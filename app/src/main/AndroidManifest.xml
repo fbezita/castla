@@ -79,6 +79,21 @@
             android:taskAffinity="com.castla.mirror.split"
             android:theme="@android:style/Theme.Translucent.NoTitleBar.Fullscreen" />
 
+        <!-- Custom Home for Virtual Displays to prevent app reparenting -->
+        <activity
+            android:name=".ui.VirtualDisplayHomeActivity"
+            android:exported="true"
+            android:launchMode="singleInstance"
+            android:stateNotNeeded="true"
+            android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.SECONDARY_HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
         <service
             android:name=".service.MirrorForegroundService"
             android:foregroundServiceType="mediaProjection"

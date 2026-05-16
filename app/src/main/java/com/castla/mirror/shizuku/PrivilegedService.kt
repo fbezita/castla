@@ -633,10 +633,16 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
     override fun launchHomeOnDisplay(displayId: Int) {
         try {
-            execCommand("input -d $displayId keyevent 3")
-            Log.i(TAG, "Sent HOME key to display $displayId")
+            // Instead of just sending HOME keyevent (which causes apps to be reparented
+            // to display 0 if no launcher exists on the VD), we explicitly start
+            // our own Secondary Home activity on the target display.
+            val cmd = "am start -W --display $displayId -n com.castla.mirror/.ui.VirtualDisplayHomeActivity"
+            execCommand(cmd)
+            Log.i(TAG, "Launched custom HOME on display $displayId: $cmd")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to send HOME key to display $displayId", e)
+            Log.e(TAG, "Failed to launch custom HOME on display $displayId", e)
+            // Fallback to keyevent 3
+            try { execCommand("input -d $displayId keyevent 3") } catch (_: Exception) {}
         }
     }
 

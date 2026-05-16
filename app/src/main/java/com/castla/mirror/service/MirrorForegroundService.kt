@@ -1099,9 +1099,10 @@ class MirrorForegroundService : Service() {
                     if (!singleVdSplit) {
                         releaseSecondaryPipeline(clearState = true)
                     }
-                    // Force-stop BEFORE going home so the old app's screen
-                    // is removed before the home animation starts
-                    forceStopAppIfNeeded(previousApp)
+                    // We NO LONGER force-stop the previous app here. 
+                    // By launching a custom HOME on the virtual display, the previous app
+                    // will stay in the background of the virtual display (not display 0).
+                    // This preserves app state and avoids the "touch deadlock" bug on return.
                     if (virtualDisplayManager?.hasVirtualDisplay() == true) {
                         virtualDisplayManager?.launchHomeOnDisplay()
                     } else {
@@ -1493,8 +1494,8 @@ class MirrorForegroundService : Service() {
         val myPackage = packageName
 
         try {
-            // 1. Send HOME to push everything to background
-            service.execCommand("input -d $displayId keyevent 3")
+            // 1. Launch our custom HOME to push everything to background
+            service.launchHomeOnDisplay(displayId)
 
             // 2. Parse tasks and collect third-party packages
             val dumpsys = service.execCommand("dumpsys activity activities")
