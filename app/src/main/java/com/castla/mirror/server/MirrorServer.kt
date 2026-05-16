@@ -474,7 +474,7 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
 
     private fun serveAsset(uri: String): Response {
         return try {
-            var path = uri.trimStart('/')
+            var path = uri.substringBefore('?').trimStart('/')
             if (path.isEmpty()) path = "index.html"
             val stream = context.assets.open("web/$path")
             val mimeType = when {

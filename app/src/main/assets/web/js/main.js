@@ -950,19 +950,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     let isReconnecting = false;
     let qualityReportInterval = null;
 
-    // Frame-arrival watchdog: if the primary video socket stays open but stops
-    // delivering frames (Shizuku death, encoder stall, VD end, silent network
-    // stall), the last frame would otherwise stay frozen on screen. Bind the
-    // timer to the specific socket instance so a stale fire cannot close a
-    // freshly reconnected socket.
-    const FRAME_TIMEOUT_MS = 4000;
+    // Frame-arrival watchdog: first try to recover an open but quiet stream by
+    // asking the server/encoder for a fresh frame. Only reconnect if the stream
+    // stays quiet for the hard timeout.
+    const FRAME_SOFT_TIMEOUT_MS = 4000;
+    const FRAME_HARD_TIMEOUT_MS = 10000;
     let frameWatchdogTimer = null;
 
     function armFrameWatchdog(socket) {
         if (isLauncherMode || !socket) return;
         if (socket !== videoSocket) return;
         if (frameWatchdogTimer !== null) clearTimeout(frameWatchdogTimer);
-        frameWatchdogTimer = setTimeout(() => onFrameStalled(socket), FRAME_TIMEOUT_MS);
+        frameWatchdogTimer = setTimeout(() => onFrameSoftStalled(socket), FRAME_SOFT_TIMEOUT_MS);
     }
 
     function clearFrameWatchdog() {
@@ -970,11 +969,36 @@ document.addEventListener('DOMContentLoaded', async () => {
         frameWatchdogTimer = null;
     }
 
-    function onFrameStalled(socket) {
+    function requestStreamRecovery() {
+        if (!controlSocket || controlSocket.readyState !== WebSocket.OPEN) return;
+        try {
+            controlSocket.send(JSON.stringify({ type: 'requestKeyframe' }));
+            if (codecMode === 'mjpeg') {
+                controlSocket.send(JSON.stringify({ type: 'codec', mode: 'mjpeg' }));
+            }
+        } catch (err) {
+            console.warn('[Main] Stream recovery request failed:', err);
+        }
+    }
+
+    function onFrameSoftStalled(socket) {
         if (socket !== videoSocket) return;
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
         if (isLauncherMode) return;
-        console.warn('[Main] Video stream stalled — no frame for', FRAME_TIMEOUT_MS, 'ms. Triggering reconnect.');
+        console.warn('[Main] Video stream quiet for', FRAME_SOFT_TIMEOUT_MS, 'ms. Requesting recovery frame.');
+        requestStreamRecovery();
+        clearTimeout(frameWatchdogTimer);
+        frameWatchdogTimer = setTimeout(
+            () => onFrameHardStalled(socket),
+            FRAME_HARD_TIMEOUT_MS - FRAME_SOFT_TIMEOUT_MS
+        );
+    }
+
+    function onFrameHardStalled(socket) {
+        if (socket !== videoSocket) return;
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        if (isLauncherMode) return;
+        console.warn('[Main] Video stream stalled — no frame for', FRAME_HARD_TIMEOUT_MS, 'ms. Triggering reconnect.');
         setStatus('Disconnected', 'error');
         showOverlay();
         try { socket.close(); } catch (_) {}
