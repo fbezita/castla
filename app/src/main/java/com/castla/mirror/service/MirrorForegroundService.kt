@@ -39,7 +39,8 @@ import com.castla.mirror.shizuku.IPrivilegedService
 import com.castla.mirror.shizuku.ShizukuSetup
 import com.castla.mirror.ott.BrowserResolver
 import com.castla.mirror.ott.OttCatalog
-import com.castla.mirror.utils.ImeTargetParser
+import com.castla.mirror.utils.ImeState
+import com.castla.mirror.utils.ImeVisibilityPolicy
 import com.castla.mirror.utils.LaunchMode
 import com.castla.mirror.policy.AutoScaleDecision
 import com.castla.mirror.policy.AutoScaleInput
@@ -2930,6 +2931,8 @@ class MirrorForegroundService : Service() {
     private var lastBroadcastPane: String? = null
     private var lastImeCheckTime = 0L
     private var imeCheckSuspendUntil = 0L
+    private var lastImeVisibleTime = 0L
+    private var imeHiddenSince = 0L
     // Once a real phone IME show (`mInputShown=true` or equivalent) is observed,
     // stop trusting the `imeInputTarget` fallback — that signal persists after
     // the phone keyboard dismisses, which would otherwise keep the bubble stuck
@@ -2943,73 +2946,62 @@ class MirrorForegroundService : Service() {
     // without tapping the mirror. Auto-exits when lastImeState goes false.
     private var imeHideWatchdogJob: Job? = null
 
-    private fun parseImeVisible(dumpsys: String): Boolean {
-        if (dumpsys.contains("mInputShown=true")) return true
-        val imeWindowVis = Regex("""mImeWindowVis=(\d+)""")
-            .find(dumpsys)?.groupValues?.getOrNull(1)?.toIntOrNull()
-        if (imeWindowVis != null && imeWindowVis != 0) return true
-        val decorVisible = dumpsys.contains("mDecorViewVisible=true")
-        val windowVisible = dumpsys.contains("mWindowVisible=true")
-        if (decorVisible && windowVisible) return true
-        return false
-    }
-
-    private fun parseHasServedInput(dumpsys: String): Boolean {
-        if (dumpsys.contains("mServedView=") && !dumpsys.contains("mServedView=null")) return true
-        if (dumpsys.contains("mCurClient=") && !dumpsys.contains("mCurClient=null")) {
-            if (dumpsys.contains("mInputShown=true") || dumpsys.contains("mShowRequested=true")) return true
-        }
-        return false
-    }
-
-    // One IME-visibility poll iteration. Runs dumpsys, updates state, and
+    // One IME-visibility poll iteration. Reads Shizuku's lightweight binder-dump state,
+    // updates state, and
     // broadcasts show/hide when it changes. Returns the combined-visible
     // value, or null on a transport error. Shared by the touch-triggered
     // retry loop (show detection) and the hide watchdog (fast dismiss).
     private suspend fun imeCheckTick(activePane: String, activeDisplayId: Int, source: String): Boolean? {
         val service = virtualDisplayManager?.getPrivilegedService() ?: return null
 
-        val result = try {
-            service.execCommand("dumpsys input_method | grep -E 'mInputShown|mImeWindowVis|mDecorViewVisible|mWindowVisible|mServedView|mShowRequested|mCurClient'")
+        var imeState = try {
+            service.getImeState(activeDisplayId)
         } catch (e: android.os.DeadObjectException) {
             imeCheckSuspendUntil = System.currentTimeMillis() + 10_000
             return null
-        } ?: return null
+        }
+        if (imeState == 0) {
+            imeState = legacyImeState(service, activeDisplayId)
+        }
 
-        var imeVisible = parseImeVisible(result)
-        if (!imeVisible && activeDisplayId > 0) {
-            imeVisible = parseHasServedInput(result)
+        var imeVisible = !bubbleClosedByUser && (imeState and ImeState.VISIBLE) != 0
+        if (!imeVisible && !bubbleClosedByUser && activeDisplayId > 0) {
+            imeVisible = (imeState and ImeState.SERVED_INPUT) != 0
         }
         if (imeVisible) {
             haveSeenRealImeShow = true
         }
 
-        // Samsung dual-VD only: cross-display focus mismatch makes the global
-        // IME state lie, so we fall back to per-display imeInputTarget. In
-        // single-VD (including single-VD split) the global state is truthful,
-        // and this fallback would fire on mere focus without a keyboard.
-        val isDualVdMode = secondaryDisplayId >= 0 && !singleVdSplit
-        var hasTargetOnActive = false
-        if (isDualVdMode && !imeVisible && activeDisplayId > 0) {
-            val winOut = try {
-                service.execCommand("dumpsys window | grep 'imeInputTarget in display'")
-            } catch (e: android.os.DeadObjectException) {
-                imeCheckSuspendUntil = System.currentTimeMillis() + 10_000
-                return null
-            } ?: return null
-            hasTargetOnActive = ImeTargetParser
-                .displaysWithInputTarget(winOut)
-                .contains(activeDisplayId)
+        val hasTargetOnActive = if (!imeVisible && activeDisplayId > 0) {
+            ImeVisibilityPolicy.shouldUseInputTargetFallback(
+                activeDisplayId = activeDisplayId,
+                hasInputTargetOnActiveDisplay = (imeState and ImeState.INPUT_TARGET_ON_DISPLAY) != 0,
+                haveSeenRealImeShow = haveSeenRealImeShow,
+                bubbleClosedByUser = bubbleClosedByUser
+            )
+        } else false
+
+        val combinedVisible = imeVisible || hasTargetOnActive
+        val now = System.currentTimeMillis()
+        if (combinedVisible) {
+            lastImeVisibleTime = now
+            imeHiddenSince = 0L
+        } else if (lastImeState) {
+            if (imeHiddenSince == 0L) {
+                imeHiddenSince = now
+            }
+            val hideStableMs = now - imeHiddenSince
+            val sinceVisibleMs = now - lastImeVisibleTime
+            if (hideStableMs < 700 || sinceVisibleMs < 1_200) {
+                Log.d(TAG, "IME $source: suppress transient hide pane=$activePane display=$activeDisplayId hideStableMs=$hideStableMs sinceVisibleMs=$sinceVisibleMs imeVisible=$imeVisible hasTarget=$hasTargetOnActive")
+                return true
+            }
         }
-
-        val useHasTarget = hasTargetOnActive && !haveSeenRealImeShow && !bubbleClosedByUser
-        val combinedVisible = imeVisible || useHasTarget
-        Log.d(TAG, "IME $source: pane=$activePane display=$activeDisplayId imeVisible=$imeVisible hasTarget=$hasTargetOnActive seenReal=$haveSeenRealImeShow closedByUser=$bubbleClosedByUser lastState=$lastImeState lastPane=$lastBroadcastPane")
-
         val stateChanged = combinedVisible != lastImeState
         val paneChangedWhileVisible = combinedVisible && lastImeState &&
             lastBroadcastPane != null && lastBroadcastPane != activePane
-        if (stateChanged || paneChangedWhileVisible) {
+        val shouldRefreshVisibleBubble = combinedVisible && source == "check"
+        if (stateChanged || paneChangedWhileVisible || shouldRefreshVisibleBubble) {
             lastImeState = combinedVisible
             lastBroadcastPane = if (combinedVisible) activePane else null
             if (!combinedVisible || paneChangedWhileVisible) {
@@ -3019,10 +3011,38 @@ class MirrorForegroundService : Service() {
                 """{"type":"showKeyboard","pane":"$activePane"}"""
             else
                 """{"type":"hideKeyboard"}"""
-            Log.d(TAG, "IME broadcast: $msg (sockets=${mirrorServer?.controlSocketCount()})")
+            Log.d(TAG, "IME broadcast: $msg state=$imeState source=$source (sockets=${mirrorServer?.controlSocketCount()})")
             mirrorServer?.broadcastControlMessage(msg)
         }
         return combinedVisible
+    }
+
+    private fun legacyImeState(service: IPrivilegedService, activeDisplayId: Int): Int {
+        val inputState = try {
+            ImeState.parseInputMethodDump(
+                service.execCommand("dumpsys input_method | grep -E 'mInputShown|mImeWindowVis|mDecorViewVisible|mWindowVisible|mServedView|mServedInputConnection|mShowRequested|mShowInputRequested|mIsInputViewShown|isInputViewShown|mInputViewStarted|mCurClient'")
+            )
+        } catch (e: android.os.DeadObjectException) {
+            imeCheckSuspendUntil = System.currentTimeMillis() + 10_000
+            return 0
+        } catch (_: Exception) {
+            0
+        }
+        if ((inputState and (ImeState.VISIBLE or ImeState.SERVED_INPUT)) != 0 || activeDisplayId <= 0) {
+            return inputState
+        }
+        val targetState = try {
+            ImeState.parseWindowDump(
+                service.execCommand("dumpsys window | grep 'imeInputTarget in display'"),
+                activeDisplayId
+            )
+        } catch (e: android.os.DeadObjectException) {
+            imeCheckSuspendUntil = System.currentTimeMillis() + 10_000
+            0
+        } catch (_: Exception) {
+            0
+        }
+        return inputState or targetState
     }
 
     private fun startImeHideWatchdog() {
@@ -3101,7 +3121,7 @@ class MirrorForegroundService : Service() {
     }
 
     private fun injectKeyEvent(keyCode: Int) {
-        serviceScope.launch(Dispatchers.IO) {
+        serviceScope.launch(compositionDispatcher) {
             try {
                 val displayId = activeInputDisplayId()
                 val cmd = if (displayId > 0) "input -d $displayId keyevent $keyCode" else "input keyevent $keyCode"

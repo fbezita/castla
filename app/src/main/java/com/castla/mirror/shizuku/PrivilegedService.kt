@@ -17,6 +17,7 @@ import android.view.InputDevice
 import android.view.InputEvent
 import android.view.MotionEvent
 import android.view.Surface
+import com.castla.mirror.utils.ImeState
 import java.lang.reflect.Method
 
 /**
@@ -389,6 +390,86 @@ class PrivilegedService : IPrivilegedService.Stub() {
         }
     }
 
+    override fun getImeState(displayId: Int): Int {
+        return try {
+            var inputMethodDump = dumpSystemService("input_method")
+            if (inputMethodDump.isBlank()) {
+                inputMethodDump = execCommand("dumpsys input_method")
+            }
+            var state = ImeState.parseInputMethodDump(inputMethodDump)
+            if (state == 0 && inputMethodDump.isNotBlank()) {
+                val shellInputMethodDump = execCommand("dumpsys input_method")
+                val shellState = ImeState.parseInputMethodDump(shellInputMethodDump)
+                if (shellState != 0) {
+                    state = shellState
+                } else {
+                    state = ImeState.parseInputMethodDump(
+                        execCommand("dumpsys input_method | grep -E 'mInputShown|mImeWindowVis|mDecorViewVisible|mWindowVisible|mServedView|mServedInputConnection|mShowRequested|mShowInputRequested|mIsInputViewShown|isInputViewShown|mInputViewStarted|mCurClient'")
+                    )
+                }
+            }
+            val alreadyVisibleEnough = (state and (ImeState.VISIBLE or ImeState.SERVED_INPUT)) != 0
+            if (displayId > 0 && !alreadyVisibleEnough) {
+                var windowDump = dumpSystemService("window")
+                if (windowDump.isBlank()) {
+                    windowDump = execCommand("dumpsys window")
+                }
+                state = state or ImeState.parseWindowDump(windowDump, displayId)
+                if ((state and ImeState.INPUT_TARGET_ON_DISPLAY) == 0 && windowDump.isNotBlank()) {
+                    val shellWindowState = ImeState.parseWindowDump(execCommand("dumpsys window"), displayId)
+                    state = state or if (shellWindowState != 0) {
+                        shellWindowState
+                    } else {
+                        ImeState.parseWindowDump(
+                            execCommand("dumpsys window | grep 'imeInputTarget in display'"),
+                            displayId
+                        )
+                    }
+                }
+            }
+            state
+        } catch (e: Exception) {
+            Log.w(TAG, "getImeState($displayId) failed", e)
+            0
+        }
+    }
+
+    private fun dumpSystemService(name: String): String {
+        val binder = try {
+            val smClass = Class.forName("android.os.ServiceManager")
+            val getService = smClass.getMethod("getService", String::class.java)
+            getService.invoke(null, name) as? android.os.IBinder
+        } catch (e: Exception) {
+            Log.w(TAG, "ServiceManager.getService($name) failed", e)
+            null
+        } ?: return ""
+
+        val pipe = ParcelFileDescriptor.createPipe()
+        val output = StringBuilder()
+        val reader = Thread({
+            try {
+                ParcelFileDescriptor.AutoCloseInputStream(pipe[0]).bufferedReader().use { input ->
+                    output.append(input.readText())
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "dumpSystemService($name) read failed", e)
+            }
+        }, "Dump-$name")
+
+        reader.start()
+        try {
+            binder.dump(pipe[1].fileDescriptor, emptyArray())
+        } finally {
+            try { pipe[1].close() } catch (_: Exception) {}
+        }
+        try {
+            reader.join(1_500)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        return output.toString()
+    }
+
     private fun doStartWifiTethering(): String {
         val log = StringBuilder()
         log.appendLine("=== startWifiTethering ===")
@@ -660,14 +741,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
             return
         }
         try {
-            val imClass = Class.forName("android.hardware.input.InputManager")
-            val getInstance = imClass.getMethod("getInstance")
-            val im = getInstance.invoke(null)
-            val injectMethod = imClass.getMethod(
-                "injectInputEvent",
-                android.view.InputEvent::class.java,
-                Int::class.javaPrimitiveType
-            )
             val smClass = Class.forName("android.os.ServiceManager")
             val getService = smClass.getMethod("getService", String::class.java)
             val clipBinder = getService.invoke(null, "clipboard") as android.os.IBinder
@@ -688,24 +761,14 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 setPrimary.invoke(clipService, *args)
             }
             Thread.sleep(50)
-            val time = android.os.SystemClock.uptimeMillis()
-            val meta = android.view.KeyEvent.META_CTRL_LEFT_ON or android.view.KeyEvent.META_CTRL_ON
-            fun makeKeyEvent(action: Int, keyCode: Int, metaState: Int): android.view.KeyEvent {
-                val ev = android.view.KeyEvent(time, time, action, keyCode, 0, metaState,
-                    android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0,
-                    android.view.InputDevice.SOURCE_KEYBOARD)
-                if (displayId > 0) {
-                    try { ev.javaClass.getMethod("setDisplayId", Int::class.javaPrimitiveType).invoke(ev, displayId) }
-                    catch (_: Exception) {}
-                }
-                return ev
+            val pasteCmd = if (displayId > 0) {
+                "input -d $displayId keyevent ${android.view.KeyEvent.KEYCODE_PASTE}"
+            } else {
+                "input keyevent ${android.view.KeyEvent.KEYCODE_PASTE}"
             }
-            injectMethod.invoke(im, makeKeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_CTRL_LEFT, meta), 0)
-            injectMethod.invoke(im, makeKeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_V, meta), 0)
-            injectMethod.invoke(im, makeKeyEvent(android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_V, meta), 0)
-            injectMethod.invoke(im, makeKeyEvent(android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_CTRL_LEFT, 0), 0)
+            execCommand(pasteCmd)
         } catch (e: Exception) {
-            Log.e(TAG, "Clipboard+CTRL+V injection failed", e)
+            Log.e(TAG, "Clipboard+paste injection failed", e)
         }
     }
 

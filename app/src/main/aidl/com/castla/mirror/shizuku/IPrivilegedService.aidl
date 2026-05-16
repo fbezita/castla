@@ -93,15 +93,24 @@ interface IPrivilegedService {
 
     /**
      * Inject text into the focused field on the specified display.
-     * ASCII: shell `input text`. Non-ASCII: clipboard + CTRL+V.
+     * ASCII: shell `input text`. Non-ASCII: clipboard + paste key.
      */
     void injectText(String text, int displayId) = 13;
 
     /**
-     * Korean/CJK composition: delete N chars (backspace) + insert text via clipboard+CTRL+V.
+     * Korean/CJK composition: delete N chars (backspace) + insert text via clipboard+paste.
      * Called on each compositionupdate from browser. Serialized on a single thread.
      */
     void injectComposingText(int backspaces, String text, int displayId) = 14;
+
+    /**
+     * Return lightweight IME state for a display.
+     * Bitmask:
+     *   1 = IME visible
+     *   2 = served input/client exists
+     *   4 = imeInputTarget is on the requested display
+     */
+    int getImeState(int displayId) = 25;
 
     /**
      * Register a binder token to monitor the client's lifecycle.
