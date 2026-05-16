@@ -645,8 +645,8 @@ class MainActivity : AppCompatActivity() {
         val hotspotIp = currentIp
 
         val ip = when {
-            cellularIp != null && !cellularIp.startsWith("10.") -> cellularIp
             hotspotIp != "0.0.0.0" && hotspotIp.isNotEmpty() -> hotspotIp
+            cellularIp != null && !cellularIp.startsWith("10.") -> cellularIp
             else -> "0.0.0.0"
         }
 

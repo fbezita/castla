@@ -210,6 +210,24 @@ class VirtualDisplayManager {
         }
     }
 
+    /** Inject a multi-touch MotionEvent on the virtual display. */
+    fun injectMotionEvent(event: android.view.MotionEvent) {
+        if (displayId < 0) {
+            Log.w(TAG, "injectMotionEvent skipped: displayId=$displayId")
+            return
+        }
+        val svc = privilegedService
+        if (svc == null) {
+            Log.w(TAG, "injectMotionEvent skipped: privilegedService is null")
+            return
+        }
+        try {
+            svc.injectMotionEvent(displayId, event)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to inject motion event on display $displayId", e)
+        }
+    }
+
     /** Launch the home screen on the virtual display. */
     fun launchHomeOnDisplay(): Boolean {
         if (displayId < 0) return false

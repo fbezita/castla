@@ -1,5 +1,6 @@
 package com.castla.mirror.input
 
+import android.view.MotionEvent
 import com.castla.mirror.server.TouchEvent
 import org.junit.Assert.*
 import org.junit.Before
@@ -82,8 +83,8 @@ class TouchInjectorTest {
     @Test
     fun `virtual display injector receives routed events`() {
         val received = mutableListOf<List<Any>>()
-        injector.setVirtualDisplayInjector { action, x, y, pointerId ->
-            received.add(listOf(action, x, y, pointerId))
+        injector.setVirtualDisplayInjector { motionEvent ->
+            received.add(listOf(motionEvent.action, motionEvent.x, motionEvent.y, motionEvent.getPointerId(0)))
         }
 
         injector.onTouchEvent(TouchEvent("down", 0.5f, 0.25f, 0))
@@ -96,7 +97,7 @@ class TouchInjectorTest {
     @Test
     fun `clearing virtual display injector falls back to normal injection`() {
         val vdReceived = mutableListOf<Any>()
-        injector.setVirtualDisplayInjector { _, _, _, _ -> vdReceived.add(true) }
+        injector.setVirtualDisplayInjector { _ -> vdReceived.add(true) }
         injector.onTouchEvent(TouchEvent("down", 0.5f, 0.5f, 0))
         assertEquals(1, vdReceived.size)
 

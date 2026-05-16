@@ -346,6 +346,23 @@ class PrivilegedService : IPrivilegedService.Stub() {
         }
     }
 
+    override fun injectMotionEvent(displayId: Int, event: MotionEvent) {
+        try {
+            if (setDisplayIdMethod == null) {
+                setDisplayIdMethod = MotionEvent::class.java.getMethod(
+                    "setDisplayId", Int::class.javaPrimitiveType
+                )
+            }
+            setDisplayIdMethod?.invoke(event, displayId)
+        } catch (_: Exception) {}
+
+        try {
+            injectMethod?.invoke(inputManagerInstance, event, 0)
+        } catch (e: Exception) {
+            Log.e(TAG, "Input event injection failed on display $displayId", e)
+        }
+    }
+
     override fun execCommand(command: String): String {
         // Handle special internal commands for hotspot control
         if (command == "__HOTSPOT_ON__") return doStartWifiTethering()

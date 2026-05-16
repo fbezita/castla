@@ -2,6 +2,7 @@ package com.castla.mirror.shizuku;
 
 import android.os.ParcelFileDescriptor;
 import android.view.Surface;
+import android.view.MotionEvent;
 
 interface IPrivilegedService {
     void destroy() = 16777114;
@@ -27,7 +28,13 @@ interface IPrivilegedService {
      * Inject an input event at the given coordinates on the specified display.
      * action: MotionEvent action constant (0=DOWN, 1=UP, 2=MOVE)
      */
+    @JavaPassthrough(annotation="@java.lang.Deprecated")
     void injectInput(int displayId, int action, float x, float y, int pointerId) = 3;
+
+    /**
+     * Inject a full MotionEvent on the specified display (supports multi-touch).
+     */
+    void injectMotionEvent(int displayId, in MotionEvent event) = 24;
 
     /**
      * Check if the service is alive.
