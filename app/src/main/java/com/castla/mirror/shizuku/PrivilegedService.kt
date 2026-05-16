@@ -589,14 +589,14 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 launchTarget.contains("com.castla.mirror.ui.WebBrowserActivity")) &&
                 extraKey == "url" && extraValue?.contains("#split=true") == true
         return buildString {
-            append("am start -W --display $displayId -f 0x18000000 ") // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_MULTIPLE_TASK
+            append("am start -W --display $displayId -f 0x10200000 ") // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
             if (isSplitBrowserLaunch) {
                 append("--windowingMode 5 ")
             }
+            append("-a android.intent.action.MAIN -c android.intent.category.LAUNCHER ")
             if (resolvedComponent != null) {
                 append("-n ${escapeShellArg(resolvedComponent)} ")
             } else {
-                append("-a android.intent.action.MAIN -c android.intent.category.LAUNCHER ")
                 append("-p ${escapeShellArg(packageOrComponent)} ")
             }
             if (!extraKey.isNullOrEmpty() && extraValue != null) {

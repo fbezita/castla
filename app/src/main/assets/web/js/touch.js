@@ -41,6 +41,7 @@ class TouchHandler {
         if (window.PointerEvent) {
             addEvent(this.canvas, 'pointerdown', (e) => {
                 e.preventDefault();
+                try { this.canvas.setPointerCapture(e.pointerId); } catch (err) {}
                 this._onPointer(e, TouchHandler.ACTION_DOWN);
             });
             addEvent(this.canvas, 'pointermove', (e) => {
@@ -49,10 +50,12 @@ class TouchHandler {
             });
             addEvent(this.canvas, 'pointerup', (e) => {
                 e.preventDefault();
+                try { this.canvas.releasePointerCapture(e.pointerId); } catch (err) {}
                 this._onPointer(e, TouchHandler.ACTION_UP);
             });
             addEvent(this.canvas, 'pointercancel', (e) => {
                 e.preventDefault();
+                try { this.canvas.releasePointerCapture(e.pointerId); } catch (err) {}
                 this._onPointer(e, TouchHandler.ACTION_UP);
             });
             // Prevent default touch behavior (scrolling, zooming)
@@ -65,18 +68,20 @@ class TouchHandler {
             addEvent(this.canvas, 'touchcancel', (e) => this._onTouch(e, TouchHandler.ACTION_UP), { passive: false });
         }
 
-        // Mouse fallback for desktop testing
+        // Mouse fallback for desktop testing (bind move/up to window so we don't lose drag outside canvas)
         if (!window.PointerEvent) {
             addEvent(this.canvas, 'mousedown', (e) => {
                 this.mouseDown = true;
                 this._sendMouse(e, TouchHandler.ACTION_DOWN);
             });
-            addEvent(this.canvas, 'mousemove', (e) => {
+            addEvent(window, 'mousemove', (e) => {
                 if (this.mouseDown) this._sendMouse(e, TouchHandler.ACTION_MOVE);
             });
-            addEvent(this.canvas, 'mouseup', (e) => {
-                this.mouseDown = false;
-                this._sendMouse(e, TouchHandler.ACTION_UP);
+            addEvent(window, 'mouseup', (e) => {
+                if (this.mouseDown) {
+                    this.mouseDown = false;
+                    this._sendMouse(e, TouchHandler.ACTION_UP);
+                }
             });
         }
     }
@@ -124,6 +129,13 @@ class TouchHandler {
                 this._scheduleFlush();
             }
         } else {
+            // Flush any pending move for this pointer before sending UP/DOWN
+            // to prevent a late rAF move arriving after UP, which causes stuck pointers
+            if (this.pendingMoves.has(pid)) {
+                const data = this.pendingMoves.get(pid);
+                this._sendBinary(data.action, pid, data.x, data.y);
+                this.pendingMoves.delete(pid);
+            }
             if (coords.inBounds || actionCode === TouchHandler.ACTION_UP) {
                 this._sendBinary(actionCode, pid, coords.x, coords.y);
             }
@@ -150,8 +162,15 @@ class TouchHandler {
                     });
                     this._scheduleFlush();
                 }
-            } else if (coords.inBounds || actionCode === TouchHandler.ACTION_UP) {
-                this._sendBinary(actionCode, tid, coords.x, coords.y);
+            } else {
+                if (this.pendingMoves.has(tid)) {
+                    const data = this.pendingMoves.get(tid);
+                    this._sendBinary(data.action, tid, data.x, data.y);
+                    this.pendingMoves.delete(tid);
+                }
+                if (coords.inBounds || actionCode === TouchHandler.ACTION_UP) {
+                    this._sendBinary(actionCode, tid, coords.x, coords.y);
+                }
             }
         }
     }
@@ -169,8 +188,15 @@ class TouchHandler {
                 this.pendingMoves.set(0, { action: actionCode, x: coords.x, y: coords.y });
                 this._scheduleFlush();
             }
-        } else if (coords.inBounds || actionCode === TouchHandler.ACTION_UP) {
-            this._sendBinary(actionCode, 0, coords.x, coords.y);
+        } else {
+            if (this.pendingMoves.has(0)) {
+                const data = this.pendingMoves.get(0);
+                this._sendBinary(data.action, 0, data.x, data.y);
+                this.pendingMoves.delete(0);
+            }
+            if (coords.inBounds || actionCode === TouchHandler.ACTION_UP) {
+                this._sendBinary(actionCode, 0, coords.x, coords.y);
+            }
         }
     }
 

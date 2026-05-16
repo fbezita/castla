@@ -29,7 +29,7 @@ class ControlSocket(
         try {
             // Binary frames: 10-byte touch protocol [action:u8][id:u8][x:f32LE][y:f32LE]
             if (message.opCode == NanoWSD.WebSocketFrame.OpCode.Binary) {
-                Log.d(TAG, "Binary touch received: ${message.binaryPayload.size} bytes")
+                //Log.d(TAG, "Binary touch received: ${message.binaryPayload.size} bytes")
                 handleBinaryTouch(message.binaryPayload)
                 return
             }

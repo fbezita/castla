@@ -1909,11 +1909,18 @@ class MirrorForegroundService : Service() {
     private fun launchFullscreenStandardTarget(launchTarget: String) {
         clearSplitState()
         val resolvedTarget = normalizeLaunchTarget(launchTarget)
-        // Force-stop the previous app first to prevent its screen from flashing
-        // during the transition to the new app
-        val previousApp = currentVdApp
-        if (previousApp != resolvedTarget) {
-            forceStopAppIfNeeded(previousApp)
+        val service = virtualDisplayManager?.getPrivilegedService()
+        val displayId = virtualDisplayManager?.getDisplayId() ?: -1
+
+        // Check if the app is already on the virtual display.
+        // If it is NOT on the virtual display, it might be running on the primary display.
+        // Moving a task from the primary display to the virtual display breaks touch input (Android input channel bug).
+        // Therefore, we MUST force-stop it to ensure a fresh launch on the virtual display.
+        if (service != null && displayId >= 0) {
+            val taskId = findTaskId(service, displayId, resolvedTarget)
+            if (taskId == null) {
+                forceStopAppIfNeeded(resolvedTarget)
+            }
         }
         val launched = virtualDisplayManager?.launchAppOnDisplay(resolvedTarget) ?: false
         if (!launched && virtualDisplayManager?.hasVirtualDisplay() == false) {

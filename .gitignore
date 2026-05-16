@@ -19,3 +19,4 @@ keystore.properties
 *.jks
 *.aab
 *.apk
+app/release/
