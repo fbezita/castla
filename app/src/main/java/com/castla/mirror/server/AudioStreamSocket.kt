@@ -33,7 +33,11 @@ class AudioStreamSocket(
     override fun onPong(pong: NanoWSD.WebSocketFrame?) {}
 
     override fun onException(exception: IOException?) {
-        Log.w(TAG, "WebSocket exception", exception)
+        if (exception is java.net.SocketException || exception?.message?.contains("Socket closed") == true) {
+            Log.i(TAG, "Audio WebSocket closed cleanly")
+        } else {
+            Log.w(TAG, "WebSocket exception", exception)
+        }
         server.unregisterAudioSocket(this)
     }
 
@@ -41,7 +45,11 @@ class AudioStreamSocket(
         try {
             send(data)
         } catch (e: IOException) {
-            Log.w(TAG, "Send failed", e)
+            if (e is java.net.SocketException || e.message?.contains("Socket closed") == true) {
+                Log.i(TAG, "Send failed: socket closed cleanly")
+            } else {
+                Log.w(TAG, "Send failed", e)
+            }
             throw e
         }
     }

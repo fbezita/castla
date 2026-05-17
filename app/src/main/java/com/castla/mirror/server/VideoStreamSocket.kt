@@ -42,8 +42,12 @@ class VideoStreamSocket(
             } catch (_: InterruptedException) {
                 break
             } catch (e: IOException) {
-                Log.w(TAG, "Send failed, closing", e)
-                MirrorDiagnostics.log(DiagnosticEvent.SOCKET_TIMEOUT, "[$channel] send IOException: ${e.message}")
+                if (e is java.net.SocketException || e.message?.contains("Socket closed") == true) {
+                    Log.i(TAG, "[$channel] Send thread socket closed cleanly")
+                } else {
+                    Log.w(TAG, "Send failed, closing", e)
+                    MirrorDiagnostics.log(DiagnosticEvent.SOCKET_TIMEOUT, "[$channel] send IOException: ${e.message}")
+                }
                 closed = true
                 try { close(NanoWSD.WebSocketFrame.CloseCode.GoingAway, "send error", false) }
                 catch (_: Exception) {}
@@ -75,7 +79,11 @@ class VideoStreamSocket(
     override fun onPong(pong: NanoWSD.WebSocketFrame?) {}
 
     override fun onException(exception: IOException?) {
-        Log.w(TAG, "WebSocket exception", exception)
+        if (exception is java.net.SocketException || exception?.message?.contains("Socket closed") == true) {
+            Log.i(TAG, "[$channel] WebSocket closed cleanly")
+        } else {
+            Log.w(TAG, "WebSocket exception", exception)
+        }
         closed = true
         sendThread.interrupt()
         server.unregisterVideoSocket(channel, this)

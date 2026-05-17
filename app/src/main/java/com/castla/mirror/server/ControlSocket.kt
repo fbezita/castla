@@ -153,7 +153,11 @@ class ControlSocket(
     override fun onPong(pong: NanoWSD.WebSocketFrame?) {}
 
     override fun onException(exception: IOException?) {
-        Log.w(TAG, "Control socket exception", exception)
+        if (exception is java.net.SocketException || exception?.message?.contains("Socket closed") == true) {
+            Log.i(TAG, "Control socket closed cleanly")
+        } else {
+            Log.w(TAG, "Control socket exception", exception)
+        }
         server.unregisterControlSocket(this)
     }
 }

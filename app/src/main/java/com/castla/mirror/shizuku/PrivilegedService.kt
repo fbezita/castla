@@ -1370,4 +1370,17 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
         return null
     }
+
+    override fun removeTask(taskId: Int) {
+        Log.i(TAG, "removeTask($taskId) ENTRY")
+        try {
+            val atmClass = Class.forName("android.app.ActivityTaskManager")
+            val atm = atmClass.getMethod("getService").invoke(null)
+            val removeTaskMethod = atm.javaClass.getMethod("removeTask", Int::class.javaPrimitiveType)
+            val success = removeTaskMethod.invoke(atm, taskId) as? Boolean
+            Log.i(TAG, "removeTask($taskId) result: $success")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to remove task $taskId via ActivityTaskManager", e)
+        }
+    }
 }

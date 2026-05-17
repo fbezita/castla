@@ -163,4 +163,9 @@ interface IPrivilegedService {
      * Returns true if the request was submitted successfully.
      */
     boolean stopWifiTethering() = 23;
+
+    /**
+     * Remove a task by its task ID using ActivityTaskManager.
+     */
+    void removeTask(int taskId) = 26;
 }

@@ -1418,7 +1418,7 @@ class MirrorForegroundService : Service() {
                     // Find and remove split task
                     for (task in tasks) {
                         if (task.mode == "freeform" && taskMatchesLaunchTarget(task, splitTarget)) {
-                            service.execCommand("am task remove ${task.taskId}")
+                            service.removeTask(task.taskId)
                             Log.i(TAG, "Removed split task ${task.taskId} ($splitTarget)")
                             break
                         }
@@ -1495,7 +1495,7 @@ class MirrorForegroundService : Service() {
 
             // 4. Remove remaining tasks (our own activities, etc.)
             for (task in tasks) {
-                service.execCommand("am task remove ${task.taskId}")
+                service.removeTask(task.taskId)
                 Log.i(TAG, "Removed task ${task.taskId} from display $displayId")
             }
 
@@ -1533,7 +1533,7 @@ class MirrorForegroundService : Service() {
                 val displayId = virtualDisplayManager?.getDisplayId() ?: -1
                 val taskId = findTaskId(service, displayId, packageName)
                 if (taskId != null) {
-                    service.execCommand("am task remove $taskId")
+                    service.removeTask(taskId)
                     Log.i(TAG, "Removed browser task $taskId for $pkg (avoiding force-stop)")
                     return
                 }
