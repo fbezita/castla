@@ -28,7 +28,7 @@ import java.nio.ByteOrder
  * Falls back to raw PCM if Opus encoding fails to initialize.
  */
 class AudioCapture(
-    private val mediaProjection: MediaProjection,
+    private val mediaProjection: MediaProjection?,
     private val privilegedService: IPrivilegedService? = null
 ) {
     companion object {
@@ -62,6 +62,10 @@ class AudioCapture(
 
         try {
             setupAudioRecord()
+            if (!usingRemoteSubmix && audioRecord == null) {
+                Log.w(TAG, "Audio capture unavailable")
+                return
+            }
             isRunning = true
 
             if (usingRemoteSubmix) {
@@ -96,6 +100,10 @@ class AudioCapture(
         if (!isSupported()) return
         try {
             setupAudioRecord()
+            if (!usingRemoteSubmix && audioRecord == null) {
+                Log.w(TAG, "PCM audio capture unavailable")
+                return
+            }
             isRunning = true
             sendConfig("pcm", onAudioData)
 
@@ -302,6 +310,11 @@ class AudioCapture(
             }
         }
 
+        val projection = mediaProjection ?: run {
+            Log.w(TAG, "AudioPlaybackCapture skipped: MediaProjection is unavailable in Shizuku VD mode")
+            return
+        }
+
         // Priority 2: AudioPlaybackCapture (can only capture MEDIA/GAME/UNKNOWN without system permission)
         val audioFormat = AudioFormat.Builder()
             .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
@@ -313,7 +326,7 @@ class AudioCapture(
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT
         )
 
-        val config = AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
+        val config = AudioPlaybackCaptureConfiguration.Builder(projection)
             .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
             .addMatchingUsage(AudioAttributes.USAGE_GAME)
             .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)

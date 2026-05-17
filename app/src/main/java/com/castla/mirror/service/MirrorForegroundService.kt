@@ -1,6 +1,5 @@
 package com.castla.mirror.service
 
-import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -29,7 +28,6 @@ import com.castla.mirror.widget.MirrorWidgetProvider
 import com.castla.mirror.capture.AudioCapture
 
 import com.castla.mirror.capture.JpegEncoder
-import com.castla.mirror.capture.ScreenCaptureManager
 import com.castla.mirror.capture.VideoEncoder
 import com.castla.mirror.capture.VirtualDisplayManager
 import com.castla.mirror.input.TouchInjector
@@ -79,8 +77,6 @@ class MirrorForegroundService : Service() {
         private const val CHANNEL_ID = "castla_mirror"
         private const val NOTIFICATION_ID = 1
         const val ACTION_STOP = "com.castla.mirror.ACTION_STOP"
-        const val EXTRA_RESULT_CODE = "result_code"
-        const val EXTRA_DATA = "data"
         const val EXTRA_MAX_RESOLUTION = "max_resolution"
         const val EXTRA_FPS = "fps"
         const val EXTRA_AUDIO = "audio_enabled"
@@ -144,7 +140,6 @@ class MirrorForegroundService : Service() {
     private val binder = LocalBinder()
 
     private var mirrorServer: MirrorServer? = null
-    private var screenCapture: ScreenCaptureManager? = null
     private var videoEncoder: VideoEncoder? = null
     private var jpegEncoder: JpegEncoder? = null
     private var audioCapture: AudioCapture? = null
@@ -620,24 +615,9 @@ class MirrorForegroundService : Service() {
             this,
             NOTIFICATION_ID,
             notification,
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
         )
-
-        val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, Int.MIN_VALUE) ?: Int.MIN_VALUE
-        @Suppress("DEPRECATION")
-        val data: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent?.getParcelableExtra(EXTRA_DATA, Intent::class.java)
-        } else {
-            intent?.getParcelableExtra(EXTRA_DATA)
-        }
-
-        if (resultCode == Int.MIN_VALUE || data == null) {
-            Log.e(TAG, "Invalid MediaProjection data (resultCode=$resultCode, data=$data)")
-            stopSelf()
-            return START_NOT_STICKY
-        }
-
-        Log.i(TAG, "onStartCommand: resultCode=$resultCode, hasData=true")
+        Log.i(TAG, "onStartCommand: Shizuku virtual-display mode")
 
         val rawMaxHeight = intent!!.getIntExtra(EXTRA_MAX_RESOLUTION, 0)
         autoResolution = rawMaxHeight == 0
@@ -652,7 +632,7 @@ class MirrorForegroundService : Service() {
         mirroringMode = intent.getStringExtra(EXTRA_MIRRORING_MODE) ?: "FULL_SCREEN"
         targetPackage = intent.getStringExtra(EXTRA_TARGET_PACKAGE) ?: ""
 
-        startPipeline(resultCode, data, settingsFps, audioEnabled)
+        startPipeline(settingsFps, audioEnabled)
 
         return START_NOT_STICKY
     }
@@ -851,7 +831,6 @@ class MirrorForegroundService : Service() {
         reconnectJob = null
         try { virtualDisplayManager?.release() } catch (e: Exception) { Log.w(TAG, "Failed to release virtual display manager", e) }
         try { shizukuSetup?.release() } catch (e: Exception) { Log.w(TAG, "Failed to release shizuku setup", e) }
-        try { screenCapture?.release() } catch (e: Exception) { Log.w(TAG, "Failed to release screen capture", e) }
         try { videoEncoder?.release() } catch (e: Exception) { Log.w(TAG, "Failed to release video encoder", e) }
         try { jpegEncoder?.release() } catch (e: Exception) { Log.w(TAG, "Failed to release jpeg encoder", e) }
         try { touchInjector?.release() } catch (e: Exception) { Log.w(TAG, "Failed to release touch injector", e) }
@@ -859,7 +838,6 @@ class MirrorForegroundService : Service() {
 
         virtualDisplayManager = null
         shizukuSetup = null
-        screenCapture = null
         videoEncoder = null
         jpegEncoder = null
         touchInjector = null
@@ -977,8 +955,6 @@ class MirrorForegroundService : Service() {
     }
 
     private fun startPipeline(
-        resultCode: Int,
-        data: Intent,
         fps: Int,
         audioEnabled: Boolean
     ) {
@@ -986,13 +962,12 @@ class MirrorForegroundService : Service() {
             terminalReason.set(null)
             MirrorDiagnostics.onSessionStart()
 
-            // Only initialize projection and server — defer encoder/capture until browser connects
-            screenCapture = ScreenCaptureManager(this).also {
-                it.initProjection(resultCode, data)
-            }
-
-            val rawWidth = screenCapture!!.captureWidth
-            val rawHeight = screenCapture!!.captureHeight
+            // Shizuku virtual-display mode does not use MediaProjection. Use
+            // current display metrics only as an initial encoder size; the
+            // browser viewport message will resize the VD after connect.
+            val metrics = resources.displayMetrics
+            val rawWidth = metrics.widthPixels.coerceAtMost(1920)
+            val rawHeight = metrics.heightPixels.coerceAtMost(1080)
             val effectiveMaxHeight = effectiveMaxHeightForRequest(rawHeight)
 
             var width = rawWidth
@@ -1014,11 +989,7 @@ class MirrorForegroundService : Service() {
 
             audioOrchestrator = AudioCaptureOrchestrator(object : AudioCaptureOrchestrator.Actions {
                 override fun startCapture(codec: String?) {
-                    val projection = screenCapture?.getMediaProjection() ?: run {
-                        Log.w(TAG, "Audio requested but MediaProjection not available")
-                        return
-                    }
-                    audioCapture = AudioCapture(projection, shizukuSetup?.privilegedService).also { audio ->
+                    audioCapture = AudioCapture(null, shizukuSetup?.privilegedService).also { audio ->
                         if (codec == "pcm") {
                             audio.startPcmOnly { audioData -> mirrorServer?.broadcastAudio(audioData) }
                         } else {
@@ -2747,15 +2718,10 @@ class MirrorForegroundService : Service() {
 
                 trySetupVirtualDisplay(width, height, surface) { shizukuActive ->
                     if (shizukuActive) {
-                        screenCapture?.stopCapture()
                         currentVdApp = "HOME"
                     } else {
-                        try {
-                            screenCapture?.startCapture(surface, width, height)
-                            Log.w(TAG, "Fallback: MediaProjection mirroring at ${width}x${height} (raw phone screen)")
-                        } catch (e: Exception) {
-                            Log.e(TAG, "MediaProjection fallback failed", e)
-                        }
+                        Log.e(TAG, "Shizuku VD setup failed — MediaProjection fallback disabled")
+                        markTerminal(TerminalReason.SHIZUKU_REBIND_FAILED)
                     }
                     // Start audio after privilegedService is attached so REMOTE_SUBMIX is available
                     ensureAudioCaptureState()
@@ -2886,7 +2852,6 @@ class MirrorForegroundService : Service() {
         try { removeAllVdTasks() } catch (e: Exception) { Log.w(TAG, "Failed to remove VD tasks on disconnect", e) }
         tearDownVdSession("browser_disconnected")
         
-        screenCapture?.stopCapture()
         videoEncoder?.release()
         videoEncoder = null
         jpegEncoder?.release()
@@ -3268,7 +3233,7 @@ class MirrorForegroundService : Service() {
                         }
                         restoreCurrentVdContent()
                     } else {
-                        // Retry once before considering MediaProjection fallback
+                        // Retry once before marking the Shizuku VD path failed.
                         Log.w(TAG, "VD creation failed during rebuild — retrying once")
                         virtualDisplayManager?.createVirtualDisplay(width, height, dpi, surface)
                         if (virtualDisplayManager?.hasVirtualDisplay() == true) {
@@ -3312,8 +3277,6 @@ class MirrorForegroundService : Service() {
             Log.e(TAG, "Failed to rebuild pipeline", e)
             FileLogger.e(TAG, "rebuildPipeline exception", e)
             markTerminal(TerminalReason.PIPELINE_REBUILD_EXCEPTION)
-        } finally {
-            screenCapture?.isRebuilding = false
         }
     }
 

@@ -1,7 +1,6 @@
 package com.castla.mirror
 
 import android.Manifest
-import android.app.Activity
 import com.castla.mirror.BuildConfig
 import android.app.DownloadManager
 import android.content.BroadcastReceiver
@@ -11,8 +10,6 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
-import android.media.projection.MediaProjectionConfig
-import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -77,8 +74,6 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "MainActivity"
         private const val MIRROR_START_TIMEOUT_MS = 15_000L
-        private const val PROJECTION_RESULT_TIMEOUT_MS = 8_000L
-        private const val PROJECTION_FOCUS_RETURN_TIMEOUT_MS = 1_500L
         private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
         private const val SHIZUKU_RELEASES_API = "https://api.github.com/repos/RikkaApps/Shizuku/releases/latest"
         private const val SHIZUKU_APK_FILENAME = "shizuku.apk"
@@ -117,9 +112,6 @@ class MainActivity : AppCompatActivity() {
     private var mirrorService: MirrorForegroundService? = null
     private var serviceBound = false
     private var bindRequested = false
-    private var awaitingProjectionResult = false
-    private var projectionResultTimeoutJob: kotlinx.coroutines.Job? = null
-    private var projectionFocusRecoveryJob: kotlinx.coroutines.Job? = null
     private var isCleanupInProgress by mutableStateOf(false)
     private var pendingStartAfterCleanup = false
 
@@ -148,29 +140,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private val mediaProjectionLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        awaitingProjectionResult = false
-        projectionResultTimeoutJob?.cancel()
-        projectionResultTimeoutJob = null
-        projectionFocusRecoveryJob?.cancel()
-        projectionFocusRecoveryJob = null
-        Log.i(TAG, "MediaProjection result: code=${result.resultCode}, data=${result.data != null}")
-        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-            Toast.makeText(this, getString(R.string.toast_screen_capture_granted), Toast.LENGTH_SHORT).show()
-            startMirrorService(result.resultCode, result.data!!)
-        } else {
-            isPreparing = false
-            Toast.makeText(this, getString(R.string.toast_screen_capture_denied, result.resultCode), Toast.LENGTH_LONG).show()
-            Log.w(TAG, "Screen capture denied or failed")
-        }
-    }
-
     private val audioPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { _ ->
-        requestScreenCapture()
+        startMirrorService()
     }
 
     private val notificationPermissionLauncher = registerForActivityResult(
@@ -235,7 +208,7 @@ class MainActivity : AppCompatActivity() {
                 MirrorForegroundService.serviceRunningFlow.collect { running ->
                     if (!running && isStreaming) {
                         isStreaming = false
-                        if (!pendingStartAfterCleanup && !awaitingProjectionResult) {
+                        if (!pendingStartAfterCleanup) {
                             isPreparing = false
                         }
                         mirrorService = null
@@ -568,33 +541,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onWindowFocusChanged(hasFocus: Boolean) {
-        super.onWindowFocusChanged(hasFocus)
-        if (!awaitingProjectionResult) {
-            projectionFocusRecoveryJob?.cancel()
-            projectionFocusRecoveryJob = null
-            return
-        }
-        if (hasFocus) {
-            projectionFocusRecoveryJob?.cancel()
-            projectionFocusRecoveryJob = lifecycleScope.launch {
-                kotlinx.coroutines.delay(PROJECTION_FOCUS_RETURN_TIMEOUT_MS)
-                if (awaitingProjectionResult && hasWindowFocus()) {
-                    Log.w(TAG, "MediaProjection result missing after focus returned")
-                    awaitingProjectionResult = false
-                    projectionResultTimeoutJob?.cancel()
-                    projectionResultTimeoutJob = null
-                    clearPreparingState(
-                        getString(R.string.toast_error, "screen capture result missing")
-                    )
-                }
-            }
-        } else {
-            projectionFocusRecoveryJob?.cancel()
-            projectionFocusRecoveryJob = null
-        }
-    }
-
     override fun onStart() {
         super.onStart()
         val wasInstalled = shizukuInstalled
@@ -629,8 +575,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        projectionResultTimeoutJob?.cancel()
-        projectionFocusRecoveryJob?.cancel()
         updateManager.destroy()
         networkMonitor.stopMonitoring()
         stopAutoDetect()
@@ -1079,7 +1023,7 @@ class MainActivity : AppCompatActivity() {
     private fun beginMirroringStartFlow(reason: String) {
         Log.i(TAG, "Beginning mirroring start flow: $reason")
         isPreparing = true
-        Log.i(TAG, "isPreparing=true (starting permission flow)")
+        Log.i(TAG, "isPreparing=true (starting Shizuku mirror flow)")
 
         // Check if Shizuku is running but permission not granted
         if (shizukuInstalled && shizukuRunning && !shizukuPermitted) {
@@ -1102,11 +1046,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun onStartMirroring() {
         Log.i(TAG, "onStartMirroring called")
-
-        if (awaitingProjectionResult) {
-            Log.i(TAG, "Ignoring duplicate start: awaiting MediaProjection result")
-            return
-        }
 
         if (isCleanupInProgress || MirrorForegroundService.isCleanupInProgress) {
             queueStartAfterCleanup("cleanup_in_progress")
@@ -1131,48 +1070,10 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        requestScreenCapture()
+        startMirrorService()
     }
 
-    private fun requestScreenCapture() {
-        try {
-            val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            val captureIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                projectionManager.createScreenCaptureIntent(
-                    MediaProjectionConfig.createConfigForDefaultDisplay()
-                )
-            } else {
-                projectionManager.createScreenCaptureIntent()
-            }
-            Log.i(TAG, "Launching screen capture consent dialog")
-            awaitingProjectionResult = true
-            projectionResultTimeoutJob?.cancel()
-            projectionResultTimeoutJob = lifecycleScope.launch {
-                kotlinx.coroutines.delay(PROJECTION_RESULT_TIMEOUT_MS)
-                if (awaitingProjectionResult && isPreparing) {
-                    awaitingProjectionResult = false
-                    projectionFocusRecoveryJob?.cancel()
-                    projectionFocusRecoveryJob = null
-                    Log.w(TAG, "MediaProjection result timed out after ${PROJECTION_RESULT_TIMEOUT_MS}ms")
-                    clearPreparingState(
-                        getString(R.string.toast_error, "screen capture request timed out")
-                    )
-                }
-            }
-            Toast.makeText(this, getString(R.string.toast_requesting_screen_capture), Toast.LENGTH_SHORT).show()
-            mediaProjectionLauncher.launch(captureIntent)
-        } catch (e: Exception) {
-            awaitingProjectionResult = false
-            projectionResultTimeoutJob?.cancel()
-            projectionResultTimeoutJob = null
-            projectionFocusRecoveryJob?.cancel()
-            projectionFocusRecoveryJob = null
-            Log.e(TAG, "Failed to launch screen capture intent", e)
-            clearPreparingState(getString(R.string.toast_error, e.message ?: "screen capture intent failed"))
-        }
-    }
-
-    private fun startMirrorService(resultCode: Int, data: Intent) {
+    private fun startMirrorService() {
         // Auto-enable hotspot if setting is on, Shizuku is available, and hotspot is not already active
         val needHotspot = streamSettings.autoHotspot && shizukuSetup.serviceConnected.value
         if (needHotspot) {
@@ -1180,7 +1081,7 @@ class MainActivity : AppCompatActivity() {
             if (alreadyActive) {
                 Log.i(TAG, "Hotspot already active — skipping enableHotspot, starting service directly")
                 isHotspotActive = true
-                launchMirrorService(resultCode, data)
+                launchMirrorService()
             } else {
                 Toast.makeText(this, getString(R.string.toast_hotspot_enabling), Toast.LENGTH_SHORT).show()
                 lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
@@ -1194,19 +1095,17 @@ class MainActivity : AppCompatActivity() {
                             Toast.makeText(this@MainActivity, getString(R.string.toast_hotspot_failed), Toast.LENGTH_SHORT).show()
                         }
                         updateServerUrl()
-                        launchMirrorService(resultCode, data)
+                        launchMirrorService()
                     }
                 }
             }
         } else {
-            launchMirrorService(resultCode, data)
+            launchMirrorService()
         }
     }
 
-    private fun launchMirrorService(resultCode: Int, data: Intent) {
+    private fun launchMirrorService() {
         val intent = Intent(this, MirrorForegroundService::class.java).apply {
-            putExtra(MirrorForegroundService.EXTRA_RESULT_CODE, resultCode)
-            putExtra(MirrorForegroundService.EXTRA_DATA, data)
             putExtra(MirrorForegroundService.EXTRA_MAX_RESOLUTION,
                 if (streamSettings.isAutoResolution) 0 else streamSettings.maxResolution.maxHeight)
             putExtra(MirrorForegroundService.EXTRA_FPS, streamSettings.fps) // FPS_AUTO is already 0
