@@ -887,16 +887,44 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function connectVideo() {
+        if (videoSocket) {
+            try {
+                videoSocket.onopen = null;
+                videoSocket.onmessage = null;
+                videoSocket.onerror = null;
+                videoSocket.onclose = null;
+                videoSocket.close();
+            } catch (_) {}
+        }
         const wsUrl = `ws://${host}/ws/video`;
         if (!isLauncherMode) setStatus('Connecting...', '');
 
         clearFrameWatchdog();
+        
+        // Reset firstFrameReceived so that the reconnected stream's first frame triggers checkReady() and hides the overlay!
+        firstFrameReceived = false;
+        
+        // Reset decoder sequence tracking and SPS/PPS cache to prevent "frame gap" errors when new stream starts
+        if (decoder) {
+            decoder._lastSeqNum = undefined;
+            decoder._cachedSpsPps = null;
+            if (decoder.resetStats) decoder.resetStats();
+        }
+        if (secondaryDecoder) {
+            secondaryDecoder._lastSeqNum = undefined;
+            secondaryDecoder._cachedSpsPps = null;
+            if (secondaryDecoder.resetStats) secondaryDecoder.resetStats();
+        }
+
+        console.log(`[Main] Connecting video socket to: ${wsUrl}`);
         videoSocket = new WebSocket(wsUrl);
         videoSocket.binaryType = 'arraybuffer';
 
         videoSocket.onopen = () => {
+            console.log(`[Main] Video socket connected!`);
             if (!isLauncherMode) setStatus('Loading...', '');
             if (codecMode === 'mjpeg' && controlSocket && controlSocket.readyState === WebSocket.OPEN) {
+                console.log(`[Main] Sending codec preference: mjpeg via control socket`);
                 controlSocket.send(JSON.stringify({ type: 'codec', mode: 'mjpeg' }));
             }
         };
@@ -961,7 +989,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (isLauncherMode || !socket) return;
         if (socket !== videoSocket) return;
         if (frameWatchdogTimer !== null) clearTimeout(frameWatchdogTimer);
-        frameWatchdogTimer = setTimeout(() => onFrameSoftStalled(socket), FRAME_SOFT_TIMEOUT_MS);
+        frameWatchdogTimer = setTimeout(() => {
+            // [핵심 해결 포인트]
+            // 프레임은 안 들어왔지만, 웹소켓 파이프라인(TCP)이 여전히 정상 연결(OPEN) 상태라면?
+            // 이는 에러가 아니라 안드로이드 화면에 아무런 움직임이 없는 '정상 정지 상태'입니다.
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                // 소프트 스톨 리커버리를 호출하지 않고, 조용히 타이머를 다음 주기로 갱신합니다.
+                armFrameWatchdog(socket);
+                return;
+            }
+
+            // 소켓이 CONNECTING, CLOSING, CLOSED 상태이거나 아예 먹통인 진짜 정체 상황일 때만 실행
+            onFrameSoftStalled(socket);
+        }, FRAME_SOFT_TIMEOUT_MS);
     }
 
     function clearFrameWatchdog() {
@@ -1008,12 +1048,28 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (isReconnecting) return;
         isReconnecting = true;
         clearTimeout(reconnectTimer);
+        console.log(`[Main] Reconnect scheduled in 3000ms. Status: videoSocket=${videoSocket ? videoSocket.readyState : 'null'}, controlSocket=${controlSocket ? controlSocket.readyState : 'null'}`);
         reconnectTimer = setTimeout(() => {
             isReconnecting = false;
-            if (videoSocket && videoSocket.readyState === WebSocket.CLOSED) connectVideo();
-            if (SPLIT_STRATEGY === 'dual_stream' && browserSplitState.active && (!secondaryVideoSocket || secondaryVideoSocket.readyState === WebSocket.CLOSED)) connectSecondaryVideo();
-            if (controlSocket && controlSocket.readyState === WebSocket.CLOSED) connectControl();
-            if (audioPlayer && (!audioPlayer.socket || audioPlayer.socket.readyState === WebSocket.CLOSED)) {
+            
+            const videoNeedsReconnect = !videoSocket || videoSocket.readyState === WebSocket.CLOSED || videoSocket.readyState === WebSocket.CLOSING;
+            const controlNeedsReconnect = !controlSocket || controlSocket.readyState === WebSocket.CLOSED || controlSocket.readyState === WebSocket.CLOSING;
+
+            if (videoNeedsReconnect) {
+                console.log('[Main] Reconnecting video socket...');
+                connectVideo();
+            }
+            if (SPLIT_STRATEGY === 'dual_stream' && browserSplitState.active && (!secondaryVideoSocket || secondaryVideoSocket.readyState === WebSocket.CLOSED || secondaryVideoSocket.readyState === WebSocket.CLOSING)) {
+                console.log('[Main] Reconnecting secondary video socket...');
+                connectSecondaryVideo();
+            }
+            // Force reconnect control socket if video socket is reconnecting OR control socket is closed
+            if (videoNeedsReconnect || controlNeedsReconnect) {
+                console.log('[Main] Reconnecting control socket...');
+                connectControl();
+            }
+            if (audioPlayer && (!audioPlayer.socket || audioPlayer.socket.readyState === WebSocket.CLOSED || audioPlayer.socket.readyState === WebSocket.CLOSING)) {
+                console.log('[Main] Reconnecting audio player socket...');
                 audioPlayer.startFromUserGesture(`ws://${host}/ws/audio`);
             }
         }, 3000);
@@ -1084,10 +1140,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function connectControl() {
+        if (controlSocket) {
+            try {
+                controlSocket.onopen = null;
+                controlSocket.onmessage = null;
+                controlSocket.onerror = null;
+                controlSocket.onclose = null;
+                controlSocket.close();
+            } catch (_) {}
+        }
         const wsUrl = `ws://${host}/ws/control`;
+        console.log(`[Main] Connecting control socket to: ${wsUrl}`);
         controlSocket = new WebSocket(wsUrl);
 
         controlSocket.onopen = () => {
+            console.log(`[Main] Control socket connected!`);
             closeInputBubble(true);
             if (touchHandler) touchHandler.destroy();
             const renderer = (decoder && decoder.renderer) ? decoder.renderer : null;
@@ -1110,6 +1177,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
 
             if (codecMode === 'mjpeg') {
+                console.log(`[Main] Sending codec preference: mjpeg via control socket on open`);
                 controlSocket.send(JSON.stringify({ type: 'codec', mode: 'mjpeg' }));
             }
 
@@ -1221,9 +1289,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             } catch (e) {}
         };
 
-        controlSocket.onclose = () => {
+        controlSocket.onclose = (e) => {
+            console.log(`[Main] Control socket closed: code=${e.code}, reason=${e.reason}`);
             clearInterval(qualityReportInterval);
             scheduleReconnect();
+        };
+
+        controlSocket.onerror = (err) => {
+            console.error('[Main] Control socket error:', err);
         };
     }
 
@@ -1653,35 +1726,36 @@ document.addEventListener('DOMContentLoaded', async () => {
     const splashUnmute = document.getElementById('splash-unmute');
     let splashReady = false;
 
-    // Show "Tap to Start" once launcher apps are loaded
+    // Auto-dismiss the splash screen instantly once launcher apps are loaded so the user doesn't have to tap!
     const splashLoading = document.getElementById('splash-loading');
     window.addEventListener('launcher-ready', () => {
         splashReady = true;
         if (splashLoading) splashLoading.classList.add('hidden');
         if (splashUnmute) splashUnmute.classList.add('visible');
-    });
-
-    const dismissSplash = async () => {
-        if (!splashReady) return; // ignore taps before loading finishes
-        if (!audioPlayer.socket || audioPlayer.socket.readyState === WebSocket.CLOSED) {
-            await audioPlayer.startFromUserGesture(`ws://${host}/ws/audio`);
-        }
-        document.removeEventListener('click', dismissSplash);
-        document.removeEventListener('touchstart', dismissSplash);
-        // Prevent the splash-dismiss tap from accidentally launching an app
-        // cell that sits underneath the splash overlay
-        launchGuardUntil = Date.now() + 600;
+        
+        // Instant seamless auto-dismiss
         if (splashScreen) {
             splashScreen.classList.add('hidden');
             setTimeout(() => splashScreen.classList.add('removed'), 500);
         }
+    });
+
+    // Initialize audio lazily upon the first actual user interaction (click/touch) on the page.
+    // This perfectly satisfies the browser's autoplay gesture policy without requiring a dedicated tap screen!
+    const initAudioOnFirstGesture = async () => {
+        if (!audioPlayer.socket || audioPlayer.socket.readyState === WebSocket.CLOSED) {
+            try {
+                await audioPlayer.startFromUserGesture(`ws://${host}/ws/audio`);
+                console.log('[Audio] Successfully initialized audio on first user gesture.');
+            } catch (e) {
+                console.warn('[Audio] Failed to initialize audio on gesture', e);
+            }
+        }
+        document.removeEventListener('click', initAudioOnFirstGesture);
+        document.removeEventListener('touchstart', initAudioOnFirstGesture);
     };
-    if (splashScreen) {
-        splashScreen.addEventListener('click', dismissSplash);
-        splashScreen.addEventListener('touchstart', dismissSplash);
-    }
-    document.addEventListener('click', dismissSplash);
-    document.addEventListener('touchstart', dismissSplash);
+    document.addEventListener('click', initAudioOnFirstGesture);
+    document.addEventListener('touchstart', initAudioOnFirstGesture);
 
     const mseVideo = document.getElementById('mse-video');
     if (mseVideo) mseVideo.style.pointerEvents = 'none';

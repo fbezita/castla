@@ -6,7 +6,8 @@ import android.content.SharedPreferences
 enum class MirroringMode { FULL_SCREEN, APP }
 
 data class StreamSettings(
-    val maxResolution: Resolution = Resolution.AUTO,
+    // [OPTIMIZATION] Changed the default fallback from AUTO to RES_720 for better initialization latency
+    val maxResolution: Resolution = Resolution.RES_720,
     val fps: Int = FPS_AUTO,
     val audioEnabled: Boolean = false,
     val mirroringMode: MirroringMode = MirroringMode.FULL_SCREEN,
@@ -44,8 +45,9 @@ data class StreamSettings(
         fun load(context: Context): StreamSettings {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val resolution = try {
-                Resolution.valueOf(prefs.getString(KEY_RESOLUTION, Resolution.AUTO.name)!!)
-            } catch (_: Exception) { Resolution.AUTO }
+                // [OPTIMIZATION] Set fallback default value to RES_720 if no value is cached in SharedPreferences
+                Resolution.valueOf(prefs.getString(KEY_RESOLUTION, Resolution.RES_720.name)!!)
+            } catch (_: Exception) { Resolution.RES_720 }
 
             val fps = prefs.getInt(KEY_FPS, FPS_AUTO)
 

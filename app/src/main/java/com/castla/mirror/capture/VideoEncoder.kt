@@ -58,21 +58,30 @@ class VideoEncoder(
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, KEYFRAME_INTERVAL)
-            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+            
+            // [OPTIMIZATION] Switch from CBR to VBR for dynamic video streaming playback.
+            // CBR forces a rigid data stream which wastes bandwidth on static screens and causes 
+            // severe frame stuttering/dropping during high-motion video sequences like YouTube.
+            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+            
             setInteger(MediaFormat.KEY_PROFILE, profile)
             setInteger(MediaFormat.KEY_LEVEL, level)
+            
             // Low latency hints
             setInteger(MediaFormat.KEY_LATENCY, 0)
             
-            // Set operating rate to actual target fps so SoC DVFS can clock down when idle
+            // Max out operating rate to prevent the SoC from underclocking the hardware encoder.
+            // This keeps the VPU acceleration active even when the screen activity drops significantly.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
+                setInteger(MediaFormat.KEY_OPERATING_RATE, 32767) 
             }
             
-            // Repeat last frame if no new input for 1s — reduces idle encoder/Wi-Fi load on static screens
-            setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 1_000_000) // microseconds
-            setInteger(MediaFormat.KEY_PRIORITY, 0) // real-time priority
-            setInteger("max-bframes", 0) // Explicit B-frame disable (Samsung quirk safety)
+            // Force repeat previous frame after 100ms of idling to keep the frontend watchdog fed
+            // and eliminate packet loss artifacts on steady streams.
+            setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000) // 100,000 microseconds (0.1s)
+            
+            setInteger(MediaFormat.KEY_PRIORITY, 0) // Real-time priority
+            setInteger("max-bframes", 0) // Explicitly disable B-frames to bypass Samsung-specific rendering quirks
         }
 
         val encoder = MediaCodec.createEncoderByType(MIME_TYPE)

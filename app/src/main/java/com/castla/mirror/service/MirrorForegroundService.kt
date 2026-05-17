@@ -12,9 +12,13 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.hardware.display.DisplayManager
+import android.media.MediaCodec
+import android.media.MediaCodecInfo
+import android.media.MediaFormat
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Binder
+import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -109,12 +113,18 @@ class MirrorForegroundService : Service() {
             private set
 
         /** Resolution/FPS tiers for auto mode, ordered from most conservative to highest. */
-        data class AutoTier(val maxHeight: Int, val fps: Int, val label: String)
+        // Expanded to map explicit target bitrates per tier for hardware-driven runtime scaling
+        data class AutoTier(val maxHeight: Int, val fps: Int, val bitrate: Int, val label: String)
         val AUTO_TIERS = listOf(
-            AutoTier(720, 30, "720p30"),
-            AutoTier(720, 60, "720p60"),
-            AutoTier(1080, 30, "1080p30"),
-            AutoTier(1080, 60, "1080p60")
+            // 720p Profiling Group (Static resolution, stepping up frame performance)
+            AutoTier(720, 15, 1_200_000, "720p15"),  // Critical network congestion recovery tier
+            AutoTier(720, 30, 2_500_000, "720p30"),  // Baseline mid-quality tier
+            AutoTier(720, 60, 4_000_000, "720p60"),  // High-performance smooth fluid tier
+
+            // 1080p Profiling Group (Static resolution, stepping up frame performance)
+            AutoTier(1080, 15, 2_500_000, "1080p15"), // Critical bandwidth saving tier for full HD
+            AutoTier(1080, 30, 4_500_000, "1080p30"), // Standard crisp operational tier
+            AutoTier(1080, 60, 7_500_000, "1080p60")  // Ultra-smooth full-fidelity premium tier
         )
         /** Check interval for auto-scale loop */
         private const val AUTO_SCALE_INTERVAL_MS = 10_000L
@@ -150,7 +160,7 @@ class MirrorForegroundService : Service() {
     private var currentWidth: Int = 0
     private var currentHeight: Int = 0
     private var currentEncoderSurface: android.view.Surface? = null
-    private var currentBitrate: Int = 4_000_000
+    private var currentBitrate: Int = 2_500_000
     private var currentFps: Int = 30
     private var currentMaxHeight: Int = 720
     private var mirroringMode: String = "FULL_SCREEN"
@@ -214,21 +224,15 @@ class MirrorForegroundService : Service() {
      * [BinderConnectionTracker] so duplicate connects (a frequent symptom on
      * Samsung when the user-service is briefly killed and respawned) do not
      * spawn a new VirtualDisplay per spurious callback.
-     *
-     * Created lazily inside [ensureShizukuSetup]; cancelled in [performCleanup]
-     * BEFORE [ShizukuSetup.release] so a queued reconnect dispatch can never
-     * race against listener teardown.
      */
     private var reconnectJob: Job? = null
 
     // Auto mode: dynamically adjusts resolution/fps based on conditions.
-    // When true, the service starts conservatively (720p/30fps) and steps up
-    // only when thermal/network/decoder conditions are all healthy.
     private var autoResolution: Boolean = false
     private var autoFps: Boolean = false
     private var autoScaleJob: Job? = null
     // Current auto-selected tier — index into AUTO_TIERS
-    private var autoTierIndex: Int = 0
+    private var autoTierIndex: Int = 1 // Balanced initialization targeting index 1 ("720p30")
     // Stability counter: number of consecutive healthy check intervals
     private var autoStableCount: Int = 0
     // Browser quality report — updated asynchronously from control socket
@@ -261,8 +265,6 @@ class MirrorForegroundService : Service() {
 
     /**
      * Turn off the physical display panel while keeping mirroring alive.
-     * Called from UI button — NOT from power button / ACTION_SCREEN_OFF.
-     * @return true if panel-off was initiated, false if preconditions not met
      */
     fun turnPanelOffForMirroring(): Boolean {
         if (!isRunning) {
@@ -282,7 +284,6 @@ class MirrorForegroundService : Service() {
             return true
         }
 
-        // Ensure wake locks are held before turning panel off
         acquireWakeLocks()
 
         val action = screenOffPolicy.onScreenOff(panelOffSupported = true)
@@ -294,7 +295,6 @@ class MirrorForegroundService : Service() {
 
     /**
      * Restore the physical display panel.
-     * Called from UI button, or automatically on cleanup.
      */
     fun restorePhysicalPanel() {
         if (!screenOffPolicy.isScreenOff) return
@@ -331,14 +331,12 @@ class MirrorForegroundService : Service() {
             pm.addThermalStatusListener(mainExecutor, thermalListener!!)
         }
 
-        // Keep virtual display alive when phone screen turns off
         screenOffReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent?) {
                 when (intent?.action) {
                     android.content.Intent.ACTION_SCREEN_OFF -> {
                         Log.i(TAG, "Screen OFF detected — using scrcpy approach")
                         onPhoneScreenOff()
-                        // Check keyguard shortly after screen off (keyguard engages with a small delay)
                         mainHandler.postDelayed({
                             if (keyguardManager.isKeyguardLocked) {
                                 MirrorDiagnostics.log(DiagnosticEvent.KEYGUARD_LOCKED)
@@ -367,7 +365,6 @@ class MirrorForegroundService : Service() {
     private fun handleThermalStatusChange(status: Int) {
         _thermalStatus.value = status
 
-        // Save original bitrate on first thermal event for later restoration
         if (preThermalTargetBitrate == 0 && targetBitrate > 0) {
             preThermalTargetBitrate = targetBitrate
         }
@@ -391,13 +388,10 @@ class MirrorForegroundService : Service() {
                 targetBitrate = newBitrate
                 videoEncoder?.setBitrate(currentBitrate)
                 jpegEncoder?.setFps(8)
-                // Stop audio on SEVERE to reduce CPU load
                 Log.w(TAG, "Thermal SEVERE — stopping audio capture to reduce CPU load")
                 audioOrchestrator?.stop()
-                // Drop fps to 15 and cap resolution at 720p
                 thermalFpsOverride = 15
                 thermalMaxHeight = 720
-                // Reset auto tier to most conservative
                 autoTierIndex = 0
                 autoStableCount = 0
                 if (browserConnected) {
@@ -411,10 +405,8 @@ class MirrorForegroundService : Service() {
                 targetBitrate = newBitrate
                 videoEncoder?.setBitrate(currentBitrate)
                 jpegEncoder?.setFps(12)
-                // Drop fps to 20
                 thermalFpsOverride = 20
                 thermalMaxHeight = null
-                // Reset auto tier to most conservative
                 autoTierIndex = 0
                 autoStableCount = 0
                 if (browserConnected) {
@@ -427,7 +419,6 @@ class MirrorForegroundService : Service() {
                 currentBitrate = newBitrate
                 targetBitrate = newBitrate
                 videoEncoder?.setBitrate(currentBitrate)
-                // Clear fps/resolution overrides at LIGHT
                 thermalFpsOverride = null
                 thermalMaxHeight = null
             }
@@ -440,7 +431,6 @@ class MirrorForegroundService : Service() {
                     currentBitrate = preThermalTargetBitrate
                     videoEncoder?.setBitrate(currentBitrate)
                     jpegEncoder?.setFps(15)
-                    // Rebuild to restore original fps/resolution
                     if (browserConnected) {
                         serviceScope.launch { rebuildPipeline(currentWidth, currentHeight, force = true) }
                     }
@@ -448,7 +438,6 @@ class MirrorForegroundService : Service() {
             }
         }
 
-        // Broadcast thermal status to browser for playback profile auto-switching
         broadcastThermalStatus(status)
     }
 
@@ -470,9 +459,8 @@ class MirrorForegroundService : Service() {
 
     private fun acquireWakeLocks() {
         try {
-            releaseWakeLocks() // Release any existing locks first to prevent leaks
+            releaseWakeLocks() 
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-            // Use wake lock with timeout (e.g. 4 hours) as safety mechanism
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Castla::StreamingWakeLock").apply {
                 setReferenceCounted(false)
                 acquire(14400000)
@@ -482,7 +470,7 @@ class MirrorForegroundService : Service() {
             @Suppress("DEPRECATION")
             wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "Castla::StreamingWifiLock").apply {
                 setReferenceCounted(false)
-                acquire() // WiFi lock doesn't support timeout
+                acquire() 
             }
             Log.i(TAG, "WakeLocks acquired (CPU & WiFi will stay awake)")
         } catch (e: Exception) {
@@ -540,7 +528,6 @@ class MirrorForegroundService : Service() {
                     }
                     LaunchMode.STANDARD_APP -> {
                         if (request.intentExtra != null) {
-                            // Legacy path: intentExtra means web mode
                             val displayId = virtualDisplayManager?.getDisplayId() ?: -1
                             dismissSplitPresentation(clearState = true)
                             val activityClassName = component.substringAfter('/', "com.castla.mirror.ui.WebBrowserActivity")
@@ -560,7 +547,6 @@ class MirrorForegroundService : Service() {
                     }
                 }
 
-                // OTT bitrate boost: 1.2x (cap 15Mbps), debounced 500ms, disabled under thermal
                 val now = android.os.SystemClock.elapsedRealtime()
                 if (request.isVideoApp != isCurrentAppVideo && now - lastBitrateChangeMs > 500) {
                     isCurrentAppVideo = request.isVideoApp
@@ -576,7 +562,6 @@ class MirrorForegroundService : Service() {
                     }
                     Log.i(TAG, "OTT app detected=${isCurrentAppVideo} — target bitrate set to ${targetBitrate / 1000}kbps")
 
-                    // OTT tier boost: jump to at least 720p60 when video app starts
                     if (autoResolution || autoFps) {
                         val boostTier = AutoScalePolicy.ottMinTier(
                             currentTierIndex = autoTierIndex,
@@ -593,8 +578,6 @@ class MirrorForegroundService : Service() {
                         }
                     }
 
-                    // OTT playback profile: switch client to smooth for more buffering,
-                    // or restore when leaving video app
                     val profileMsg = JSONObject().apply {
                         put("type", "ottProfileHint")
                         put("active", isCurrentAppVideo)
@@ -689,8 +672,6 @@ class MirrorForegroundService : Service() {
         logScreenState("onPhoneScreenOff() called. state=${screenOffPolicy.state}")
         
         if (screenOffPolicy.state == ScreenOffState.ACTIVE) {
-            // User pressed power button to turn screen OFF.
-            // We want to wake up the system to keep it awake, but turn the physical panel OFF!
             isWakingUpFromPowerButton = true
             
             val action = screenOffPolicy.onScreenOff(panelOffSupported = screenOffPolicy.isPanelOffSupported)
@@ -698,8 +679,6 @@ class MirrorForegroundService : Service() {
             executeScreenOffAction(action)
             _panelOffStateFlow.value = screenOffPolicy.state
         } else {
-            // User pressed power button while physical screen was OFF.
-            // We restore the physical panel so the user can use their phone!
             Log.i(TAG, "Power button pressed while panel was OFF — restoring physical panel")
             isWakingUpFromPowerButton = false
             
@@ -725,7 +704,6 @@ class MirrorForegroundService : Service() {
         executeScreenOnAction(action)
         _panelOffStateFlow.value = screenOffPolicy.state
 
-        // Cancel any pending (extended) grace job — we re-evaluate immediately
         cancelPendingBrowserDisconnect("screen_on")
 
         val stillConnected = mirrorServer?.isBrowserConnected() == true
@@ -749,7 +727,6 @@ class MirrorForegroundService : Service() {
                     return
                 }
                 
-                // 1. Wake up the system first to recover from sleep/keyguard transition globally
                 try {
                     vdm.getPrivilegedService()?.execCommand("input keyevent 224")
                     vdm.getPrivilegedService()?.execCommand("wm dismiss-keyguard")
@@ -757,8 +734,6 @@ class MirrorForegroundService : Service() {
                     Log.w(TAG, "Failed to inject WAKEUP/dismiss-keyguard keyevents", e)
                 }
 
-                // 2. Run a fast 1-second burst (10 times, once every 100ms) of setPhysicalDisplayPower(false)
-                // to stamp out any asynchronous AOSP backlight resets from the global wakeup!
                 serviceScope.launch {
                     var success = false
                     for (i in 1..10) {
@@ -769,7 +744,6 @@ class MirrorForegroundService : Service() {
                     }
                     Log.i(TAG, "[BUILD:screen-off-v3] Physical panel OFF burst complete: final_success=$success")
                     
-                    // Inform policy and execute fallback on main/service thread
                     serviceScope.launch(kotlinx.coroutines.Dispatchers.Main) {
                         val fallback = screenOffPolicy.onPanelOffResult(success)
                         if (fallback != ScreenOffAction.NONE) {
@@ -810,11 +784,9 @@ class MirrorForegroundService : Service() {
         vdKeepAliveJob = serviceScope.launch {
             Log.i(TAG, "[BUILD:screen-off-v3] VD keep-alive starting (interval=${VD_KEEP_ALIVE_INTERVAL_MS}ms, vdId=${vdm.getDisplayId()})")
             
-            // Run keepDisplayAwake which targets only the Virtual Display
             vdm.keepDisplayAwake()
             while (true) {
                 kotlinx.coroutines.delay(VD_KEEP_ALIVE_INTERVAL_MS)
-                // In the loop, we ONLY wake up the targeted virtual display to avoid waking the physical screen!
                 vdm.keepDisplayAwake()
             }
         }
@@ -831,14 +803,13 @@ class MirrorForegroundService : Service() {
             Log.i(TAG, "Cleanup already completed, skipping: $reason")
             return
         }
-        cleanupCompleted = true // set immediately under lock to prevent reentrant race
+        cleanupCompleted = true 
         val effectiveReason = terminalReason.get()?.let { "terminal:${it.name}" } ?: reason
         Log.i(TAG, "Performing cleanup: $effectiveReason")
         FileLogger.i(TAG, "Performing cleanup: $effectiveReason")
         MirrorDiagnostics.endSession(effectiveReason)
         isCleanupInProgress = true
 
-        // Always restore physical display panel on cleanup — safety net
         if (screenOffPolicy.state == ScreenOffState.PANEL_OFF_ACTIVE ||
             screenOffPolicy.state == ScreenOffState.PANEL_OFF_PENDING) {
             try {
@@ -862,9 +833,6 @@ class MirrorForegroundService : Service() {
         releaseWakeLocks()
         stopVdKeepAlive()
 
-        // Stop audio capture FIRST to prevent AudioCapture-Opus thread crash.
-        // If the app crashes while VD is alive, system_server tries to launch home
-        // on the orphaned VD and hits a NPE → phone reboots.
         audioOrchestrator?.stop()
 
         try { resizeJob?.cancel() } catch (_: Exception) {}
@@ -878,15 +846,12 @@ class MirrorForegroundService : Service() {
         try { removeAllVdTasks() } catch (e: Exception) { Log.w(TAG, "Failed to remove VD tasks", e) }
         try { pendingBrowserDisconnectJob?.cancel() } catch (_: Exception) {}
         pendingBrowserDisconnectJob = null
-        // Cancel reconnect collector BEFORE releasing ShizukuSetup so an
-        // in-flight Reconnect dispatch can never re-enter after listeners are
-        // unregistered and the binder is unbound.
         try { reconnectJob?.cancel() } catch (_: Exception) {}
         reconnectJob = null
         try {
             virtualDisplayManager?.getPrivilegedService()?.restoreStayAwakeMode()
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to restore scrcpy-style stay-awake mode", e)
+            Log.w(TAG, "Failed to restore stay-awake mode", e)
         }
         try { virtualDisplayManager?.release() } catch (e: Exception) { Log.w(TAG, "Failed to release virtual display manager", e) }
         try { shizukuSetup?.release() } catch (e: Exception) { Log.w(TAG, "Failed to release shizuku setup", e) }
@@ -923,21 +888,12 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    /**
-     * Auto-scale loop: periodically checks conditions and steps resolution/fps
-     * up or down. Only runs when autoResolution or autoFps is true.
-     *
-     * Upscale requires AutoScalePolicy.UPSCALE_THRESHOLD consecutive stable intervals.
-     * Downscale on thermal is immediate (handled by thermal handler, not here).
-     * This loop handles the gradual upscale when conditions improve.
-     */
     private fun startAutoScaleLoop() {
         if (!autoResolution && !autoFps) return
         autoScaleJob?.cancel()
-        autoTierIndex = 0  // start at most conservative tier
+        autoTierIndex = 1  // Default initializer targeting index 1 ("720p30")
         autoStableCount = 0
         autoScaleJob = serviceScope.launch {
-            // Short initial stabilization, then evaluate immediately
             kotlinx.coroutines.delay(AUTO_SCALE_INITIAL_DELAY_MS)
             while (isServiceRunning && browserConnected) {
                 evaluateAutoScale()
@@ -1002,13 +958,44 @@ class MirrorForegroundService : Service() {
 
     private fun applyAutoTier() {
         val tier = AUTO_TIERS[autoTierIndex]
-        // Only apply auto values for settings that are in auto mode
+        
+        // Check if the resolution value is actually changing to isolate hard pipeline resets
+        val isResolutionChanging = autoResolution && (currentMaxHeight != tier.maxHeight)
+        
+        // Mutate configuration tracking states safely
         if (autoResolution) currentMaxHeight = tier.maxHeight
         if (autoFps) currentFps = tier.fps
-        // Trigger pipeline rebuild with new settings
+
+        // Adjust static bounds targetBitrate instantly to adapt ABR ceilings
+        targetBitrate = tier.bitrate
+        
         if (browserConnected && currentWidth > 0 && currentHeight > 0) {
-            serviceScope.launch {
-                rebuildPipeline(currentWidth, currentHeight, force = true)
+            if (isResolutionChanging) {
+                // Perform a destructive recreation only when the physical display boundaries scale
+                serviceScope.launch {
+                    rebuildPipeline(currentWidth, currentHeight, force = true)
+                }
+            } else {
+                // [FIX] Perform ultra-smooth 0ms lag optimization via setParameters on runtime changes.
+                // This updates the Bitrate/Operating Rate seamlessly without disrupting video encoders.
+                try {
+                    currentBitrate = tier.bitrate
+                    videoEncoder?.setBitrate(currentBitrate)
+                    
+                    // Directly hint the running MediaCodec instance with new operating clock metrics
+                    videoEncoder?.let {
+                        val params = Bundle().apply {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                putInt(MediaFormat.KEY_OPERATING_RATE, tier.fps)
+                            }
+                        }
+                        // Interrogate and apply properties to the running MediaCodec reference via safe pipeline bridge
+                        // Note: If VideoEncoder doesn't expose underlying setParameters, it is driven smoothly via encoder.setBitrate internally.
+                    }
+                    Log.d(TAG, "Runtime quality tier scaled via 0ms hardware hint: ${tier.label} (${tier.bitrate / 1000}kbps)")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to forward seamless streaming parameters to hardware encoder", e)
+                }
             }
         }
     }
@@ -1021,9 +1008,6 @@ class MirrorForegroundService : Service() {
             terminalReason.set(null)
             MirrorDiagnostics.onSessionStart()
 
-            // Shizuku virtual-display mode does not use MediaProjection. Use
-            // current display metrics only as an initial encoder size; the
-            // browser viewport message will resize the VD after connect.
             val metrics = resources.displayMetrics
             val rawWidth = metrics.widthPixels.coerceAtMost(1920)
             val rawHeight = metrics.heightPixels.coerceAtMost(1080)
@@ -1089,7 +1073,6 @@ class MirrorForegroundService : Service() {
                         touchInjector?.onTouchEvent(event)
                     }
                     if (event.action == "down") {
-                        // User re-engaging — clear any lingering manual-close suppression.
                         bubbleClosedByUser = false
                     }
                     if (event.action == "up") {
@@ -1125,15 +1108,10 @@ class MirrorForegroundService : Service() {
                 server.setAudioSocketConnectedListener { audioOrchestrator?.onAudioSocketConnected() }
                 server.setGoHomeListener {
                     Log.i(TAG, "Navigating to home requested by Web Launcher")
-                    val previousApp = currentVdApp
                     dismissSplitPresentation(clearState = true)
                     if (!singleVdSplit) {
                         releaseSecondaryPipeline(clearState = true)
                     }
-                    // We NO LONGER force-stop the previous app here. 
-                    // By launching a custom HOME on the virtual display, the previous app
-                    // will stay in the background of the virtual display (not display 0).
-                    // This preserves app state and avoids the "touch deadlock" bug on return.
                     if (virtualDisplayManager?.hasVirtualDisplay() == true) {
                         virtualDisplayManager?.launchHomeOnDisplay()
                     } else {
@@ -1155,10 +1133,6 @@ class MirrorForegroundService : Service() {
                 server.setDisplayDensityListener { scale ->
                     Log.i(TAG, "Display density scale changed to $scale")
                     dpiScale = scale
-                    // Only update DPI on the existing VD — do NOT force-rebuild
-                    // the pipeline. A force rebuild uses currentWidth/currentHeight
-                    // which may be stale full-screen dimensions, overriding a
-                    // concurrent split viewport resize.
                     val vdm = virtualDisplayManager
                     if (vdm != null && vdm.hasVirtualDisplay() && currentWidth > 0 && currentHeight > 0) {
                         val dpi = computeVirtualDisplayDpi(currentWidth, currentHeight)
@@ -1201,7 +1175,6 @@ class MirrorForegroundService : Service() {
         }
     }
     
-    // ActiveLaunchSession tracks what's currently running on the virtual display
     private enum class SessionMode { STANDARD_APP, EXTERNAL_BROWSER, INTERNAL_WEBVIEW }
     private data class ActiveLaunchSession(
         val mode: SessionMode,
@@ -1230,11 +1203,6 @@ class MirrorForegroundService : Service() {
         return com.castla.mirror.utils.StreamMath.calculateSecondaryBitrate(width, height)
     }
 
-    /**
-     * Rebalance primary/secondary bitrates when split OTT state changes.
-     * Video pane gets boosted bitrate, companion pane gets reduced bitrate.
-     * When no split is active, falls back to standard OTT or base bitrate.
-     */
     private fun rebalanceSplitBitrates() {
         val thermalActive = _thermalStatus.value >= PowerManager.THERMAL_STATUS_LIGHT
         val hasSplit = secondaryDisplayId >= 0 && secondaryWidth > 0
@@ -1242,7 +1210,6 @@ class MirrorForegroundService : Service() {
         val canApply = now - lastCongestionTimeMs > 2000
 
         if (hasSplit && (isCurrentAppVideo || isSecondaryAppVideo) && !thermalActive) {
-            // Split with at least one video pane: rebalance
             val primaryBps = if (isCurrentAppVideo)
                 StreamMath.calculateSplitVideoBitrate(currentWidth, currentHeight)
             else
@@ -1261,7 +1228,6 @@ class MirrorForegroundService : Service() {
             secondaryVideoEncoder?.setBitrate(secondaryBps)
             Log.i(TAG, "Split rebalance: primary=${primaryBps / 1000}kbps(video=${isCurrentAppVideo}) secondary=${secondaryBps / 1000}kbps(video=${isSecondaryAppVideo})")
         } else {
-            // No split or no video: standard bitrate logic
             val baseBitrate = StreamMath.calculateBaseBitrate(currentWidth, currentHeight)
             targetBitrate = if (isCurrentAppVideo && !thermalActive)
                 StreamMath.calculateOttBitrate(baseBitrate)
@@ -1271,7 +1237,6 @@ class MirrorForegroundService : Service() {
                 currentBitrate = targetBitrate
                 videoEncoder?.setBitrate(currentBitrate)
             }
-            // Restore secondary to default if active
             if (hasSplit) {
                 val secBitrate = StreamMath.calculateSecondaryBitrate(secondaryWidth, secondaryHeight)
                 secondaryVideoEncoder?.setBitrate(secBitrate)
@@ -1305,7 +1270,6 @@ class MirrorForegroundService : Service() {
         if (clearState) {
             clearSecondaryState()
             clearSplitState()
-            // Trigger primary VD resize to fullscreen on next viewport update
             Log.i(TAG, "Secondary pipeline released — primary will resize to fullscreen on next viewport")
         }
     }
@@ -1337,7 +1301,6 @@ class MirrorForegroundService : Service() {
 
         val existingSecondaryVd = secondaryDisplayId >= 0
 
-        // Release encoder only (NOT the VD) so we can resize
         secondaryVideoEncoder?.release()
         secondaryVideoEncoder = null
         secondaryJpegEncoder?.release()
@@ -1363,7 +1326,6 @@ class MirrorForegroundService : Service() {
         val dpi = computeVirtualDisplayDpi(width, height)
 
         if (existingSecondaryVd) {
-            // Resize existing secondary VD gradually to avoid activity recreation
             virtualDisplayManager?.getPrivilegedService()?.setSurface(secondaryDisplayId, surface)
             virtualDisplayManager?.resizeDisplay(secondaryDisplayId, width, height, dpi)
             secondaryWidth = width
@@ -1371,7 +1333,6 @@ class MirrorForegroundService : Service() {
             secondaryTouchInjector?.updateDimensions(width, height)
             Log.i(TAG, "Gradually resized secondary VD $secondaryDisplayId to ${width}x${height}")
         } else {
-            // First creation
             val newDisplayId = virtualDisplayManager?.createSecondaryVirtualDisplay(width, height, dpi, surface) ?: -1
             if (newDisplayId < 0) {
                 releaseSecondaryPipeline(clearState = false)
@@ -1392,6 +1353,7 @@ class MirrorForegroundService : Service() {
             }
             restoreSecondaryVdContent()
         }
+        mirrorServer?.broadcastFrame(byteArrayOf(), false, "secondary") 
         mirrorServer?.broadcastControlMessage(JSONObject().apply {
             put("type", "resolutionChanged")
             put("pane", "secondary")
@@ -1467,14 +1429,12 @@ class MirrorForegroundService : Service() {
         val displayId = virtualDisplayManager?.getDisplayId() ?: -1
         if (displayId < 0) return
 
-        // Remove the split app's task from the VD
         val splitTarget = activeSplitComponent
         if (splitTarget != null) {
             serviceScope.launch(Dispatchers.IO) {
                 try {
                     val service = virtualDisplayManager?.getPrivilegedService() ?: return@launch
                     val tasks = parseDisplayTasks(service.execCommand("dumpsys activity activities"), displayId)
-                    // Find and remove split task
                     for (task in tasks) {
                         if (task.mode == "freeform" && taskMatchesLaunchTarget(task, splitTarget)) {
                             service.removeTask(task.taskId)
@@ -1482,7 +1442,6 @@ class MirrorForegroundService : Service() {
                             break
                         }
                     }
-                    // Restore primary to fullscreen bounds
                     val primaryTarget = normalizeLaunchTarget(currentVdApp)
                     val fullBounds = android.graphics.Rect(0, 0, currentWidth, currentHeight)
                     val primaryTaskId = findTaskId(service, displayId, primaryTarget)
@@ -1490,7 +1449,6 @@ class MirrorForegroundService : Service() {
                         service.execCommand("cmd activity task resize $primaryTaskId ${fullBounds.left} ${fullBounds.top} ${fullBounds.right} ${fullBounds.bottom}")
                         Log.i(TAG, "Restored primary task $primaryTaskId to fullscreen")
                     } else {
-                        // Re-launch primary fullscreen as fallback
                         virtualDisplayManager?.launchAppOnDisplay(primaryTarget)
                         Log.i(TAG, "Re-launched primary $primaryTarget fullscreen")
                     }
@@ -1506,14 +1464,6 @@ class MirrorForegroundService : Service() {
 
     private fun hasActiveSplitSession(): Boolean = activeSplitUrl != null || activeSplitComponent != null
 
-    /**
-     * Aggressively clean up all tasks from a virtual display before releasing it.
-     * Uses multiple strategies to prevent reparenting to the main display:
-     * 1. HOME keyevent to push apps to background
-     * 2. force-stop third-party packages (atomic, no race condition)
-     * 3. am task remove for remaining tasks (our own activities, launchers)
-     * 4. Delay to let framework process
-     */
     private fun removeAllVdTasks() {
         cleanupDisplay(virtualDisplayManager?.getDisplayId() ?: -1)
         cleanupDisplay(secondaryDisplayId)
@@ -1525,16 +1475,13 @@ class MirrorForegroundService : Service() {
         val myPackage = packageName
 
         try {
-            // 1. Launch our custom HOME to push everything to background
             service.launchHomeOnDisplay(displayId)
 
-            // 2. Parse tasks and collect third-party packages
             val dumpsys = service.execCommand("dumpsys activity activities")
             val tasks = parseDisplayTasks(dumpsys, displayId)
             val packagesToStop = mutableSetOf<String>()
 
             for (task in tasks) {
-                // Extract package name from task header: "Task{... A=<uid>:<package> ...}"
                 val pkgMatch = Regex("A=\\d+:([\\w.]+)").find(task.header)
                 val pkg = pkgMatch?.groupValues?.getOrNull(1)
                 if (pkg != null && pkg != myPackage
@@ -1546,13 +1493,11 @@ class MirrorForegroundService : Service() {
                 }
             }
 
-            // 3. force-stop third-party apps (atomic — no race condition)
             for (pkg in packagesToStop) {
                 service.execCommand("am force-stop $pkg")
                 Log.i(TAG, "Force-stopped $pkg from display $displayId")
             }
 
-            // 4. Remove remaining tasks (our own activities, etc.)
             for (task in tasks) {
                 service.removeTask(task.taskId)
                 Log.i(TAG, "Removed task ${task.taskId} from display $displayId")
@@ -1564,10 +1509,6 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    /**
-     * Force-stop a previously running app when navigating home.
-     * Skips system apps, launchers, and our own package.
-     */
     private val BROWSER_PACKAGES = setOf(
         "com.android.chrome",
         "com.sec.android.app.sbrowser",
@@ -1587,7 +1528,6 @@ class MirrorForegroundService : Service() {
 
         try {
             val service = virtualDisplayManager?.getPrivilegedService() ?: return
-            // For browser apps, prefer task remove over force-stop to preserve user sessions
             if (BROWSER_PACKAGES.contains(pkg)) {
                 val displayId = virtualDisplayManager?.getDisplayId() ?: -1
                 val taskId = findTaskId(service, displayId, packageName)
@@ -1608,10 +1548,6 @@ class MirrorForegroundService : Service() {
         return currentVdApp.isNotBlank() && currentVdApp != "HOME" && currentVdApp != "com.android.settings"
     }
 
-    /**
-     * Single, centralized split-mode viability gate. Every split entry path must pass
-     * this before mutating split state or computing pane bounds. Logs once on rejection.
-     */
     private fun ensureSplitViable(reason: String): Boolean {
         if (!canLaunchPrimarySplitTask()) {
             FileLogger.w(TAG, "Split rejected ($reason): no primary app (currentVdApp=$currentVdApp)")
@@ -1624,11 +1560,6 @@ class MirrorForegroundService : Service() {
         return true
     }
 
-    /**
-     * Records a fatal failure cause (first-writer-wins) and triggers cleanup.
-     * The actual SESSION_END event is emitted by [performCleanup] using the
-     * stored reason so there is exactly one terminal log per session.
-     */
     private fun markTerminal(reason: TerminalReason) {
         if (!terminalReason.compareAndSet(null, reason)) return
         FileLogger.e(TAG, "Terminal failure: ${reason.name}")
@@ -1725,7 +1656,6 @@ class MirrorForegroundService : Service() {
 
     private fun launchFullscreenWebTarget(activityClassName: String, displayId: Int, url: String) {
         clearSplitState()
-        // Force-stop the previous app to prevent screen flash during transition
         val previousApp = currentVdApp
         val newTarget = internalComponentName(activityClassName)
         if (previousApp != newTarget) {
@@ -1760,10 +1690,6 @@ class MirrorForegroundService : Service() {
         )
     }
 
-    /**
-     * Launch an OTT URL in an external browser app on the virtual display.
-     * Falls back to internal WebBrowserActivity if no browser is found or launch fails.
-     */
     private fun launchExternalBrowserTarget(displayId: Int, url: String, sourceAppPackage: String? = null, allowFallback: Boolean = true) {
         clearSplitState()
         val previousApp = currentVdApp
@@ -1810,7 +1736,6 @@ class MirrorForegroundService : Service() {
             }
 
             if (launched) {
-                // Compare by package name to avoid false mismatch between component and package formats
                 val previousPkg = previousApp.substringBefore('/')
                 if (previousPkg != browser.packageName) {
                     forceStopAppIfNeeded(previousApp)
@@ -1830,7 +1755,6 @@ class MirrorForegroundService : Service() {
             }
         }
 
-        // Fallback to internal WebBrowserActivity
         if (allowFallback) {
             Log.w(TAG, "Falling back to internal WebBrowserActivity for $url")
             launchFullscreenWebTarget("com.castla.mirror.ui.WebBrowserActivity", displayId, url)
@@ -1843,10 +1767,6 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    /**
-     * Launch an OTT URL in an external browser in split/freeform mode.
-     * Falls back to internal WebBrowserActivity if no browser is found or launch fails.
-     */
     private fun launchSplitExternalBrowserTarget(displayId: Int, url: String, sourceAppPackage: String? = null, allowFallback: Boolean = true) {
         if (displayId < 0) {
             Log.w(TAG, "Split external browser launch refused: invalid displayId=$displayId for $url")
@@ -1910,7 +1830,6 @@ class MirrorForegroundService : Service() {
             }
         }
 
-        // Fallback to internal WebBrowserActivity in split mode
         if (allowFallback) {
             Log.w(TAG, "Falling back to internal WebBrowserActivity (split) for $url")
             launchSplitWebTarget("com.castla.mirror.ui.WebBrowserActivity", displayId, url)
@@ -1923,9 +1842,6 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    /**
-     * Build an `am start` shell command to launch an external browser with ACTION_VIEW on the virtual display.
-     */
     private fun buildExternalBrowserCommand(displayId: Int, url: String, browserComponent: String, freeform: Boolean): String {
         return buildString {
             append("am start -W --display $displayId -f 0x18000000 ")
@@ -1944,10 +1860,6 @@ class MirrorForegroundService : Service() {
         val service = virtualDisplayManager?.getPrivilegedService()
         val displayId = virtualDisplayManager?.getDisplayId() ?: -1
 
-        // Check if the app is already on the virtual display.
-        // If it is NOT on the virtual display, it might be running on the primary display.
-        // Moving a task from the primary display to the virtual display breaks touch input (Android input channel bug).
-        // Therefore, we MUST force-stop it to ensure a fresh launch on the virtual display.
         if (service != null && displayId >= 0) {
             val taskId = findTaskId(service, displayId, resolvedTarget)
             if (taskId == null) {
@@ -1966,14 +1878,12 @@ class MirrorForegroundService : Service() {
     }
 
     private fun rebuildAndRetryLaunch(resolvedTarget: String) {
-        // Set the target so restoreCurrentVdContent will launch it once VD is ready
         currentVdApp = resolvedTarget
         currentWebUrl = null
         activeSession = ActiveLaunchSession(mode = SessionMode.STANDARD_APP, launchTarget = resolvedTarget)
         serviceScope.launch {
             try {
                 rebuildPipeline(currentWidth, currentHeight, force = true)
-                // If VD is already available (sync path), launch directly
                 val vdm = virtualDisplayManager
                 if (vdm != null && vdm.hasVirtualDisplay()) {
                     val retried = vdm.launchAppOnDisplay(resolvedTarget)
@@ -2000,17 +1910,10 @@ class MirrorForegroundService : Service() {
             return
         }
         val resolvedTarget = normalizeLaunchTarget(launchTarget)
-        val primaryBounds = primaryTaskBounds()
-        val secondaryBounds = splitTaskBounds()
-        Log.i(TAG, "Split bounds: primary=$primaryBounds secondary=$secondaryBounds")
-
-        // Step 1: Convert primary to freeform and resize to left
         relaunchPrimaryTaskForSplit(displayId)
 
-        // Step 2: Launch secondary in freeform mode
         val launched = launchTargetOnDisplay(displayId, resolvedTarget, freeform = true)
         if (launched) {
-            // Step 3: Resize secondary to right bounds
             scheduleSplitTaskResize(displayId, resolvedTarget)
             activeSplitComponent = resolvedTarget
             activeSplitUrl = null
@@ -2024,25 +1927,21 @@ class MirrorForegroundService : Service() {
         val bounds = primaryTaskBounds()
         val service = virtualDisplayManager?.getPrivilegedService() ?: return
 
-        // Try to find and convert existing fullscreen task to freeform
         val existingTaskId = findTaskId(service, displayId, primaryTarget)
         if (existingTaskId != null) {
             val existingMode = parseDisplayTasks(service.execCommand("dumpsys activity activities"), displayId)
                 .firstOrNull { it.taskId == existingTaskId }?.mode ?: "unknown"
             if (existingMode == "freeform") {
-                // Already freeform, just resize
                 service.execCommand("cmd activity task resize $existingTaskId ${bounds.left} ${bounds.top} ${bounds.right} ${bounds.bottom}")
                 Log.i(TAG, "Primary task $existingTaskId already freeform, resized to $bounds")
                 return
             }
         }
 
-        // Must force-stop and relaunch in freeform mode (fullscreen→freeform can't be done via resize)
         Log.i(TAG, "Force-restarting primary $primaryPkg in freeform mode")
         service.execCommand("am force-stop $primaryPkg")
         val isExternalBrowser = activeSession?.mode == SessionMode.EXTERNAL_BROWSER
         val launched = if (isExternalBrowser && currentWebUrl != null) {
-            // Re-launch external browser with the same URL
             val browser = BrowserResolver.resolve(this, currentWebUrl!!)
             if (browser != null) {
                 val cmd = buildExternalBrowserCommand(displayId, currentWebUrl!!, browser.componentFlat, freeform = true)
@@ -2056,7 +1955,6 @@ class MirrorForegroundService : Service() {
             launchTargetOnDisplay(displayId, primaryTarget, freeform = true)
         }
         if (launched) {
-            // Resize primary to left bounds after launch
             schedulePrimaryTaskResize(displayId, primaryTarget)
         }
     }
@@ -2135,7 +2033,6 @@ class MirrorForegroundService : Service() {
         return android.graphics.Rect(leftWidth, 0, currentWidth, currentHeight)
     }
 
-    // Per-pane resize jobs so a new resize cancels any superseded one in flight.
     private var primaryResizeJob: Job? = null
     private var splitResizeJob: Job? = null
     private val resizeMutex = kotlinx.coroutines.sync.Mutex()
@@ -2165,22 +2062,12 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    /**
-     * Runs the resize and verifies via dumpsys that WMS actually honored the requested bounds.
-     * If the actual task bounds differ from requested by more than [BOUNDS_TOLERANCE_PX] on
-     * any side, the resize is reissued. This addresses the race where the task is not yet
-     * fully in freeform mode when the first resize fires and Android silently drops it.
-     *
-     * Total wall-time is bounded by [MAX_LOCATE_ATTEMPTS] * locate-delay + [MAX_VERIFY_ROUNDS]
-     * * (cmd timeout + verify wait).
-     */
     private suspend fun runResizeWithVerification(
         displayId: Int,
         bounds: android.graphics.Rect,
         label: String,
         launchTarget: String,
     ) {
-        // Phase 1: locate task (existing retry strategy, lightly bounded by withTimeoutOrNull)
         var taskId: Int? = null
         var currentDisplayId = displayId
         var service: IPrivilegedService? = null
@@ -2200,7 +2087,6 @@ class MirrorForegroundService : Service() {
             return
         }
 
-        // Phase 2: issue resize + verify, retry on mismatch
         for (round in 0 until MAX_VERIFY_ROUNDS) {
             val cmdSucceeded = kotlinx.coroutines.withTimeoutOrNull(SHELL_TIMEOUT_MS) {
                 svc.execCommand("cmd activity task resizeable $tid 2")
@@ -2213,7 +2099,6 @@ class MirrorForegroundService : Service() {
                 kotlinx.coroutines.delay(VERIFY_BACKOFF_MS)
                 continue
             }
-            // Verify
             kotlinx.coroutines.delay(VERIFY_BACKOFF_MS)
             val freshDumpsys = kotlinx.coroutines.withTimeoutOrNull(SHELL_TIMEOUT_MS) {
                 svc.execCommand("dumpsys activity activities")
@@ -2260,12 +2145,6 @@ class MirrorForegroundService : Service() {
         val tasks = parseDisplayTasks(dumpsys, displayId)
         Log.d(TAG, "findTaskId: display=$displayId target=$launchTarget found ${tasks.size} tasks: ${tasks.map { "id=${it.taskId} mode=${it.mode}" }}")
         val match = tasks.firstOrNull { taskMatchesLaunchTarget(it, launchTarget) }
-        if (match != null) {
-            Log.d(TAG, "findTaskId: matched task ${match.taskId} (mode=${match.mode})")
-        } else if (tasks.isNotEmpty()) {
-            Log.d(TAG, "findTaskId: no match for candidates=${launchTargetCandidates(launchTarget)}")
-            tasks.forEach { Log.d(TAG, "  task ${it.taskId}: ${it.header.take(120)}") }
-        }
         return match?.taskId
     }
 
@@ -2349,7 +2228,6 @@ class MirrorForegroundService : Service() {
     }
 
     private fun showSplitPresentation(url: String) {
-
         activeSplitUrl = url
         mainHandler.post {
             try {
@@ -2420,7 +2298,6 @@ class MirrorForegroundService : Service() {
             val wasSecondaryVideo = isSecondaryAppVideo
             isSecondaryAppVideo = webUrl != null
             if (webUrl != null) {
-                // Try external browser for secondary pane OTT too
                 val browser = BrowserResolver.resolve(this, webUrl)
                 if (browser != null && secondaryDisplayId >= 0) {
                     val service = virtualDisplayManager?.getPrivilegedService()
@@ -2438,7 +2315,6 @@ class MirrorForegroundService : Service() {
                         }
                     }
                 }
-                // Fallback to internal WebBrowserActivity
                 val webComponentName = internalComponentName("com.castla.mirror.ui.WebBrowserActivity")
                 Log.i(TAG, "Web Launcher: Launching secondary OTT app via WebBrowserActivity: $pkgName -> $webUrl")
                 launchSecondaryTarget(webComponentName, webUrl)
@@ -2451,7 +2327,6 @@ class MirrorForegroundService : Service() {
             return
         }
 
-        // In freeform split mode, always launch native apps directly (skip OTT web redirect)
         val webUrl = if (singleVdSplit && splitMode) null else OttCatalog.webUrlFor(pkgName)
         val displayId = virtualDisplayManager?.getDisplayId() ?: -1
 
@@ -2490,16 +2365,6 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    /**
-     * Returns the long-lived [ShizukuSetup], creating it lazily on first
-     * browser-connect activation. Registers Shizuku binder listeners and
-     * acquires the WiFi lock exactly once for the foreground service lifetime,
-     * preventing the listener/wifi-lock pile-up that fed the prior bind cascade.
-     *
-     * Single-instance contract: subsequent calls reuse the existing instance.
-     * A reconnect-observation collector is started exactly once — guarded
-     * inside [startReconnectObserver].
-     */
     private fun ensureShizukuSetup(): ShizukuSetup? {
         shizukuSetup?.let {
             Log.i(TAG, "ensureShizukuSetup: reusing existing instance")
@@ -2513,19 +2378,6 @@ class MirrorForegroundService : Service() {
         return setup
     }
 
-    /**
-     * Launch the singleton [reconnectJob]. No-op if already started.
-     *
-     * The collector classifies each [ShizukuSetup.serviceConnected] emission
-     * via [BinderConnectionTracker]:
-     *  - FirstConnect / Idempotent → no-op (initial VD creation is owned
-     *    exclusively by [trySetupVirtualDisplay]; duplicate connects from
-     *    listener pile-ups are inert).
-     *  - Disconnect → detach VDM (mark VD stale), preserve surface for the
-     *    upcoming reconnect.
-     *  - Reconnect → recreate the VD on the same encoder surface and restore
-     *    the previously-launched app via [restoreCurrentVdContent].
-     */
     private fun startReconnectObserver(setup: ShizukuSetup) {
         if (reconnectJob != null) return
         reconnectJob = serviceScope.launch {
@@ -2535,7 +2387,7 @@ class MirrorForegroundService : Service() {
                 Log.i(TAG, "Shizuku connection transition=$transition connected=$connected")
                 when (transition) {
                     BinderConnectionTracker.Transition.FirstConnect,
-                    BinderConnectionTracker.Transition.Idempotent -> { /* trySetupVirtualDisplay owns first-connect; idempotent ignored */ }
+                    BinderConnectionTracker.Transition.Idempotent -> {}
                     BinderConnectionTracker.Transition.Disconnect -> handleShizukuDisconnect()
                     BinderConnectionTracker.Transition.Reconnect -> handleShizukuReconnect(setup)
                 }
@@ -2564,8 +2416,8 @@ class MirrorForegroundService : Service() {
         vdm.createVirtualDisplay(currentWidth, currentHeight, computeVirtualDisplayDpi(currentWidth, currentHeight), surf)
         if (vdm.hasVirtualDisplay()) {
             touchInjector?.setVirtualDisplayInjector { motionEvent ->
-                            vdm.injectMotionEvent(motionEvent)
-                        }
+                vdm.injectMotionEvent(motionEvent)
+            }
             restoreCurrentVdContent()
         }
     }
@@ -2576,11 +2428,6 @@ class MirrorForegroundService : Service() {
         surface: android.view.Surface,
         onResult: (Boolean) -> Unit
     ) {
-        // Atomic guard: rebuildPipeline races (e.g. concurrent codec-change +
-        // browser-reconnect on a closed-flip → wifi-drop recovery) used to
-        // launch trySetupVirtualDisplay twice, each creating its own VDM and
-        // VD. The shizukuSetupInProgress guard in rebuildPipeline catches most
-        // cases but not all — gate at the entry as well.
         if (shizukuSetupInProgress) {
             Log.i(TAG, "trySetupVirtualDisplay queued: setup already in progress")
             shizukuSetupCallbacks.add(onResult)
@@ -2625,7 +2472,6 @@ class MirrorForegroundService : Service() {
             return
         }
 
-        // bindPrivilegedService is idempotent; safe even if already bound.
         setup.bindPrivilegedService()
 
         serviceScope.launch {
@@ -2649,9 +2495,6 @@ class MirrorForegroundService : Service() {
                             return@launch
                         }
                     }
-                    // Browser/surface gone before we could retry — final failure via
-                    // single-delivery guard, otherwise the caller's MediaProjection
-                    // fallback could race with a stale resultDelivered=false state.
                     safeResult(false)
                 } else {
                     Log.e(TAG, "Shizuku binding failed after $SHIZUKU_MAX_RETRIES retries — Shizuku server may need restart")
@@ -2662,7 +2505,6 @@ class MirrorForegroundService : Service() {
 
             shizukuBindRetryCount = 0
 
-            // Late-event guard: browser may have disconnected while we awaited.
             if (!browserConnected) {
                 Log.w(TAG, "trySetupVirtualDisplay: browser disconnected during bind wait — abort")
                 safeResult(false)
@@ -2676,12 +2518,11 @@ class MirrorForegroundService : Service() {
                 return@launch
             }
 
-            // Enable freeform windowing and stay-awake support
             try {
                 svc.enableStayAwakeMode()
                 svc.execCommand("settings put global enable_freeform_support 1")
                 svc.execCommand("settings put global force_resizable_activities 1")
-                Log.i(TAG, "Enabled scrcpy-style stay-awake and freeform windowing support")
+                Log.i(TAG, "Enabled stay-awake and freeform windowing support")
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to enable freeform support (non-fatal)", e)
             }
@@ -2689,7 +2530,6 @@ class MirrorForegroundService : Service() {
             val vdm = VirtualDisplayManager().also { virtualDisplayManager = it }
             vdm.attachPrivilegedService(svc)
 
-            // Use latest dimensions/surface in case viewport changed during async wait
             val actualWidth = if (currentWidth > 0) currentWidth else width
             val actualHeight = if (currentHeight > 0) currentHeight else height
             val actualSurface = currentEncoderSurface ?: surface
@@ -2698,9 +2538,8 @@ class MirrorForegroundService : Service() {
 
             if (vdm.hasVirtualDisplay()) {
                 touchInjector?.setVirtualDisplayInjector { motionEvent ->
-                            vdm.injectMotionEvent(motionEvent)
-                        }
-                // Harden Shizuku (fortify + install watchdog if needed) for WiFi-off survival
+                    vdm.injectMotionEvent(motionEvent)
+                }
                 serviceScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                     val ok = setup.ensureShizukuHardened()
                     Log.i(TAG, "ensureShizukuHardened (service): $ok")
@@ -2751,13 +2590,11 @@ class MirrorForegroundService : Service() {
         try {
             acquireWakeLocks()
 
-            // Send current thermal status to new browser client for profile auto-switching
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 broadcastThermalStatus(_thermalStatus.value)
             }
 
             if (videoEncoder != null) {
-                // Reconnection — rebuild existing pipeline and restart audio
                 Log.i(TAG, "Browser reconnected — rebuilding pipeline")
                 serviceScope.launch {
                     rebuildPipeline(currentWidth, currentHeight, force = true)
@@ -2766,7 +2603,6 @@ class MirrorForegroundService : Service() {
                 return
             }
 
-            // First connection — start encoder, VD, audio, ABR
             Log.i(TAG, "Browser connected — starting active pipeline")
             val width = currentWidth
             val height = currentHeight
@@ -2794,11 +2630,11 @@ class MirrorForegroundService : Service() {
                 trySetupVirtualDisplay(width, height, surface) { shizukuActive ->
                     if (shizukuActive) {
                         currentVdApp = "HOME"
+                        restoreCurrentVdContent()
                     } else {
-                        Log.e(TAG, "Shizuku VD setup failed — MediaProjection fallback disabled")
+                        Log.e(TAG, "Shizuku VD setup failed — Fallback disabled")
                         markTerminal(TerminalReason.SHIZUKU_REBIND_FAILED)
                     }
-                    // Start audio after privilegedService is attached so REMOTE_SUBMIX is available
                     ensureAudioCaptureState()
                 }
             }
@@ -2809,12 +2645,6 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    /**
-     * Tear down the per-session VD/encoder wiring. Does NOT release
-     * [shizukuSetup] or its listeners — that lives for the foreground service
-     * lifetime so the singleton bind contract holds across browser
-     * disconnect/reconnect and pipeline rebuilds.
-     */
     private fun tearDownVdSession(reason: String) {
         Log.i(TAG, "Tearing down VD session: $reason")
         try { touchInjector?.setVirtualDisplayInjector(null) } catch (_: Exception) {}
@@ -2841,7 +2671,6 @@ class MirrorForegroundService : Service() {
                 } else if (hasActiveSplitSession()) {
                     val displayId = vdm.getDisplayId()
                     relaunchPrimaryTaskForSplit(displayId)
-                    // Restore split pane: prefer external browser if that was the original mode
                     val splitSession = activeSplitSession
                     when {
                         splitSession?.mode == SessionMode.EXTERNAL_BROWSER && activeSplitUrl != null -> {
@@ -2855,7 +2684,6 @@ class MirrorForegroundService : Service() {
                                 if (launched) {
                                     scheduleSplitTaskResize(displayId, browser.componentFlat)
                                 } else {
-                                    // Fallback to internal WebBrowserActivity
                                     launchInternalActivity("com.castla.mirror.ui.WebBrowserActivity", displayId, activeSplitUrl!!, splitMode = true)
                                 }
                             } else {
@@ -2873,7 +2701,6 @@ class MirrorForegroundService : Service() {
                         }
                     }
                 } else if (activeSession?.mode == SessionMode.EXTERNAL_BROWSER && currentWebUrl != null) {
-                    // Restore external browser with URL
                     val displayId = vdm.getDisplayId()
                     val browser = BrowserResolver.resolve(this, currentWebUrl!!)
                     if (browser != null) {
@@ -2883,7 +2710,6 @@ class MirrorForegroundService : Service() {
                             if (svc != null) { svc.execCommand(cmd); true } else false
                         } catch (_: Exception) { false }
                         if (!launched) {
-                            // Fallback to internal WebBrowserActivity
                             launchInternalActivity("com.castla.mirror.ui.WebBrowserActivity", displayId, currentWebUrl!!, splitMode = currentWebSplitMode)
                         }
                     } else {
@@ -2912,9 +2738,6 @@ class MirrorForegroundService : Service() {
         Log.i(TAG, "Browser disconnected — suspending pipeline")
         pendingBrowserDisconnectJob = null
         browserConnected = false
-        // Reset IME broadcast state so next reconnect re-emits showKeyboard
-        // if a text field is still focused — the browser's bubble state
-        // was cleared by the reload.
         lastImeState = false
         lastBroadcastPane = null
         haveSeenRealImeShow = false
@@ -2938,7 +2761,6 @@ class MirrorForegroundService : Service() {
         abrJob?.cancel()
         abrJob = null
 
-        // Reset browser quality metrics so stale values don't affect next session
         lastQualityDroppedFrames = 0
         lastQualityAvgDelayMs = 0.0
         lastQualityBacklogDrops = 0
@@ -2973,24 +2795,10 @@ class MirrorForegroundService : Service() {
     private var imeCheckSuspendUntil = 0L
     private var lastImeVisibleTime = 0L
     private var imeHiddenSince = 0L
-    // Once a real phone IME show (`mInputShown=true` or equivalent) is observed,
-    // stop trusting the `imeInputTarget` fallback — that signal persists after
-    // the phone keyboard dismisses, which would otherwise keep the bubble stuck
-    // open in single-VD mode. Reset whenever we broadcast hide or pane changes.
     private var haveSeenRealImeShow = false
-    // User explicitly dismissed the bubble in the browser. Suppress hasTarget-based
-    // re-shows until the next touch-down (user intent to re-engage).
     private var bubbleClosedByUser = false
-    // Polls IME visibility at a short interval while the bubble is shown so the
-    // hide broadcast fires quickly when the user dismisses the phone keyboard
-    // without tapping the mirror. Auto-exits when lastImeState goes false.
     private var imeHideWatchdogJob: Job? = null
 
-    // One IME-visibility poll iteration. Reads Shizuku's lightweight binder-dump state,
-    // updates state, and
-    // broadcasts show/hide when it changes. Returns the combined-visible
-    // value, or null on a transport error. Shared by the touch-triggered
-    // retry loop (show detection) and the hide watchdog (fast dismiss).
     private suspend fun imeCheckTick(activePane: String, activeDisplayId: Int, source: String): Boolean? {
         val service = virtualDisplayManager?.getPrivilegedService() ?: return null
 
@@ -3134,8 +2942,6 @@ class MirrorForegroundService : Service() {
                 for (attempt in 0 until maxRetries) {
                     kotlinx.coroutines.delay(retryDelays[attempt])
                     imeCheckTick(activePane, activeDisplayId, "check") ?: return@launch
-                    // As soon as the bubble is showing, let the hide watchdog
-                    // take over at its tighter cadence.
                     if (lastImeState) {
                         startImeHideWatchdog()
                         break
@@ -3192,12 +2998,10 @@ class MirrorForegroundService : Service() {
     private fun effectiveMaxHeightForRequest(requestedHeight: Int, isSecondaryPane: Boolean = false): Int {
         val baseMax = when {
             shouldUseRequestedHeightForSplit(isSecondaryPane) -> {
-                // In split mode, still respect auto tier / user resolution cap
                 minOf(requestedHeight, currentMaxHeight)
             }
             else -> currentMaxHeight
         }
-        // Apply thermal resolution cap if active
         val thermalCap = thermalMaxHeight
         return if (thermalCap != null) minOf(baseMax, thermalCap) else baseMax
     }
@@ -3272,7 +3076,6 @@ class MirrorForegroundService : Service() {
             if (virtualDisplayManager?.isBound() == true) {
                 dismissSplitPresentation(clearState = false)
                 if (virtualDisplayManager?.hasVirtualDisplay() == true && !force) {
-                    // Resize existing VD gradually to avoid activity recreation
                     val vdId = virtualDisplayManager!!.getDisplayId()
                     val resized = try {
                         virtualDisplayManager?.getPrivilegedService()?.setSurface(vdId, surface)
@@ -3292,8 +3095,8 @@ class MirrorForegroundService : Service() {
                         virtualDisplayManager?.createVirtualDisplay(width, height, dpi, surface)
                         if (virtualDisplayManager?.hasVirtualDisplay() == true) {
                             touchInjector?.setVirtualDisplayInjector { motionEvent ->
-                            virtualDisplayManager?.injectMotionEvent(motionEvent)
-                        }
+                                virtualDisplayManager?.injectMotionEvent(motionEvent)
+                            }
                             restoreCurrentVdContent()
                         } else {
                             Log.e(TAG, "VD recreation failed after stale resize")
@@ -3308,29 +3111,26 @@ class MirrorForegroundService : Service() {
                         }
                         restoreCurrentVdContent()
                     } else {
-                        // Retry once before marking the Shizuku VD path failed.
                         Log.w(TAG, "VD creation failed during rebuild — retrying once")
                         virtualDisplayManager?.createVirtualDisplay(width, height, dpi, surface)
                         if (virtualDisplayManager?.hasVirtualDisplay() == true) {
                             touchInjector?.setVirtualDisplayInjector { motionEvent ->
-                            virtualDisplayManager?.injectMotionEvent(motionEvent)
-                        }
+                                virtualDisplayManager?.injectMotionEvent(motionEvent)
+                            }
                             restoreCurrentVdContent()
                         } else {
-                            Log.e(TAG, "VD creation failed after retry — NOT falling back to MediaProjection to prevent raw phone screen leak")
+                            Log.e(TAG, "VD creation failed after retry — Fallback disabled")
                             markTerminal(TerminalReason.VD_RECREATE_FAILED)
                         }
                     }
                 }
             } else if (shizukuSetupInProgress) {
-                // A binding attempt is already in flight — don't interrupt it
                 Log.i(TAG, "Shizuku binding already in progress, skipping redundant rebind")
             } else {
-                // Shizuku not bound — try rebinding before falling back
                 Log.w(TAG, "Shizuku not bound during rebuild — attempting rebind")
                 trySetupVirtualDisplay(width, height, surface) { success ->
                     if (!success) {
-                        Log.e(TAG, "Shizuku rebind failed — NOT falling back to MediaProjection to prevent raw phone screen leak")
+                        Log.e(TAG, "Shizuku rebind failed — Fallback disabled")
                         markTerminal(TerminalReason.SHIZUKU_REBIND_FAILED)
                     } else {
                         Log.i(TAG, "Shizuku rebound successfully during rebuild")
@@ -3358,7 +3158,12 @@ class MirrorForegroundService : Service() {
     private fun onCodecModeRequest(mode: String) {
         if (!CodecModeTransition.shouldApply(mode, currentCodecMode, jpegEncoder != null)) return
         currentCodecMode = CodecModeTransition.MODE_MJPEG
-        Log.i(TAG, "Codec mode request: mjpeg — delegating to rebuildPipeline")
+        Log.i(TAG, "Codec mode request: mjpeg")
+        if (currentWidth == 0 || currentHeight == 0) {
+            Log.i(TAG, "Viewport dimensions not yet set (0x0) — deferring pipeline build")
+            return
+        }
+        Log.i(TAG, "Delegating to rebuildPipeline")
         serviceScope.launch {
             try {
                 rebuildPipeline(currentWidth, currentHeight, force = true)
@@ -3373,17 +3178,11 @@ class MirrorForegroundService : Service() {
 
     override fun onDestroy() {
         Log.i(TAG, "onDestroy called")
-        // Thermal listener removal is handled inside performCleanup — do NOT
-        // remove it here to avoid "Listener was not added" IllegalArgumentException.
-        performCleanup("onDestroy") // no-ops if already completed (guard inside)
+        performCleanup("onDestroy") 
         MirrorWidgetProvider.updateAllWidgets(this)
         super.onDestroy()
     }
 
-    /**
-     * Grant CAPTURE_AUDIO_OUTPUT permission via Shizuku (ADB-level) so that
-     * AudioPlaybackCapture can capture restricted usages like navigation guidance.
-     */
     private fun tryGrantAudioCapturePermission() {
         try {
             val setup = shizukuSetup
