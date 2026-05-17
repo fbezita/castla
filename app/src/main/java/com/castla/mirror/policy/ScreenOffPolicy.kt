@@ -76,7 +76,7 @@ class ScreenOffPolicy {
 
         return if (success) {
             state = ScreenOffState.PANEL_OFF_ACTIVE
-            ScreenOffAction.NONE
+            ScreenOffAction.START_KEEP_ALIVE
         } else {
             isPanelOffSupported = false
             state = ScreenOffState.KEEP_ALIVE_ACTIVE

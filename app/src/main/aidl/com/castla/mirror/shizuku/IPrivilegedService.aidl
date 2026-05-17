@@ -168,4 +168,14 @@ interface IPrivilegedService {
      * Remove a task by its task ID using ActivityTaskManager.
      */
     void removeTask(int taskId) = 26;
+
+    /**
+     * Enable scrcpy-style stay-awake mode by setting stay_on_while_plugged_in.
+     */
+    void enableStayAwakeMode() = 27;
+
+    /**
+     * Restore the original stay-awake mode setting.
+     */
+    void restoreStayAwakeMode() = 28;
 }

@@ -122,7 +122,7 @@ class MirrorForegroundService : Service() {
         private const val AUTO_SCALE_INITIAL_DELAY_MS = 5_000L
         // Grace period constants are now in DisconnectPolicy
         /** Interval for poking the VD awake while the physical screen is off. */
-        private const val VD_KEEP_ALIVE_INTERVAL_MS = 30_000L
+        private const val VD_KEEP_ALIVE_INTERVAL_MS = 3_000L
 
         // Split resize verification tunables
         private const val MAX_LOCATE_ATTEMPTS = 10
@@ -158,6 +158,7 @@ class MirrorForegroundService : Service() {
     private var browserConnectionListener: ((Boolean) -> Unit)? = null
     @Volatile private var stopRequested = false
     @Volatile private var cleanupCompleted = false
+    private var isWakingUpFromPowerButton = false
     /**
      * First-writer-wins terminal failure reason. Set by [markTerminal] at the
      * moment a known fatal failure is detected; consumed by [performCleanup]
@@ -202,6 +203,7 @@ class MirrorForegroundService : Service() {
     private var dpiScale: Float = 0.7f
     // Guard against concurrent Shizuku binding attempts
     @Volatile private var shizukuSetupInProgress = false
+    private val shizukuSetupCallbacks = java.util.Collections.synchronizedList(mutableListOf<(Boolean) -> Unit>())
     private var shizukuBindRetryCount = 0
     private val SHIZUKU_MAX_RETRIES = 2
     private val BIND_WAIT_BUDGET_MS = 8_000L
@@ -684,14 +686,40 @@ class MirrorForegroundService : Service() {
 
     private fun onPhoneScreenOff() {
         MirrorDiagnostics.log(DiagnosticEvent.SCREEN_OFF)
-        val action = screenOffPolicy.onScreenOff(panelOffSupported = screenOffPolicy.isPanelOffSupported)
-        logScreenState("Screen OFF (action=$action)")
-        executeScreenOffAction(action)
-        _panelOffStateFlow.value = screenOffPolicy.state
+        logScreenState("onPhoneScreenOff() called. state=${screenOffPolicy.state}")
+        
+        if (screenOffPolicy.state == ScreenOffState.ACTIVE) {
+            // User pressed power button to turn screen OFF.
+            // We want to wake up the system to keep it awake, but turn the physical panel OFF!
+            isWakingUpFromPowerButton = true
+            
+            val action = screenOffPolicy.onScreenOff(panelOffSupported = screenOffPolicy.isPanelOffSupported)
+            logScreenState("Screen OFF (action=$action)")
+            executeScreenOffAction(action)
+            _panelOffStateFlow.value = screenOffPolicy.state
+        } else {
+            // User pressed power button while physical screen was OFF.
+            // We restore the physical panel so the user can use their phone!
+            Log.i(TAG, "Power button pressed while panel was OFF — restoring physical panel")
+            isWakingUpFromPowerButton = false
+            
+            val action = screenOffPolicy.onScreenOn()
+            logScreenState("Screen ON (action=$action)")
+            executeScreenOnAction(action)
+            _panelOffStateFlow.value = screenOffPolicy.state
+        }
     }
 
     private fun onPhoneScreenOn() {
         MirrorDiagnostics.log(DiagnosticEvent.SCREEN_ON)
+        logScreenState("onPhoneScreenOn() called. isWakingUpFromPowerButton=$isWakingUpFromPowerButton")
+        
+        if (isWakingUpFromPowerButton) {
+            isWakingUpFromPowerButton = false
+            Log.i(TAG, "Screen ON broadcast received from our own WAKEUP injection — keeping physical panel OFF")
+            return
+        }
+        
         val action = screenOffPolicy.onScreenOn()
         logScreenState("Screen ON (action=$action)")
         executeScreenOnAction(action)
@@ -720,11 +748,34 @@ class MirrorForegroundService : Service() {
                     executeScreenOffAction(fallback)
                     return
                 }
-                val success = vdm.setPhysicalDisplayPower(false)
-                Log.i(TAG, "Physical panel OFF result: success=$success")
-                val fallback = screenOffPolicy.onPanelOffResult(success)
-                if (fallback != ScreenOffAction.NONE) {
-                    executeScreenOffAction(fallback)
+                
+                // 1. Wake up the system first to recover from sleep/keyguard transition globally
+                try {
+                    vdm.getPrivilegedService()?.execCommand("input keyevent 224")
+                    vdm.getPrivilegedService()?.execCommand("wm dismiss-keyguard")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to inject WAKEUP/dismiss-keyguard keyevents", e)
+                }
+
+                // 2. Run a fast 1-second burst (10 times, once every 100ms) of setPhysicalDisplayPower(false)
+                // to stamp out any asynchronous AOSP backlight resets from the global wakeup!
+                serviceScope.launch {
+                    var success = false
+                    for (i in 1..10) {
+                        try {
+                            success = vdm.setPhysicalDisplayPower(false)
+                        } catch (_: Exception) {}
+                        kotlinx.coroutines.delay(100)
+                    }
+                    Log.i(TAG, "[BUILD:screen-off-v3] Physical panel OFF burst complete: final_success=$success")
+                    
+                    // Inform policy and execute fallback on main/service thread
+                    serviceScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                        val fallback = screenOffPolicy.onPanelOffResult(success)
+                        if (fallback != ScreenOffAction.NONE) {
+                            executeScreenOffAction(fallback)
+                        }
+                    }
                 }
             }
             ScreenOffAction.START_KEEP_ALIVE -> {
@@ -758,9 +809,12 @@ class MirrorForegroundService : Service() {
         }
         vdKeepAliveJob = serviceScope.launch {
             Log.i(TAG, "[BUILD:screen-off-v3] VD keep-alive starting (interval=${VD_KEEP_ALIVE_INTERVAL_MS}ms, vdId=${vdm.getDisplayId()})")
+            
+            // Run keepDisplayAwake which targets only the Virtual Display
             vdm.keepDisplayAwake()
             while (true) {
                 kotlinx.coroutines.delay(VD_KEEP_ALIVE_INTERVAL_MS)
+                // In the loop, we ONLY wake up the targeted virtual display to avoid waking the physical screen!
                 vdm.keepDisplayAwake()
             }
         }
@@ -829,6 +883,11 @@ class MirrorForegroundService : Service() {
         // unregistered and the binder is unbound.
         try { reconnectJob?.cancel() } catch (_: Exception) {}
         reconnectJob = null
+        try {
+            virtualDisplayManager?.getPrivilegedService()?.restoreStayAwakeMode()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to restore scrcpy-style stay-awake mode", e)
+        }
         try { virtualDisplayManager?.release() } catch (e: Exception) { Log.w(TAG, "Failed to release virtual display manager", e) }
         try { shizukuSetup?.release() } catch (e: Exception) { Log.w(TAG, "Failed to release shizuku setup", e) }
         try { videoEncoder?.release() } catch (e: Exception) { Log.w(TAG, "Failed to release video encoder", e) }
@@ -2523,11 +2582,14 @@ class MirrorForegroundService : Service() {
         // VD. The shizukuSetupInProgress guard in rebuildPipeline catches most
         // cases but not all — gate at the entry as well.
         if (shizukuSetupInProgress) {
-            Log.i(TAG, "trySetupVirtualDisplay skipped: setup already in progress")
-            onResult(false)
+            Log.i(TAG, "trySetupVirtualDisplay queued: setup already in progress")
+            shizukuSetupCallbacks.add(onResult)
             return
         }
         shizukuSetupInProgress = true
+        shizukuSetupCallbacks.clear()
+        shizukuSetupCallbacks.add(onResult)
+        
         var resultDelivered = false
         val safeResult = { success: Boolean ->
             if (!resultDelivered) {
@@ -2536,7 +2598,19 @@ class MirrorForegroundService : Service() {
                 if (!success) {
                     tearDownVdSession("virtual_display_setup_failed")
                 }
-                onResult(success)
+                
+                val callbacks = synchronized(shizukuSetupCallbacks) {
+                    val list = shizukuSetupCallbacks.toList()
+                    shizukuSetupCallbacks.clear()
+                    list
+                }
+                callbacks.forEach { cb ->
+                    try {
+                        cb(success)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Callback invocation failed during setup completion", e)
+                    }
+                }
             }
         }
 
@@ -2602,11 +2676,12 @@ class MirrorForegroundService : Service() {
                 return@launch
             }
 
-            // Enable freeform windowing support for split mode
+            // Enable freeform windowing and stay-awake support
             try {
+                svc.enableStayAwakeMode()
                 svc.execCommand("settings put global enable_freeform_support 1")
                 svc.execCommand("settings put global force_resizable_activities 1")
-                Log.i(TAG, "Enabled freeform windowing support")
+                Log.i(TAG, "Enabled scrcpy-style stay-awake and freeform windowing support")
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to enable freeform support (non-fatal)", e)
             }

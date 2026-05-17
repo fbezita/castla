@@ -1233,8 +1233,8 @@ class PrivilegedService : IPrivilegedService.Stub() {
             // Do NOT use PowerManager.wakeUp() — it wakes the physical screen too.
             // Instead, use display-targeted methods that only affect the VD.
 
-            // 1. Send WAKEUP key event to the specific display (does not wake physical screen)
-            execCommand("input -d $displayId keyevent 224")
+            // 1. WAKEUP keyevent 224 is omitted here because it overrides and wakes up the physical screen globally.
+            // We rely on targeted userActivity and targeted touch injection below which do not wake the physical screen.
 
             // 2. Inject user activity on the VD via PowerManager to prevent doze/dream
             try {
@@ -1381,6 +1381,74 @@ class PrivilegedService : IPrivilegedService.Stub() {
             Log.i(TAG, "removeTask($taskId) result: $success")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to remove task $taskId via ActivityTaskManager", e)
+        }
+    }
+
+    private var previousStayAwake: String? = null
+    private var previousPowerButtonLocks: String? = null
+    private var previousLockTimeout: String? = null
+
+    override fun enableStayAwakeMode() {
+        Log.i(TAG, "enableStayAwakeMode ENTRY")
+        try {
+            val oldVal = execCommand("settings get global stay_on_while_plugged_in").trim()
+            previousStayAwake = oldVal
+            val newVal = "7"
+            execCommand("settings put global stay_on_while_plugged_in $newVal")
+            Log.i(TAG, "Stay-awake mode enabled: previous=$oldVal new=$newVal")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to enable stay-awake mode", e)
+        }
+
+        try {
+            val oldPowerBtn = execCommand("settings get secure power_button_instantly_locks").trim()
+            previousPowerButtonLocks = oldPowerBtn
+            execCommand("settings put secure power_button_instantly_locks 0")
+            Log.i(TAG, "Disabled power button instantly locks: previous=$oldPowerBtn new=0")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to disable power button instantly locks", e)
+        }
+
+        try {
+            val oldTimeout = execCommand("settings get secure lock_screen_lock_after_timeout").trim()
+            previousLockTimeout = oldTimeout
+            execCommand("settings put secure lock_screen_lock_after_timeout 86400000")
+            Log.i(TAG, "Extended lockscreen lock timeout: previous=$oldTimeout new=86400000")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to extend lock screen timeout", e)
+        }
+    }
+
+    override fun restoreStayAwakeMode() {
+        Log.i(TAG, "restoreStayAwakeMode ENTRY")
+        try {
+            val oldVal = previousStayAwake
+            if (oldVal != null) {
+                execCommand("settings put global stay_on_while_plugged_in $oldVal")
+                Log.i(TAG, "Stay-awake mode restored to $oldVal")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to restore stay-awake mode", e)
+        }
+
+        try {
+            val oldPowerBtn = previousPowerButtonLocks
+            if (oldPowerBtn != null && oldPowerBtn != "null") {
+                execCommand("settings put secure power_button_instantly_locks $oldPowerBtn")
+                Log.i(TAG, "Power button instantly locks restored to $oldPowerBtn")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to restore power button instantly locks setting", e)
+        }
+
+        try {
+            val oldTimeout = previousLockTimeout
+            if (oldTimeout != null && oldTimeout != "null") {
+                execCommand("settings put secure lock_screen_lock_after_timeout $oldTimeout")
+                Log.i(TAG, "Lock screen timeout restored to $oldTimeout")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to restore lock screen timeout setting", e)
         }
     }
 }
