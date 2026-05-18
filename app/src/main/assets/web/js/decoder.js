@@ -88,7 +88,7 @@ class H264Decoder {
 
         this.configured = true;
         this.startTime = performance.now();
-        this._waitingForKeyframe = false;
+        this._waitingForKeyframe = true; // [SAFEGUARD] Wait for a valid keyframe before decoding delta frames to prevent hardware decoder crash
         console.log('[Decoder] Initialized with WebCodecs, codec:', supportedCodec);
     }
 
@@ -126,11 +126,11 @@ class H264Decoder {
         // If waiting for a keyframe after a gap, discard all delta frames
         if (this._waitingForKeyframe) {
             if (!isKeyFrame) {
+                // [CRITICAL SAFEGUARD] Keep the sequence tracking updated even when dropping deltas to prevent cascade false positives
+                this._lastSeqNum = seqNum;
                 return; // Discard delta frame silently to prevent hardware decoder crash
-            } else {
-                console.log('[Decoder] Keyframe received. Resuming decoding after frame gap.');
-                this._waitingForKeyframe = false;
             }
+            // Keyframe will be handled below and will automatically re-anchor the sequence tracking
         }
 
         const nalData = data.slice(8); // Remove 8-byte header
@@ -138,6 +138,13 @@ class H264Decoder {
         // Detect frame drops via sequence gap
         if (this._lastSeqNum !== undefined) {
             const expected = (this._lastSeqNum + 1) & 0xFFFF;
+            // [SAFEGUARD 1] If this is a valid keyframe and we were waiting for it, smoothly unlock the waiting state immediately
+            if (isKeyFrame && this._waitingForKeyframe) {
+                console.log(`[Decoder] Re-anchoring sequence tracking smoothly to keyframe #${seqNum}`);
+                this._waitingForKeyframe = false;
+            }
+            
+            // [SAFEGUARD 2] Independently evaluate sequence continuity to catch genuine gaps
             if (seqNum !== expected) {
                 console.warn('[Decoder] Frame gap detected: expected', expected, 'got', seqNum, '- requesting keyframe and skipping delta frames');
                 this._waitingForKeyframe = true;
@@ -187,6 +194,8 @@ class H264Decoder {
                     this._lastBacklogWarn = now;
                     console.warn(`[Decoder] Backlog: queueSize=${queueSize} threshold=${threshold} totalDrops=${this._backlogDrops}`);
                 }
+                // [CRITICAL SAFEGUARD] Keep the sequence tracking updated even when dropping backlog deltas to prevent subsequent gap false positives
+                this._lastSeqNum = seqNum;
                 return;
             }
 

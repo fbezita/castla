@@ -361,8 +361,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     }
 
-    async function initSecondaryDecoder() {
+    async function initSecondaryDecoder(preserveCache = false) {
         if (!secondaryCanvas) return null;
+        
+        // [SPS/PPS MIGRATION SAFEGUARD] Backup SPS/PPS cache only when preserveCache is true (not a resolution change)
+        const prevSpsPps = (preserveCache && secondaryDecoder) ? secondaryDecoder._cachedSpsPps : null;
+
         if (secondaryDecoder) {
             secondaryDecoder.destroy?.();
             secondaryDecoder = null;
@@ -391,6 +395,15 @@ document.addEventListener('DOMContentLoaded', async () => {
             secondaryDecoder.setBacklogProfile(playbackProfile);
             secondaryFramePacer.setDecoder(secondaryDecoder);
             secondaryDecoder.renderer = renderer;
+
+            // Restore/migrate previous SPS/PPS cache only if appropriate
+            if (prevSpsPps) {
+                secondaryDecoder._cachedSpsPps = prevSpsPps;
+                console.log('[Decoder] Successfully migrated cached SPS/PPS to new secondary decoder');
+            } else {
+                console.log('[Decoder] Secondary SPS/PPS cache cleared/reset for new resolution stream');
+            }
+
             await secondaryDecoder.init(secondaryCanvas);
         } else if (typeof createImageBitmap !== 'undefined') {
             secondaryDecoder = new FallbackDecoder(
@@ -403,11 +416,20 @@ document.addEventListener('DOMContentLoaded', async () => {
         return secondaryDecoder;
     }
 
-    function connectSecondaryVideo() {
+    function connectSecondaryVideo(isHotRefresh = false) {
         if (!browserSplitState.active) return;
         if (secondaryVideoSocket) {
             try { secondaryVideoSocket.close(); } catch (_) {}
         }
+        
+        // Reset sequence tracking but preserve the precious SPS/PPS cache if in hot-refresh mode
+        if (secondaryDecoder) {
+            secondaryDecoder._lastSeqNum = undefined;
+            if (!isHotRefresh) {
+                secondaryDecoder._cachedSpsPps = null;
+            }
+        }
+
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${wsProtocol}//${host}/ws/video?channel=secondary`;
         secondaryVideoSocket = new WebSocket(wsUrl);
@@ -537,19 +559,48 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         applyActiveFitModes();
+        
         // Force send full viewport immediately (don't rely on CSS transition timing)
         if (wasActive && controlSocket && controlSocket.readyState === WebSocket.OPEN) {
-            const fullWidth = Math.round(window.innerWidth || 1920);
-            const fullHeight = Math.round(window.innerHeight || 1080);
-            console.log(`[Main] Split closed — forcing full viewport ${fullWidth}x${fullHeight}`);
+            const canvasEl = document.getElementById('display') || canvas;
+            // 1. Immediate window-dimension fallback to quickly steer backend back to landscape aspect ratio
+            const initWidth = Math.round(window.innerWidth || 1920);
+            const initHeight = Math.round(window.innerHeight || 1080);
+            console.log(`[Main] Split closed — forcing fallback viewport ${initWidth}x${initHeight}`);
             controlSocket.send(JSON.stringify({
                 type: 'viewport',
                 pane: 'primary',
-                width: fullWidth,
-                height: fullHeight,
+                width: initWidth,
+                height: initHeight,
                 fitMode: getEffectivePrimaryFitMode(),
                 layoutMode: 'single'
             }));
+
+            // 2. Delayed precise refits to capture settled client dimensions after DOM/CSS settle down
+            for (const delayMs of [100, 300]) {
+                setTimeout(() => {
+                    if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
+                        const finalWidth = Math.round(canvasEl?.clientWidth || window.innerWidth || 1920);
+                        const finalHeight = Math.round(canvasEl?.clientHeight || window.innerHeight || 1080);
+                        console.log(`[Main] Split closed (reflow ${delayMs}ms) — updates precise viewport ${finalWidth}x${finalHeight}`);
+                        controlSocket.send(JSON.stringify({
+                            type: 'viewport',
+                            pane: 'primary',
+                            width: finalWidth,
+                            height: finalHeight,
+                            fitMode: getEffectivePrimaryFitMode(),
+                            layoutMode: 'single'
+                        }));
+                    }
+                }, delayMs);
+            }
+        }
+
+        // Trigger refit bursts during and after DOM reflow/CSS transition to avoid black bars
+        for (const delayMs of [50, 150, 300, 500]) {
+            setTimeout(() => {
+                getActiveRenderer()?.updateLayout?.();
+            }, delayMs);
         }
     }
 
@@ -869,8 +920,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateSplitFitButton();
     hideOverlay();
 
-    async function initDecoder() {
-        console.log('[Main] Initializing decoders...');
+    async function initDecoder(preserveCache = false) {
+        console.log('[Main] Initializing decoders... preserveCache=', preserveCache);
 
         if (typeof WebCodecs !== 'undefined' || window.VideoDecoder) {
             console.log('[Main] Using WebCodecs Decoder');
@@ -881,6 +932,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (framePacer) framePacer.destroy();
             framePacer = new FramePacer((frame) => renderer.render(frame));
             framePacer.setProfile(playbackProfile);
+
+            // [SPS/PPS MIGRATION SAFEGUARD] Backup SPS/PPS cache only when preserveCache is true (not a resolution change)
+            const prevSpsPps = (preserveCache && decoder) ? decoder._cachedSpsPps : null;
 
             decoder = new H264Decoder(
                 (frame) => framePacer.push(frame),
@@ -894,6 +948,15 @@ document.addEventListener('DOMContentLoaded', async () => {
             decoder.setBacklogProfile(playbackProfile);
             framePacer.setDecoder(decoder);
             decoder.renderer = renderer;
+
+            // Restore/migrate previous SPS/PPS cache only if appropriate
+            if (prevSpsPps) {
+                decoder._cachedSpsPps = prevSpsPps;
+                console.log('[Decoder] Successfully migrated cached SPS/PPS to new primary decoder');
+            } else {
+                console.log('[Decoder] SPS/PPS cache cleared/reset for new resolution stream');
+            }
+
             await decoder.init(canvas);
             codecMode = 'h264';
             applyActiveFitModes();
@@ -929,7 +992,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     }
 
-    function connectVideo() {
+    function connectVideo(isHotRefresh = false) {
         if (videoSocket) {
             try {
                 videoSocket.onopen = null;
@@ -948,15 +1011,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Reset firstFrameReceived so that the reconnected stream's first frame triggers checkReady() and hides the overlay!
         firstFrameReceived = false;
         
-        // Reset decoder sequence tracking and SPS/PPS cache to prevent "frame gap" errors when new stream starts
+        // Reset decoder sequence tracking and SPS/PPS cache only when NOT in a hot-refresh transition
         if (decoder) {
             decoder._lastSeqNum = undefined;
-            decoder._cachedSpsPps = null;
+            if (!isHotRefresh) {
+                decoder._cachedSpsPps = null;
+            }
             if (decoder.resetStats) decoder.resetStats();
         }
         if (secondaryDecoder) {
             secondaryDecoder._lastSeqNum = undefined;
-            secondaryDecoder._cachedSpsPps = null;
+            if (!isHotRefresh) {
+                secondaryDecoder._cachedSpsPps = null;
+            }
             if (secondaryDecoder.resetStats) secondaryDecoder.resetStats();
         }
 
@@ -1328,8 +1395,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                     if (pane === 'secondary') {
                         if (browserSplitState.active) {
                             console.log('[Main] Performing hot-refresh on secondary decoder to prevent rainbow artifacts');
-                            initSecondaryDecoder().then(() => {
-                                connectSecondaryVideo();
+                            initSecondaryDecoder(false).then(() => { // Clear old resolution cache
+                                connectSecondaryVideo(false); // Reset sequence/cache for new resolution stream
                                 setTimeout(() => {
                                     if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
                                         controlSocket.send(JSON.stringify({ type: 'requestKeyframe', pane: 'secondary' }));
@@ -1339,8 +1406,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                         }
                     } else {
                         console.log('[Main] Performing hot-refresh on primary decoder to prevent rainbow artifacts');
-                        initDecoder().then(() => {
-                            connectVideo();
+                        initDecoder(false).then(() => { // Clear old resolution cache
+                            connectVideo(false); // Reset sequence/cache for new resolution stream
                             setTimeout(() => {
                                 if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
                                     controlSocket.send(JSON.stringify({ type: 'requestKeyframe', pane: 'primary' }));
@@ -2549,9 +2616,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                     pane: 'primary'
                 }));
             }
-        }, 800);
+        }, 200);
 
-        // 7. Send the launch command for the secondary app (safe 1200ms delay to prevent ActivityTaskManager focus/launch collision during sequential heavy app startups)
+        // 7. Send the launch command for the secondary app (fast sequential launch)
         setTimeout(() => {
             if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
                 controlSocket.send(JSON.stringify({
@@ -2561,7 +2628,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     pane: 'secondary'
                 }));
             }
-        }, 2000);
+        }, 500);
     }
 
     /* ### 수정 시작 ### */

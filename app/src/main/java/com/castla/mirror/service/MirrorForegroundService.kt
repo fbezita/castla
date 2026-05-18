@@ -1158,7 +1158,7 @@ class MirrorForegroundService : Service() {
                             onSecondaryViewportChange(w, h)
                         }
                     } else {
-                        onViewportChange(w, h)
+                        onViewportChange(w, h, layoutMode)
                     }
                 }
                 server.setTextInputListener { text -> injectText(text) }
@@ -1340,6 +1340,9 @@ class MirrorForegroundService : Service() {
             clearSecondaryState()
             clearSplitState()
             Log.i(TAG, "Secondary pipeline released — primary will resize to fullscreen on next viewport")
+            serviceScope.launch {
+                rebuildPipeline(currentWidth, currentHeight, force = true, forceSingle = true)
+            }
         }
     }
 
@@ -3225,10 +3228,11 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    private fun onViewportChange(width: Int, height: Int) {
+    private fun onViewportChange(width: Int, height: Int, layoutMode: String = "") {
         resizeJob?.cancel()
         resizeJob = serviceScope.launch {
-            rebuildPipeline(width, height)
+            val forceSingle = (layoutMode == "single")
+            rebuildPipeline(width, height, forceSingle = forceSingle)
         }
     }
 
@@ -3244,8 +3248,9 @@ class MirrorForegroundService : Service() {
             hasActiveSplitSession()
     }
 
-    private fun effectiveMaxHeightForRequest(requestedHeight: Int, isSecondaryPane: Boolean = false): Int {
+    private fun effectiveMaxHeightForRequest(requestedHeight: Int, isSecondaryPane: Boolean = false, forceSingle: Boolean = false): Int {
         val baseMax = when {
+            forceSingle -> currentMaxHeight
             shouldUseRequestedHeightForSplit(isSecondaryPane) -> {
                 minOf(requestedHeight, currentMaxHeight)
             }
@@ -3255,8 +3260,8 @@ class MirrorForegroundService : Service() {
         return if (thermalCap != null) minOf(baseMax, thermalCap) else baseMax
     }
 
-    private suspend fun rebuildPipeline(newWidth: Int, newHeight: Int, force: Boolean = false) = pipelineMutex.withLock {
-        val effectiveMaxHeight = effectiveMaxHeightForRequest(newHeight)
+    private suspend fun rebuildPipeline(newWidth: Int, newHeight: Int, force: Boolean = false, forceSingle: Boolean = false) = pipelineMutex.withLock {
+        val effectiveMaxHeight = effectiveMaxHeightForRequest(newHeight, forceSingle = forceSingle)
         var cappedWidth = newWidth
         var cappedHeight = newHeight
         
