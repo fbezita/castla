@@ -1,5 +1,7 @@
 import java.util.Properties
 import java.util.concurrent.TimeUnit
+import java.text.SimpleDateFormat
+import java.util.Date
 
 plugins {
     id("com.android.application")
@@ -118,7 +120,7 @@ android {
         val variant = this
         variant.outputs.all {
             val output = this as com.android.build.gradle.api.ApkVariantOutput
-            val dateStr = java.text.SimpleDateFormat("yyyyMMdd-HHmmss").format(java.util.Date())
+            val dateStr = SimpleDateFormat("yyyyMMdd-HHmmss").format(Date())
             // 프로젝트명-버전-날짜-시간.apk 형식으로 출력 파일명 커스텀 정의
             output.outputFileName = "castla-${variant.versionName}-$dateStr.apk"
         }
