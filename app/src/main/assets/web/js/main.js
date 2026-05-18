@@ -16,6 +16,7 @@ let framePacer = null;
 let secondaryFramePacer = null;
 let currentPrimaryApp = null;
 let isLauncherMode = true; // start in launcher mode
+let currentServerInstanceId = null; // Track current server instance to detect restarts
 let launchGuardUntil = 0; // block accidental launches after splash dismiss
 let codecMode = 'h264'; // Default to h264, switch to mjpeg if needed
 
@@ -397,7 +398,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (secondaryVideoSocket) {
             try { secondaryVideoSocket.close(); } catch (_) {}
         }
-        const wsUrl = `ws://${host}/ws/video?channel=secondary`;
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProtocol}//${host}/ws/video?channel=secondary`;
         secondaryVideoSocket = new WebSocket(wsUrl);
         secondaryVideoSocket.binaryType = 'arraybuffer';
         secondaryVideoSocket.onmessage = async (event) => {
@@ -858,6 +860,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             await decoder.init(canvas);
             codecMode = 'h264';
             applyActiveFitModes();
+
+            canvas.style.display = 'block';
+            const mseVideo = document.getElementById('mse-video');
+            if (mseVideo) mseVideo.style.display = 'none';
         } else if (typeof createImageBitmap !== 'undefined') {
             console.log('[Main] Using MJPEG fallback');
             decoder = new FallbackDecoder(
@@ -896,7 +902,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 videoSocket.close();
             } catch (_) {}
         }
-        const wsUrl = `ws://${host}/ws/video`;
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProtocol}//${host}/ws/video`;
         if (!isLauncherMode) setStatus('Connecting...', '');
 
         clearFrameWatchdog();
@@ -960,12 +967,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (firstFrameReceived) {
             clearLaunchTimeout();
             const mseVideo = document.getElementById('mse-video');
-            if (codecMode === 'mjpeg') {
-                canvas.style.opacity = '1';
-                if (mseVideo) mseVideo.style.opacity = '0';
-            } else {
-                if (mseVideo) mseVideo.style.opacity = '1';
+            if (isLauncherMode) {
                 canvas.style.opacity = '0';
+                if (mseVideo) {
+                    mseVideo.style.opacity = '0';
+                    mseVideo.style.display = 'none';
+                }
+            } else {
+                canvas.style.opacity = '1';
+                if (mseVideo) {
+                    mseVideo.style.opacity = '0';
+                    mseVideo.style.display = 'none';
+                }
             }
             hideOverlay();
             if (decoder && decoder.play) {
@@ -1070,7 +1083,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             if (audioPlayer && (!audioPlayer.socket || audioPlayer.socket.readyState === WebSocket.CLOSED || audioPlayer.socket.readyState === WebSocket.CLOSING)) {
                 console.log('[Main] Reconnecting audio player socket...');
-                audioPlayer.startFromUserGesture(`ws://${host}/ws/audio`);
+                const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                audioPlayer.startFromUserGesture(`${wsProtocol}//${host}/ws/audio`);
             }
         }, 3000);
     }
@@ -1149,7 +1163,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 controlSocket.close();
             } catch (_) {}
         }
-        const wsUrl = `ws://${host}/ws/control`;
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProtocol}//${host}/ws/control`;
         console.log(`[Main] Connecting control socket to: ${wsUrl}`);
         controlSocket = new WebSocket(wsUrl);
 
@@ -1179,6 +1194,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (codecMode === 'mjpeg') {
                 console.log(`[Main] Sending codec preference: mjpeg via control socket on open`);
                 controlSocket.send(JSON.stringify({ type: 'codec', mode: 'mjpeg' }));
+                console.log(`[Main] Requesting MJPEG keyframe immediately on open to force server wakeUp`);
+                controlSocket.send(JSON.stringify({ type: 'requestKeyframe' }));
             }
 
             if (controlSocket.readyState === WebSocket.OPEN) {
@@ -1242,7 +1259,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         controlSocket.onmessage = (event) => {
             try {
                 const msg = JSON.parse(event.data);
-                if (msg.type === 'resolutionChanged') {
+                if (msg.type === 'serverInit') {
+                    const newInstanceId = msg.instanceId;
+                    console.log(`[Main] Server init received: ${newInstanceId} (current: ${currentServerInstanceId})`);
+                    if (newInstanceId && currentServerInstanceId && currentServerInstanceId !== newInstanceId) {
+                        console.log('[Main] Server instance changed! Resetting to launcher.');
+                        goHome();
+                    }
+                    currentServerInstanceId = newInstanceId;
+                } else if (msg.type === 'resolutionChanged') {
                     const pane = msg.pane || 'primary';
                     const lockedViewport = pane === 'secondary'
                         ? browserSplitState.lockedSecondaryViewport
@@ -1488,7 +1513,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         webLauncher.classList.add('hidden');
         splitDrawer.style.display = 'flex';
         homeBtn.style.display = 'block';
-        firstFrameReceived = false;
         clearLaunchTimeout();
         clearFrameWatchdog();
 
@@ -1512,6 +1536,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
 
                 sendViewportSize();
+                firstFrameReceived = false; // Reset here to avoid race condition with frames decoded within the 50ms window
                 setStatus('Loading...', '');
                 showOverlay();
                 launchTimeout = setTimeout(() => {
@@ -1526,6 +1551,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }, 5000);
             }
         }, 50);
+
     }
 
     function clearCanvas() {
@@ -1745,7 +1771,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const initAudioOnFirstGesture = async () => {
         if (!audioPlayer.socket || audioPlayer.socket.readyState === WebSocket.CLOSED) {
             try {
-                await audioPlayer.startFromUserGesture(`ws://${host}/ws/audio`);
+                const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                await audioPlayer.startFromUserGesture(`${wsProtocol}//${host}/ws/audio`);
                 console.log('[Audio] Successfully initialized audio on first user gesture.');
             } catch (e) {
                 console.warn('[Audio] Failed to initialize audio on gesture', e);

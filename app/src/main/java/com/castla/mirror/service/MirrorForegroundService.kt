@@ -563,18 +563,19 @@ class MirrorForegroundService : Service() {
                     Log.i(TAG, "OTT app detected=${isCurrentAppVideo} — target bitrate set to ${targetBitrate / 1000}kbps")
 
                     if (autoResolution || autoFps) {
+                        val activeTiers = AUTO_TIERS.filter { it.maxHeight == currentMaxHeight }
                         val boostTier = AutoScalePolicy.ottMinTier(
                             currentTierIndex = autoTierIndex,
                             isVideoApp = isCurrentAppVideo,
                             thermalStatus = _thermalStatus.value,
-                            tierCount = AUTO_TIERS.size
+                            tierCount = activeTiers.size
                         )
-                        if (boostTier != null) {
+                        if (boostTier != null && boostTier < activeTiers.size) {
                             autoTierIndex = boostTier
                             autoStableCount = 0
                             applyAutoTier()
                             notifyAutoTierChange("ott_boost")
-                            Log.i(TAG, "OTT tier boost — jumped to ${AUTO_TIERS[autoTierIndex].label}")
+                            Log.i(TAG, "OTT tier boost — jumped to ${activeTiers[autoTierIndex].label}")
                         }
                     }
 
@@ -891,7 +892,10 @@ class MirrorForegroundService : Service() {
     private fun startAutoScaleLoop() {
         if (!autoResolution && !autoFps) return
         autoScaleJob?.cancel()
-        autoTierIndex = 1  // Default initializer targeting index 1 ("720p30")
+        
+        val activeTiers = AUTO_TIERS.filter { it.maxHeight == currentMaxHeight }
+        autoTierIndex = activeTiers.indexOfFirst { it.fps == 30 }.coerceAtLeast(0)
+        
         autoStableCount = 0
         autoScaleJob = serviceScope.launch {
             kotlinx.coroutines.delay(AUTO_SCALE_INITIAL_DELAY_MS)
@@ -903,6 +907,16 @@ class MirrorForegroundService : Service() {
     }
 
     private fun evaluateAutoScale() {
+        if (currentCodecMode == "mjpeg") {
+            // MJPEG mode must stick to its stable configured resolution (e.g. 720p)
+            // to avoid massive JPEG payload sizes (1080p is extremely heavy for MJPEG)
+            // and destructive pipeline recreations.
+            return
+        }
+        
+        val activeTiers = AUTO_TIERS.filter { it.maxHeight == currentMaxHeight }
+        if (activeTiers.isEmpty()) return
+        
         val now = android.os.SystemClock.elapsedRealtime()
         val input = AutoScaleInput(
             thermalStatus = _thermalStatus.value,
@@ -910,32 +924,32 @@ class MirrorForegroundService : Service() {
             browserHealthy = AutoScalePolicy.isBrowserHealthy(
                 lastQualityDroppedFrames, lastQualityBacklogDrops, lastQualityAvgDelayMs
             ),
-            currentTierIndex = autoTierIndex,
+            currentTierIndex = autoTierIndex.coerceIn(0, activeTiers.size - 1),
             stableCount = autoStableCount,
-            tierCount = AUTO_TIERS.size
+            tierCount = activeTiers.size
         )
 
         when (val decision = AutoScalePolicy.evaluate(input)) {
             is AutoScaleDecision.DropToTier -> {
-                autoTierIndex = decision.tierIndex
+                autoTierIndex = decision.tierIndex.coerceIn(0, activeTiers.size - 1)
                 autoStableCount = 0
                 applyAutoTier()
                 notifyAutoTierChange(decision.reason)
-                Log.i(TAG, "AutoScale: ${decision.reason} — dropped to ${AUTO_TIERS[autoTierIndex].label}")
+                Log.i(TAG, "AutoScale: ${decision.reason} — dropped to ${activeTiers[autoTierIndex].label}")
             }
             is AutoScaleDecision.StepDown -> {
-                autoTierIndex = decision.newTierIndex
+                autoTierIndex = decision.newTierIndex.coerceIn(0, activeTiers.size - 1)
                 autoStableCount = 0
                 applyAutoTier()
                 notifyAutoTierChange(decision.reason)
-                Log.i(TAG, "AutoScale: ${decision.reason} — stepped down to ${AUTO_TIERS[autoTierIndex].label}")
+                Log.i(TAG, "AutoScale: ${decision.reason} — stepped down to ${activeTiers[autoTierIndex].label}")
             }
             is AutoScaleDecision.StepUp -> {
-                autoTierIndex = decision.newTierIndex
+                autoTierIndex = decision.newTierIndex.coerceIn(0, activeTiers.size - 1)
                 autoStableCount = 0
                 applyAutoTier()
                 notifyAutoTierChange("stable")
-                Log.i(TAG, "AutoScale: stable — stepped up to ${AUTO_TIERS[autoTierIndex].label}")
+                Log.i(TAG, "AutoScale: stable — stepped up to ${activeTiers[autoTierIndex].label}")
             }
             is AutoScaleDecision.Hold -> {
                 autoStableCount = decision.newStableCount
@@ -947,7 +961,9 @@ class MirrorForegroundService : Service() {
     }
 
     private fun notifyAutoTierChange(reason: String) {
-        val tier = AUTO_TIERS[autoTierIndex]
+        val activeTiers = AUTO_TIERS.filter { it.maxHeight == currentMaxHeight }
+        if (activeTiers.isEmpty()) return
+        val tier = activeTiers[autoTierIndex.coerceIn(0, activeTiers.size - 1)]
         val json = JSONObject().apply {
             put("type", "autoTierChange")
             put("tier", tier.label)
@@ -957,7 +973,9 @@ class MirrorForegroundService : Service() {
     }
 
     private fun applyAutoTier() {
-        val tier = AUTO_TIERS[autoTierIndex]
+        val activeTiers = AUTO_TIERS.filter { it.maxHeight == currentMaxHeight }
+        if (activeTiers.isEmpty()) return
+        val tier = activeTiers[autoTierIndex.coerceIn(0, activeTiers.size - 1)]
         
         // Check if the resolution value is actually changing to isolate hard pipeline resets
         val isResolutionChanging = autoResolution && (currentMaxHeight != tier.maxHeight)
@@ -2534,9 +2552,11 @@ class MirrorForegroundService : Service() {
             val actualHeight = if (currentHeight > 0) currentHeight else height
             val actualSurface = currentEncoderSurface ?: surface
             val actualDpi = computeVirtualDisplayDpi(actualWidth, actualHeight)
+            Log.i(TAG, "trySetupVirtualDisplay [DIAGNOSTIC]: creating VirtualDisplay: size=${actualWidth}x${actualHeight}, dpi=$actualDpi, surface=$actualSurface")
             vdm.createVirtualDisplay(actualWidth, actualHeight, actualDpi, actualSurface)
 
             if (vdm.hasVirtualDisplay()) {
+                Log.i(TAG, "trySetupVirtualDisplay [DIAGNOSTIC]: VirtualDisplay created successfully! ID=${vdm.getDisplayId()}")
                 touchInjector?.setVirtualDisplayInjector { motionEvent ->
                     vdm.injectMotionEvent(motionEvent)
                 }
@@ -2546,6 +2566,7 @@ class MirrorForegroundService : Service() {
                 }
                 safeResult(true)
             } else {
+                Log.e(TAG, "trySetupVirtualDisplay [DIAGNOSTIC]: VirtualDisplay creation returned null/failed!")
                 safeResult(false)
             }
         }
@@ -2594,7 +2615,8 @@ class MirrorForegroundService : Service() {
                 broadcastThermalStatus(_thermalStatus.value)
             }
 
-            if (videoEncoder != null) {
+            val isPipelineActive = (videoEncoder != null || jpegEncoder != null)
+            if (isPipelineActive) {
                 Log.i(TAG, "Browser reconnected — rebuilding pipeline")
                 serviceScope.launch {
                     rebuildPipeline(currentWidth, currentHeight, force = true)
@@ -2604,9 +2626,8 @@ class MirrorForegroundService : Service() {
             }
 
             Log.i(TAG, "Browser connected — starting active pipeline")
-            val width = currentWidth
-            val height = currentHeight
-            val fps = thermalFpsOverride ?: currentFps
+            val width = if (currentWidth > 0) currentWidth else 720
+            val height = if (currentHeight > 0) currentHeight else 720
 
             val baseTargetBitrate = com.castla.mirror.utils.StreamMath.calculateBaseBitrate(width, height)
             targetBitrate = baseTargetBitrate
@@ -2616,27 +2637,8 @@ class MirrorForegroundService : Service() {
             startAbrLoop()
             startAutoScaleLoop()
 
-            videoEncoder = VideoEncoder(width, height, currentBitrate, fps).also { encoder ->
-                val surface = encoder.createInputSurface()
-                currentEncoderSurface = surface
-
-                mirrorServer?.setKeyframeRequester("primary") { encoder.requestKeyFrame() }
-
-                encoder.onSpsPps = { spsPps -> mirrorServer?.broadcastSpsPps(spsPps) }
-                encoder.start { frameData, isKeyFrame ->
-                    mirrorServer?.broadcastFrame(frameData, isKeyFrame)
-                }
-
-                trySetupVirtualDisplay(width, height, surface) { shizukuActive ->
-                    if (shizukuActive) {
-                        currentVdApp = "HOME"
-                        restoreCurrentVdContent()
-                    } else {
-                        Log.e(TAG, "Shizuku VD setup failed — Fallback disabled")
-                        markTerminal(TerminalReason.SHIZUKU_REBIND_FAILED)
-                    }
-                    ensureAudioCaptureState()
-                }
+            serviceScope.launch {
+                rebuildPipeline(width, height, force = true)
             }
         } catch (t: Throwable) {
             Log.e(TAG, "Browser connection activation failed", t)
@@ -2664,6 +2666,9 @@ class MirrorForegroundService : Service() {
         when (currentVdApp) {
             "HOME", "", "com.android.settings" -> {
                 currentVdApp = "HOME"
+                if (vdm.hasVirtualDisplay()) {
+                    vdm.launchHomeOnDisplay()
+                }
             }
             else -> {
                 if (currentVdApp.contains("SplitWebBrowserActivity")) {
@@ -3040,12 +3045,13 @@ class MirrorForegroundService : Service() {
 
         Log.i(
             TAG,
-            "Rebuilding pipeline requested=${newWidth}x${newHeight} -> ${width}x${height} effectiveMaxHeight=$effectiveMaxHeight splitActive=${shouldUseRequestedHeightForSplit()} force=$force"
+            "Rebuilding pipeline requested=${newWidth}x${newHeight} -> ${width}x${height} effectiveMaxHeight=$effectiveMaxHeight splitActive=${shouldUseRequestedHeightForSplit()} force=$force (currentCodecMode=$currentCodecMode)"
         )
 
         try {
             val surface = if (currentCodecMode == "mjpeg") {
                 videoEncoder?.release()
+
                 videoEncoder = null
                 jpegEncoder?.release()
                 jpegEncoder = null
@@ -3055,9 +3061,26 @@ class MirrorForegroundService : Service() {
                 currentEncoderSurface = jpegSurface
                 jpeg.start { frameData, isKeyFrame -> mirrorServer?.broadcastFrame(frameData, isKeyFrame) }
                 jpegEncoder = jpeg
+
+                mirrorServer?.setKeyframeRequester("primary") {
+                    serviceScope.launch {
+                        try {
+                            val vdId = virtualDisplayManager?.getDisplayId()
+                            if (vdId != null && vdId >= 0) {
+                                virtualDisplayManager?.getPrivilegedService()?.wakeUpDisplay(vdId)
+                            }
+
+                            restoreCurrentVdContent()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to handle MJPEG keyframe request", e)
+                        }
+                    }
+                }
+
                 jpegSurface
             } else {
                 videoEncoder?.release()
+
                 videoEncoder = null
 
                 val encoder = VideoEncoder(width, height, currentBitrate, thermalFpsOverride ?: currentFps)
@@ -3075,35 +3098,21 @@ class MirrorForegroundService : Service() {
 
             if (virtualDisplayManager?.isBound() == true) {
                 dismissSplitPresentation(clearState = false)
-                if (virtualDisplayManager?.hasVirtualDisplay() == true && !force) {
-                    val vdId = virtualDisplayManager!!.getDisplayId()
-                    val resized = try {
-                        virtualDisplayManager?.getPrivilegedService()?.setSurface(vdId, surface)
-                        virtualDisplayManager?.resizeDisplay(vdId, width, height, dpi) ?: false
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Resize failed for VD $vdId (stale display?), will recreate", e)
-                        false
+                
+                // [FIX] Always recreate the virtual display when rebuilding the pipeline.
+                // Dynamic surface resizing/swapping via setSurface is extremely fragile on newer
+                // Android versions (frequently failing silently or leaving the surface frozen).
+                // Recreating the display guarantees that the new encoder surface is successfully active.
+                Log.i(TAG, "Recreating virtual display during pipeline rebuild to guarantee active surface binding")
+                virtualDisplayManager?.releaseVirtualDisplay()
+                virtualDisplayManager?.createVirtualDisplay(width, height, dpi, surface)
+                if (virtualDisplayManager?.hasVirtualDisplay() == true) {
+                    touchInjector?.setVirtualDisplayInjector { motionEvent ->
+                        virtualDisplayManager?.injectMotionEvent(motionEvent)
                     }
-                    if (resized) {
-                        touchInjector?.setVirtualDisplayInjector { motionEvent ->
-                            virtualDisplayManager?.injectMotionEvent(motionEvent)
-                        }
-                        Log.i(TAG, "Gradually resized primary VD $vdId to ${width}x${height}")
-                    } else {
-                        Log.w(TAG, "VD $vdId resize failed, falling through to recreate")
-                        virtualDisplayManager?.releaseVirtualDisplay()
-                        virtualDisplayManager?.createVirtualDisplay(width, height, dpi, surface)
-                        if (virtualDisplayManager?.hasVirtualDisplay() == true) {
-                            touchInjector?.setVirtualDisplayInjector { motionEvent ->
-                                virtualDisplayManager?.injectMotionEvent(motionEvent)
-                            }
-                            restoreCurrentVdContent()
-                        } else {
-                            Log.e(TAG, "VD recreation failed after stale resize")
-                        }
-                    }
+                    restoreCurrentVdContent()
                 } else {
-                    virtualDisplayManager?.releaseVirtualDisplay()
+                    Log.w(TAG, "VD creation failed during rebuild — retrying once")
                     virtualDisplayManager?.createVirtualDisplay(width, height, dpi, surface)
                     if (virtualDisplayManager?.hasVirtualDisplay() == true) {
                         touchInjector?.setVirtualDisplayInjector { motionEvent ->
@@ -3111,17 +3120,8 @@ class MirrorForegroundService : Service() {
                         }
                         restoreCurrentVdContent()
                     } else {
-                        Log.w(TAG, "VD creation failed during rebuild — retrying once")
-                        virtualDisplayManager?.createVirtualDisplay(width, height, dpi, surface)
-                        if (virtualDisplayManager?.hasVirtualDisplay() == true) {
-                            touchInjector?.setVirtualDisplayInjector { motionEvent ->
-                                virtualDisplayManager?.injectMotionEvent(motionEvent)
-                            }
-                            restoreCurrentVdContent()
-                        } else {
-                            Log.e(TAG, "VD creation failed after retry — Fallback disabled")
-                            markTerminal(TerminalReason.VD_RECREATE_FAILED)
-                        }
+                        Log.e(TAG, "VD creation failed after retry — Fallback disabled")
+                        markTerminal(TerminalReason.VD_RECREATE_FAILED)
                     }
                 }
             } else if (shizukuSetupInProgress) {
@@ -3134,6 +3134,7 @@ class MirrorForegroundService : Service() {
                         markTerminal(TerminalReason.SHIZUKU_REBIND_FAILED)
                     } else {
                         Log.i(TAG, "Shizuku rebound successfully during rebuild")
+                        restoreCurrentVdContent()
                     }
                 }
             }

@@ -56,6 +56,7 @@ class FallbackDecoder {
         // `InvalidStateError` in createImageBitmap and spam the console.
         if (view[8] !== 0xFF || view[9] !== 0xD8) return;
 
+
         // Drop frame if previous decode is still running
         if (this._decoding) {
             this._droppedFrames++;

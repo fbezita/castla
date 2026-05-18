@@ -2,6 +2,12 @@ package com.castla.mirror.server
 
 import android.content.Context
 import android.util.Log
+import java.io.InputStream
+import java.security.KeyStore
+import javax.net.ssl.KeyManagerFactory
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.SSLServerSocketFactory
 import fi.iki.elonen.NanoHTTPD
 import fi.iki.elonen.NanoWSD
 import fi.iki.elonen.NanoWSD.WebSocket
@@ -14,6 +20,29 @@ import com.castla.mirror.ott.OttCatalog
 data class TouchEvent(val action: String, val x: Float, val y: Float, val pointerId: Int, val pane: String = "primary")
 
 class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
+
+    // Unique instance ID for detecting server restarts
+    val instanceId: String = java.util.UUID.randomUUID().toString()
+
+    init {
+        try {
+            val keystoreStream = context.assets.open("castla.p12")
+            val keyStore = KeyStore.getInstance("PKCS12")
+            val password = "castla123".toCharArray()
+            keyStore.load(keystoreStream, password)
+
+            val keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
+            keyManagerFactory.init(keyStore, password)
+
+            val sslContext = SSLContext.getInstance("TLS")
+            sslContext.init(keyManagerFactory.keyManagers, null, null)
+
+            makeSecure(sslContext.serverSocketFactory, null)
+            Log.i(TAG, "Local HTTPS (SSL) successfully enabled on port $DEFAULT_PORT")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load SSL Keystore, falling back to HTTP", e)
+        }
+    }
 
     companion object {
         private const val TAG = "MirrorServer"
@@ -173,6 +202,17 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     fun registerControlSocket(socket: ControlSocket) {
         controlSockets.add(socket)
         Log.i(TAG, "Control client connected (total: ${controlSockets.size})")
+
+        // Send serverInit greeting with unique instanceId
+        try {
+            val initMsg = JSONObject().apply {
+                put("type", "serverInit")
+                put("instanceId", instanceId)
+            }
+            socket.send(initMsg.toString())
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to send serverInit message", e)
+        }
 
         // Replay cached thermal status to new client immediately
         cachedThermalJson?.let { json ->

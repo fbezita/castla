@@ -596,9 +596,9 @@ class MainActivity : AppCompatActivity() {
 
         if (ip != "0.0.0.0") {
             val sslipDomain = ip.replace('.', '-') + ".sslip.io"
-            serverUrl = "http://${sslipDomain}:${MirrorServer.DEFAULT_PORT}"
+            serverUrl = "https://${sslipDomain}:${MirrorServer.DEFAULT_PORT}"
         } else {
-            serverUrl = "http://${ip}:${MirrorServer.DEFAULT_PORT}"
+            serverUrl = "https://${ip}:${MirrorServer.DEFAULT_PORT}"
         }
     }
 
