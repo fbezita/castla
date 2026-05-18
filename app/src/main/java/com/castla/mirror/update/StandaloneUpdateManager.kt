@@ -104,8 +104,11 @@ class StandaloneUpdateManager : UpdateManager {
      * Returns true if [remote] is newer than [current].
      */
     private fun isNewerVersion(current: String, remote: String): Boolean {
-        val currentParts = current.split(".").mapNotNull { it.toIntOrNull() }
-        val remoteParts = remote.split(".").mapNotNull { it.toIntOrNull() }
+        val cleanCurrent = current.takeWhile { it.isDigit() || it == '.' }.trimEnd('.')
+        val cleanRemote = remote.takeWhile { it.isDigit() || it == '.' }.trimEnd('.')
+
+        val currentParts = cleanCurrent.split(".").mapNotNull { it.toIntOrNull() }
+        val remoteParts = cleanRemote.split(".").mapNotNull { it.toIntOrNull() }
         val length = maxOf(currentParts.size, remoteParts.size)
         for (i in 0 until length) {
             val c = currentParts.getOrElse(i) { 0 }

@@ -117,16 +117,15 @@ android {
 
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
-        val tag = gitLatestSemverTag()
         val commitCount = gitCommitCount()
         variant.outputs.forEach { output ->
             val nameProvider = output.versionName
             val codeProvider = output.versionCode
-            if (tag != null) {
-                nameProvider.set("$tag-debug")
-            } else {
-                nameProvider.set(nameProvider.get() + "-debug")
-            }
+            
+            // 🌟 defaultConfig에 기재된 versionName("1.4.4" 등)을 실시간으로 참조합니다!
+            val baseVersion = android.defaultConfig.versionName ?: "1.0.0"
+            nameProvider.set("$baseVersion-debug")
+            
             if (commitCount > 0) {
                 codeProvider.set(commitCount)
             }
