@@ -1326,6 +1326,28 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // --- Web Launcher & Split Launcher Code ---
+    
+    // 🌟 Favorites data helper functions
+    function getFavorites() {
+        try {
+            return JSON.parse(localStorage.getItem('castla_favorites') || '[]');
+        } catch (e) {
+            return [];
+        }
+    }
+
+    function toggleFavorite(packageName) {
+        let favorites = getFavorites();
+        if (favorites.includes(packageName)) {
+            favorites = favorites.filter(pkg => pkg !== packageName);
+        } else {
+            favorites.push(packageName);
+        }
+        localStorage.setItem('castla_favorites', JSON.stringify(favorites));
+        // Refresh the launcher lists in real-time
+        loadLauncherApps();
+    }
+
     async function loadLauncherApps() {
         try {
             const response = await fetch('/api/apps');
@@ -1352,14 +1374,23 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!splitAppList) return;
         splitAppList.innerHTML = '';
 
-        const grouped = {
-            'NAVIGATION': { title: 'Navigation', color: '#4CAF50', items: [] },
-            'VIDEO': { title: 'Video', color: '#FF5722', items: [] },
-            'MUSIC': { title: 'Music', color: '#9C27B0', items: [] },
-            'OTHER': { title: 'Apps', color: '#9E9E9E', items: [] }
-        };
+        const favoritesList = getFavorites();
+        const grouped = {};
+
+        // Prepend Favorites category group at the very top if any exist
+        if (favoritesList.length > 0) {
+            grouped['FAVORITES'] = { title: 'Favorites', color: '#FFD700', items: [] };
+        }
+
+        grouped['NAVIGATION'] = { title: 'Navigation', color: '#4CAF50', items: [] };
+        grouped['VIDEO'] = { title: 'Video', color: '#FF5722', items: [] };
+        grouped['MUSIC'] = { title: 'Music', color: '#9C27B0', items: [] };
+        grouped['OTHER'] = { title: 'Apps', color: '#9E9E9E', items: [] };
 
         apps.forEach(app => {
+            if (favoritesList.includes(app.packageName)) {
+                grouped['FAVORITES']?.items.push(app);
+            }
             if (grouped[app.category]) grouped[app.category].items.push(app);
             else grouped['OTHER'].items.push(app);
         });
@@ -1400,6 +1431,18 @@ document.addEventListener('DOMContentLoaded', async () => {
                 label.style.color = '#FFD700';
                 cell.appendChild(label);
 
+                // Favorite star button
+                const star = document.createElement('div');
+                const isFav = favoritesList.includes(app.packageName);
+                star.className = `app-star ${isFav ? 'active' : ''}`;
+                star.innerHTML = '&#9733;';
+                
+                star.addEventListener('click', (e) => {
+                    e.stopPropagation(); // Prevent parent launching event
+                    toggleFavorite(app.packageName);
+                });
+                cell.appendChild(star);
+
                 cell.addEventListener('click', () => {
                     launchApp(app, true);
                     splitDrawer.classList.remove('open');
@@ -1415,14 +1458,23 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function renderLauncherApps(apps) {
         launcherContent.innerHTML = '';
-        const grouped = {
-            'NAVIGATION': { title: 'Navigation', color: '#4CAF50', items: [] },
-            'VIDEO': { title: 'Video', color: '#FF5722', items: [] },
-            'MUSIC': { title: 'Music', color: '#9C27B0', items: [] },
-            'OTHER': { title: 'Apps', color: '#9E9E9E', items: [] }
-        };
+        const favoritesList = getFavorites();
+        const grouped = {};
+
+        // Prepend Favorites category group at the very top if any exist
+        if (favoritesList.length > 0) {
+            grouped['FAVORITES'] = { title: 'Favorites', color: '#FFD700', items: [] };
+        }
+
+        grouped['NAVIGATION'] = { title: 'Navigation', color: '#4CAF50', items: [] };
+        grouped['VIDEO'] = { title: 'Video', color: '#FF5722', items: [] };
+        grouped['MUSIC'] = { title: 'Music', color: '#9C27B0', items: [] };
+        grouped['OTHER'] = { title: 'Apps', color: '#9E9E9E', items: [] };
 
         apps.forEach(app => {
+            if (favoritesList.includes(app.packageName)) {
+                grouped['FAVORITES']?.items.push(app);
+            }
             if (grouped[app.category]) grouped[app.category].items.push(app);
             else grouped['OTHER'].items.push(app);
         });
@@ -1464,6 +1516,18 @@ document.addEventListener('DOMContentLoaded', async () => {
                 label.className = 'app-label';
                 label.textContent = app.label;
                 cell.appendChild(label);
+
+                // Favorite star button
+                const star = document.createElement('div');
+                const isFav = favoritesList.includes(app.packageName);
+                star.className = `app-star ${isFav ? 'active' : ''}`;
+                star.innerHTML = '&#9733;';
+                
+                star.addEventListener('click', (e) => {
+                    e.stopPropagation(); // Prevent parent launching event
+                    toggleFavorite(app.packageName);
+                });
+                cell.appendChild(star);
 
                 cell.addEventListener('click', () => {
                     launchApp(app, false);
