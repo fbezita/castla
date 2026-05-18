@@ -177,6 +177,7 @@ class MirrorForegroundService : Service() {
     private val terminalReason = java.util.concurrent.atomic.AtomicReference<TerminalReason?>(null)
     private var serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var resizeJob: Job? = null
+    private var secondaryResizeJob: Job? = null
     private var pendingBrowserDisconnectJob: Job? = null
     private var browserConnected = false
     private var currentVdApp: String = "com.android.settings" // what's running on main VD
@@ -251,6 +252,8 @@ class MirrorForegroundService : Service() {
     private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
     private var screenOffReceiver: BroadcastReceiver? = null
     private var vdKeepAliveJob: Job? = null
+    private var appExitMonitorJob: Job? = null
+    @Volatile private var lastAppLaunchTime: Long = 0L
     private val screenOffPolicy = ScreenOffPolicy()
     private val keyguardManager by lazy {
         getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
@@ -784,18 +787,65 @@ class MirrorForegroundService : Service() {
         }
         vdKeepAliveJob = serviceScope.launch {
             Log.i(TAG, "[BUILD:screen-off-v3] VD keep-alive starting (interval=${VD_KEEP_ALIVE_INTERVAL_MS}ms, vdId=${vdm.getDisplayId()})")
-            
             vdm.keepDisplayAwake()
             while (true) {
                 kotlinx.coroutines.delay(VD_KEEP_ALIVE_INTERVAL_MS)
                 vdm.keepDisplayAwake()
             }
         }
+        startAppExitMonitor()
     }
 
     private fun stopVdKeepAlive() {
         vdKeepAliveJob?.cancel()
         vdKeepAliveJob = null
+        stopAppExitMonitor()
+    }
+
+    private fun startAppExitMonitor() {
+        stopAppExitMonitor()
+        val vdm = virtualDisplayManager ?: return
+        val displayId = vdm.getDisplayId()
+        if (displayId < 0) return
+ 
+        appExitMonitorJob = serviceScope.launch {
+            Log.i(TAG, "VD app-exit monitor starting for display $displayId")
+            while (true) {
+                kotlinx.coroutines.delay(2000L)
+                if (secondaryDisplayId >= 0) {
+                    // Bypass exit monitor entirely when running dual apps (split mode)
+                    // to prevent annoying spontaneous exits due to system focus/display adjustments.
+                    continue
+                }
+                val currentApp = currentVdApp
+                if (currentApp.isNotBlank() && currentApp != "HOME" && currentApp != "com.android.settings") {
+                    val timeSinceLaunch = System.currentTimeMillis() - lastAppLaunchTime
+                    val service = vdm.getPrivilegedService()
+                    if (service != null) {
+                        try {
+                            val activeTasks = service.getRunningTasksOnDisplay(displayId) ?: emptyList()
+                            
+                            // If our custom Home activity is detected at the top of the virtual display,
+                            // it means the user manually exited or went home.
+                            val isHomeAtTop = activeTasks.firstOrNull()?.contains("VirtualDisplayHomeActivity") == true
+
+                            if (isHomeAtTop) {
+                                Log.i(TAG, "Home activity detected at the top of VD $displayId. Sending stream stopped notification.")
+                                currentVdApp = "HOME"
+                                mirrorServer?.broadcastControlMessage("{\"type\":\"APP_STREAM_STOPPED\"}")
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to query active tasks in VD", e)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun stopAppExitMonitor() {
+        appExitMonitorJob?.cancel()
+        appExitMonitorJob = null
     }
 
     @Synchronized
@@ -1271,6 +1321,7 @@ class MirrorForegroundService : Service() {
 
     private fun releaseSecondaryPipeline(clearState: Boolean = false) {
         if (secondaryDisplayId >= 0) {
+            cleanupDisplay(secondaryDisplayId)
             virtualDisplayManager?.releaseSecondaryVirtualDisplay(secondaryDisplayId)
             secondaryDisplayId = -1
         }
@@ -1306,9 +1357,8 @@ class MirrorForegroundService : Service() {
             height = effectiveMaxHeight
             width = (width * scale).toInt()
         }
-        width = (width + 15) and 15.inv()
-        height = (height + 15) and 15.inv()
-        if (width < 320 || height < 320) return
+        width = ((width + 15) and 15.inv()).coerceAtLeast(320)
+        height = ((height + 15) and 15.inv()).coerceAtLeast(320)
         if (virtualDisplayManager?.isBound() != true) return
         val hasMatchingPipeline = secondaryDisplayId >= 0 && secondaryWidth == width && secondaryHeight == height &&
             ((currentCodecMode == "mjpeg" && secondaryJpegEncoder != null) || (currentCodecMode != "mjpeg" && secondaryVideoEncoder != null))
@@ -1316,8 +1366,6 @@ class MirrorForegroundService : Service() {
             Log.d(TAG, "Secondary pipeline already matches ${width}x${height}, skipping rebuild")
             return
         }
-
-        val existingSecondaryVd = secondaryDisplayId >= 0
 
         secondaryVideoEncoder?.release()
         secondaryVideoEncoder = null
@@ -1343,13 +1391,13 @@ class MirrorForegroundService : Service() {
 
         val dpi = computeVirtualDisplayDpi(width, height)
 
-        if (existingSecondaryVd) {
+        if (secondaryDisplayId >= 0) {
             virtualDisplayManager?.getPrivilegedService()?.setSurface(secondaryDisplayId, surface)
             virtualDisplayManager?.resizeDisplay(secondaryDisplayId, width, height, dpi)
             secondaryWidth = width
             secondaryHeight = height
             secondaryTouchInjector?.updateDimensions(width, height)
-            Log.i(TAG, "Gradually resized secondary VD $secondaryDisplayId to ${width}x${height}")
+            Log.i(TAG, "Gradually resized secondary VD $secondaryDisplayId to ${width}x${height} without restarting")
         } else {
             val newDisplayId = virtualDisplayManager?.createSecondaryVirtualDisplay(width, height, dpi, surface) ?: -1
             if (newDisplayId < 0) {
@@ -1357,6 +1405,12 @@ class MirrorForegroundService : Service() {
                 return
             }
             secondaryDisplayId = newDisplayId
+            try {
+                virtualDisplayManager?.getPrivilegedService()?.launchHomeOnDisplay(newDisplayId)
+                Log.i(TAG, "Successfully bound launcher properties to VD_2 display $newDisplayId")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to launch secondary home on VD_2", e)
+            }
             secondaryWidth = width
             secondaryHeight = height
             secondaryTouchInjector = (secondaryTouchInjector ?: TouchInjector(width, height)).also { injector ->
@@ -1371,6 +1425,7 @@ class MirrorForegroundService : Service() {
             }
             restoreSecondaryVdContent()
         }
+
         mirrorServer?.broadcastFrame(byteArrayOf(), false, "secondary") 
         mirrorServer?.broadcastControlMessage(JSONObject().apply {
             put("type", "resolutionChanged")
@@ -1384,7 +1439,8 @@ class MirrorForegroundService : Service() {
         if (width <= 0 || height <= 0) return
         secondaryRequestedWidth = width
         secondaryRequestedHeight = height
-        serviceScope.launch(Dispatchers.IO) {
+        secondaryResizeJob?.cancel()
+        secondaryResizeJob = serviceScope.launch(Dispatchers.IO) {
             rebuildSecondaryPipeline(width, height)
         }
     }
@@ -1410,10 +1466,11 @@ class MirrorForegroundService : Service() {
                 currentSecondaryApp,
                 extraKey = "url",
                 extraValue = currentSecondaryWebUrl,
-                freeform = false
+                freeform = false,
+                forceColdStart = false
             )
         } else {
-            launchTargetOnDisplay(secondaryDisplayId, currentSecondaryApp, freeform = false)
+            launchTargetOnDisplay(secondaryDisplayId, currentSecondaryApp, freeform = false, forceColdStart = false)
         }
     }
 
@@ -1426,6 +1483,14 @@ class MirrorForegroundService : Service() {
         )
         if (secondaryDisplayId >= 0) {
             restoreSecondaryVdContent()
+        } else {
+            // Auto-provisioning fallback: Build secondary display pipeline dynamically if active display is absent!
+            val targetW = if (secondaryRequestedWidth > 0) secondaryRequestedWidth else (currentWidth / 2).coerceAtLeast(320)
+            val targetH = if (secondaryRequestedHeight > 0) secondaryRequestedHeight else currentHeight
+            Log.i(TAG, "Secondary display not active ($secondaryDisplayId) — triggering dynamic auto-provisioning: ${targetW}x${targetH}")
+            serviceScope.launch(Dispatchers.IO) {
+                rebuildSecondaryPipeline(targetW, targetH)
+            }
         }
     }
 
@@ -1467,7 +1532,7 @@ class MirrorForegroundService : Service() {
                         service.execCommand("cmd activity task resize $primaryTaskId ${fullBounds.left} ${fullBounds.top} ${fullBounds.right} ${fullBounds.bottom}")
                         Log.i(TAG, "Restored primary task $primaryTaskId to fullscreen")
                     } else {
-                        virtualDisplayManager?.launchAppOnDisplay(primaryTarget)
+                        launchTargetOnDisplay(displayId, primaryTarget, freeform = false)
                         Log.i(TAG, "Re-launched primary $primaryTarget fullscreen")
                     }
                 } catch (e: Exception) {
@@ -1546,14 +1611,19 @@ class MirrorForegroundService : Service() {
 
         try {
             val service = virtualDisplayManager?.getPrivilegedService() ?: return
-            if (BROWSER_PACKAGES.contains(pkg)) {
-                val displayId = virtualDisplayManager?.getDisplayId() ?: -1
-                val taskId = findTaskId(service, displayId, packageName)
-                if (taskId != null) {
+            val dumpsys = service.execCommand("dumpsys activity activities")
+            val matchingTaskIds = findAllTaskIds(dumpsys, pkg)
+            for (taskId in matchingTaskIds) {
+                try {
                     service.removeTask(taskId)
-                    Log.i(TAG, "Removed browser task $taskId for $pkg (avoiding force-stop)")
-                    return
+                    Log.i(TAG, "Synchronously removed zombie task $taskId for package $pkg to guarantee fresh launch on new virtual display")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to remove task $taskId", e)
                 }
+            }
+
+            if (BROWSER_PACKAGES.contains(pkg)) {
+                return
             }
             service.execCommand("am force-stop $pkg")
             Log.i(TAG, "Force-stopped previous app: $pkg")
@@ -1567,7 +1637,13 @@ class MirrorForegroundService : Service() {
     }
 
     private fun ensureSplitViable(reason: String): Boolean {
-        if (!canLaunchPrimarySplitTask()) {
+        if (!singleVdSplit) return false
+        
+        // 메인 표준 앱(Primary)을 기동하거나 재배치하는 상황이라면, 
+        // 기존에 실행 중인 앱이 없더라도(초기 HOME 상태) 분할 모드가 정상 성립되어야 합니다.
+        val isPrimaryLaunch = reason.contains("standard") || reason == "relaunch-primary"
+        
+        if (!isPrimaryLaunch && !canLaunchPrimarySplitTask()) {
             FileLogger.w(TAG, "Split rejected ($reason): no primary app (currentVdApp=$currentVdApp)")
             return false
         }
@@ -1629,12 +1705,14 @@ class MirrorForegroundService : Service() {
         packageOrComponent: String,
         extraKey: String? = null,
         extraValue: String? = null,
-        freeform: Boolean = false
+        freeform: Boolean = false,
+        reorderToFront: Boolean = false
     ): String {
         val resolvedComponent = resolveLaunchComponent(packageOrComponent)
         val launchTarget = resolvedComponent ?: packageOrComponent
+        val flags = if (reorderToFront) "0x10020000" else "0x10200000"
         return buildString {
-            append("am start -W --display $displayId -f 0x18000000 ")
+            append("am start --display $displayId -f $flags ")
             if (freeform) {
                 append("--windowingMode 5 ")
             }
@@ -1655,20 +1733,114 @@ class MirrorForegroundService : Service() {
         packageOrComponent: String,
         extraKey: String? = null,
         extraValue: String? = null,
-        freeform: Boolean = false
+        freeform: Boolean = false,
+        forceColdStart: Boolean = false
     ): Boolean {
         if (displayId < 0) return false
         val service = virtualDisplayManager?.getPrivilegedService() ?: return false
         return try {
-            val command = buildShellLaunchCommand(displayId, packageOrComponent, extraKey, extraValue, freeform)
+            val resolvedTarget = resolveLaunchComponent(packageOrComponent) ?: packageOrComponent
+            val pkg = packageOrComponent.substringBefore('/')
+
+            if (forceColdStart && pkg.isNotBlank() && pkg != "HOME" && !pkg.contains("com.castla.mirror")) {
+                try {
+                    service.execCommand("am force-stop $pkg")
+                    Log.i(TAG, "Forced cold start: Successfully force-stopped $pkg before launching to enforce layout refresh")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to force stop $pkg for cold start", e)
+                }
+            }
+
+            // 1. Precise Display ID tracking for original task to ensure symmetric control
+            val originalDisplayId = try { service.getDisplayIdForPackage(pkg) } catch (e: Exception) { -1 }
+            val primaryVdId = virtualDisplayManager?.getDisplayId() ?: -1
+            val secondaryVdId = secondaryDisplayId
+            val targetDisplayId = if (originalDisplayId >= 0 && (originalDisplayId == primaryVdId || originalDisplayId == secondaryVdId)) {
+                Log.i(TAG, "Symmetric Task Routing: Redirecting launch of $pkg from display $displayId to original display $originalDisplayId")
+                originalDisplayId
+            } else {
+                displayId
+            }
+
+            val dumpsys = service.execCommand("dumpsys activity activities")
+            val matchingTaskIds = findAllTaskIds(dumpsys, pkg)
+            val isWarmStart = matchingTaskIds.isNotEmpty()
+
+            for (taskId in matchingTaskIds) {
+                try {
+                    // Move the task to the correct target display
+                    service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId")
+                    Log.i(TAG, "Migrated existing task $taskId ($pkg) to display $targetDisplayId")
+                    
+                    // Force bring task to the front of target display to restore focus and resume rendering
+                    service.execCommand("cmd activity task move-to-front $taskId")
+                    Log.i(TAG, "Forced task $taskId to front of display $targetDisplayId")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to migrate/bring-to-front task $taskId for display $targetDisplayId", e)
+                }
+            }
+
+            val command = buildShellLaunchCommand(targetDisplayId, packageOrComponent, extraKey, extraValue, freeform, reorderToFront = isWarmStart)
             Log.i(TAG, "Executing: $command")
             val result = service.execCommand(command)
             Log.i(TAG, "Launch result for $packageOrComponent: $result")
+
+            // 3. Surface Re-bind Verification and Safe Fallback mechanism
+            if (isWarmStart) {
+                verifySurfaceAndFallback(service, targetDisplayId, pkg, matchingTaskIds, packageOrComponent, extraKey, extraValue, freeform)
+            }
+
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to launch $packageOrComponent on display $displayId", e)
             FileLogger.e(TAG, "launchTargetOnDisplay failed pkg=$packageOrComponent display=$displayId", e)
             false
+        }
+    }
+
+    private fun verifySurfaceAndFallback(
+        service: IPrivilegedService,
+        displayId: Int,
+        pkg: String,
+        taskIds: List<Int>,
+        packageOrComponent: String,
+        extraKey: String?,
+        extraValue: String?,
+        freeform: Boolean
+    ) {
+        serviceScope.launch(Dispatchers.IO) {
+            kotlinx.coroutines.delay(1000L) // Wait 1 second for OS window manager transitions to settle
+            try {
+                val runningTasks = service.getRunningTasksOnDisplay(displayId)
+                // Check if the target package has successfully resumed as topActivity or active on this display
+                val isResumedSuccessfully = runningTasks.any { it.contains(pkg) }
+                if (!isResumedSuccessfully) {
+                    Log.w(TAG, "Surface binding verification FAILED for $pkg on display $displayId. Black screen or focus loss suspected.")
+                    FileLogger.w(TAG, "Verification failed for $pkg on display $displayId, initiating Clean Launch fallback.")
+                    
+                    // Fallback Safety Mechanism: completely remove stale tasks and execute clean launch
+                    for (taskId in taskIds) {
+                        try {
+                            service.removeTask(taskId)
+                            Log.i(TAG, "Fallback: Removed stale task $taskId")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to remove stale task $taskId during fallback", e)
+                        }
+                    }
+                    service.execCommand("am force-stop $pkg")
+                    Log.i(TAG, "Fallback: Force-stopped package $pkg")
+                    
+                    // Re-launch with a clean slate
+                    val command = buildShellLaunchCommand(displayId, packageOrComponent, extraKey, extraValue, freeform, reorderToFront = false)
+                    Log.i(TAG, "Fallback Clean Launch: Executing: $command")
+                    val result = service.execCommand(command)
+                    Log.i(TAG, "Fallback Clean Launch result: $result")
+                } else {
+                    Log.i(TAG, "Surface binding verified successfully for $pkg on display $displayId")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed during surface binding verification for $pkg", e)
+            }
         }
     }
 
@@ -1862,7 +2034,7 @@ class MirrorForegroundService : Service() {
 
     private fun buildExternalBrowserCommand(displayId: Int, url: String, browserComponent: String, freeform: Boolean): String {
         return buildString {
-            append("am start -W --display $displayId -f 0x18000000 ")
+            append("am start --display $displayId -f 0x18000000 ")
             if (freeform) {
                 append("--windowingMode 5 ")
             }
@@ -1875,16 +2047,9 @@ class MirrorForegroundService : Service() {
     private fun launchFullscreenStandardTarget(launchTarget: String) {
         clearSplitState()
         val resolvedTarget = normalizeLaunchTarget(launchTarget)
-        val service = virtualDisplayManager?.getPrivilegedService()
         val displayId = virtualDisplayManager?.getDisplayId() ?: -1
 
-        if (service != null && displayId >= 0) {
-            val taskId = findTaskId(service, displayId, resolvedTarget)
-            if (taskId == null) {
-                forceStopAppIfNeeded(resolvedTarget)
-            }
-        }
-        val launched = virtualDisplayManager?.launchAppOnDisplay(resolvedTarget) ?: false
+        val launched = launchTargetOnDisplay(displayId, resolvedTarget, freeform = false)
         if (!launched && virtualDisplayManager?.hasVirtualDisplay() == false) {
             Log.w(TAG, "Launch failed due to stale display, rebuilding pipeline and retrying")
             rebuildAndRetryLaunch(resolvedTarget)
@@ -1902,16 +2067,12 @@ class MirrorForegroundService : Service() {
         serviceScope.launch {
             try {
                 rebuildPipeline(currentWidth, currentHeight, force = true)
-                val vdm = virtualDisplayManager
-                if (vdm != null && vdm.hasVirtualDisplay()) {
-                    val retried = vdm.launchAppOnDisplay(resolvedTarget)
-                    if (retried) {
-                        Log.i(TAG, "Retry launch succeeded for $resolvedTarget after pipeline rebuild")
-                    } else {
-                        Log.w(TAG, "Retry launch deferred — VD will launch via restoreCurrentVdContent on bind completion")
-                    }
+                val displayId = virtualDisplayManager?.getDisplayId() ?: -1
+                val retried = launchTargetOnDisplay(displayId, resolvedTarget, freeform = false)
+                if (retried) {
+                    Log.i(TAG, "Retry launch succeeded for $resolvedTarget after pipeline rebuild")
                 } else {
-                    Log.i(TAG, "VD not yet available after rebuild — app will launch when Shizuku binds")
+                    Log.w(TAG, "Retry launch deferred — VD will launch via restoreCurrentVdContent on bind completion")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to rebuild pipeline for retry launch", e)
@@ -1928,10 +2089,23 @@ class MirrorForegroundService : Service() {
             return
         }
         val resolvedTarget = normalizeLaunchTarget(launchTarget)
-        relaunchPrimaryTaskForSplit(displayId)
 
-        val launched = launchTargetOnDisplay(displayId, resolvedTarget, freeform = true)
+        val service = virtualDisplayManager?.getPrivilegedService()
+        if (service != null) {
+            val taskId = findTaskId(service, displayId, resolvedTarget)
+            if (taskId != null) {
+                try {
+                    service.execCommand("cmd activity task move-to-front $taskId")
+                    Log.i(TAG, "Moved existing task $taskId ($resolvedTarget) to front on display $displayId")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to move existing task $taskId to front", e)
+                }
+            }
+        }
+
+        val launched = launchTargetOnDisplay(displayId, resolvedTarget, freeform = singleVdSplit)
         if (launched) {
+            currentVdApp = resolvedTarget
             scheduleSplitTaskResize(displayId, resolvedTarget)
             activeSplitComponent = resolvedTarget
             activeSplitUrl = null
@@ -1957,6 +2131,7 @@ class MirrorForegroundService : Service() {
         }
 
         Log.i(TAG, "Force-restarting primary $primaryPkg in freeform mode")
+        lastAppLaunchTime = System.currentTimeMillis() // Reset exit monitor grace period to avoid transient APP_STREAM_STOPPED signal
         service.execCommand("am force-stop $primaryPkg")
         val isExternalBrowser = activeSession?.mode == SessionMode.EXTERNAL_BROWSER
         val launched = if (isExternalBrowser && currentWebUrl != null) {
@@ -2018,7 +2193,8 @@ class MirrorForegroundService : Service() {
         }
         val intent = Intent().apply {
             setClassName(this@MirrorForegroundService, activityClassName)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            // Use NEW_TASK and REORDER_TO_FRONT flags to bring the existing activity to front without duplicates
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
             putExtra("url", launchUrl)
             putExtra("splitMode", splitMode)
         }
@@ -2062,6 +2238,7 @@ class MirrorForegroundService : Service() {
     }
 
     private fun scheduleSplitTaskResize(displayId: Int, launchTarget: String) {
+        if (!singleVdSplit) return
         try { splitResizeJob?.cancel() } catch (_: Exception) {}
         splitResizeJob = scheduleTaskResize(displayId, splitTaskBounds(), "split", launchTarget)
     }
@@ -2168,13 +2345,27 @@ class MirrorForegroundService : Service() {
 
     private fun parseDisplayTasks(dumpsys: String?, displayId: Int): List<DisplayTaskSnapshot> {
         if (dumpsys.isNullOrBlank()) return emptyList()
-        val startMarker = "Display #$displayId (activities from top to bottom):"
-        val startIndex = dumpsys.indexOf(startMarker)
+        val lines = dumpsys.lines()
+        var startIndex = -1
+        for (i in lines.indices) {
+            val line = lines[i]
+            if (line.contains("Display #$displayId")) {
+                startIndex = i
+                break
+            }
+        }
         if (startIndex < 0) return emptyList()
-        val remaining = dumpsys.substring(startIndex + startMarker.length)
-        val nextDisplay = Regex("\nDisplay #\\d+ \\(activities from top to bottom\\):").find(remaining)
-        val displayBlock = remaining.substring(0, nextDisplay?.range?.first ?: remaining.length)
 
+        var endIndex = lines.size
+        for (i in (startIndex + 1) until lines.size) {
+            val line = lines[i]
+            if (line.contains("Display #") && !line.contains("Display #$displayId")) {
+                endIndex = i
+                break
+            }
+        }
+
+        val displayBlockLines = lines.subList(startIndex + 1, endIndex)
         val tasks = mutableListOf<DisplayTaskSnapshot>()
         var currentHeader: String? = null
         val bodyLines = mutableListOf<String>()
@@ -2189,9 +2380,9 @@ class MirrorForegroundService : Service() {
             bodyLines.clear()
         }
 
-        for (line in displayBlock.lines()) {
+        for (line in displayBlockLines) {
             val trimmed = line.trimStart()
-            if (trimmed.startsWith("* Task{")) {
+            if (trimmed.startsWith("* Task{") || trimmed.startsWith("* TaskRecord{") || trimmed.startsWith("* Task id #")) {
                 flushCurrent()
                 currentHeader = trimmed
             } else if (currentHeader != null) {
@@ -2202,21 +2393,62 @@ class MirrorForegroundService : Service() {
         return tasks
     }
 
+    private fun findAllTaskIds(dumpsys: String?, pkg: String): List<Int> {
+        val service = virtualDisplayManager?.getPrivilegedService()
+        if (service != null) {
+            try {
+                return service.getTaskIdsForPackage(pkg).toList()
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to get task IDs natively, falling back to regex", e)
+            }
+        }
+
+        if (dumpsys.isNullOrBlank()) return emptyList()
+        val taskIds = mutableListOf<Int>()
+
+        val blocks = dumpsys.split(Regex("\\* Task"))
+        for (i in 1 until blocks.size) {
+            val block = blocks[i]
+            val taskId = Regex("^\\s*(?:#|Record\\{\\s*|\\{\\s*)(\\d+)").find(block)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: continue
+
+            val hasActivity = block.contains("realActivity=$pkg/") ||
+                              block.contains("origActivity=$pkg/") ||
+                              block.contains("ComponentInfo{$pkg/")
+            if (hasActivity) {
+                taskIds.add(taskId)
+            }
+        }
+        return taskIds
+    }
+
     private fun createTaskSnapshot(header: String, bodyLines: List<String>): DisplayTaskSnapshot? {
-        val taskId = Regex("#(\\d+)").find(header)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: return null
+        val trimmed = header.trimStart().removePrefix("* Task")
+        val taskId = Regex("^\\s*(?:#|Record\\{\\s*|\\{\\s*)(\\d+)").find(trimmed)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: return null
         val mode = Regex("mode=([a-zA-Z_]+)").find(header)?.groupValues?.getOrNull(1) ?: "unknown"
         return DisplayTaskSnapshot(taskId, mode, header, bodyLines.joinToString("\n"))
     }
 
     private fun taskMatchesLaunchTarget(task: DisplayTaskSnapshot, launchTarget: String): Boolean {
-        val haystack = buildString {
-            append(task.header)
-            append('\n')
-            append(task.body)
+        val targetPkg = launchTarget.substringBefore('/')
+        
+        // Extract realActivity package name from task body to ensure 100% precise matching
+        val realActivityLine = task.body.lines().firstOrNull { it.trimStart().startsWith("realActivity=") }
+        if (realActivityLine != null) {
+            val component = realActivityLine.substringAfter("realActivity=").trim()
+            val pkg = component.substringBefore('/')
+            if (pkg == targetPkg) return true
         }
-        return launchTargetCandidates(launchTarget).any { candidate ->
-            candidate.isNotBlank() && haystack.contains(candidate)
+        
+        // Fallback to checking topActivity or origActivity package lines
+        val fallbackLines = task.body.lines().filter { 
+            val trimmed = it.trimStart()
+            trimmed.startsWith("origActivity=") || trimmed.contains("topActivity=ComponentInfo{")
         }
+        for (line in fallbackLines) {
+            if (line.contains(targetPkg)) return true
+        }
+        
+        return false
     }
 
     private fun launchTargetCandidates(launchTarget: String): List<String> {
@@ -2303,6 +2535,9 @@ class MirrorForegroundService : Service() {
 
     private fun launchAppFromWebLauncher(pkgName: String, componentName: String? = null, splitMode: Boolean = false, pane: String = if (splitMode) "secondary" else "primary") {
         Log.i(TAG, "launchAppFromWebLauncher: pkg=$pkgName split=$splitMode pane=$pane singleVdSplit=$singleVdSplit")
+        if (pane != "secondary") {
+            lastAppLaunchTime = System.currentTimeMillis()
+        }
         if (pane == "secondary") {
             if (singleVdSplit) {
                 Log.d(TAG, "Ignoring secondary launch in single-VD split mode (pkg=$pkgName)")
@@ -2560,6 +2795,7 @@ class MirrorForegroundService : Service() {
                 touchInjector?.setVirtualDisplayInjector { motionEvent ->
                     vdm.injectMotionEvent(motionEvent)
                 }
+                startAppExitMonitor() // Start the exit monitor for standard mirroring sessions
                 serviceScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                     val ok = setup.ensureShizukuHardened()
                     Log.i(TAG, "ensureShizukuHardened (service): $ok")
@@ -2649,6 +2885,7 @@ class MirrorForegroundService : Service() {
 
     private fun tearDownVdSession(reason: String) {
         Log.i(TAG, "Tearing down VD session: $reason")
+        stopAppExitMonitor() // Safely stop task monitor when virtual display is released
         try { touchInjector?.setVirtualDisplayInjector(null) } catch (_: Exception) {}
         try { virtualDisplayManager?.release() } catch (e: Exception) { Log.w(TAG, "Failed to release virtual display manager", e) }
         virtualDisplayManager = null
@@ -2663,6 +2900,7 @@ class MirrorForegroundService : Service() {
 
     private fun restoreCurrentVdContent() {
         val vdm = virtualDisplayManager ?: return
+        startAppExitMonitor() // Keep monitor active during display rebuilds/reconnects
         when (currentVdApp) {
             "HOME", "", "com.android.settings" -> {
                 currentVdApp = "HOME"
@@ -2673,7 +2911,7 @@ class MirrorForegroundService : Service() {
             else -> {
                 if (currentVdApp.contains("SplitWebBrowserActivity")) {
                     currentVdApp = "HOME"
-                } else if (hasActiveSplitSession()) {
+                } else if (singleVdSplit && hasActiveSplitSession()) {
                     val displayId = vdm.getDisplayId()
                     relaunchPrimaryTaskForSplit(displayId)
                     val splitSession = activeSplitSession
@@ -2724,12 +2962,9 @@ class MirrorForegroundService : Service() {
                     val activityClassName = currentVdApp.substringAfter('/')
                     launchInternalActivity(activityClassName, vdm.getDisplayId(), currentWebUrl ?: "https://m.youtube.com", splitMode = currentWebSplitMode)
                 } else {
-                    vdm.launchAppOnDisplay(currentVdApp)
+                    launchTargetOnDisplay(vdm.getDisplayId(), currentVdApp, freeform = false, forceColdStart = false)
                 }
             }
-        }
-        if (!singleVdSplit && secondaryWidth > 0 && secondaryHeight > 0 && currentSecondaryApp.isNotBlank()) {
-            rebuildSecondaryPipeline(secondaryWidth, secondaryHeight)
         }
     }
 
@@ -3022,15 +3257,15 @@ class MirrorForegroundService : Service() {
             cappedWidth = (cappedWidth * scale).toInt()
         }
 
-        val alignedWidth = (cappedWidth + 15) and 15.inv()
-        val alignedHeight = (cappedHeight + 15) and 15.inv()
+        val alignedWidth = ((cappedWidth + 15) and 15.inv()).coerceAtLeast(320)
+        val alignedHeight = ((cappedHeight + 15) and 15.inv()).coerceAtLeast(320)
 
         if (!force && alignedWidth == currentWidth && alignedHeight == currentHeight) {
             Log.d(TAG, "rebuildPipeline skipped: dimensions unchanged ${alignedWidth}x${alignedHeight}")
             return@withLock
         }
 
-        if (alignedWidth < 320 || alignedWidth > 3840 || alignedHeight < 320 || alignedHeight > 3840) {
+        if (alignedWidth > 3840 || alignedHeight > 3840) {
             Log.w(TAG, "rebuildPipeline skipped: dimensions out of range ${alignedWidth}x${alignedHeight}")
             return@withLock
         }

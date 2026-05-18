@@ -28,22 +28,34 @@
         }
 
         #launcher-loading {
-            display: flex;
-            flex-direction: column;
+            display: none;
+            flex-direction: row;
             align-items: center;
             justify-content: center;
             position: absolute;
-            top: 0; left: 0; right: 0; bottom: 0;
+            top: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(20, 20, 20, 0.85);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            padding: 12px 28px;
+            border-radius: 30px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            z-index: 999999;
+            pointer-events: none;
+            gap: 12px;
         }
 
         .loading-spinner {
-            width: 48px;
-            height: 48px;
-            border: 4px solid rgba(255, 255, 255, 0.15);
+            width: 20px;
+            height: 20px;
+            border: 2.5px solid rgba(255, 255, 255, 0.15);
             border-top-color: #fff;
             border-radius: 50%;
             animation: spin 0.8s linear infinite;
-            margin-bottom: 20px;
+            flex-shrink: 0;
         }
 
         @keyframes spin {
@@ -51,9 +63,11 @@
         }
 
         .loading-text {
-            font-size: 16px;
-            color: rgba(255, 255, 255, 0.6);
+            font-size: 15px;
+            color: #ffffff;
             font-family: sans-serif;
+            font-weight: 500;
+            white-space: nowrap;
         }
 
         .category-section {
@@ -94,19 +108,31 @@
             padding: 12px 8px;
             border-radius: 12px;
             transition: background 0.2s ease;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-touch-callout: none;
         }
 
         .app-cell:hover {
             background-color: rgba(255, 255, 255, 0.1);
         }
 
-        .app-icon {
+        .app-icon-wrapper {
+            position: relative; /* 별표와 번개 위치 기준점 */
             width: 72px;
             height: 72px;
-            object-fit: contain;
             margin-bottom: 8px;
+        }
+
+        .app-icon {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
             filter: drop-shadow(0px 4px 6px rgba(0,0,0,0.5));
             transition: transform 0.1s ease;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-touch-callout: none;
         }
 
         .app-cell:active .app-icon {
@@ -124,15 +150,16 @@
             color: #ddd;
         }
 
-        /* ── 즐겨찾기(Favorites) 별표 스타일 ── */
+        /* ── 즐겨찾기(Favorites) 별표 및 자동 실행(Auto-run) 번개 스타일 ── */
         .app-star {
             position: absolute;
-            top: 4px;
-            right: 8px;
+            top: -6px;
+            right: -8px;
             font-size: 20px;
-            color: rgba(255, 255, 255, 0.22);
+            color: rgba(255, 255, 255, 0.35);
+            text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9), 0 0 2px rgba(0, 0, 0, 0.9);
             transition: color 0.2s cubic-bezier(0.2, 0.8, 0.2, 1), transform 0.15s ease;
-            z-index: 10;
+            z-index: 15;
             cursor: pointer;
             user-select: none;
             -webkit-user-select: none;
@@ -145,10 +172,43 @@
 
         .app-star.active {
             color: #FFD700;
-            text-shadow: 0 0 8px rgba(255, 215, 0, 0.6);
+            text-shadow: 0 0 8px rgba(255, 215, 0, 0.6), 0 1px 2px rgba(0, 0, 0, 0.9);
         }
 
         .app-star.active:active {
+            transform: scale(1.35);
+        }
+
+        .app-bolt {
+            position: absolute;
+            top: -6px;
+            left: -8px;
+            font-size: 20px;
+            color: rgba(255, 255, 255, 0.35);
+            text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9), 0 0 2px rgba(0, 0, 0, 0.9);
+            transition: color 0.2s cubic-bezier(0.2, 0.8, 0.2, 1), transform 0.15s ease;
+            z-index: 15;
+            cursor: pointer;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        .app-bolt:hover {
+            color: rgba(255, 255, 255, 0.7);
+            transform: scale(1.2);
+        }
+
+        .app-bolt.active.primary {
+            color: #00E5FF;
+            text-shadow: 0 0 8px rgba(0, 229, 255, 0.6);
+        }
+
+        .app-bolt.active.secondary {
+            color: #E040FB;
+            text-shadow: 0 0 8px rgba(224, 64, 251, 0.6);
+        }
+
+        .app-bolt.active:active {
             transform: scale(1.35);
         }
 
@@ -239,17 +299,50 @@
         .split-app-item:hover {
             background: rgba(255,255,255,0.15);
         }
-        .split-app-item .app-star {
+        .split-app-star {
             position: absolute;
             top: 50%;
             right: 12px;
+            left: auto;
             transform: translateY(-50%);
             font-size: 20px;
+            cursor: pointer;
+            user-select: none;
+            -webkit-user-select: none;
         }
-        .split-app-item .app-star:hover {
+        .split-app-star:hover {
             transform: translateY(-50%) scale(1.2);
         }
-        .split-app-item .app-star.active {
+        .split-app-star.active {
+            transform: translateY(-50%) scale(1.0);
+            color: #FFD700;
+            text-shadow: 0 0 8px rgba(255, 215, 0, 0.6), 0 1px 2px rgba(0, 0, 0, 0.9);
+        }
+        .split-app-bolt {
+            position: absolute;
+            top: 50%;
+            right: 38px;
+            left: auto;
+            transform: translateY(-50%);
+            font-size: 20px;
+            color: rgba(255, 255, 255, 0.22);
+            transition: color 0.2s ease, transform 0.15s ease;
+            cursor: pointer;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        .split-app-bolt:hover {
+            color: rgba(255, 255, 255, 0.7);
+            transform: translateY(-50%) scale(1.2);
+        }
+        .split-app-bolt.active.primary {
+            color: #00E5FF;
+            text-shadow: 0 0 8px rgba(0, 229, 255, 0.6);
+            transform: translateY(-50%) scale(1.0);
+        }
+        .split-app-bolt.active.secondary {
+            color: #E040FB;
+            text-shadow: 0 0 8px rgba(224, 64, 251, 0.6);
             transform: translateY(-50%) scale(1.0);
         }
         .split-app-icon {
@@ -473,6 +566,20 @@
             display: block;
         }
 
+        /* Secondary Fullscreen Mode: Hide primary and stretch secondary to 100% */
+        #player-shell.secondary-fullscreen #stream-pane {
+            display: none !important;
+            width: 0 !important;
+        }
+        #player-shell.secondary-fullscreen #browser-split-pane {
+            display: block !important;
+            width: 100% !important;
+            border-left: none !important;
+        }
+        #player-shell.secondary-fullscreen #split-divider {
+            display: none !important;
+        }
+
         /* ── Browser-Only Split Pane ── */
         .browser-pane-ui {
             display: flex;
@@ -601,9 +708,14 @@
             z-index: 230;
             cursor: col-resize;
             touch-action: none;
+            transition: background-color 0.25s ease;
+        }
+        #split-divider:hover,
+        #player-shell.resizing-divider #split-divider {
+            background-color: rgba(255, 255, 255, 0.06);
         }
         #player-shell.browser-split #split-divider {
-            display: none;
+            display: flex;
         }
         #split-divider::before {
             content: '';
@@ -612,6 +724,13 @@
             border-radius: 999px;
             background: rgba(255,255,255,0.35);
             box-shadow: 0 0 0 1px rgba(0,0,0,0.35);
+            transition: background-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+        }
+        #split-divider:hover::before,
+        #player-shell.resizing-divider #split-divider::before {
+            background: #00E5FF;
+            box-shadow: 0 0 10px rgba(0, 229, 255, 0.8);
+            transform: scaleX(1.5);
         }
         #split-pane-toolbar {
             display: none;
@@ -653,6 +772,322 @@
             background: rgba(255,255,255,0.15);
             margin: 0 1px;
         }
+
+        /* ── App Pair Icons ── */
+        .app-pair-icon-wrapper {
+            position: relative;
+            width: 72px;
+            height: 72px;
+            margin-bottom: 8px;
+        }
+        .app-pair-icon-left {
+            width: 48px;
+            height: 48px;
+            position: absolute;
+            left: 2px;
+            bottom: 2px;
+            z-index: 3;
+            border-radius: 12px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.5);
+            background: #14141e;
+            border: 3px solid #14141e; /* Elegant masking outline that cleanly cuts the under-layered icon */
+        }
+        .app-pair-icon-right {
+            width: 48px;
+            height: 48px;
+            position: absolute;
+            right: 2px;
+            top: 2px;
+            z-index: 2;
+            border-radius: 12px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+            background: #14141e;
+        }
+        .app-pair-icon-left, .app-pair-icon-right {
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.3s ease;
+        }
+        .app-cell:hover .app-pair-icon-left {
+            transform: translate(-3px, 3px) scale(1.02);
+            box-shadow: -4px 6px 12px rgba(0,0,0,0.6);
+        }
+        .app-cell:hover .app-pair-icon-right {
+            transform: translate(3px, -3px) scale(1.02);
+            box-shadow: 4px -2px 10px rgba(0,0,0,0.5);
+        }
+
+        /* ### 수정 시작 ### */
+        /* ── Drag & Drop Overlay (Spatial Launching) ── */
+        #drag-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(10, 10, 18, 0.65);
+            backdrop-filter: blur(20px);
+            z-index: 500;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            padding: 16px;
+            box-sizing: border-box;
+        }
+
+        #drag-overlay.active {
+            opacity: 1;
+            pointer-events: auto; /* Allow pointer capture while active */
+        }
+
+        .drop-zone {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            border: 2px dashed rgba(255, 255, 255, 0.15);
+            border-radius: 24px;
+            background: rgba(255, 255, 255, 0.02);
+            color: rgba(255, 255, 255, 0.5);
+            transition: all 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+            box-sizing: border-box;
+            position: relative;
+            backdrop-filter: blur(5px);
+        }
+
+        .drop-zone-icon {
+            font-size: 32px;
+            margin-bottom: 8px;
+            transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+        }
+
+        .drop-zone-text {
+            font-size: 14px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        /* Hovered Drop Zone effects with harmonious HSL glow glows */
+        #drop-zone-top.hovered {
+            border: 2px solid #FFD700;
+            color: #FFD700;
+            box-shadow: 0 0 30px rgba(255, 215, 0, 0.25);
+            background: rgba(255, 215, 0, 0.06);
+            transform: scale(1.02);
+        }
+        #drop-zone-top.hovered .drop-zone-icon {
+            transform: scale(1.25);
+        }
+
+        #drop-zone-autorun.hovered {
+            border: 2px solid #00E5FF;
+            color: #00E5FF;
+            box-shadow: 0 0 30px rgba(0, 229, 255, 0.25);
+            background: rgba(0, 229, 255, 0.06);
+            transform: scale(1.02);
+        }
+        #drop-zone-autorun.hovered .drop-zone-icon {
+            transform: scale(1.25);
+        }
+
+        #drop-zone-launch-left.hovered {
+            border: 2px solid #00E5FF;
+            color: #00E5FF;
+            box-shadow: 0 0 40px rgba(0, 229, 255, 0.35);
+            background: rgba(0, 229, 255, 0.08);
+            transform: scale(1.03);
+        }
+        #drop-zone-launch-left.hovered .drop-zone-icon {
+            transform: scale(1.25);
+        }
+
+        #drop-zone-launch-right.hovered {
+            border: 2px solid #E040FB;
+            color: #E040FB;
+            box-shadow: 0 0 40px rgba(224, 64, 251, 0.35);
+            background: rgba(224, 64, 251, 0.08);
+            transform: scale(1.03);
+        }
+        #drop-zone-launch-right.hovered .drop-zone-icon {
+            transform: scale(1.25);
+        }
+
+        #drop-zone-bottom.hovered {
+            border: 2px solid #FF3B30;
+            color: #FF3B30;
+            box-shadow: 0 0 30px rgba(255, 59, 48, 0.25);
+            background: rgba(255, 59, 48, 0.08);
+            transform: scale(1.02);
+        }
+        #drop-zone-bottom.hovered .drop-zone-icon {
+            transform: scale(1.2);
+        }
+        /* ### 수정 끝 ### */
+
+        /* Drop Zone Previews ( 반투명 기존 매핑 앱 정보 ) */
+        .drop-zone-preview {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            opacity: 0.35;
+            pointer-events: none;
+            transition: opacity 0.2s ease;
+        }
+        .drop-zone-preview img {
+            width: 48px;
+            height: 48px;
+            margin-bottom: 6px;
+            object-fit: contain;
+        }
+        .drop-zone-preview span {
+            font-size: 11px;
+            color: #ccc;
+            font-weight: 500;
+        }
+
+        /* Dragged Floating Ghost */
+        .drag-ghost {
+            position: fixed;
+            width: 72px;
+            height: 72px;
+            pointer-events: none;
+            z-index: 600;
+            opacity: 0.85;
+            transform: translate(-50%, -50%) scale(1.1);
+            filter: drop-shadow(0 8px 16px rgba(0,0,0,0.6));
+        }
+        .drag-ghost img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+
+        /* App Pair Edit Dialog */
+        #app-pair-dialog-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(10, 10, 18, 0.7);
+            backdrop-filter: blur(15px);
+            z-index: 700;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+        }
+        #app-pair-dialog-overlay.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+        #app-pair-dialog {
+            background: rgba(20, 20, 30, 0.95);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 24px;
+            width: 380px;
+            padding: 24px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.6);
+            color: #fff;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            text-align: center;
+            transform: scale(0.9);
+            transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+        }
+        #app-pair-dialog-overlay.active #app-pair-dialog {
+            transform: scale(1);
+        }
+        .dialog-title {
+            font-size: 18px;
+            font-weight: 700;
+            margin-bottom: 24px;
+            color: #00E5FF;
+            text-shadow: 0 0 10px rgba(0,229,255,0.3);
+        }
+        .pair-edit-container {
+            display: flex;
+            align-items: center;
+            justify-content: space-around;
+            margin-bottom: 28px;
+        }
+        .pair-app-slot {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 100px;
+        }
+        .pair-app-slot img {
+            width: 64px;
+            height: 64px;
+            margin-bottom: 8px;
+            object-fit: contain;
+        }
+        .pair-app-slot span {
+            font-size: 13px;
+            font-weight: 500;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            width: 100%;
+            color: #eee;
+        }
+        .swap-btn {
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 50%;
+            width: 48px;
+            height: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.25s ease;
+            color: rgba(255,255,255,0.8);
+        }
+        .swap-btn:hover {
+            background: #00E5FF;
+            color: #000;
+            box-shadow: 0 0 12px rgba(0,229,255,0.5);
+            transform: rotate(180deg);
+        }
+        .dialog-buttons {
+            display: flex;
+            gap: 12px;
+            justify-content: stretch;
+        }
+        .dialog-btn {
+            flex: 1;
+            padding: 12px;
+            border-radius: 12px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s ease;
+        }
+        .dialog-btn.cancel {
+            background: rgba(255,255,255,0.08);
+            color: #eee;
+        }
+        .dialog-btn.cancel:hover {
+            background: rgba(255,255,255,0.15);
+        }
+        .dialog-btn.dissolve {
+            background: rgba(255, 59, 48, 0.15);
+            color: #FF3B30;
+            border: 1px solid rgba(255,59,48,0.3);
+        }
+        .dialog-btn.dissolve:hover {
+            background: rgba(255, 59, 48, 0.25);
+        }
+        .dialog-btn.save {
+            background: #00E5FF;
+            color: #000;
+            box-shadow: 0 0 10px rgba(0,229,255,0.3);
+        }
+        .dialog-btn.save:hover {
+            background: #00b8cc;
+        }
     </style>
 </head>
 <body>
@@ -669,12 +1104,14 @@
             </div>
         </div>
 
+        <!-- Global Notice Toast Layer -->
+        <div id="launcher-loading" style="display: none;">
+            <div class="loading-spinner"></div>
+            <div class="loading-text">Loading apps...</div>
+        </div>
+
         <!-- Web Native Launcher UI -->
         <div id="web-launcher">
-            <div id="launcher-loading">
-                <div class="loading-spinner"></div>
-                <div class="loading-text">Loading apps...</div>
-            </div>
             <div id="launcher-content" style="display:none;"></div>
         </div>
 
@@ -865,7 +1302,67 @@
                     transition:opacity 0.3s ease;white-space:nowrap;">
         </div>
 
-    </div>
+        <!-- ### 수정 시작 ### -->
+        <!-- Drag & Drop Overlay -->
+        <div id="drag-overlay">
+            <div class="drag-row-top" style="display: flex; gap: 16px; height: 110px; width: 100%; flex-shrink: 0;">
+                <div id="drop-zone-top" class="drop-zone" style="flex: 1; height: 100%;">
+                    <span class="drop-zone-icon" style="font-size: 24px; margin-bottom: 4px;">★</span>
+                    <span class="drop-zone-text" style="font-size: 13px;">즐겨찾기 추가</span>
+                </div>
+                <div id="drop-zone-autorun" class="drop-zone" style="flex: 1; height: 100%;">
+                    <span class="drop-zone-icon" style="font-size: 24px; margin-bottom: 4px;">⚡</span>
+                    <span class="drop-zone-text" style="font-size: 13px;">자동실행 등록</span>
+                    <div class="drop-zone-preview" id="drop-zone-autorun-preview"></div>
+                </div>
+            </div>
+            <div class="drag-row-middle" style="display: flex; gap: 16px; flex: 1; width: 100%;">
+                <div id="drop-zone-launch-left" class="drop-zone" style="flex: 1; height: 100%; border-color: rgba(0, 229, 255, 0.35); background: rgba(0, 229, 255, 0.02);">
+                    <span class="drop-zone-icon" style="font-size: 40px; color: #00E5FF; margin-bottom: 12px; text-shadow: 0 0 10px rgba(0, 229, 255, 0.4);">🖥️</span>
+                    <span class="drop-zone-text" style="font-size: 16px; font-weight: 700; color: #00E5FF; text-shadow: 0 0 10px rgba(0, 229, 255, 0.3);">Primary(왼쪽)에 실행</span>
+                    <span style="font-size: 11px; color: rgba(255,255,255,0.4); margin-top: 6px;">VD_1 Screen fullscreen execution</span>
+                </div>
+                <div id="drop-zone-launch-right" class="drop-zone" style="flex: 1; height: 100%; border-color: rgba(224, 64, 251, 0.35); background: rgba(224, 64, 251, 0.02);">
+                    <span class="drop-zone-icon" style="font-size: 40px; color: #E040FB; margin-bottom: 12px; text-shadow: 0 0 10px rgba(224, 64, 251, 0.4);">🖥️</span>
+                    <span class="drop-zone-text" style="font-size: 16px; font-weight: 700; color: #E040FB; text-shadow: 0 0 10px rgba(224, 64, 251, 0.3);">Secondary(오른쪽)에 실행</span>
+                    <span style="font-size: 11px; color: rgba(255,255,255,0.4); margin-top: 6px;">VD_2 Independent & Split launch</span>
+                </div>
+            </div>
+            <div class="drag-row-bottom" style="display: flex; width: 100%; height: 80px; flex-shrink: 0; display: none;" id="drag-row-bottom-wrap">
+                <div id="drop-zone-bottom" class="drop-zone" style="width: 100%; height: 100%; border-color: rgba(255, 59, 48, 0.3);">
+                    <span class="drop-zone-icon" style="font-size: 22px; margin-bottom: 4px;">🗑️</span>
+                    <span class="drop-zone-text" style="font-size: 13px; color: #FF3B30;">제거 / 휴지통</span>
+                </div>
+            </div>
+        </div>
+        <!-- ### 수정 끝 ### -->
+
+        <!-- App Pair Edit Dialog Overlay -->
+        <div id="app-pair-dialog-overlay">
+            <div id="app-pair-dialog">
+                <div class="dialog-title">App Pair Edit</div>
+                <div class="pair-edit-container">
+                    <div class="pair-app-slot" id="pair-app-left">
+                        <img src="" alt="" />
+                        <span>Left App</span>
+                    </div>
+                    <div class="swap-btn" id="pair-swap-btn" title="Swap sides">
+                        <svg viewBox="0 0 24 24">
+                            <path d="M16 17.01V10h-2v7.01h-3L15 21l4-3.99h-3zM9 3L5 6.99h3V14h2V6.99h3L9 3z"/>
+                        </svg>
+                    </div>
+                    <div class="pair-app-slot" id="pair-app-right">
+                        <img src="" alt="" />
+                        <span>Right App</span>
+                    </div>
+                </div>
+                <div class="dialog-buttons">
+                    <button class="dialog-btn cancel" id="pair-dialog-cancel">Cancel</button>
+                    <button class="dialog-btn dissolve" id="pair-dialog-dissolve">Dissolve Pair</button>
+                    <button class="dialog-btn save" id="pair-dialog-save">Save & Close</button>
+                </div>
+            </div>
+        </div>
 
     <script src="js/decoder.js"></script>
     <script src="js/mse-decoder.js"></script>

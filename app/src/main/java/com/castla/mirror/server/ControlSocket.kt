@@ -50,7 +50,8 @@ class ControlSocket(
                     server.onTouchEvent(event)
                 }
                 "requestKeyframe" -> {
-                    server.onKeyframeRequest()
+                    val pane = json.optString("pane", "primary")
+                    server.onKeyframeRequest(pane)
                 }
                 "codec" -> {
                     val mode = json.optString("mode", "h264")
@@ -97,6 +98,14 @@ class ControlSocket(
                         .takeIf { it.isNotEmpty() }
                     if (pkg.isNotEmpty()) {
                         server.onAppLaunchRequest(pkg, componentName, splitMode, pane)
+                    }
+                }
+                "LAUNCH_APP_PAIR" -> {
+                    val left = json.optString("left", "")
+                    val right = json.optString("right", "")
+                    if (left.isNotEmpty() && right.isNotEmpty()) {
+                        server.onAppLaunchRequest(left, null, false, "primary")
+                        server.onAppLaunchRequest(right, null, true, "secondary")
                     }
                 }
                 "closeSecondary" -> {

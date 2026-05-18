@@ -678,7 +678,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 launchTarget.contains("com.castla.mirror.ui.WebBrowserActivity")) &&
                 extraKey == "url" && extraValue?.contains("#split=true") == true
         return buildString {
-            append("am start -W --display $displayId -f 0x10200000 ") // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+            append("am start --display $displayId -f 0x10200000 ") // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
             if (isSplitBrowserLaunch) {
                 append("--windowingMode 5 ")
             }
@@ -725,7 +725,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
             // Instead of just sending HOME keyevent (which causes apps to be reparented
             // to display 0 if no launcher exists on the VD), we explicitly start
             // our own Secondary Home activity on the target display.
-            val cmd = "am start -W --display $displayId -n com.castla.mirror/.ui.VirtualDisplayHomeActivity"
+            val cmd = "am start --display $displayId -n com.castla.mirror/.ui.VirtualDisplayHomeActivity"
             execCommand(cmd)
             Log.i(TAG, "Launched custom HOME on display $displayId: $cmd")
         } catch (e: Exception) {
@@ -1457,5 +1457,230 @@ class PrivilegedService : IPrivilegedService.Stub() {
         } catch (e: Exception) {
             Log.w(TAG, "Failed to restore lock screen timeout setting", e)
         }
+    }
+
+    override fun getRunningTasksOnDisplay(displayId: Int): List<String> {
+        val packages = mutableListOf<String>()
+        try {
+            val atmClass = Class.forName("android.app.ActivityTaskManager")
+            val getService = atmClass.getMethod("getService")
+            val service = getService.invoke(null)
+            
+            val getTasksMethod = service.javaClass.methods.firstOrNull { it.name == "getTasks" }
+                ?: throw NoSuchMethodException("No getTasks method found on ATM")
+
+            val params = getTasksMethod.parameterTypes
+            val args = Array(params.size) { index ->
+                val type = params[index]
+                when {
+                    type == Int::class.javaPrimitiveType -> {
+                        if (index == 0) 100 else 0
+                    }
+                    type == Boolean::class.javaPrimitiveType -> false
+                    else -> null
+                }
+            }
+            val tasks = getTasksMethod.invoke(service, *args) as List<*>
+
+            for (task in tasks) {
+                if (task == null) continue
+                val taskClass = task.javaClass
+                
+                val displayIdField = try {
+                    taskClass.getField("displayId")
+                } catch (_: Exception) {
+                    try {
+                        taskClass.getSuperclass()?.getField("displayId")
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+                val tDisplayId = displayIdField?.getInt(task) ?: -1
+                if (displayId == -1 || tDisplayId == displayId) {
+                    val topActField = try {
+                        taskClass.getField("topActivity")
+                    } catch (_: Exception) {
+                        try {
+                            taskClass.getSuperclass()?.getField("topActivity")
+                        } catch (_: Exception) {
+                            null
+                        }
+                    }
+                    val topActivity = topActField?.get(task) as? ComponentName
+                    if (topActivity != null) {
+                        packages.add(topActivity.packageName)
+                        packages.add(topActivity.flattenToShortString())
+                    }
+
+                    val baseActField = try {
+                        taskClass.getField("baseActivity")
+                    } catch (_: Exception) {
+                        try {
+                            taskClass.getSuperclass()?.getField("baseActivity")
+                        } catch (_: Exception) {
+                            null
+                        }
+                    }
+                    val baseActivity = baseActField?.get(task) as? ComponentName
+                    if (baseActivity != null) {
+                        packages.add(baseActivity.packageName)
+                        packages.add(baseActivity.flattenToShortString())
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to get running tasks on display $displayId via reflection", e)
+        }
+        return packages.distinct()
+    }
+
+    override fun getTaskIdsForPackage(packageName: String): IntArray {
+        val taskIds = mutableListOf<Int>()
+        try {
+            val atmClass = Class.forName("android.app.ActivityTaskManager")
+            val getService = atmClass.getMethod("getService")
+            val service = getService.invoke(null)
+            
+            val getTasksMethod = service.javaClass.methods.firstOrNull { it.name == "getTasks" }
+                ?: throw NoSuchMethodException("No getTasks method found on ATM")
+
+            val params = getTasksMethod.parameterTypes
+            val args = Array(params.size) { index ->
+                val type = params[index]
+                when {
+                    type == Int::class.javaPrimitiveType -> {
+                        if (index == 0) 100 else 0
+                    }
+                    type == Boolean::class.javaPrimitiveType -> false
+                    else -> null
+                }
+            }
+            val tasks = getTasksMethod.invoke(service, *args) as List<*>
+
+            Log.d(TAG, "getTaskIdsForPackage natively: queried ${tasks.size} tasks for package $packageName")
+
+            for (task in tasks) {
+                if (task == null) continue
+                val taskClass = task.javaClass
+                
+                val topActField = try { taskClass.getField("topActivity") } catch (_: Exception) { null }
+                val baseActField = try { taskClass.getField("baseActivity") } catch (_: Exception) { null }
+                val realActField = try { taskClass.getField("realActivity") } catch (_: Exception) { null }
+                val origActField = try { taskClass.getField("origActivity") } catch (_: Exception) { null }
+
+                val topActivityObj = topActField?.get(task)
+                val baseActivityObj = baseActField?.get(task)
+                val realActivityObj = realActField?.get(task)
+                val origActivityObj = origActField?.get(task)
+
+                val topStr = topActivityObj?.toString() ?: ""
+                val baseStr = baseActivityObj?.toString() ?: ""
+                val realStr = realActivityObj?.toString() ?: ""
+                val origStr = origActivityObj?.toString() ?: ""
+
+                val matches = topStr.contains(packageName) ||
+                              baseStr.contains(packageName) ||
+                              realStr.contains(packageName) ||
+                              origStr.contains(packageName)
+
+                if (matches) {
+                    // 안드로이드 API 29+ 에서는 taskId 필드가 표준이며, 이전 버전은 id 필드를 사용함
+                    val idField = try {
+                        taskClass.getField("taskId")
+                    } catch (_: Exception) {
+                        try {
+                            taskClass.getField("id")
+                        } catch (_: Exception) {
+                            try {
+                                taskClass.getSuperclass()?.getField("taskId")
+                            } catch (_: Exception) {
+                                try {
+                                    taskClass.getSuperclass()?.getField("id")
+                                } catch (_: Exception) {
+                                    null
+                                }
+                            }
+                        }
+                    }
+                    val taskId = idField?.getInt(task) ?: -1
+                    if (taskId != -1) {
+                        taskIds.add(taskId)
+                        Log.i(TAG, "Matched task ID $taskId for package $packageName (top=$topStr, base=$baseStr, real=$realStr, orig=$origStr)")
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get task IDs for package $packageName natively", e)
+        }
+        return taskIds.toIntArray()
+    }
+
+    override fun getDisplayIdForPackage(packageName: String): Int {
+        try {
+            val atmClass = Class.forName("android.app.ActivityTaskManager")
+            val getService = atmClass.getMethod("getService")
+            val service = getService.invoke(null)
+            
+            val getTasksMethod = service.javaClass.methods.firstOrNull { it.name == "getTasks" }
+                ?: throw NoSuchMethodException("No getTasks method found on ATM")
+
+            val params = getTasksMethod.parameterTypes
+            val args = Array(params.size) { index ->
+                val type = params[index]
+                when {
+                    type == Int::class.javaPrimitiveType -> {
+                        if (index == 0) 100 else 0
+                    }
+                    type == Boolean::class.javaPrimitiveType -> false
+                    else -> null
+                }
+            }
+            val tasks = getTasksMethod.invoke(service, *args) as List<*>
+
+            for (task in tasks) {
+                if (task == null) continue
+                val taskClass = task.javaClass
+                
+                val topActField = try { taskClass.getField("topActivity") } catch (_: Exception) { null }
+                val baseActField = try { taskClass.getField("baseActivity") } catch (_: Exception) { null }
+                val realActField = try { taskClass.getField("realActivity") } catch (_: Exception) { null }
+                val origActField = try { taskClass.getField("origActivity") } catch (_: Exception) { null }
+
+                val topActivityObj = topActField?.get(task)
+                val baseActivityObj = baseActField?.get(task)
+                val realActivityObj = realActField?.get(task)
+                val origActivityObj = origActField?.get(task)
+
+                val topStr = topActivityObj?.toString() ?: ""
+                val baseStr = baseActivityObj?.toString() ?: ""
+                val realStr = realActivityObj?.toString() ?: ""
+                val origStr = origActivityObj?.toString() ?: ""
+
+                val matches = topStr.contains(packageName) ||
+                              baseStr.contains(packageName) ||
+                              realStr.contains(packageName) ||
+                              origStr.contains(packageName)
+
+                if (matches) {
+                    val displayIdField = try {
+                        taskClass.getField("displayId")
+                    } catch (_: Exception) {
+                        try {
+                            taskClass.getSuperclass()?.getField("displayId")
+                        } catch (_: Exception) {
+                            null
+                        }
+                    }
+                    val tDisplayId = displayIdField?.getInt(task) ?: -1
+                    if (tDisplayId >= 0) {
+                        Log.i(TAG, "Matched display ID $tDisplayId for package $packageName")
+                        return tDisplayId
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get display ID for package $packageName", e)
+        }
+        return -1
     }
 }

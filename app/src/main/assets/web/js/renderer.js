@@ -19,7 +19,7 @@ class CanvasRenderer {
     }
 
     setFitMode(mode) {
-        const nextMode = mode === 'cover' ? 'cover' : 'contain';
+        const nextMode = (mode === 'cover' || mode === 'fill') ? mode : 'contain';
         if (this.fitMode === nextMode) return;
         this.fitMode = nextMode;
         if (this.videoWidth > 0 && this.videoHeight > 0) {
@@ -66,7 +66,12 @@ class CanvasRenderer {
         const videoAspect = this.videoWidth / this.videoHeight;
         const canvasAspect = canvasWidth / canvasHeight;
 
-        if (this.fitMode === 'cover') {
+        if (this.fitMode === 'fill') {
+            this.renderWidth = canvasWidth;
+            this.renderHeight = canvasHeight;
+            this.renderX = 0;
+            this.renderY = 0;
+        } else if (this.fitMode === 'cover') {
             if (videoAspect > canvasAspect) {
                 this.renderHeight = canvasHeight;
                 this.renderWidth = canvasHeight * videoAspect;

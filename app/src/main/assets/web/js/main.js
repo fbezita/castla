@@ -17,7 +17,9 @@ let secondaryFramePacer = null;
 let currentPrimaryApp = null;
 let isLauncherMode = true; // start in launcher mode
 let currentServerInstanceId = null; // Track current server instance to detect restarts
+let lastLaunchedInstanceId = null; // Prevent duplicate auto-run launches in the same session
 let launchGuardUntil = 0; // block accidental launches after splash dismiss
+let lastLaunchTime = 0; // track last app launch time to prevent transient stream-stop redirection
 let codecMode = 'h264'; // Default to h264, switch to mjpeg if needed
 
 // Playback profile system:
@@ -149,11 +151,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function getEffectivePrimaryFitMode() {
-        return browserSplitState.active ? 'contain' : streamPolicy.fitMode;
+        return browserSplitState.active ? 'fill' : streamPolicy.fitMode;
     }
 
     function getEffectiveSecondaryFitMode() {
-        return browserSplitState.active ? browserSplitState.fitMode : streamPolicy.fitMode;
+        return browserSplitState.active ? 'fill' : streamPolicy.fitMode;
     }
 
     function alignDimension(value) {
@@ -231,21 +233,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     function resolveSplitPreset(primaryApp, secondaryApp) {
         const primaryAspectRatio = getAppPreferredAspectRatio(primaryApp, 'primary');
         const secondaryAspectRatio = getAppPreferredAspectRatio(secondaryApp, 'secondary');
-        const primaryHints = getAppLayoutHints(primaryApp);
-        const secondaryHints = getAppLayoutHints(secondaryApp);
 
-        let ratio = computePrimaryPaneRatio(primaryAspectRatio);
-        if (primaryHints.isMapApp && secondaryHints.isVideoApp) {
-            ratio = 0.31;
-        } else if (primaryHints.isMapApp) {
-            ratio = 0.33;
-        }
+        let ratio = 0.50;
 
         return {
             ratio: Math.max(0.25, Math.min(0.75, ratio)),
             secondaryAspectRatio,
-            primaryAspectRatio,
-            secondaryAspectRatio
+            primaryAspectRatio
         };
     }
 
@@ -259,23 +253,28 @@ document.addEventListener('DOMContentLoaded', async () => {
         const { primaryWidth, secondaryWidth, shellHeight } = getDesiredSplitWidths(activeRatio);
         const primaryHeight = Math.round(streamPane?.clientHeight || canvas?.clientHeight || shellHeight || window.innerHeight || 0);
 
-        if (primaryWidth <= 0 || primaryHeight <= 0) {
-            return;
+        console.log(`[ViewportLockDebug] activeRatio=${activeRatio} primaryWidth=${primaryWidth} secondaryWidth=${secondaryWidth} shellHeight=${shellHeight} isFullscreen=${playerShell?.classList.contains('secondary-fullscreen')}`);
+
+        if (primaryWidth > 0 && primaryHeight > 0) {
+            browserSplitState.lockedPrimaryViewport = buildLockedViewport(
+                primaryWidth,
+                primaryHeight
+            );
+        } else {
+            browserSplitState.lockedPrimaryViewport = null;
         }
 
-        browserSplitState.lockedPrimaryViewport = buildLockedViewport(
-            primaryWidth,
-            primaryHeight
-        );
-
         if (SPLIT_STRATEGY === 'dual_stream') {
-            const secondaryHeight = Math.round(browserSplitPane?.clientHeight || shellHeight || 0);
+            const secondaryHeight = shellHeight;
             if (secondaryWidth > 0 && secondaryHeight > 0) {
                 browserSplitState.lockedSecondaryViewport = buildLockedViewport(
                     secondaryWidth,
                     secondaryHeight,
                     preset.secondaryAspectRatio
                 );
+                console.log(`[ViewportLockDebug] lockedSecondaryViewport locked! width=${browserSplitState.lockedSecondaryViewport.width} height=${browserSplitState.lockedSecondaryViewport.height}`);
+            } else {
+                console.warn(`[ViewportLockDebug] Secondary lock skipped because secondaryWidth=${secondaryWidth} or secondaryHeight=${secondaryHeight}`);
             }
         }
     }
@@ -304,6 +303,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (shellWidth <= 0 || shellHeight <= 0) {
             return { primaryWidth: 0, secondaryWidth: 0, shellWidth, shellHeight };
         }
+        
+        // Strict Secondary Fullscreen Safeguard: Dedicate 100% shellWidth to VD_2 viewport
+        if (playerShell?.classList.contains('secondary-fullscreen')) {
+            return { primaryWidth: 0, secondaryWidth: shellWidth, shellWidth, shellHeight };
+        }
+
         const minPrimaryWidth = 320;
         const minSecondaryWidth = 320;
         const desiredPrimaryWidth = Math.round(shellWidth * ratio);
@@ -319,7 +324,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function setBrowserSplitRatio(nextRatio) {
-        const ratio = Math.max(0.25, Math.min(0.75, nextRatio));
+        const ratio = Math.max(0.10, Math.min(0.90, nextRatio));
         browserSplitState.ratio = ratio;
         const { primaryWidth, shellWidth } = getDesiredSplitWidths(ratio);
         if (primaryWidth > 0 && shellWidth > 0) {
@@ -378,6 +383,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                 (frame) => secondaryFramePacer.push(frame),
                 (error) => console.error('[Main] Secondary decoder error:', error)
             );
+            secondaryDecoder.onFrameGap = () => {
+                if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
+                    controlSocket.send(JSON.stringify({ type: 'requestKeyframe', pane: 'secondary' }));
+                }
+            };
             secondaryDecoder.setBacklogProfile(playbackProfile);
             secondaryFramePacer.setDecoder(secondaryDecoder);
             secondaryDecoder.renderer = renderer;
@@ -476,6 +486,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             const btnRatio = parseFloat(b.dataset.ratio);
             b.classList.toggle('active', Math.abs(btnRatio - initialRatio) < 0.05);
         });
+        playerShell?.classList.remove('secondary-fullscreen');
         playerShell?.classList.add('browser-split');
         updateSplitToolbarVisibility();
         applyActiveFitModes();
@@ -510,6 +521,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         document.body.dataset.layoutMode = streamPolicy.layoutMode;
         playerShell?.classList.remove('browser-split');
         playerShell?.classList.remove('freeform-split');
+        playerShell?.classList.remove('secondary-fullscreen');
         playerShell?.style.removeProperty('--split-left-width');
 
         if (SPLIT_STRATEGY === 'freeform') {
@@ -602,15 +614,35 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     }
 
+    let launcherNoticeTimer = null;
+
     function showLauncherNotice(message) {
         if (!launcherLoading) return;
-        launcherLoading.innerHTML = `<div class="loading-text">${message}</div>`;
+        const isAppLoading = message.toLowerCase().includes('loading') || message.toLowerCase().includes('launching');
+        launcherLoading.innerHTML = `
+            ${isAppLoading ? '<div class="loading-spinner"></div>' : ''}
+            <div class="loading-text">${message}</div>
+        `;
         launcherLoading.style.display = 'flex';
+
+        if (launcherNoticeTimer) {
+            clearTimeout(launcherNoticeTimer);
+            launcherNoticeTimer = null;
+        }
+        if (!isAppLoading) {
+            launcherNoticeTimer = setTimeout(() => {
+                hideLauncherNotice();
+            }, 3000);
+        }
     }
 
     function hideLauncherNotice() {
         if (!launcherLoading) return;
         launcherLoading.style.display = 'none';
+        if (launcherNoticeTimer) {
+            clearTimeout(launcherNoticeTimer);
+            launcherNoticeTimer = null;
+        }
     }
 
     // ── Bubble Composer functions ──
@@ -854,6 +886,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                 (frame) => framePacer.push(frame),
                 (error) => console.error('[Main] Decoder error:', error)
             );
+            decoder.onFrameGap = () => {
+                if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
+                    controlSocket.send(JSON.stringify({ type: 'requestKeyframe', pane: 'primary' }));
+                }
+            };
             decoder.setBacklogProfile(playbackProfile);
             framePacer.setDecoder(decoder);
             decoder.renderer = renderer;
@@ -1111,8 +1148,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                 : { width: livePrimaryWidth, height: livePrimaryHeight };
 
             // Only send secondary viewport in legacy dual-stream mode
+            console.log(`[ViewportSendDebug] SPLIT_STRATEGY=${SPLIT_STRATEGY} active=${browserSplitState.active} browserSplitPane=${!!browserSplitPane}`);
             if (SPLIT_STRATEGY === 'dual_stream' && browserSplitState.active && browserSplitPane) {
                 const secondaryViewport = browserSplitState.lockedSecondaryViewport;
+                console.log(`[ViewportSendDebug] secondaryViewport=${JSON.stringify(secondaryViewport)}`);
                 if (secondaryViewport && secondaryViewport.width > 0 && secondaryViewport.height > 0) {
                     console.log(`[Main] Sending viewport pane=secondary requested=${secondaryViewport.width}x${secondaryViewport.height} fitMode=${getEffectiveSecondaryFitMode()} locked=${describeViewport(secondaryViewport)} split=${browserSplitState.active}`);
                     controlSocket.send(JSON.stringify({
@@ -1267,6 +1306,14 @@ document.addEventListener('DOMContentLoaded', async () => {
                         goHome();
                     }
                     currentServerInstanceId = newInstanceId;
+                } else if (msg.type === 'APP_STREAM_STOPPED') {
+                    const elapsed = Date.now() - lastLaunchTime;
+                    if (elapsed < 5000) {
+                        console.log(`[Main] APP_STREAM_STOPPED received during launch transition (${elapsed}ms). Ignoring transient signal to ensure stable dual-app boot.`);
+                    } else {
+                        console.log('[Main] APP_STREAM_STOPPED received. Redirecting to home...');
+                        goHome();
+                    }
                 } else if (msg.type === 'resolutionChanged') {
                     const pane = msg.pane || 'primary';
                     const lockedViewport = pane === 'secondary'
@@ -1276,6 +1323,31 @@ document.addEventListener('DOMContentLoaded', async () => {
                         ? getEffectiveSecondaryFitMode()
                         : getEffectivePrimaryFitMode();
                     console.log(`[Main] Server resolution changed pane=${pane} server=${msg.width}x${msg.height} fitMode=${fitMode} locked=${describeViewport(lockedViewport)} split=${browserSplitState.active}`);
+
+                    // Safely hot-refresh the specific active decoder and request a keyframe immediately to maintain zero-restart clean feed
+                    if (pane === 'secondary') {
+                        if (browserSplitState.active) {
+                            console.log('[Main] Performing hot-refresh on secondary decoder to prevent rainbow artifacts');
+                            initSecondaryDecoder().then(() => {
+                                connectSecondaryVideo();
+                                setTimeout(() => {
+                                    if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
+                                        controlSocket.send(JSON.stringify({ type: 'requestKeyframe', pane: 'secondary' }));
+                                    }
+                                }, 80);
+                            });
+                        }
+                    } else {
+                        console.log('[Main] Performing hot-refresh on primary decoder to prevent rainbow artifacts');
+                        initDecoder().then(() => {
+                            connectVideo();
+                            setTimeout(() => {
+                                if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
+                                    controlSocket.send(JSON.stringify({ type: 'requestKeyframe', pane: 'primary' }));
+                                }
+                            }, 80);
+                        });
+                    }
                 } else if (msg.type === 'showKeyboard') {
                     console.log('[IME] showKeyboard received pane=', msg.pane, 'useBubble=', useBubbleInput, 'bubbleEl=', !!inputBubble, 'bubbleVisible=', bubbleVisible);
                     if (useBubbleInput) {
@@ -1344,8 +1416,507 @@ document.addEventListener('DOMContentLoaded', async () => {
             favorites.push(packageName);
         }
         localStorage.setItem('castla_favorites', JSON.stringify(favorites));
-        // Refresh the launcher lists in real-time
-        loadLauncherApps();
+        // Refresh the launcher lists in real-time instantly without network lag
+        refreshLauncherUI();
+    }
+
+    // ⚡ Auto-run data helper function
+    function toggleAutoRun(packageName) {
+        const primaryPkg = localStorage.getItem('castla_autorun_primary');
+        const secondaryPkg = localStorage.getItem('castla_autorun_secondary');
+
+        if (primaryPkg === packageName) {
+            // Primary -> Secondary
+            localStorage.removeItem('castla_autorun_primary');
+            localStorage.setItem('castla_autorun_secondary', packageName);
+        } else if (secondaryPkg === packageName) {
+            // Secondary -> Off
+            localStorage.removeItem('castla_autorun_secondary');
+        } else {
+            // Off -> Primary (Clear existing primary and set this)
+            localStorage.setItem('castla_autorun_primary', packageName);
+            if (secondaryPkg === packageName) {
+                localStorage.removeItem('castla_autorun_secondary');
+            }
+        }
+        // Refresh the launcher lists in real-time instantly without network lag
+        refreshLauncherUI();
+    }
+
+    // ── App Pairs & Drag-and-Drop States & Helper Functions ──
+    let allApps = []; // Globally tracked apps
+    let appPairs = (() => {
+        try {
+            const saved = localStorage.getItem('castla_app_pairs');
+            return saved ? JSON.parse(saved) : [];
+        } catch (_) { return []; }
+    })();
+
+    let activeDragApp = null; 
+    let activeDragIsExisting = false; 
+    let longPressTimer = null;
+    let dragGhost = null;
+    let currentHoveredDropZone = null;
+
+    /* ### 수정 시작 ### */
+    // Cache elements for Drag-and-Drop (Spatial Launching)
+    let dragOverlay, dropZoneTop, dropZoneAutorun, dropZoneLaunchLeft, dropZoneLaunchRight, dropZoneBottom;
+    let dropZoneAutorunPreview;
+    let appPairOverlay, pairAppLeft, pairAppRight, pairSwapBtn, pairCancelBtn, pairDissolveBtn, pairSaveBtn;
+    let currentEditingPair = null;
+
+    function initDragAndDropElements() {
+        dragOverlay = document.getElementById('drag-overlay');
+        dropZoneTop = document.getElementById('drop-zone-top');
+        dropZoneAutorun = document.getElementById('drop-zone-autorun');
+        dropZoneLaunchLeft = document.getElementById('drop-zone-launch-left');
+        dropZoneLaunchRight = document.getElementById('drop-zone-launch-right');
+        dropZoneBottom = document.getElementById('drop-zone-bottom');
+        dropZoneAutorunPreview = document.getElementById('drop-zone-autorun-preview');
+
+        appPairOverlay = document.getElementById('app-pair-dialog-overlay');
+        pairAppLeft = document.getElementById('pair-app-left');
+        pairAppRight = document.getElementById('pair-app-right');
+        pairSwapBtn = document.getElementById('pair-swap-btn');
+        pairCancelBtn = document.getElementById('pair-dialog-cancel');
+        pairDissolveBtn = document.getElementById('pair-dialog-dissolve');
+        pairSaveBtn = document.getElementById('pair-dialog-save');
+        /* ### 수정 끝 ### */
+
+        if (pairSwapBtn && !pairSwapBtn.hasAttribute('data-bound')) {
+            pairSwapBtn.setAttribute('data-bound', 'true');
+            pairSwapBtn.addEventListener('click', () => {
+                if (!currentEditingPair) return;
+                const temp = currentEditingPair.left;
+                currentEditingPair.left = currentEditingPair.right;
+                currentEditingPair.right = temp;
+                updatePairDialogUI();
+            });
+
+            pairCancelBtn.addEventListener('click', () => {
+                appPairOverlay.classList.remove('active');
+                currentEditingPair = null;
+            });
+
+            pairDissolveBtn.addEventListener('click', () => {
+                if (!currentEditingPair) return;
+                appPairs = appPairs.filter(p => 
+                    !(p.left === currentEditingPair.left && p.right === currentEditingPair.right) &&
+                    !(p.left === currentEditingPair.right && p.right === currentEditingPair.left)
+                );
+                localStorage.setItem('castla_app_pairs', JSON.stringify(appPairs));
+                appPairOverlay.classList.remove('active');
+                currentEditingPair = null;
+                refreshLauncherUI();
+            });
+
+            pairSaveBtn.addEventListener('click', () => {
+                if (!currentEditingPair) return;
+                const index = appPairs.findIndex(p => 
+                    (p.left === currentEditingPair.left && p.right === currentEditingPair.right) ||
+                    (p.left === currentEditingPair.right && p.right === currentEditingPair.left)
+                );
+                if (index !== -1) {
+                    appPairs[index] = currentEditingPair;
+                } else {
+                    appPairs.push(currentEditingPair);
+                }
+                localStorage.setItem('castla_app_pairs', JSON.stringify(appPairs));
+                appPairOverlay.classList.remove('active');
+                currentEditingPair = null;
+                refreshLauncherUI();
+            });
+        }
+    }
+
+    function openAppPairEdit(pair) {
+        initDragAndDropElements();
+        currentEditingPair = { ...pair };
+        updatePairDialogUI();
+        appPairOverlay.classList.add('active');
+    }
+
+    function updatePairDialogUI() {
+        if (!currentEditingPair) return;
+        const leftApp = allApps.find(a => a.packageName === currentEditingPair.left);
+        const rightApp = allApps.find(a => a.packageName === currentEditingPair.right);
+
+        const leftImg = pairAppLeft.querySelector('img');
+        const leftSpan = pairAppLeft.querySelector('span');
+        leftImg.src = leftApp ? `/api/icon?pkg=${leftApp.packageName}` : '';
+        leftSpan.textContent = leftApp ? leftApp.label : 'Unknown';
+
+        const rightImg = pairAppRight.querySelector('img');
+        const rightSpan = pairAppRight.querySelector('span');
+        rightImg.src = rightApp ? `/api/icon?pkg=${rightApp.packageName}` : '';
+        rightSpan.textContent = rightApp ? rightApp.label : 'Unknown';
+    }
+
+    function getPairPseudoApps(apps) {
+        return appPairs.map(pair => {
+            const leftApp = apps.find(a => a.packageName === pair.left);
+            const rightApp = apps.find(a => a.packageName === pair.right);
+            return {
+                packageName: `pair:${pair.left}:${pair.right}`,
+                isPair: true,
+                left: pair.left,
+                right: pair.right,
+                label: `${leftApp?.label || 'Left'} + ${rightApp?.label || 'Right'}`,
+                category: 'PAIR'
+            };
+        });
+    }
+
+    function startDragging(app, cell, event) {
+        initDragAndDropElements();
+        activeDragApp = app;
+        cell.classList.add('dragging');
+        
+        // Lock body and launcher scrolling dynamically to prevent scroll gesture cancelling pointer capture
+        const launcherEl = document.getElementById('web-launcher');
+        if (launcherEl) {
+            launcherEl.style.overflowY = 'hidden';
+            launcherEl.style.touchAction = 'none';
+        }
+        document.body.style.overflow = 'hidden';
+        document.body.style.touchAction = 'none';
+        
+        if (navigator.vibrate) {
+            navigator.vibrate(50);
+        }
+
+        const sourceCat = cell.getAttribute('data-source-category');
+        activeDragIsExisting = sourceCat === 'FAVORITES' || 
+                               sourceCat === 'AUTORUN' || 
+                               sourceCat === 'PAIR';
+
+        /* ### 수정 시작 ### */
+        dragOverlay.classList.add('active');
+        
+        // Toggle the bottom trash drop zone wrap dynamically
+        const bottomWrap = document.getElementById('drag-row-bottom-wrap');
+        if (bottomWrap) {
+            bottomWrap.style.display = activeDragIsExisting ? 'flex' : 'none';
+        }
+
+        // Update live viewport task guides inside spatial drop zones
+        const leftGuide = dropZoneLaunchLeft ? dropZoneLaunchLeft.querySelector('span:last-of-type') : null;
+        if (leftGuide) {
+            if (currentPrimaryApp) {
+                leftGuide.innerHTML = `<img src="/api/icon?pkg=${currentPrimaryApp.packageName}" style="width:16px;height:16px;object-fit:contain;vertical-align:middle;margin-right:4px;border-radius:4px;"/> <strong style="color:#00E5FF;">${currentPrimaryApp.label}</strong> 실행 중`;
+            } else {
+                leftGuide.innerHTML = `<span style="color:rgba(255,255,255,0.35);">빈 화면 (VD_1)</span>`;
+            }
+        }
+
+        const rightGuide = dropZoneLaunchRight ? dropZoneLaunchRight.querySelector('span:last-of-type') : null;
+        if (rightGuide) {
+            if (browserSplitState.active && browserSplitState.app) {
+                rightGuide.innerHTML = `<img src="/api/icon?pkg=${browserSplitState.app.packageName}" style="width:16px;height:16px;object-fit:contain;vertical-align:middle;margin-right:4px;border-radius:4px;"/> <strong style="color:#E040FB;">${browserSplitState.app.label}</strong> 실행 중`;
+            } else {
+                rightGuide.innerHTML = `<span style="color:rgba(255,255,255,0.35);">빈 화면 (VD_2)</span>`;
+            }
+        }
+        /* ### 수정 끝 ### */
+
+        updateDropZonePreviews();
+
+        dragGhost = document.createElement('div');
+        dragGhost.className = 'drag-ghost';
+        
+        const ghostImg = document.createElement('img');
+        if (app.isPair) {
+            ghostImg.src = `/api/icon?pkg=${app.left}`;
+        } else {
+            ghostImg.src = `/api/icon?pkg=${app.packageName}`;
+        }
+        dragGhost.appendChild(ghostImg);
+        document.body.appendChild(dragGhost);
+
+        updateGhostPosition(event.clientX, event.clientY);
+    }
+
+    function updateGhostPosition(x, y) {
+        if (!dragGhost) return;
+        dragGhost.style.left = `${x}px`;
+        dragGhost.style.top = `${y}px`;
+    }
+
+    /* ### 수정 시작 ### */
+    function updateDropZonePreviews() {
+        const primaryPkg = localStorage.getItem('castla_autorun_primary');
+        const secondaryPkg = localStorage.getItem('castla_autorun_secondary');
+
+        if (!dropZoneAutorunPreview) return;
+
+        if (primaryPkg && secondaryPkg) {
+            const leftApp = allApps.find(a => a.packageName === primaryPkg);
+            const rightApp = allApps.find(a => a.packageName === secondaryPkg);
+            dropZoneAutorunPreview.innerHTML = `
+                <div style="display:flex; gap:10px; align-items:center; margin-bottom: 6px;">
+                    <img src="/api/icon?pkg=${primaryPkg}" style="width:36px; height:36px; object-fit:contain;" />
+                    <span style="font-size:18px; color:#00E5FF; font-weight:bold;">+</span>
+                    <img src="/api/icon?pkg=${secondaryPkg}" style="width:36px; height:36px; object-fit:contain;" />
+                </div>
+                <span>${leftApp ? leftApp.label : 'Left'} + ${rightApp ? rightApp.label : 'Right'}</span>
+            `;
+            dropZoneAutorunPreview.style.display = 'flex';
+        } else if (primaryPkg) {
+            const leftApp = allApps.find(a => a.packageName === primaryPkg);
+            dropZoneAutorunPreview.innerHTML = `
+                <img src="/api/icon?pkg=${primaryPkg}" />
+                <span>${leftApp ? leftApp.label : 'Auto-run'}</span>
+            `;
+            dropZoneAutorunPreview.style.display = 'flex';
+        } else {
+            dropZoneAutorunPreview.style.display = 'none';
+        }
+    }
+    /* ### 수정 끝 ### */
+
+    /* ### 수정 시작 ### */
+    function checkHoveredZone(x, y) {
+        if (!dropZoneTop) return null;
+        
+        const topRect = dropZoneTop.getBoundingClientRect();
+        if (x >= topRect.left && x <= topRect.right && y >= topRect.top && y <= topRect.bottom) {
+            return 'top';
+        }
+        
+        if (dropZoneAutorun) {
+            const autorunRect = dropZoneAutorun.getBoundingClientRect();
+            if (x >= autorunRect.left && x <= autorunRect.right && y >= autorunRect.top && y <= autorunRect.bottom) {
+                return 'autorun';
+            }
+        }
+        
+        if (dropZoneLaunchLeft) {
+            const leftRect = dropZoneLaunchLeft.getBoundingClientRect();
+            if (x >= leftRect.left && x <= leftRect.right && y >= leftRect.top && y <= leftRect.bottom) {
+                return 'launch_left';
+            }
+        }
+        
+        if (dropZoneLaunchRight) {
+            const rightRect = dropZoneLaunchRight.getBoundingClientRect();
+            if (x >= rightRect.left && x <= rightRect.right && y >= rightRect.top && y <= rightRect.bottom) {
+                return 'launch_right';
+            }
+        }
+        
+        if (dropZoneBottom && activeDragIsExisting) {
+            const bottomRect = dropZoneBottom.getBoundingClientRect();
+            if (x >= bottomRect.left && x <= bottomRect.right && y >= bottomRect.top && y <= bottomRect.bottom) {
+                return 'bottom';
+            }
+        }
+        
+        return null;
+    }
+    /* ### 수정 끝 ### */
+
+    function checkHoveredCell(x, y) {
+        const cells = document.querySelectorAll('.app-cell');
+        for (const cell of cells) {
+            if (cell.classList.contains('dragging')) continue;
+            const rect = cell.getBoundingClientRect();
+            if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+                return cell;
+            }
+        }
+        return null;
+    }
+
+    /* ### 수정 시작 ### */
+    function handleDragMove(x, y) {
+        if (!activeDragApp) return;
+        updateGhostPosition(x, y);
+
+        // Auto-scroll launcher grid during drag when hovering near top/bottom grid boundaries
+        const launcherEl = document.getElementById('web-launcher');
+        if (launcherEl) {
+            const scrollSpeed = 12;
+            if (y > window.innerHeight - 140) {
+                launcherEl.scrollTop += scrollSpeed;
+            } else if (y > 140 && y < 260) {
+                launcherEl.scrollTop -= scrollSpeed;
+            }
+        }
+
+        if (dropZoneTop) dropZoneTop.classList.remove('hovered');
+        if (dropZoneAutorun) dropZoneAutorun.classList.remove('hovered');
+        if (dropZoneLaunchLeft) dropZoneLaunchLeft.classList.remove('hovered');
+        if (dropZoneLaunchRight) dropZoneLaunchRight.classList.remove('hovered');
+        if (dropZoneBottom) dropZoneBottom.classList.remove('hovered');
+
+        const hoveredCell = checkHoveredCell(x, y);
+        if (hoveredCell) {
+            currentHoveredDropZone = null;
+            hoveredCell.style.transform = 'scale(1.15)';
+            hoveredCell.style.boxShadow = '0 0 15px rgba(0, 229, 255, 0.4)';
+            hoveredCell.style.border = '1px solid #00E5FF';
+        } else {
+            document.querySelectorAll('.app-cell').forEach(cell => {
+                if (cell.classList.contains('dragging')) return;
+                cell.style.transform = '';
+                cell.style.boxShadow = '';
+                cell.style.border = '';
+            });
+
+            const hoveredZone = checkHoveredZone(x, y);
+            currentHoveredDropZone = hoveredZone;
+
+            if (hoveredZone === 'top' && dropZoneTop) dropZoneTop.classList.add('hovered');
+            else if (hoveredZone === 'autorun' && dropZoneAutorun) dropZoneAutorun.classList.add('hovered');
+            else if (hoveredZone === 'launch_left' && dropZoneLaunchLeft) dropZoneLaunchLeft.classList.add('hovered');
+            else if (hoveredZone === 'launch_right' && dropZoneLaunchRight) dropZoneLaunchRight.classList.add('hovered');
+            else if (hoveredZone === 'bottom' && dropZoneBottom) dropZoneBottom.classList.add('hovered');
+        }
+    }
+    /* ### 수정 끝 ### */
+
+    function handleDragEnd(x, y) {
+        if (!activeDragApp) return;
+
+        const cell = document.querySelector('.app-cell.dragging');
+        if (cell) cell.classList.remove('dragging');
+
+        document.querySelectorAll('.app-cell').forEach(cell => {
+            cell.style.transform = '';
+            cell.style.boxShadow = '';
+            cell.style.border = '';
+        });
+
+        dragOverlay.classList.remove('active');
+        if (dragGhost) {
+            dragGhost.remove();
+            dragGhost = null;
+        }
+
+        const hoveredZone = checkHoveredZone(x, y);
+        const hoveredCell = checkHoveredCell(x, y);
+
+        if (hoveredCell) {
+            const targetPkg = hoveredCell.getAttribute('data-package');
+            if (targetPkg && targetPkg !== activeDragApp.packageName && !activeDragApp.isPair) {
+                const targetApp = allApps.find(a => a.packageName === targetPkg);
+                if (targetApp && !targetApp.isPair) {
+                    createAppPair(activeDragApp.packageName, targetApp.packageName);
+                }
+            }
+        } else if (hoveredZone) {
+            triggerDropZoneAction(hoveredZone, activeDragApp, cell);
+        }
+
+        // Restore body and launcher scrolling dynamically
+        const launcherEl = document.getElementById('web-launcher');
+        if (launcherEl) {
+            launcherEl.style.overflowY = '';
+            launcherEl.style.touchAction = '';
+        }
+        document.body.style.overflow = '';
+        document.body.style.touchAction = '';
+
+        /* ### 수정 시작 ### */
+        // Close the sidebar quick launcher automatically after any drag-and-drop ends
+        if (splitDrawer) {
+            splitDrawer.classList.remove('open');
+        }
+
+        activeDragApp = null;
+        currentHoveredDropZone = null;
+    }
+    /* ### 수정 끝 ### */
+
+    /* ### 수정 시작 ### */
+    function triggerDropZoneAction(zone, app, cell) {
+        if (app.isPair) {
+            if (zone === 'autorun') {
+                localStorage.setItem('castla_autorun_primary', app.left);
+                localStorage.setItem('castla_autorun_secondary', app.right);
+                showLauncherNotice(`${app.label} set to Auto-run (Split Screen).`);
+                refreshLauncherUI();
+                return;
+            }
+        }
+
+        const pkg = app.packageName;
+        const sourceCat = cell ? cell.getAttribute('data-source-category') : '';
+
+        if (zone === 'top') {
+            let favorites = getFavorites();
+            if (!favorites.includes(pkg)) {
+                favorites.push(pkg);
+                localStorage.setItem('castla_favorites', JSON.stringify(favorites));
+                showLauncherNotice(`${app.label} added to Favorites.`);
+            }
+        } else if (zone === 'autorun') {
+            localStorage.setItem('castla_autorun_primary', pkg);
+            localStorage.removeItem('castla_autorun_secondary');
+            showLauncherNotice(`${app.label} set to Auto-run.`);
+        } else if (zone === 'launch_left') {
+            console.log(`[Launcher] Drag-launching Primary (VD_1): ${app.label}`);
+            if (browserSplitState.active && browserSplitState.app && browserSplitState.app.packageName === pkg) {
+                showLauncherNotice('이미 오른쪽 화면(Secondary)에서 실행 중인 앱입니다.');
+                return;
+            }
+            launchApp(app, false);
+        } else if (zone === 'launch_right') {
+            console.log(`[Launcher] Drag-launching Secondary (VD_2): ${app.label}`);
+            if (currentPrimaryApp && currentPrimaryApp.packageName === pkg) {
+                showLauncherNotice('이미 왼쪽 화면(Primary)에서 실행 중인 앱입니다.');
+                return;
+            }
+            if (currentPrimaryApp) {
+                if (!isDualStreamCapable(app)) {
+                    showLauncherNotice('이 앱은 듀얼 스트림을 지원하지 않습니다.');
+                    return;
+                }
+                enableBrowserSplit(app);
+            } else {
+                launchAppOnSecondaryIndependently(app);
+            }
+        } else if (zone === 'bottom') {
+            if (sourceCat === 'FAVORITES') {
+                let favorites = getFavorites().filter(p => p !== pkg);
+                localStorage.setItem('castla_favorites', JSON.stringify(favorites));
+                showLauncherNotice(`${app.label} removed from Favorites.`);
+            } else if (sourceCat === 'PAIR') {
+                appPairs = appPairs.filter(p => !(p.left === app.left && p.right === app.right));
+                localStorage.setItem('castla_app_pairs', JSON.stringify(appPairs));
+                let favorites = getFavorites().filter(p => p !== pkg);
+                localStorage.setItem('castla_favorites', JSON.stringify(favorites));
+                showLauncherNotice('App Pair dissolved.');
+            } else if (sourceCat === 'AUTORUN') {
+                const leftPkg = localStorage.getItem('castla_autorun_primary');
+                const rightPkg = localStorage.getItem('castla_autorun_secondary');
+                if (leftPkg === pkg) localStorage.removeItem('castla_autorun_primary');
+                if (rightPkg === pkg) localStorage.removeItem('castla_autorun_secondary');
+                showLauncherNotice(`${app.label} removed from Auto-run.`);
+            }
+        }
+
+        refreshLauncherUI();
+    }
+    /* ### 수정 끝 ### */
+
+    function createAppPair(leftPkg, rightPkg) {
+        const exists = appPairs.some(p => 
+            (p.left === leftPkg && p.right === rightPkg) ||
+            (p.left === rightPkg && p.right === leftPkg)
+        );
+        if (exists) {
+            showLauncherNotice('This App Pair already exists.');
+            return;
+        }
+
+        appPairs.push({
+            left: leftPkg,
+            right: rightPkg
+        });
+        localStorage.setItem('castla_app_pairs', JSON.stringify(appPairs));
+        showLauncherNotice('New App Pair created!');
+        refreshLauncherUI();
     }
 
     async function loadLauncherApps() {
@@ -1355,6 +1926,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             const data = await response.json();
 
             const apps = data.apps || [];
+            allApps = apps;
 
             applyStreamPolicy({
                 fitMode: data.fitMode || 'contain',
@@ -1362,22 +1934,63 @@ document.addEventListener('DOMContentLoaded', async () => {
                 layoutMode: data.layoutMode || 'single'
             });
 
-            renderLauncherApps(apps);
-            renderSplitLauncherApps(apps);
+            const pairApps = getPairPseudoApps(apps);
+            const combinedApps = [...apps, ...pairApps];
+
+            renderLauncherApps(combinedApps);
+            renderSplitLauncherApps(combinedApps);
+
+            // ⚡ Auto-run logic (Execute auto-run once per initial server instance connection)
+            const primaryPkg = localStorage.getItem('castla_autorun_primary');
+            const secondaryPkg = localStorage.getItem('castla_autorun_secondary');
+
+            if (!lastLaunchedInstanceId && currentServerInstanceId) {
+                lastLaunchedInstanceId = currentServerInstanceId;
+                if (primaryPkg) {
+                    const primaryApp = apps.find(a => a.packageName === primaryPkg);
+                    if (primaryApp) {
+                        const secondaryApp = secondaryPkg ? apps.find(a => a.packageName === secondaryPkg) : null;
+                        if (secondaryApp) {
+                            console.log(`[AutoRun] Automatically launching dual apps directly: ${primaryApp.packageName} + ${secondaryApp.packageName}`);
+                            launchDualAppsDirectly(primaryApp, secondaryApp);
+                        } else {
+                            console.log(`[AutoRun] Automatically launching primary app at startup: ${primaryApp.packageName}`);
+                            launchApp(primaryApp, false);
+                        }
+                    }
+                }
+            }
         } catch (err) {
             console.error('[Launcher]', err);
             showLauncherNotice('Failed to load apps. Try refreshing.');
         }
     }
 
+    function refreshLauncherUI() {
+        const pairApps = getPairPseudoApps(allApps);
+        const combinedApps = [...allApps, ...pairApps];
+        renderLauncherApps(combinedApps);
+        renderSplitLauncherApps(combinedApps);
+    }
+
     function renderSplitLauncherApps(apps) {
         if (!splitAppList) return;
         splitAppList.innerHTML = '';
 
+        const singleApps = apps.filter(app => !app.isPair);
+
+        const primaryPkg = localStorage.getItem('castla_autorun_primary');
+        const secondaryPkg = localStorage.getItem('castla_autorun_secondary');
+
         const favoritesList = getFavorites();
         const grouped = {};
 
-        // Prepend Favorites category group at the very top if any exist
+        // Prepend Auto-run category group at the very top if any exist
+        if (primaryPkg || secondaryPkg) {
+            grouped['AUTORUN'] = { title: 'Auto-run', color: '#00E5FF', items: [] };
+        }
+
+        // Prepend Favorites category group right below Auto-run if any exist
         if (favoritesList.length > 0) {
             grouped['FAVORITES'] = { title: 'Favorites', color: '#FFD700', items: [] };
         }
@@ -1387,7 +2000,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         grouped['MUSIC'] = { title: 'Music', color: '#9C27B0', items: [] };
         grouped['OTHER'] = { title: 'Apps', color: '#9E9E9E', items: [] };
 
-        apps.forEach(app => {
+        singleApps.forEach(app => {
+            if (app.packageName === primaryPkg || app.packageName === secondaryPkg) {
+                grouped['AUTORUN']?.items.push(app);
+            }
             if (favoritesList.includes(app.packageName)) {
                 grouped['FAVORITES']?.items.push(app);
             }
@@ -1434,16 +2050,104 @@ document.addEventListener('DOMContentLoaded', async () => {
                 // Favorite star button
                 const star = document.createElement('div');
                 const isFav = favoritesList.includes(app.packageName);
-                star.className = `app-star ${isFav ? 'active' : ''}`;
+                star.className = `split-app-star ${isFav ? 'active' : ''}`;
                 star.innerHTML = '&#9733;';
                 
                 star.addEventListener('click', (e) => {
                     e.stopPropagation(); // Prevent parent launching event
                     toggleFavorite(app.packageName);
                 });
+                star.addEventListener('pointerdown', (e) => e.stopPropagation());
+                star.addEventListener('pointerup', (e) => e.stopPropagation());
                 cell.appendChild(star);
 
-                cell.addEventListener('click', () => {
+                // Auto-run bolt button
+                const bolt = document.createElement('div');
+                const pPkg = localStorage.getItem('castla_autorun_primary');
+                const sPkg = localStorage.getItem('castla_autorun_secondary');
+                
+                let boltClass = 'split-app-bolt';
+                if (pPkg === app.packageName) {
+                    boltClass += ' active primary';
+                } else if (sPkg === app.packageName) {
+                    boltClass += ' active secondary';
+                }
+                bolt.className = boltClass;
+                bolt.innerHTML = '&#9889;';
+                
+                bolt.addEventListener('click', (e) => {
+                    e.stopPropagation(); // Prevent parent launching event
+                    toggleAutoRun(app.packageName);
+                });
+                bolt.addEventListener('pointerdown', (e) => e.stopPropagation());
+                bolt.addEventListener('pointerup', (e) => e.stopPropagation());
+                cell.appendChild(bolt);
+
+                // Long-press Drag and Drop pointer events for split launcher sidebar app items
+                let startX = 0, startY = 0;
+                let isPointerDown = false;
+                let wasDragging = false;
+
+                cell.addEventListener('pointerdown', (e) => {
+                    if (e.button !== 0) return;
+                    // Strict safeguard: Ignore if clicking favorite or auto-run directly
+                    if (e.target.classList.contains('split-app-star') || e.target.classList.contains('split-app-bolt')) {
+                        return;
+                    }
+                    isPointerDown = true;
+                    wasDragging = false;
+                    startX = e.clientX;
+                    startY = e.clientY;
+
+                    try { cell.setPointerCapture(e.pointerId); } catch (_) {}
+
+                    longPressTimer = setTimeout(() => {
+                        if (isPointerDown) {
+                            startDragging(app, cell, e);
+                        }
+                    }, 1000);
+                });
+
+                cell.addEventListener('pointermove', (e) => {
+                    if (!isPointerDown) return;
+                    
+                    const dist = Math.hypot(e.clientX - startX, e.clientY - startY);
+                    if (dist > 18 && !activeDragApp) {
+                        clearTimeout(longPressTimer);
+                    }
+
+                    if (activeDragApp) {
+                        handleDragMove(e.clientX, e.clientY);
+                    }
+                });
+
+                const endPointerHandler = (e) => {
+                    if (!isPointerDown) return;
+                    isPointerDown = false;
+                    clearTimeout(longPressTimer);
+                    try { cell.releasePointerCapture(e.pointerId); } catch (_) {}
+
+                    if (activeDragApp) {
+                        wasDragging = true;
+                        handleDragEnd(e.clientX, e.clientY);
+                        setTimeout(() => {
+                            wasDragging = false;
+                        }, 100);
+                    }
+                };
+
+                cell.addEventListener('pointerup', endPointerHandler);
+                cell.addEventListener('pointercancel', endPointerHandler);
+
+                cell.addEventListener('click', (e) => {
+                    // Double safeguard: Block event propagation if hitting toggle icons
+                    if (e.target.classList.contains('split-app-star') || e.target.classList.contains('split-app-bolt')) {
+                        return;
+                    }
+                    if (wasDragging) {
+                        wasDragging = false;
+                        return;
+                    }
                     launchApp(app, true);
                     splitDrawer.classList.remove('open');
                 });
@@ -1458,12 +2162,25 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function renderLauncherApps(apps) {
         launcherContent.innerHTML = '';
+        const primaryPkg = localStorage.getItem('castla_autorun_primary');
+        const secondaryPkg = localStorage.getItem('castla_autorun_secondary');
+
         const favoritesList = getFavorites();
         const grouped = {};
 
-        // Prepend Favorites category group at the very top if any exist
+        // Prepend Auto-run category group at the very top if any exist
+        if (primaryPkg || secondaryPkg) {
+            grouped['AUTORUN'] = { title: 'Auto-run', color: '#00E5FF', items: [] };
+        }
+
+        // Prepend Favorites category group right below Auto-run if any exist
         if (favoritesList.length > 0) {
             grouped['FAVORITES'] = { title: 'Favorites', color: '#FFD700', items: [] };
+        }
+
+        // Add App Pairs category group if any exist
+        if (appPairs.length > 0) {
+            grouped['PAIR'] = { title: 'App Pairs', color: '#E040FB', items: [] };
         }
 
         grouped['NAVIGATION'] = { title: 'Navigation', color: '#4CAF50', items: [] };
@@ -1471,9 +2188,26 @@ document.addEventListener('DOMContentLoaded', async () => {
         grouped['MUSIC'] = { title: 'Music', color: '#9C27B0', items: [] };
         grouped['OTHER'] = { title: 'Apps', color: '#9E9E9E', items: [] };
 
+        // Check if there is a matching App Pair for the auto-run configuration
+        const matchingAutorunPair = apps.find(app => 
+            app.isPair && 
+            ((app.left === primaryPkg && app.right === secondaryPkg) || 
+             (app.left === secondaryPkg && app.right === primaryPkg))
+        );
+
         apps.forEach(app => {
             if (favoritesList.includes(app.packageName)) {
                 grouped['FAVORITES']?.items.push(app);
+            }
+            if (app.isPair) {
+                if (app === matchingAutorunPair) {
+                    grouped['AUTORUN']?.items.push(app);
+                }
+                grouped['PAIR']?.items.push(app);
+                return;
+            }
+            if (!matchingAutorunPair && (app.packageName === primaryPkg || app.packageName === secondaryPkg)) {
+                grouped['AUTORUN']?.items.push(app);
             }
             if (grouped[app.category]) grouped[app.category].items.push(app);
             else grouped['OTHER'].items.push(app);
@@ -1505,31 +2239,235 @@ document.addEventListener('DOMContentLoaded', async () => {
             group.items.forEach(app => {
                 const cell = document.createElement('div');
                 cell.className = 'app-cell';
+                cell.setAttribute('data-package', app.packageName);
+                cell.setAttribute('data-source-category', key);
 
-                const icon = document.createElement('img');
-                icon.className = 'app-icon';
-                icon.src = `/api/icon?pkg=${app.packageName}`;
-                icon.loading = 'lazy';
-                cell.appendChild(icon);
+                const iconWrapper = document.createElement('div');
+
+                if (app.isPair) {
+                    iconWrapper.className = 'app-pair-icon-wrapper';
+
+                    const leftIcon = document.createElement('img');
+                    leftIcon.className = 'app-pair-icon-left';
+                    leftIcon.src = `/api/icon?pkg=${app.left}`;
+                    leftIcon.loading = 'lazy';
+                    iconWrapper.appendChild(leftIcon);
+
+                    const rightIcon = document.createElement('img');
+                    rightIcon.className = 'app-pair-icon-right';
+                    rightIcon.src = `/api/icon?pkg=${app.right}`;
+                    rightIcon.loading = 'lazy';
+                    iconWrapper.appendChild(rightIcon);
+
+                    if (key === 'FAVORITES') {
+                        const delBadge = document.createElement('div');
+                        delBadge.className = 'app-star active';
+                        delBadge.style.color = '#F44336';
+                        delBadge.style.right = '-8px';
+                        delBadge.style.top = '-6px';
+                        delBadge.style.zIndex = '15';
+                        delBadge.style.fontSize = '14px';
+                        delBadge.style.textShadow = '0 1px 3px rgba(0,0,0,0.9)';
+                        delBadge.innerHTML = '🗑️';
+                        delBadge.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            let favorites = getFavorites().filter(p => p !== app.packageName);
+                            localStorage.setItem('castla_favorites', JSON.stringify(favorites));
+                            showLauncherNotice(`${app.label} removed from Favorites.`);
+                            refreshLauncherUI();
+                        });
+                        iconWrapper.appendChild(delBadge);
+                    } else if (key === 'AUTORUN') {
+                        const delBadge = document.createElement('div');
+                        delBadge.className = 'app-star active';
+                        delBadge.style.color = '#F44336';
+                        delBadge.style.right = '-8px';
+                        delBadge.style.top = '-6px';
+                        delBadge.style.zIndex = '15';
+                        delBadge.style.fontSize = '14px';
+                        delBadge.style.textShadow = '0 1px 3px rgba(0,0,0,0.9)';
+                        delBadge.innerHTML = '🗑️';
+                        delBadge.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            localStorage.removeItem('castla_autorun_primary');
+                            localStorage.removeItem('castla_autorun_secondary');
+                            showLauncherNotice('Auto-run apps removed.');
+                            refreshLauncherUI();
+                        });
+                        iconWrapper.appendChild(delBadge);
+                    } else {
+                        // Add an elegant edit gear button
+                        const editBtn = document.createElement('div');
+                        editBtn.className = 'app-star active';
+                        editBtn.style.color = '#00E5FF';
+                        editBtn.style.right = '-8px';
+                        editBtn.style.top = '-6px';
+                        editBtn.style.zIndex = '15';
+                        editBtn.style.textShadow = '0 1px 3px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,0.9)';
+                        editBtn.innerHTML = '⚙️';
+                        editBtn.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            openAppPairEdit(app);
+                        });
+                        iconWrapper.appendChild(editBtn);
+                    }
+                } else {
+                    iconWrapper.className = 'app-icon-wrapper';
+
+                    const icon = document.createElement('img');
+                    icon.className = 'app-icon';
+                    icon.src = `/api/icon?pkg=${app.packageName}`;
+                    icon.loading = 'lazy';
+                    iconWrapper.appendChild(icon);
+
+                    if (key === 'FAVORITES') {
+                        // Show direct delete badge instead of toggle buttons
+                        const delBadge = document.createElement('div');
+                        delBadge.className = 'app-star active';
+                        delBadge.style.color = '#F44336';
+                        delBadge.style.right = '-8px';
+                        delBadge.style.top = '-6px';
+                        delBadge.style.zIndex = '15';
+                        delBadge.style.fontSize = '14px';
+                        delBadge.style.textShadow = '0 1px 3px rgba(0,0,0,0.9)';
+                        delBadge.innerHTML = '🗑️';
+                        delBadge.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            let favorites = getFavorites().filter(p => p !== app.packageName);
+                            localStorage.setItem('castla_favorites', JSON.stringify(favorites));
+                            showLauncherNotice(`${app.label} removed from Favorites.`);
+                            refreshLauncherUI();
+                        });
+                        iconWrapper.appendChild(delBadge);
+                    } else if (key === 'AUTORUN') {
+                        // Show direct delete badge instead of toggle buttons
+                        const delBadge = document.createElement('div');
+                        delBadge.className = 'app-star active';
+                        delBadge.style.color = '#F44336';
+                        delBadge.style.right = '-8px';
+                        delBadge.style.top = '-6px';
+                        delBadge.style.zIndex = '15';
+                        delBadge.style.fontSize = '14px';
+                        delBadge.style.textShadow = '0 1px 3px rgba(0,0,0,0.9)';
+                        delBadge.innerHTML = '🗑️';
+                        delBadge.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            const leftPkg = localStorage.getItem('castla_autorun_primary');
+                            const rightPkg = localStorage.getItem('castla_autorun_secondary');
+                            if (leftPkg === app.packageName) localStorage.removeItem('castla_autorun_primary');
+                            if (rightPkg === app.packageName) localStorage.removeItem('castla_autorun_secondary');
+                            showLauncherNotice(`${app.label} removed from Auto-run.`);
+                            refreshLauncherUI();
+                        });
+                        iconWrapper.appendChild(delBadge);
+                    } else {
+                        // Favorite star button
+                        const star = document.createElement('div');
+                        const isFav = favoritesList.includes(app.packageName);
+                        star.className = `app-star ${isFav ? 'active' : ''}`;
+                        star.innerHTML = '&#9733;';
+                        
+                        star.addEventListener('click', (e) => {
+                            e.stopPropagation(); // Prevent parent launching event
+                            toggleFavorite(app.packageName);
+                        });
+                        iconWrapper.appendChild(star);
+
+                        // Auto-run bolt button
+                        const bolt = document.createElement('div');
+                        const pPkg = localStorage.getItem('castla_autorun_primary');
+                        const sPkg = localStorage.getItem('castla_autorun_secondary');
+                        
+                        let boltClass = 'app-bolt';
+                        if (pPkg === app.packageName) {
+                            boltClass += ' active primary';
+                        } else if (sPkg === app.packageName) {
+                            boltClass += ' active secondary';
+                        }
+                        bolt.className = boltClass;
+                        bolt.innerHTML = '&#9889;';
+                        
+                        bolt.addEventListener('click', (e) => {
+                            e.stopPropagation(); // Prevent parent launching event
+                            toggleAutoRun(app.packageName);
+                        });
+                        iconWrapper.appendChild(bolt);
+                    }
+                }
 
                 const label = document.createElement('div');
                 label.className = 'app-label';
                 label.textContent = app.label;
+
+                cell.appendChild(iconWrapper);
                 cell.appendChild(label);
 
-                // Favorite star button
-                const star = document.createElement('div');
-                const isFav = favoritesList.includes(app.packageName);
-                star.className = `app-star ${isFav ? 'active' : ''}`;
-                star.innerHTML = '&#9733;';
-                
-                star.addEventListener('click', (e) => {
-                    e.stopPropagation(); // Prevent parent launching event
-                    toggleFavorite(app.packageName);
+                // Long-press Drag and Drop pointer events
+                let startX = 0, startY = 0;
+                let isPointerDown = false;
+                let wasDragging = false;
+
+                cell.addEventListener('pointerdown', (e) => {
+                    if (e.button !== 0) return;
+                    isPointerDown = true;
+                    wasDragging = false;
+                    startX = e.clientX;
+                    startY = e.clientY;
+
+                    cell.setPointerCapture(e.pointerId);
+
+                    longPressTimer = setTimeout(() => {
+                        if (isPointerDown) {
+                            startDragging(app, cell, e);
+                        }
+                    }, 1000);
                 });
-                cell.appendChild(star);
+
+                cell.addEventListener('pointermove', (e) => {
+                    if (!isPointerDown) return;
+                    
+                    const dist = Math.hypot(e.clientX - startX, e.clientY - startY);
+                    if (dist > 18 && !activeDragApp) {
+                        clearTimeout(longPressTimer);
+                    }
+
+                    if (activeDragApp) {
+                        handleDragMove(e.clientX, e.clientY);
+                    }
+                });
+
+                const endPointerHandler = (e) => {
+                    if (!isPointerDown) return;
+                    isPointerDown = false;
+                    clearTimeout(longPressTimer);
+                    try { cell.releasePointerCapture(e.pointerId); } catch (_) {}
+
+                    if (activeDragApp) {
+                        wasDragging = true;
+                        handleDragEnd(e.clientX, e.clientY);
+                        // Reset wasDragging after 100ms so that if the pointer was released outside the cell
+                        // (which triggers no click event on the cell), the cell click is not permanently blocked.
+                        setTimeout(() => {
+                            wasDragging = false;
+                        }, 100);
+                    }
+                };
+
+                cell.addEventListener('pointerup', endPointerHandler);
+                cell.addEventListener('pointercancel', endPointerHandler);
+
+                // Launch or Edit Double Click
+                cell.addEventListener('dblclick', () => {
+                    if (app.isPair) {
+                        openAppPairEdit(app);
+                    }
+                });
 
                 cell.addEventListener('click', () => {
+                    if (wasDragging) {
+                        wasDragging = false;
+                        return;
+                    }
                     launchApp(app, false);
                 });
 
@@ -1548,13 +2486,191 @@ document.addEventListener('DOMContentLoaded', async () => {
         window.dispatchEvent(new Event('launcher-ready'));
     }
 
+    async function launchDualAppsDirectly(primaryApp, secondaryApp) {
+        console.log(`[Launcher] Launching dual apps directly: ${primaryApp.packageName} + ${secondaryApp.packageName}`);
+        lastLaunchTime = Date.now();
+
+        // 1. Prepare browser layout state for split screen
+        destroySecondaryTransport();
+        browserSplitState.active = true;
+        browserSplitState.app = secondaryApp;
+        browserSplitState.fitMode = 'contain';
+        browserSplitState.lockedPrimaryViewport = null;
+        browserSplitState.lockedSecondaryViewport = null;
+        browserSplitState.preset = resolveSplitPreset(primaryApp, secondaryApp);
+        streamPolicy.layoutMode = 'browser_split';
+        document.body.dataset.layoutMode = streamPolicy.layoutMode;
+
+        const initialRatio = browserSplitState.preset.ratio || browserSplitState.ratio || DEFAULT_BROWSER_SPLIT_RATIO;
+        setBrowserSplitRatio(initialRatio);
+
+        // Highlight the closest ratio button
+        document.querySelectorAll('.split-ratio-btn').forEach(b => {
+            const btnRatio = parseFloat(b.dataset.ratio);
+            b.classList.toggle('active', Math.abs(btnRatio - initialRatio) < 0.05);
+        });
+
+        playerShell?.classList.add('browser-split');
+        updateSplitToolbarVisibility();
+        applyActiveFitModes();
+
+        // 2. Clear launcher UI state
+        currentPrimaryApp = primaryApp;
+        isLauncherMode = false;
+        webLauncher.classList.add('hidden');
+        splitDrawer.style.display = 'flex';
+        homeBtn.style.display = 'block';
+        clearLaunchTimeout();
+        clearFrameWatchdog();
+        clearCanvas();
+
+        // 3. Force lock the split viewports so we send correct split resolutions immediately
+        lockBrowserSplitViewports(secondaryApp);
+
+        // 4. Initialize secondary decoder and video connection
+        await initSecondaryDecoder();
+        if (secondaryTouchHandler) {
+            secondaryTouchHandler.destroy();
+        }
+        secondaryTouchHandler = new TouchHandler(secondaryCanvas, getActiveSecondaryRenderer(), controlSocket, 'secondary');
+        applyActiveFitModes();
+        connectSecondaryVideo();
+
+        // 5. Send viewport resolutions to the server immediately (split viewports!)
+        sendViewportSize(true);
+
+        // 6. Send the launch command for the primary app
+        setTimeout(() => {
+            if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
+                controlSocket.send(JSON.stringify({
+                    type: 'launchApp',
+                    pkg: primaryApp.packageName,
+                    splitMode: true,
+                    pane: 'primary'
+                }));
+            }
+        }, 800);
+
+        // 7. Send the launch command for the secondary app (safe 1200ms delay to prevent ActivityTaskManager focus/launch collision during sequential heavy app startups)
+        setTimeout(() => {
+            if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
+                controlSocket.send(JSON.stringify({
+                    type: 'launchApp',
+                    pkg: secondaryApp.packageName,
+                    splitMode: true,
+                    pane: 'secondary'
+                }));
+            }
+        }, 2000);
+    }
+
+    /* ### 수정 시작 ### */
+    async function launchAppOnSecondaryIndependently(app) {
+        console.log(`[Launcher] Launching independent app on Secondary (VD_2): ${app.packageName}`);
+        lastLaunchTime = Date.now();
+
+        // 1. Prepare browser layout state for split screen with empty primary
+        destroySecondaryTransport();
+        browserSplitState.active = true;
+        browserSplitState.app = app;
+        browserSplitState.fitMode = 'contain';
+        browserSplitState.lockedPrimaryViewport = null;
+        browserSplitState.lockedSecondaryViewport = null;
+        browserSplitState.preset = resolveSplitPreset(null, app);
+        streamPolicy.layoutMode = 'browser_split';
+        document.body.dataset.layoutMode = streamPolicy.layoutMode;
+
+        // Force a balanced 50:50 ratio for secondary launching independently
+        const initialRatio = 0.5;
+        setBrowserSplitRatio(initialRatio);
+
+        // Highlight the closest ratio button
+        document.querySelectorAll('.split-ratio-btn').forEach(b => {
+            const btnRatio = parseFloat(b.dataset.ratio);
+            b.classList.toggle('active', Math.abs(btnRatio - initialRatio) < 0.05);
+        });
+
+        playerShell?.classList.add('secondary-fullscreen');
+        playerShell?.classList.add('browser-split');
+        updateSplitToolbarVisibility();
+        applyActiveFitModes();
+
+        // 2. Clear launcher UI state
+        currentPrimaryApp = null;
+        isLauncherMode = false;
+        webLauncher.classList.add('hidden');
+        splitDrawer.style.display = 'flex';
+        homeBtn.style.display = 'block';
+        clearLaunchTimeout();
+        clearFrameWatchdog();
+        clearCanvas();
+
+        // 3. Force lock the split viewports
+        lockBrowserSplitViewports(app);
+
+        // 4. Initialize secondary decoder and video connection
+        await initSecondaryDecoder();
+        if (secondaryTouchHandler) {
+            secondaryTouchHandler.destroy();
+        }
+        secondaryTouchHandler = new TouchHandler(secondaryCanvas, getActiveSecondaryRenderer(), controlSocket, 'secondary');
+        applyActiveFitModes();
+        connectSecondaryVideo();
+
+        // 5. Send initial viewport resolutions cleanly and trigger unified launch
+        sendViewportSize(true);
+        setTimeout(() => {
+            if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
+                controlSocket.send(JSON.stringify({
+                    type: 'launchApp',
+                    pkg: app.packageName,
+                    splitMode: true,
+                    pane: 'secondary'
+                }));
+            }
+        }, 150);
+    }
+    /* ### 수정 끝 ### */
+
+    function launchAppPair(leftPkg, rightPkg) {
+        console.log(`[Launcher] Launching App Pair: left=${leftPkg}, right=${rightPkg}`);
+        if (Date.now() < launchGuardUntil) return;
+        lastLaunchTime = Date.now(); // Record launch timestamp
+
+        const leftApp = allApps.find(a => a.packageName === leftPkg);
+        const rightApp = allApps.find(a => a.packageName === rightPkg);
+
+        if (leftApp && rightApp) {
+            launchDualAppsDirectly(leftApp, rightApp);
+        } else if (leftApp) {
+            launchApp(leftApp, false);
+        }
+    }
+
     function launchApp(app, isSplit = false) {
+        if (app.isPair) {
+            launchAppPair(app.left, app.right);
+            return;
+        }
+
+        // Strict Duplication Safeguard:
+        // Prevent running the exact same app on both VD_1 and VD_2 simultaneously
+        const pkgName = app.packageName;
+        if (isSplit && currentPrimaryApp && currentPrimaryApp.packageName === pkgName) {
+            showLauncherNotice('이미 왼쪽 화면(Primary)에서 실행 중인 앱입니다.');
+            return;
+        }
+        if (!isSplit && browserSplitState.active && browserSplitState.app && browserSplitState.app.packageName === pkgName) {
+            showLauncherNotice('이미 오른쪽 화면(Secondary)에서 실행 중인 앱입니다.');
+            return;
+        }
+
         // Block accidental launches right after splash dismiss
         if (Date.now() < launchGuardUntil) {
             console.log(`[Launcher] Blocked accidental launch: ${app.packageName} (guard active)`);
             return;
         }
-        const pkgName = app.packageName;
+        lastLaunchTime = Date.now(); // Record launch timestamp
         const componentName = app.componentName || null;
         console.log(`[Launcher] Launching app: ${pkgName} (split=${isSplit})`);
 
@@ -1571,7 +2687,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             return;
         }
 
-        disableBrowserSplit();
+        const keepSplit = browserSplitState.active;
+
+        if (!keepSplit) {
+            disableBrowserSplit();
+        }
         currentPrimaryApp = app;
         isLauncherMode = false;
         webLauncher.classList.add('hidden');
@@ -1582,14 +2702,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         // Clear the previous app's last frame immediately so it doesn't
         // flash during the transition to the new app
-        clearCanvas();
+        if (!keepSplit) {
+            clearCanvas();
+        }
 
         setTimeout(() => {
             if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
                 const message = {
                     type: 'launchApp',
                     pkg: pkgName,
-                    splitMode: false
+                    splitMode: keepSplit,
+                    pane: 'primary'
                 };
                 if (componentName) message.componentName = componentName;
 
@@ -1651,7 +2774,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         hideOverlay();
         firstFrameReceived = false;
 
-        currentPrimaryApp = null;
         if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
             controlSocket.send(JSON.stringify({ type: 'goHome' }));
         }
@@ -1705,13 +2827,82 @@ document.addEventListener('DOMContentLoaded', async () => {
         btn.addEventListener('click', () => {
             const ratio = parseFloat(btn.dataset.ratio);
             if (!ratio || !browserSplitState.active) return;
+            const rect = playerShell.getBoundingClientRect();
+            if (rect.width <= 0) return;
+
+            // Constrain ratio dynamically to guarantee at least 320px width on both panes
+            const minRatioMargin = 320 / rect.width;
+            const constrainedRatio = Math.max(minRatioMargin, Math.min(1 - minRatioMargin, ratio));
+
             document.querySelectorAll('.split-ratio-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
-            setBrowserSplitRatio(ratio);
+            setBrowserSplitRatio(constrainedRatio);
             lockBrowserSplitViewports(browserSplitState.app);
             requestAnimationFrame(() => sendViewportSize());
         });
     });
+
+    // Draggable Split Divider for real-time resizing
+    if (splitDivider) {
+        let isDraggingDivider = false;
+
+        splitDivider.addEventListener('pointerdown', (e) => {
+            if (!browserSplitState.active) return;
+            isDraggingDivider = true;
+            splitDivider.setPointerCapture(e.pointerId);
+            playerShell?.classList.add('resizing-divider');
+        });
+
+        splitDivider.addEventListener('pointermove', (e) => {
+            if (!isDraggingDivider || !browserSplitState.active) return;
+            const rect = playerShell.getBoundingClientRect();
+            if (rect.width <= 0) return;
+            const relativeX = e.clientX - rect.left;
+            const ratio = relativeX / rect.width;
+            
+            // Constrain ratio dynamically to guarantee at least 320px width on both panes (H.264 minimum safe resolution boundary)
+            const minRatioMargin = 320 / rect.width;
+            const constrainedRatio = Math.max(minRatioMargin, Math.min(1 - minRatioMargin, ratio));
+            setBrowserSplitRatio(constrainedRatio);
+        });
+
+        const endDrag = (e) => {
+            if (!isDraggingDivider) return;
+            isDraggingDivider = false;
+            try { splitDivider.releasePointerCapture(e.pointerId); } catch (_) {}
+            playerShell?.classList.remove('resizing-divider');
+
+            const currentRatio = browserSplitState.ratio;
+            if (currentRatio >= 0.85) {
+                // Extreme drag right: Maximize Left (Primary) app to 100%
+                console.log('[SplitDivider] Dragged extreme right. Maximizing Primary app to 100%.');
+                disableBrowserSplit();
+                return;
+            } else if (currentRatio <= 0.15) {
+                // Extreme drag left: Maximize Right (Secondary) app to 100% (Promote it to primary)
+                console.log('[SplitDivider] Dragged extreme left. Promoting and maximizing Secondary app.');
+                const secondaryApp = browserSplitState.app;
+                if (secondaryApp) {
+                    disableBrowserSplit({ notifyServer: false });
+                    launchApp(secondaryApp, false);
+                }
+                return;
+            }
+
+            // Save and sync with server
+            lockBrowserSplitViewports(browserSplitState.app);
+            requestAnimationFrame(() => sendViewportSize());
+
+            // Highlight nearest ratio button if any close match exists
+            document.querySelectorAll('.split-ratio-btn').forEach(b => {
+                const btnRatio = parseFloat(b.dataset.ratio);
+                b.classList.toggle('active', Math.abs(btnRatio - currentRatio) < 0.05);
+            });
+        };
+
+        splitDivider.addEventListener('pointerup', endDrag);
+        splitDivider.addEventListener('pointercancel', endDrag);
+    }
 
     if (splitCloseBtn) {
         splitCloseBtn.addEventListener('click', () => {
@@ -2116,6 +3307,41 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (homeBtn) {
         profileObserver.observe(homeBtn, { attributes: true, attributeFilter: ['style'] });
     }
+    // Block browser native context menu globally to allow premium custom long-press drag & drop
+    document.addEventListener('contextmenu', e => e.preventDefault());
+
+    // Block HTML5 native dragging globally to prevent interference with pointer drag & drop
+    document.addEventListener('dragstart', (e) => {
+        e.preventDefault();
+    });
+
+    // Prevent default touchmove when dragging an app to block mobile Chrome from triggering native scrolling and firing pointercancel
+    document.addEventListener('touchmove', (e) => {
+        if (activeDragApp) {
+            e.preventDefault();
+        }
+    }, { passive: false });
+
+    // Global pointerup and pointercancel to safely clean up dragging state even if mouse is released outside the browser window
+    window.addEventListener('pointerup', (e) => {
+        if (activeDragApp) {
+            handleDragEnd(e.clientX, e.clientY);
+        }
+    });
+
+    window.addEventListener('pointercancel', (e) => {
+        if (activeDragApp) {
+            handleDragEnd(e.clientX, e.clientY);
+        }
+    });
+
+    // Reset drag state instantly if window loses focus (e.g. user Alt-Tabs or clicks outside the window)
+    window.addEventListener('blur', () => {
+        if (activeDragApp) {
+            handleDragEnd(0, 0); // Safely cancel drag without action
+        }
+    });
+
     updateOverlayControlsVisibility();
     updateSplitToolbarVisibility();
 });

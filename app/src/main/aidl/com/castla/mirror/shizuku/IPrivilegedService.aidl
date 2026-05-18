@@ -178,4 +178,18 @@ interface IPrivilegedService {
      * Restore the original stay-awake mode setting.
      */
     void restoreStayAwakeMode() = 28;
+
+    List<String> getRunningTasksOnDisplay(int displayId) = 29;
+
+    /**
+     * Return all task IDs belonging to the specified package name.
+     * Native ATM query (under 1ms).
+     */
+    int[] getTaskIdsForPackage(String packageName) = 30;
+
+    /**
+     * Return the display ID where the specified package's task currently resides, or -1 if not found.
+     * Native ATM query (under 1ms).
+     */
+    int getDisplayIdForPackage(String packageName) = 31;
 }

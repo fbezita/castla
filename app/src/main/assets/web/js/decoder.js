@@ -15,12 +15,14 @@ class H264Decoder {
     constructor(onFrame, onError) {
         this.onFrame = onFrame;
         this.onError = onError;
+        this.onFrameGap = null; // Callback when frame gap is detected
         this.decoder = null;
         this.configured = false;
         this.frameCount = 0;
         this.startTime = 0;
         this.codecString = null; // dynamically detected from SPS
         this._backlogProfile = 'balanced';
+        this._waitingForKeyframe = false; // Flag to discard delta frames after drop
 
         // Backlog metrics
         this._backlogHits = 0;
@@ -71,8 +73,10 @@ class H264Decoder {
                 this.onFrame(frame);
             },
             error: (e) => {
-                console.error('[Decoder] Error:', e);
+                console.error('[Decoder] Hardware decoder error:', e);
                 this.onError(e);
+                // Trigger auto-recovery on hardware error
+                this.configured = false;
             }
         });
 
@@ -84,6 +88,7 @@ class H264Decoder {
 
         this.configured = true;
         this.startTime = performance.now();
+        this._waitingForKeyframe = false;
         console.log('[Decoder] Initialized with WebCodecs, codec:', supportedCodec);
     }
 
@@ -95,6 +100,10 @@ class H264Decoder {
      */
     decode(data) {
         if (!this.configured || !this.decoder || this.decoder.state === 'closed') {
+            if (this.decoder && this.decoder.state === 'closed') {
+                console.warn('[Decoder] VideoDecoder is closed, attempting automatic recovery/re-init');
+                this.init().catch(err => console.error('[Decoder] Recovery failed:', err));
+            }
             return;
         }
 
@@ -113,14 +122,34 @@ class H264Decoder {
         }
 
         const isKeyFrame = flags === 0x01;
+
+        // If waiting for a keyframe after a gap, discard all delta frames
+        if (this._waitingForKeyframe) {
+            if (!isKeyFrame) {
+                return; // Discard delta frame silently to prevent hardware decoder crash
+            } else {
+                console.log('[Decoder] Keyframe received. Resuming decoding after frame gap.');
+                this._waitingForKeyframe = false;
+            }
+        }
+
         const nalData = data.slice(8); // Remove 8-byte header
 
         // Detect frame drops via sequence gap
         if (this._lastSeqNum !== undefined) {
             const expected = (this._lastSeqNum + 1) & 0xFFFF;
             if (seqNum !== expected) {
-                console.warn('[Decoder] Frame gap: expected', expected, 'got', seqNum);
-                this.onError(new Error('frame gap'));
+                console.warn('[Decoder] Frame gap detected: expected', expected, 'got', seqNum, '- requesting keyframe and skipping delta frames');
+                this._waitingForKeyframe = true;
+                if (this.onFrameGap) {
+                    this.onFrameGap();
+                }
+                if (!isKeyFrame) {
+                    this._lastSeqNum = seqNum;
+                    return; // Discard this frame and wait for keyframe
+                } else {
+                    this._waitingForKeyframe = false;
+                }
             }
         }
         this._lastSeqNum = seqNum;
