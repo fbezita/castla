@@ -604,29 +604,37 @@ class PrivilegedService : IPrivilegedService.Stub() {
     }
 
     private fun doStopWifiTethering(): String {
-        if (android.os.Build.VERSION.SDK_INT >= 30) {
+        tetheringExecutor.execute {
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                try {
+                    val tmObj = createTetheringManager()
+                    if (tmObj != null) {
+                        val stopMethod = tmObj.javaClass.getMethod("stopTethering", Int::class.javaPrimitiveType)
+                        stopMethod.invoke(tmObj, 0)
+                        Log.i(TAG, "HOTSPOT OFF (Async): TetheringManager.stopTethering() called")
+                        return@execute
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "stopTethering TetheringManager failed", e)
+                }
+            }
+
             try {
-                val tmObj = createTetheringManager() ?: return "FAIL: no TetheringManager"
-                val stopMethod = tmObj.javaClass.getMethod("stopTethering", Int::class.javaPrimitiveType)
-                stopMethod.invoke(tmObj, 0)
-                Log.i(TAG, "HOTSPOT OFF: TetheringManager.stopTethering() called")
-                return "OK"
+                val ctx = shellContext
+                if (ctx != null) {
+                    val cm = ctx.getSystemService("connectivity")
+                    if (cm != null) {
+                        val stopMethod = cm.javaClass.getMethod("stopTethering", Int::class.javaPrimitiveType)
+                        stopMethod.invoke(cm, 0)
+                        Log.i(TAG, "HOTSPOT OFF (Async): ConnectivityManager.stopTethering() called")
+                        return@execute
+                    }
+                }
             } catch (e: Exception) {
-                Log.w(TAG, "stopTethering TetheringManager failed", e)
+                Log.e(TAG, "All stopTethering methods failed in async task", e)
             }
         }
-
-        try {
-            val ctx = shellContext ?: return "FAIL: no context"
-            val cm = ctx.getSystemService("connectivity") ?: return "FAIL: no CM"
-            val stopMethod = cm.javaClass.getMethod("stopTethering", Int::class.javaPrimitiveType)
-            stopMethod.invoke(cm, 0)
-            Log.i(TAG, "HOTSPOT OFF: ConnectivityManager.stopTethering() called")
-            return "OK"
-        } catch (e: Exception) {
-            Log.e(TAG, "All stopTethering methods failed", e)
-            return "FAIL: ${e.message}"
-        }
+        return "OK"
     }
 
     private fun escapeShellArg(value: String): String {
@@ -907,58 +915,57 @@ class PrivilegedService : IPrivilegedService.Stub() {
     }
 
     override fun stopWifiTethering(): Boolean {
-        Log.i(TAG, "stopWifiTethering: attempting to disable hotspot")
+        Log.i(TAG, "stopWifiTethering: attempting to disable hotspot (Async)")
+        tetheringExecutor.execute {
+            // Method 1: TetheringManager.stopTethering (Android 11+)
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                try {
+                    val ctx = shellContext
+                    if (ctx != null) {
+                        val tmObj = ctx.getSystemService("tethering")
+                        if (tmObj != null) {
+                            val stopMethod = tmObj.javaClass.getMethod(
+                                "stopTethering",
+                                Int::class.javaPrimitiveType
+                            )
+                            stopMethod.invoke(tmObj, 0) // TETHERING_WIFI = 0
+                            Log.i(TAG, "stopWifiTethering (Async): TetheringManager.stopTethering() called")
+                            return@execute
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "TetheringManager stop failed", e)
+                }
+            }
 
-        // Method 1: TetheringManager.stopTethering (Android 11+)
-        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            // Method 2: ConnectivityManager.stopTethering
             try {
                 val ctx = shellContext
                 if (ctx != null) {
-                    val tmObj = ctx.getSystemService("tethering")
-                    if (tmObj != null) {
-                        val stopMethod = tmObj.javaClass.getMethod(
+                    val cm = ctx.getSystemService("connectivity")
+                    if (cm != null) {
+                        val stopMethod = cm.javaClass.getMethod(
                             "stopTethering",
                             Int::class.javaPrimitiveType
                         )
-                        stopMethod.invoke(tmObj, 0) // TETHERING_WIFI = 0
-                        Log.i(TAG, "stopWifiTethering: TetheringManager.stopTethering() called")
-                        return true
+                        stopMethod.invoke(cm, 0)
+                        Log.i(TAG, "stopWifiTethering (Async): ConnectivityManager.stopTethering() called")
+                        return@execute
                     }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "TetheringManager stop failed", e)
+                Log.w(TAG, "ConnectivityManager stop failed", e)
+            }
+
+            // Method 3: Shell fallback
+            try {
+                execCommand("cmd connectivity tethering wifi disable")
+                Log.i(TAG, "stopWifiTethering (Async): shell fallback executed")
+            } catch (e: Exception) {
+                Log.e(TAG, "All stop tethering methods failed", e)
             }
         }
-
-        // Method 2: ConnectivityManager.stopTethering
-        try {
-            val ctx = shellContext
-            if (ctx != null) {
-                val cm = ctx.getSystemService("connectivity")
-                if (cm != null) {
-                    val stopMethod = cm.javaClass.getMethod(
-                        "stopTethering",
-                        Int::class.javaPrimitiveType
-                    )
-                    stopMethod.invoke(cm, 0)
-                    Log.i(TAG, "stopWifiTethering: ConnectivityManager.stopTethering() called")
-                    return true
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "ConnectivityManager stop failed", e)
-        }
-
-        // Method 3: Shell fallback
-        try {
-            execCommand("cmd connectivity tethering wifi disable")
-            Log.i(TAG, "stopWifiTethering: shell fallback executed")
-            return true
-        } catch (e: Exception) {
-            Log.e(TAG, "All stop tethering methods failed", e)
-        }
-
-        return false
+        return true
     }
 
     // --- System audio capture via AudioPolicy loopback (shell uid has MODIFY_AUDIO_ROUTING) ---
