@@ -1396,7 +1396,16 @@ class MirrorForegroundService : Service() {
             virtualDisplayManager?.resizeDisplay(secondaryDisplayId, width, height, dpi)
             secondaryWidth = width
             secondaryHeight = height
-            secondaryTouchInjector?.updateDimensions(width, height)
+            secondaryTouchInjector = (secondaryTouchInjector ?: TouchInjector(width, height)).also { injector ->
+                injector.updateDimensions(width, height)
+                injector.setVirtualDisplayInjector { motionEvent ->
+                    try {
+                        shizukuSetup?.privilegedService?.injectMotionEvent(secondaryDisplayId, motionEvent)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to inject secondary input on display $secondaryDisplayId", e)
+                    }
+                }
+            }
             Log.i(TAG, "Gradually resized secondary VD $secondaryDisplayId to ${width}x${height} without restarting")
         } else {
             val newDisplayId = virtualDisplayManager?.createSecondaryVirtualDisplay(width, height, dpi, surface) ?: -1

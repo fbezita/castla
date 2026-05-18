@@ -102,10 +102,19 @@ class CanvasRenderer {
         this.ctx.fillRect(0, 0, canvasWidth, canvasHeight);
     }
 
-    /**
-     * Convert canvas coordinates to normalized video coordinates (0-1)
-     */
     canvasToVideo(canvasX, canvasY) {
+        if (!this.renderWidth || isNaN(this.renderWidth) || this.renderWidth <= 0 ||
+            !this.renderHeight || isNaN(this.renderHeight) || this.renderHeight <= 0) {
+            const canvasWidth = this.canvas.clientWidth || 1;
+            const canvasHeight = this.canvas.clientHeight || 1;
+            const x = canvasX / canvasWidth;
+            const y = canvasY / canvasHeight;
+            return {
+                x: Math.max(0, Math.min(1, x)),
+                y: Math.max(0, Math.min(1, y)),
+                inBounds: x >= 0 && x <= 1 && y >= 0 && y <= 1
+            };
+        }
         const x = (canvasX - this.renderX) / this.renderWidth;
         const y = (canvasY - this.renderY) / this.renderHeight;
         return {
