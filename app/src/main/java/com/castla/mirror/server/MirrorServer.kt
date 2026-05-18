@@ -528,9 +528,17 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
                 path.endsWith(".jpg") || path.endsWith(".jpeg") -> "image/jpeg"
                 else -> "application/octet-stream"
             }
-            newChunkedResponse(Response.Status.OK, mimeType, stream)
+            val response = newChunkedResponse(Response.Status.OK, mimeType, stream)
+            response.addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
+            response.addHeader("Pragma", "no-cache")
+            response.addHeader("Expires", "0")
+            response
         } catch (e: Exception) {
-            newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not Found")
+            val response = newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not Found")
+            response.addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
+            response.addHeader("Pragma", "no-cache")
+            response.addHeader("Expires", "0")
+            response
         }
     }
 }

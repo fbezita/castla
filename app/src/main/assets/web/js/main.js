@@ -580,7 +580,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     let skipNextInput = false;
 
     // ── Bubble Composer state ──
-    const useBubbleInput = true;
+    let useBubbleInput = localStorage.getItem('castla_use_bubble') === 'true';
     let bubbleVisible = false;
     const inputBubble = document.getElementById('input-bubble');
     const bubbleText = document.getElementById('bubble-text');
@@ -1994,6 +1994,38 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
         document.addEventListener('click', () => {
             if (densityPopup) densityPopup.style.display = 'none';
+        });
+    }
+
+    // ── Keyboard Input Mode Toggle ──
+    const kbModeBtn = document.getElementById('keyboard-mode-btn');
+    const kbModeLabel = document.getElementById('keyboard-mode-label');
+
+    function updateKeyboardModeUI() {
+        if (!kbModeLabel) return;
+        if (useBubbleInput) {
+            kbModeLabel.textContent = 'Keyboard: Bubble';
+            if (kbModeBtn) kbModeBtn.style.background = 'rgba(0,0,0,0.6)';
+        } else {
+            kbModeLabel.textContent = 'Keyboard: Direct';
+            if (kbModeBtn) kbModeBtn.style.background = 'rgba(40,110,250,0.85)';
+        }
+    }
+
+    if (kbModeBtn) {
+        updateKeyboardModeUI();
+        kbModeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            useBubbleInput = !useBubbleInput;
+            localStorage.setItem('castla_use_bubble', useBubbleInput);
+            updateKeyboardModeUI();
+
+            if (!useBubbleInput) {
+                closeInputBubble(true);
+                focusKeyboardProxy();
+            } else {
+                blurKeyboardProxy();
+            }
         });
     }
 
