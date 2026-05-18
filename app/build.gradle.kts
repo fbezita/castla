@@ -65,7 +65,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 11
-        versionName = "1.4.4"
+        versionName = "1.4.5"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -112,6 +112,16 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    applicationVariants.all {
+        val variant = this
+        variant.outputs.all {
+            val output = this as com.android.build.gradle.api.ApkVariantOutput
+            val dateStr = java.text.SimpleDateFormat("yyyyMMdd-HHmmss").format(java.util.Date())
+            // 프로젝트명-버전-날짜-시간.apk 형식으로 출력 파일명 커스텀 정의
+            output.outputFileName = "castla-${variant.versionName}-$dateStr.apk"
+        }
     }
 }
 
