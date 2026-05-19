@@ -120,7 +120,9 @@ class ShizukuSetup {
     ).daemon(false).processNameSuffix("privileged").version(USER_SERVICE_VERSION)
 
     /** Guard to prevent duplicate bind calls while a bind is in progress. */
+    @Volatile
     private var bindingInProgress = false
+    @Volatile
     private var userServiceBound = false
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -629,6 +631,24 @@ class ShizukuSetup {
         } catch (_: Exception) {
             false
         }
+    }
+
+    fun forceResetBindingState() {
+        Log.i(TAG, "Force resetting stuck Shizuku binding state (bindingInProgress was $bindingInProgress)")
+        try {
+            runOnMainSync {
+                Shizuku.unbindUserService(serviceArgs, serviceConnection, true)
+            }
+            Log.i(TAG, "Force-reset removed stale Shizuku user-service binding")
+        } catch (e: Exception) {
+            Log.w(TAG, "Force-reset unbindUserService threw (best-effort)", e)
+        }
+        bindingInProgress = false
+        pendingForceUnbind = false
+        _serviceConnected.value = false
+        privilegedService = null
+        userServiceBound = false
+        userServiceConnectedAtMs = 0L
     }
 
     fun bindPrivilegedService() {

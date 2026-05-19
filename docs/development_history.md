@@ -240,4 +240,36 @@ ScreenOffAction.TURN_PANEL_OFF -> {
       * **연쇄 갭 방지 가드 (Cascade Gap Prevention & Backlog Safeguard)**: 키프레임 대기 중(`waitingForKeyframe = true`)에 들어오는 델타 프레임들을 드롭할 때뿐만 아니라, **하드웨어 디코더 큐 백로그 임계치 초과(`queueSize > threshold`)로 인해 델타 프레임이 부하 조절(Backlog drop)될 때도 무조건 `this._lastSeqNum = seqNum`을 동반 수행하도록 대개혁**했습니다. 이를 통해 네트워크 일시 혼잡이나 로컬 디코더 지연으로 백로그 드롭이 단 1회라도 발생했을 때, 그 다음으로 들어오는 정상 순차 델타 프레임이 시퀀스 갭으로 오인 오작동하여 화면이 통째로 멈추고 백엔드에 무한 키프레임 요청이 루프로 쏟아져 영상 갱신이 중단되던 근본 원인을 우주 최강의 견고함으로 완치했습니다.
 
 ---
+
+## 7. 가상 디스플레이 주변부 제어 모듈(ABR, Thermal, PowerLock) 2단계 격리 리팩토링 및 displayId 자동 보정 기법 장착
+
+`MirrorForegroundService.kt`에 얽혀 있던 수많은 하드웨어/시스템 비즈니스 제어 정책들을 도메인별 전용 클래스로 정밀 분리(Decoupling)하고, 비동기 디스플레이 리빌드 과정에서 발생하는 런타임 레이스 컨디션을 예방하기 위해 강건한 자동 보정 장치를 장착했습니다.
+
+### 1) 주변부 3대 통제 매니저(Manager) 완전 캡슐화
+서비스 단에 흩어져 있던 비대한 수명주기 상태값과 제어 루프를 독립된 클래스로 완전히 분리하여 코드 가독성과 유지보수성을 극대화했습니다.
+
+* **`PowerLockManager` (CPU & Wi-Fi Lock 격리)**:
+  - CPU partial wake lock 및 High-performance Wi-Fi Lock의 획득 및 안전 해제 로직을 전담합니다.
+  - 서비스에서 WakeLock 유지 상태를 동적으로 수집해 로그를 남길 수 있도록 public `isHeld` 프로퍼티를 개방했습니다.
+* **`ThermalThrottleManager` (온도 제어 및 스로틀링 격리)**:
+  - 안드로이드 OS의 발열 경고 상태 리스너(`OnThermalStatusChangedListener`) 및 온도 변경에 따른 인코더 스로틀링 계산을 캡슐화했습니다.
+  - `SEVERE` 등급 이상 감지 시, 비트레이트를 하향 조정하고 차량 브라우저 전용 소켓으로 실시간 온도 정보를 브로드캐스트하는 로직을 분리하였습니다.
+* **`AdaptiveBitrateManager` (네트워크 및 프레임 드롭율 모니터링 격리)**:
+  - 주기적인 해상도/FPS 자동 스케일러 타이머 루프(`evaluateAutoScale`) 및 네트워크 혼잡 시 20% 긴급 비트레이트 감쇄 정책을 격리 수용하였습니다.
+  - 서비스의 `serviceScope`를 인젝션 받아 안전한 백그라운드 코루틴 루프로 구동됩니다.
+
+### 2) 서비스 초경량화 및 문법 충돌 교정
+* **결합도 소거**: 서비스 클래스 내부에 잔존해 컴파일 충돌을 유발하던 소문자 확장 함수 형태의 중복 레거시 찌꺼기들(`private fun powerLockManager.acquireWakeLocks()` 등)을 완벽하게 소거하여 컴파일 무결성을 확보했습니다.
+* **프로퍼티 교정**: `preThermalTargetBitrate` 등 위임 형태로 선언되어 대입 연산이 불가능했던 프로퍼티들을 가변(`var`) 속성으로 완벽히 교정하여 `Val cannot be reassigned` 컴파일 빌드 오류를 원천 차단했습니다.
+
+### 3) [CRITICAL] stale displayId 비동기 자동 보정 장치 (Auto-Correction Safeguard)
+* **장애 원인 규명**: 
+  - 유튜브 + 지도 페어 앱 런칭과 같이 가상 디스플레이 갱신(Rebuild)과 앱 기동이 짧은 ms 단위로 중첩되는 환경에서, 이전 디스플레이 ID(예: 37)로 발사된 앱 기동/폴백 런칭 요청이 현재 새로 갱신된 가상 디스플레이 ID(예: 39)와 맞지 않아 `stale display`로 분류되어 스킵되는 버그가 확인되었습니다.
+  - 이로 인해 외부 브라우저 기동 실패 시 작동하는 자체 `WebBrowserActivity` 폴백마저 차단당해 화면이 갱신되지 못하고 락이 걸리던 미시적인 런타임 예외 현상이 발생했습니다.
+* **보정 장치 탑재**:
+  - `launchTargetOnDisplay` 내부 최상단에 디스플레이 ID 강건화 필터를 구축했습니다.
+  - 실행하려는 `displayId`가 현재 활성화된 세컨더리 ID가 아니고, `isCurrentPrimaryVd` 검증에서도 stale 상태인 경우, 조기 기각(Skip)해 버리는 대신 **현재 새로 활성화되어 켜진 실시간 최신 프라이머리 디스플레이 ID(`activePrimaryId`)를 자동으로 추적해 보정 대입(`targetDisplayId = activePrimaryId`)**하여 끝까지 쉘 기동을 완수하도록 설계했습니다.
+  - 이를 통해 비동기 해상도/인코더 리빌드 상태에서도 한 치의 오차나 실행 유실 없이 폴백 뷰어 및 써드파티 앱이 100% 정상 작동되도록 이중 displayId 샌드박스 안전망을 완성하였습니다.
+
+---
 *본 문서는 Castla 프로젝트 내 [docs/development_history.md](file:///c:/project/private/castla/docs/development_history.md) 경로에 안전하게 저장되었습니다.*

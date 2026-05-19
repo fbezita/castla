@@ -15,7 +15,7 @@ let decoder = null;
 let framePacer = null;
 let secondaryFramePacer = null;
 let currentPrimaryApp = null;
-let isLauncherMode = true; // start in launcher mode
+let isLauncherMode = false; // Homeless mode starts directly in streaming mode!
 let currentServerInstanceId = null; // Track current server instance to detect restarts
 let lastLaunchedInstanceId = null; // Prevent duplicate auto-run launches in the same session
 let launchGuardUntil = 0; // block accidental launches after splash dismiss
@@ -97,6 +97,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const splitDivider = document.getElementById('split-divider');
     const splitResetBtn = document.getElementById('split-reset-btn');
     const splitCloseBtn = document.getElementById('split-close-btn');
+    const splitSwapBtn = document.getElementById('split-swap-btn');
 
     // Split drawer
     const splitDrawer = document.getElementById('split-drawer');
@@ -113,7 +114,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         fitMode: 'cover',
         lockedPrimaryViewport: null,
         lockedSecondaryViewport: null,
-        preset: null
+        preset: null,
+        swapped: false
     };
 
     const BROWSER_PRESETS = [
@@ -453,7 +455,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         const message = {
             type: 'launchApp',
             pkg: app.packageName,
-            splitMode: true,
             pane: 'secondary'
         };
         if (app.componentName) message.componentName = app.componentName;
@@ -463,35 +464,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     async function enableBrowserSplit(app) {
         if (!app) return;
 
-        if (SPLIT_STRATEGY === 'freeform') {
-            // Single-VD freeform split: both apps on the same VD, single stream
-            browserSplitState.active = true;
-            browserSplitState.app = app;
-            browserSplitState.fitMode = 'contain';
-            browserSplitState.lockedPrimaryViewport = null;
-            browserSplitState.lockedSecondaryViewport = null;
-            streamPolicy.layoutMode = 'freeform_split';
-            document.body.dataset.layoutMode = streamPolicy.layoutMode;
-            console.log(`[Main] Freeform split: primary=${currentPrimaryApp?.packageName || 'unknown'} split=${app?.packageName || 'unknown'}`);
-
-            // Single canvas shows both apps — add freeform-split class for close button
-            playerShell?.classList.add('freeform-split');
-            updateSplitToolbarVisibility();
-            // Send split app launch request to server
-            if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
-                const message = {
-                    type: 'launchApp',
-                    pkg: app.packageName,
-                    splitMode: true,
-                    pane: 'primary'
-                };
-                if (app.componentName) message.componentName = app.componentName;
-                controlSocket.send(JSON.stringify(message));
-            }
-            return;
-        }
-
-        // Legacy dual-stream path
         destroySecondaryTransport();
         browserSplitState.active = true;
         browserSplitState.app = app;
@@ -522,7 +494,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         applyActiveFitModes();
         connectSecondaryVideo();
         // Send viewport immediately — the 500ms debounce can cause the primary
-        // VD to stay at full-screen size when entering split mode
+        // Keep the primary VD at its full display size while opening the secondary pane.
         requestAnimationFrame(() => sendViewportSize(true));
         setTimeout(() => sendSecondaryLaunchRequest(), 120);
     }
@@ -539,23 +511,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         browserSplitState.lockedPrimaryViewport = null;
         browserSplitState.lockedSecondaryViewport = null;
         browserSplitState.preset = null;
+        browserSplitState.swapped = false;
+        playerShell?.classList.remove('swapped');
         streamPolicy.layoutMode = 'single';
         document.body.dataset.layoutMode = streamPolicy.layoutMode;
         playerShell?.classList.remove('browser-split');
-        playerShell?.classList.remove('freeform-split');
         playerShell?.classList.remove('secondary-fullscreen');
         playerShell?.style.removeProperty('--split-left-width');
 
-        if (SPLIT_STRATEGY === 'freeform') {
-            // Tell server to close split and restore primary fullscreen
-            if (notifyServer && wasActive && controlSocket && controlSocket.readyState === WebSocket.OPEN) {
-                controlSocket.send(JSON.stringify({ type: 'closeSplit' }));
-            }
-        } else {
-            destroySecondaryTransport();
-            if (notifyServer && wasActive && controlSocket && controlSocket.readyState === WebSocket.OPEN) {
-                controlSocket.send(JSON.stringify({ type: 'closeSecondary' }));
-            }
+        destroySecondaryTransport();
+        if (notifyServer && wasActive && controlSocket && controlSocket.readyState === WebSocket.OPEN) {
+            controlSocket.send(JSON.stringify({ type: 'closeSecondary' }));
         }
 
         applyActiveFitModes();
@@ -1308,9 +1274,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 controlSocket.send(JSON.stringify({ type: 'displayDensity', scale: currentDensity }));
             }
 
-            if (isLauncherMode) {
-                loadLauncherApps();
-            }
+            loadLauncherApps();
 
             // Periodic quality report for auto-scale decisions.
             // Sends per-interval deltas (not cumulative totals) so the service
@@ -1524,8 +1488,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     let longPressTimer = null;
     let dragGhost = null;
     let currentHoveredDropZone = null;
+    let shouldDeferDragOverlay = false;
+    let isFromSidebarDrag = false;
 
-    /* ### 수정 시작 ### */
     // Cache elements for Drag-and-Drop (Spatial Launching)
     let dragOverlay, dropZoneTop, dropZoneAutorun, dropZoneLaunchLeft, dropZoneLaunchRight, dropZoneBottom;
     let dropZoneAutorunPreview;
@@ -1548,7 +1513,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         pairCancelBtn = document.getElementById('pair-dialog-cancel');
         pairDissolveBtn = document.getElementById('pair-dialog-dissolve');
         pairSaveBtn = document.getElementById('pair-dialog-save');
-        /* ### 수정 끝 ### */
 
         if (pairSwapBtn && !pairSwapBtn.hasAttribute('data-bound')) {
             pairSwapBtn.setAttribute('data-bound', 'true');
@@ -1639,11 +1603,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         activeDragApp = app;
         cell.classList.add('dragging');
         
-        // Lock body and launcher scrolling dynamically to prevent scroll gesture cancelling pointer capture
+        // Lock body, launcher, and split drawer scrolling dynamically to prevent scroll gesture cancelling pointer capture
         const launcherEl = document.getElementById('web-launcher');
         if (launcherEl) {
             launcherEl.style.overflowY = 'hidden';
             launcherEl.style.touchAction = 'none';
+        }
+        const drawerListEl = document.getElementById('split-app-list');
+        if (drawerListEl) {
+            drawerListEl.style.overflowY = 'hidden';
+            drawerListEl.style.touchAction = 'none';
         }
         document.body.style.overflow = 'hidden';
         document.body.style.touchAction = 'none';
@@ -1657,13 +1626,18 @@ document.addEventListener('DOMContentLoaded', async () => {
                                sourceCat === 'AUTORUN' || 
                                sourceCat === 'PAIR';
 
-        /* ### 수정 시작 ### */
-        dragOverlay.classList.add('active');
-        
-        // Toggle the bottom trash drop zone wrap dynamically
-        const bottomWrap = document.getElementById('drag-row-bottom-wrap');
-        if (bottomWrap) {
-            bottomWrap.style.display = activeDragIsExisting ? 'flex' : 'none';
+        const isFromSidebar = !!cell.closest('#split-drawer');
+        isFromSidebarDrag = isFromSidebar;
+        shouldDeferDragOverlay = isFromSidebar;
+
+        if (!shouldDeferDragOverlay) {
+            dragOverlay.classList.add('active');
+            
+            // Toggle the bottom trash drop zone wrap dynamically
+            const bottomWrap = document.getElementById('drag-row-bottom-wrap');
+            if (bottomWrap) {
+                bottomWrap.style.display = activeDragIsExisting ? 'flex' : 'none';
+            }
         }
 
         // Update live viewport task guides inside spatial drop zones
@@ -1684,7 +1658,6 @@ document.addEventListener('DOMContentLoaded', async () => {
                 rightGuide.innerHTML = `<span style="color:rgba(255,255,255,0.35);">빈 화면 (VD_2)</span>`;
             }
         }
-        /* ### 수정 끝 ### */
 
         updateDropZonePreviews();
 
@@ -1709,7 +1682,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         dragGhost.style.top = `${y}px`;
     }
 
-    /* ### 수정 시작 ### */
     function updateDropZonePreviews() {
         const primaryPkg = localStorage.getItem('castla_autorun_primary');
         const secondaryPkg = localStorage.getItem('castla_autorun_secondary');
@@ -1739,9 +1711,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             dropZoneAutorunPreview.style.display = 'none';
         }
     }
-    /* ### 수정 끝 ### */
 
-    /* ### 수정 시작 ### */
     function checkHoveredZone(x, y) {
         if (!dropZoneTop) return null;
         
@@ -1780,10 +1750,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         return null;
     }
-    /* ### 수정 끝 ### */
 
     function checkHoveredCell(x, y) {
-        const cells = document.querySelectorAll('.app-cell');
+        const cells = document.querySelectorAll('.app-cell, .split-app-item');
         for (const cell of cells) {
             if (cell.classList.contains('dragging')) continue;
             const rect = cell.getBoundingClientRect();
@@ -1794,10 +1763,65 @@ document.addEventListener('DOMContentLoaded', async () => {
         return null;
     }
 
-    /* ### 수정 시작 ### */
     function handleDragMove(x, y) {
         if (!activeDragApp) return;
         updateGhostPosition(x, y);
+
+        if (isFromSidebarDrag) {
+            const drawerEl = document.getElementById('split-drawer');
+            const drawerRect = drawerEl?.getBoundingClientRect();
+            if (drawerRect) {
+                if (x < drawerRect.left) {
+                    // 드로어 밖으로 이탈
+                    if (!dragOverlay.classList.contains('active')) {
+                        dragOverlay.classList.add('active');
+                        const bottomWrap = document.getElementById('drag-row-bottom-wrap');
+                        if (bottomWrap) {
+                            bottomWrap.style.display = activeDragIsExisting ? 'flex' : 'none';
+                        }
+                        if (navigator.vibrate) {
+                            navigator.vibrate(30);
+                        }
+                        console.log('[DragAndDrop] Left split drawer. Activated drag overlay.');
+                    }
+                } else {
+                    // 드로어 안으로 진입/복귀
+                    if (dragOverlay.classList.contains('active')) {
+                        dragOverlay.classList.remove('active');
+                        console.log('[DragAndDrop] Entered split drawer. Deactivated drag overlay.');
+                    }
+                }
+            }
+        }
+
+        // 드로어에서 시작한 드래그이고, 마우스가 현재 드로어 내부(x >= drawerRect.left)에 있는 경우
+        const drawerEl = document.getElementById('split-drawer');
+        const drawerRect = drawerEl?.getBoundingClientRect();
+        if (isFromSidebarDrag && drawerRect && x >= drawerRect.left) {
+            // 바깥 분할 드롭 영역 hover 효과 전부 리셋
+            if (dropZoneTop) dropZoneTop.classList.remove('hovered');
+            if (dropZoneAutorun) dropZoneAutorun.classList.remove('hovered');
+            if (dropZoneLaunchLeft) dropZoneLaunchLeft.classList.remove('hovered');
+            if (dropZoneLaunchRight) dropZoneLaunchRight.classList.remove('hovered');
+            if (dropZoneBottom) dropZoneBottom.classList.remove('hovered');
+
+            // 드로어 내부 앱 리스트들 중에서 호버된 아이템이 있는지 스캔하여 병합(App Pair) 비주얼 피드백 제공!
+            const hoveredCell = checkHoveredCell(x, y);
+            if (hoveredCell) {
+                currentHoveredDropZone = null;
+                hoveredCell.style.transform = 'scale(1.15)';
+                hoveredCell.style.boxShadow = '0 0 15px rgba(0, 229, 255, 0.4)';
+                hoveredCell.style.border = '1px solid #00E5FF';
+            } else {
+                document.querySelectorAll('.app-cell, .split-app-item').forEach(cell => {
+                    if (cell.classList.contains('dragging')) return;
+                    cell.style.transform = '';
+                    cell.style.boxShadow = '';
+                    cell.style.border = '';
+                });
+            }
+            return;
+        }
 
         // Auto-scroll launcher grid during drag when hovering near top/bottom grid boundaries
         const launcherEl = document.getElementById('web-launcher');
@@ -1823,7 +1847,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             hoveredCell.style.boxShadow = '0 0 15px rgba(0, 229, 255, 0.4)';
             hoveredCell.style.border = '1px solid #00E5FF';
         } else {
-            document.querySelectorAll('.app-cell').forEach(cell => {
+            document.querySelectorAll('.app-cell, .split-app-item').forEach(cell => {
                 if (cell.classList.contains('dragging')) return;
                 cell.style.transform = '';
                 cell.style.boxShadow = '';
@@ -1840,20 +1864,21 @@ document.addEventListener('DOMContentLoaded', async () => {
             else if (hoveredZone === 'bottom' && dropZoneBottom) dropZoneBottom.classList.add('hovered');
         }
     }
-    /* ### 수정 끝 ### */
 
     function handleDragEnd(x, y) {
         if (!activeDragApp) return;
 
-        const cell = document.querySelector('.app-cell.dragging');
+        const cell = document.querySelector('.app-cell.dragging, .split-app-item.dragging');
         if (cell) cell.classList.remove('dragging');
 
-        document.querySelectorAll('.app-cell').forEach(cell => {
+        document.querySelectorAll('.app-cell, .split-app-item').forEach(cell => {
             cell.style.transform = '';
             cell.style.boxShadow = '';
             cell.style.border = '';
         });
 
+        isFromSidebarDrag = false;
+        shouldDeferDragOverlay = false;
         dragOverlay.classList.remove('active');
         if (dragGhost) {
             dragGhost.remove();
@@ -1875,27 +1900,81 @@ document.addEventListener('DOMContentLoaded', async () => {
             triggerDropZoneAction(hoveredZone, activeDragApp, cell);
         }
 
-        // Restore body and launcher scrolling dynamically
+        // Restore body, launcher, and split drawer scrolling dynamically
         const launcherEl = document.getElementById('web-launcher');
         if (launcherEl) {
             launcherEl.style.overflowY = '';
             launcherEl.style.touchAction = '';
         }
+        const drawerListEl = document.getElementById('split-app-list');
+        if (drawerListEl) {
+            drawerListEl.style.overflowY = '';
+            drawerListEl.style.touchAction = '';
+        }
         document.body.style.overflow = '';
         document.body.style.touchAction = '';
 
-        /* ### 수정 시작 ### */
-        // Close the sidebar quick launcher automatically after any drag-and-drop ends
+        // Close the sidebar quick launcher automatically only if dropped outside the drawer
         if (splitDrawer) {
-            splitDrawer.classList.remove('open');
+            const drawerRect = splitDrawer.getBoundingClientRect();
+            if (x < drawerRect.left) {
+                splitDrawer.classList.remove('open');
+            } else {
+                console.log('[DragAndDrop] Dropped inside split drawer. Kept drawer open.');
+            }
         }
 
         activeDragApp = null;
         currentHoveredDropZone = null;
     }
-    /* ### 수정 끝 ### */
 
-    /* ### 수정 시작 ### */
+    function cancelDrag() {
+        if (!activeDragApp) return;
+
+        const cell = document.querySelector('.app-cell.dragging, .split-app-item.dragging');
+        if (cell) cell.classList.remove('dragging');
+
+        document.querySelectorAll('.app-cell, .split-app-item').forEach(cell => {
+            cell.style.transform = '';
+            cell.style.boxShadow = '';
+            cell.style.border = '';
+        });
+
+        isFromSidebarDrag = false;
+        shouldDeferDragOverlay = false;
+        dragOverlay.classList.remove('active');
+        if (dragGhost) {
+            dragGhost.remove();
+            dragGhost = null;
+        }
+
+        // Restore scrolling dynamically
+        const launcherEl = document.getElementById('web-launcher');
+        if (launcherEl) {
+            launcherEl.style.overflowY = '';
+            launcherEl.style.touchAction = '';
+        }
+        const drawerListEl = document.getElementById('split-app-list');
+        if (drawerListEl) {
+            drawerListEl.style.overflowY = '';
+            drawerListEl.style.touchAction = '';
+        }
+        document.body.style.overflow = '';
+        document.body.style.touchAction = '';
+
+        activeDragApp = null;
+        currentHoveredDropZone = null;
+        console.log('[DragAndDrop] Drag and drop cancelled safely via Escape key or backout.');
+    }
+
+    // Bind Escape key cancellation globally
+    window.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && activeDragApp) {
+            e.preventDefault();
+            cancelDrag();
+        }
+    });
+
     function triggerDropZoneAction(zone, app, cell) {
         if (app.isPair) {
             if (zone === 'autorun') {
@@ -1965,7 +2044,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         refreshLauncherUI();
     }
-    /* ### 수정 끝 ### */
 
     function createAppPair(leftPkg, rightPkg) {
         const exists = appPairs.some(p => 
@@ -2045,6 +2123,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         splitAppList.innerHTML = '';
 
         const singleApps = apps.filter(app => !app.isPair);
+        const pairPseudoApps = getPairPseudoApps(apps);
+        const allDisplayApps = [...singleApps, ...pairPseudoApps];
 
         const primaryPkg = localStorage.getItem('castla_autorun_primary');
         const secondaryPkg = localStorage.getItem('castla_autorun_secondary');
@@ -2062,20 +2142,29 @@ document.addEventListener('DOMContentLoaded', async () => {
             grouped['FAVORITES'] = { title: 'Favorites', color: '#FFD700', items: [] };
         }
 
+        // Prepend App Pairs category group if any exist
+        if (pairPseudoApps.length > 0) {
+            grouped['PAIR'] = { title: 'App Pairs', color: '#00E5FF', items: [] };
+        }
+
         grouped['NAVIGATION'] = { title: 'Navigation', color: '#4CAF50', items: [] };
         grouped['VIDEO'] = { title: 'Video', color: '#FF5722', items: [] };
         grouped['MUSIC'] = { title: 'Music', color: '#9C27B0', items: [] };
         grouped['OTHER'] = { title: 'Apps', color: '#9E9E9E', items: [] };
 
-        singleApps.forEach(app => {
+        allDisplayApps.forEach(app => {
             if (app.packageName === primaryPkg || app.packageName === secondaryPkg) {
                 grouped['AUTORUN']?.items.push(app);
             }
             if (favoritesList.includes(app.packageName)) {
                 grouped['FAVORITES']?.items.push(app);
             }
-            if (grouped[app.category]) grouped[app.category].items.push(app);
-            else grouped['OTHER'].items.push(app);
+            if (app.isPair) {
+                grouped['PAIR']?.items.push(app);
+            } else {
+                if (grouped[app.category]) grouped[app.category].items.push(app);
+                else grouped['OTHER'].items.push(app);
+            }
         });
 
         Object.keys(grouped).forEach(key => {
@@ -2103,52 +2192,94 @@ document.addEventListener('DOMContentLoaded', async () => {
             group.items.forEach(app => {
                 const cell = document.createElement('div');
                 cell.className = 'split-app-item';
+                cell.setAttribute('data-package', app.packageName);
+                cell.setAttribute('data-source-category', key);
 
-                const icon = document.createElement('img');
-                icon.className = 'split-app-icon';
-                icon.src = `/api/icon?pkg=${app.packageName}`;
-                cell.appendChild(icon);
+                if (app.isPair) {
+                    const iconWrapper = document.createElement('div');
+                    iconWrapper.className = 'app-pair-icon-wrapper';
+                    
+                    const leftIcon = document.createElement('img');
+                    leftIcon.className = 'app-pair-icon-left';
+                    leftIcon.src = `/api/icon?pkg=${app.left}`;
+                    leftIcon.loading = 'lazy';
+                    iconWrapper.appendChild(leftIcon);
+                    
+                    const rightIcon = document.createElement('img');
+                    rightIcon.className = 'app-pair-icon-right';
+                    rightIcon.src = `/api/icon?pkg=${app.right}`;
+                    rightIcon.loading = 'lazy';
+                    iconWrapper.appendChild(rightIcon);
+                    
+                    cell.appendChild(iconWrapper);
+                } else {
+                    const icon = document.createElement('img');
+                    icon.className = 'split-app-icon';
+                    icon.src = `/api/icon?pkg=${app.packageName}`;
+                    icon.loading = 'lazy';
+                    cell.appendChild(icon);
+                }
 
                 const label = document.createElement('div');
-                label.textContent = SPLIT_STRATEGY === 'freeform' ? `${app.label} (Split)` : `${app.label} (Dual Stream)`;
-                label.style.color = '#FFD700';
+                label.className = 'split-app-label';
+                label.textContent = app.label;
+                if (app.isPair) {
+                    label.style.color = '#00E5FF';
+                }
                 cell.appendChild(label);
 
-                // Favorite star button
-                const star = document.createElement('div');
-                const isFav = favoritesList.includes(app.packageName);
-                star.className = `split-app-star ${isFav ? 'active' : ''}`;
-                star.innerHTML = '&#9733;';
-                
-                star.addEventListener('click', (e) => {
-                    e.stopPropagation(); // Prevent parent launching event
-                    toggleFavorite(app.packageName);
-                });
-                star.addEventListener('pointerdown', (e) => e.stopPropagation());
-                star.addEventListener('pointerup', (e) => e.stopPropagation());
-                cell.appendChild(star);
+                if (app.isPair) {
+                    // Curved swap / pair edit gear button
+                    const editBtn = document.createElement('div');
+                    editBtn.className = 'split-app-star active';
+                    editBtn.style.color = '#00E5FF';
+                    editBtn.style.fontSize = '14px';
+                    editBtn.innerHTML = '⚙️';
+                    
+                    editBtn.addEventListener('click', (e) => {
+                        e.stopPropagation(); // Prevent parent launching event
+                        openAppPairEdit(app);
+                    });
+                    editBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+                    editBtn.addEventListener('pointerup', (e) => e.stopPropagation());
+                    cell.appendChild(editBtn);
+                } else {
+                    // Favorite star button
+                    const star = document.createElement('div');
+                    const isFav = favoritesList.includes(app.packageName);
+                    star.className = `split-app-star ${isFav ? 'active' : ''}`;
+                    star.innerHTML = '&#9733;';
+                    
+                    star.addEventListener('click', (e) => {
+                        e.stopPropagation(); // Prevent parent launching event
+                        toggleFavorite(app.packageName);
+                    });
+                    star.addEventListener('pointerdown', (e) => e.stopPropagation());
+                    star.addEventListener('pointerup', (e) => e.stopPropagation());
+                    cell.appendChild(star);
 
-                // Auto-run bolt button
-                const bolt = document.createElement('div');
-                const pPkg = localStorage.getItem('castla_autorun_primary');
-                const sPkg = localStorage.getItem('castla_autorun_secondary');
-                
-                let boltClass = 'split-app-bolt';
-                if (pPkg === app.packageName) {
-                    boltClass += ' active primary';
-                } else if (sPkg === app.packageName) {
-                    boltClass += ' active secondary';
+                    // Auto-run bolt button
+                    const bolt = document.createElement('div');
+                    const pPkg = localStorage.getItem('castla_autorun_primary');
+                    const sPkg = localStorage.getItem('castla_autorun_secondary');
+                    
+                    let boltClass = 'split-app-bolt';
+                    if (pPkg === app.packageName) {
+                        boltClass += ' active primary';
+                    } else if (sPkg === app.packageName) {
+                        boltClass += ' active secondary';
+                    }
+                    bolt.className = boltClass;
+                    bolt.innerHTML = '&#9889;';
+                    
+                    bolt.addEventListener('click', (e) => {
+                        e.stopPropagation(); // Prevent parent launching event
+                        toggleAutoRun(app.packageName);
+                    });
+                    bolt.addEventListener('pointerdown', (e) => e.stopPropagation());
+                    bolt.addEventListener('pointerup', (e) => e.stopPropagation());
+                    cell.appendChild(bolt);
                 }
-                bolt.className = boltClass;
-                bolt.innerHTML = '&#9889;';
-                
-                bolt.addEventListener('click', (e) => {
-                    e.stopPropagation(); // Prevent parent launching event
-                    toggleAutoRun(app.packageName);
-                });
-                bolt.addEventListener('pointerdown', (e) => e.stopPropagation());
-                bolt.addEventListener('pointerup', (e) => e.stopPropagation());
-                cell.appendChild(bolt);
 
                 // Long-press Drag and Drop pointer events for split launcher sidebar app items
                 let startX = 0, startY = 0;
@@ -2157,8 +2288,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
                 cell.addEventListener('pointerdown', (e) => {
                     if (e.button !== 0) return;
-                    // Strict safeguard: Ignore if clicking favorite or auto-run directly
-                    if (e.target.classList.contains('split-app-star') || e.target.classList.contains('split-app-bolt')) {
+                    // Ignore clicks on toggle icons or edit gears
+                    if (e.target.classList.contains('split-app-star') || e.target.classList.contains('split-app-bolt') || e.target.innerHTML === '⚙️') {
                         return;
                     }
                     isPointerDown = true;
@@ -2207,15 +2338,19 @@ document.addEventListener('DOMContentLoaded', async () => {
                 cell.addEventListener('pointercancel', endPointerHandler);
 
                 cell.addEventListener('click', (e) => {
-                    // Double safeguard: Block event propagation if hitting toggle icons
-                    if (e.target.classList.contains('split-app-star') || e.target.classList.contains('split-app-bolt')) {
+                    // Double safeguard: Block event propagation if hitting toggle icons or edit gears
+                    if (e.target.classList.contains('split-app-star') || e.target.classList.contains('split-app-bolt') || e.target.innerHTML === '⚙️') {
                         return;
                     }
                     if (wasDragging) {
                         wasDragging = false;
                         return;
                     }
-                    launchApp(app, true);
+                    if (app.isPair) {
+                        launchAppPair(app.left, app.right);
+                    } else {
+                        launchApp(app, false); // Launch directly as Primary full screen
+                    }
                     splitDrawer.classList.remove('open');
                 });
 
@@ -2612,7 +2747,6 @@ document.addEventListener('DOMContentLoaded', async () => {
                 controlSocket.send(JSON.stringify({
                     type: 'launchApp',
                     pkg: primaryApp.packageName,
-                    splitMode: true,
                     pane: 'primary'
                 }));
             }
@@ -2624,14 +2758,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                 controlSocket.send(JSON.stringify({
                     type: 'launchApp',
                     pkg: secondaryApp.packageName,
-                    splitMode: true,
                     pane: 'secondary'
                 }));
             }
         }, 500);
     }
 
-    /* ### 수정 시작 ### */
     async function launchAppOnSecondaryIndependently(app) {
         console.log(`[Launcher] Launching independent app on Secondary (VD_2): ${app.packageName}`);
         lastLaunchTime = Date.now();
@@ -2691,13 +2823,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                 controlSocket.send(JSON.stringify({
                     type: 'launchApp',
                     pkg: app.packageName,
-                    splitMode: true,
                     pane: 'secondary'
                 }));
             }
         }, 150);
     }
-    /* ### 수정 끝 ### */
 
     function launchAppPair(leftPkg, rightPkg) {
         console.log(`[Launcher] Launching App Pair: left=${leftPkg}, right=${rightPkg}`);
@@ -2714,7 +2844,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     }
 
-    function launchApp(app, isSplit = false) {
+    function launchApp(app, launchOnSecondary = false) {
         if (app.isPair) {
             launchAppPair(app.left, app.right);
             return;
@@ -2723,11 +2853,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Strict Duplication Safeguard:
         // Prevent running the exact same app on both VD_1 and VD_2 simultaneously
         const pkgName = app.packageName;
-        if (isSplit && currentPrimaryApp && currentPrimaryApp.packageName === pkgName) {
+        if (launchOnSecondary && currentPrimaryApp && currentPrimaryApp.packageName === pkgName) {
             showLauncherNotice('이미 왼쪽 화면(Primary)에서 실행 중인 앱입니다.');
             return;
         }
-        if (!isSplit && browserSplitState.active && browserSplitState.app && browserSplitState.app.packageName === pkgName) {
+        if (!launchOnSecondary && browserSplitState.active && browserSplitState.app && browserSplitState.app.packageName === pkgName) {
             showLauncherNotice('이미 오른쪽 화면(Secondary)에서 실행 중인 앱입니다.');
             return;
         }
@@ -2739,9 +2869,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         lastLaunchTime = Date.now(); // Record launch timestamp
         const componentName = app.componentName || null;
-        console.log(`[Launcher] Launching app: ${pkgName} (split=${isSplit})`);
+        console.log(`[Launcher] Launching app: ${pkgName} (pane=${launchOnSecondary ? 'secondary' : 'primary'})`);
 
-        if (isSplit) {
+        if (launchOnSecondary) {
             if (isLauncherMode) {
                 showLauncherNotice('먼저 왼쪽에 실행할 앱을 선택하세요.');
                 return;
@@ -2778,7 +2908,6 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const message = {
                     type: 'launchApp',
                     pkg: pkgName,
-                    splitMode: keepSplit,
                     pane: 'primary'
                 };
                 if (componentName) message.componentName = componentName;
@@ -2796,10 +2925,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 launchTimeout = setTimeout(() => {
                     if (firstFrameReceived) return;
                     closeInputBubble(true);
-                    isLauncherMode = true;
-                    webLauncher.classList.remove('hidden');
-                    splitDrawer.style.display = 'none';
-                    homeBtn.style.display = 'none';
+                    isLauncherMode = false;
+                    splitDrawer.classList.add('open');
+                    homeBtn.style.display = 'block';
                     hideOverlay();
                     showLauncherNotice('Launch timed out. Try again.');
                 }, 5000);
@@ -2822,21 +2950,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function goHome() {
         collapseOverlayMenu();
-        isLauncherMode = true;
+        isLauncherMode = false;
         clearLaunchTimeout();
         clearFrameWatchdog();
         closeInputBubble(true);
         blurKeyboardProxy();
         disableBrowserSplit();
 
-        // Immediately clear the canvas to prevent previous app's screen
-        // from being visible when the launcher is shown
-        clearCanvas();
-
-        webLauncher.classList.remove('hidden');
-        splitDrawer.style.display = 'none';
-        splitDrawer.classList.remove('open');
-        homeBtn.style.display = 'none';
+        // Toggle the unified side drawer launcher!
+        splitDrawer.classList.toggle('open');
+        homeBtn.style.display = 'block';
 
         hideOverlay();
         firstFrameReceived = false;
@@ -2909,9 +3032,109 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     });
 
+    function swapSplitMode() {
+        if (!browserSplitState.active) return;
+        browserSplitState.swapped = !browserSplitState.swapped;
+        playerShell?.classList.toggle('swapped', browserSplitState.swapped);
+        if (navigator.vibrate) {
+            navigator.vibrate(30);
+        }
+        console.log('[SplitSwap] Swapped split panes. Swapped status:', browserSplitState.swapped);
+        
+        // Re-apply ratio to trigger physical updates
+        setBrowserSplitRatio(browserSplitState.ratio);
+        
+        // Lock viewports and send to server
+        lockBrowserSplitViewports(browserSplitState.app);
+        requestAnimationFrame(() => sendViewportSize());
+    }
+
     // Draggable Split Divider for real-time resizing
     if (splitDivider) {
         let isDraggingDivider = false;
+
+        // Top Control Pill and Buttons inside divider
+        const splitControlPill = document.querySelector('.split-control-pill');
+        if (splitControlPill) {
+            const stopEvents = ['pointerdown', 'pointerup', 'pointermove', 'mousedown', 'mouseup', 'click'];
+            stopEvents.forEach(evt => {
+                splitControlPill.addEventListener(evt, (e) => {
+                    e.stopPropagation();
+                });
+            });
+        }
+
+        const splitExpandLeftBtn = document.getElementById('split-expand-left-btn');
+        if (splitExpandLeftBtn) {
+            const stopEvents = ['pointerdown', 'pointerup', 'pointermove', 'mousedown', 'mouseup', 'click'];
+            stopEvents.forEach(evt => {
+                splitExpandLeftBtn.addEventListener(evt, (e) => {
+                    e.stopPropagation();
+                });
+            });
+            splitExpandLeftBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (!browserSplitState.active) return;
+                if (navigator.vibrate) navigator.vibrate(30);
+
+                if (!browserSplitState.swapped) {
+                    // Left is Primary. Maximize Left means maximizing Primary.
+                    console.log('[ExpandLeft] Maximizing Left (Primary).');
+                    disableBrowserSplit();
+                } else {
+                    // Left is Secondary. Maximize Left means promoting Secondary to Primary and maximizing.
+                    console.log('[ExpandLeft] Promoting and maximizing Left (Secondary).');
+                    const secondaryApp = browserSplitState.app;
+                    if (secondaryApp) {
+                        disableBrowserSplit({ notifyServer: false });
+                        launchApp(secondaryApp, false);
+                    }
+                }
+            });
+        }
+
+        const splitSwapTopBtn = document.getElementById('split-swap-top-btn');
+        if (splitSwapTopBtn) {
+            const stopEvents = ['pointerdown', 'pointerup', 'pointermove', 'mousedown', 'mouseup', 'click'];
+            stopEvents.forEach(evt => {
+                splitSwapTopBtn.addEventListener(evt, (e) => {
+                    e.stopPropagation();
+                });
+            });
+            splitSwapTopBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                swapSplitMode();
+            });
+        }
+
+        const splitExpandRightBtn = document.getElementById('split-expand-right-btn');
+        if (splitExpandRightBtn) {
+            const stopEvents = ['pointerdown', 'pointerup', 'pointermove', 'mousedown', 'mouseup', 'click'];
+            stopEvents.forEach(evt => {
+                splitExpandRightBtn.addEventListener(evt, (e) => {
+                    e.stopPropagation();
+                });
+            });
+            splitExpandRightBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (!browserSplitState.active) return;
+                if (navigator.vibrate) navigator.vibrate(30);
+
+                if (browserSplitState.swapped) {
+                    // Right is Primary. Maximize Right means maximizing Primary.
+                    console.log('[ExpandRight] Maximizing Right (Primary).');
+                    disableBrowserSplit();
+                } else {
+                    // Right is Secondary. Maximize Right means promoting Secondary to Primary and maximizing.
+                    console.log('[ExpandRight] Promoting and maximizing Right (Secondary).');
+                    const secondaryApp = browserSplitState.app;
+                    if (secondaryApp) {
+                        disableBrowserSplit({ notifyServer: false });
+                        launchApp(secondaryApp, false);
+                    }
+                }
+            });
+        }
 
         splitDivider.addEventListener('pointerdown', (e) => {
             if (!browserSplitState.active) return;
@@ -2922,10 +3145,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         splitDivider.addEventListener('pointermove', (e) => {
             if (!isDraggingDivider || !browserSplitState.active) return;
+
             const rect = playerShell.getBoundingClientRect();
             if (rect.width <= 0) return;
             const relativeX = e.clientX - rect.left;
-            const ratio = relativeX / rect.width;
+            let ratio = relativeX / rect.width;
+            
+            if (browserSplitState.swapped) {
+                ratio = 1 - ratio;
+            }
             
             // Constrain ratio dynamically to guarantee at least 320px width on both panes (H.264 minimum safe resolution boundary)
             const minRatioMargin = 320 / rect.width;
@@ -2974,6 +3202,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (splitCloseBtn) {
         splitCloseBtn.addEventListener('click', () => {
             disableBrowserSplit();
+        });
+    }
+
+    if (splitSwapBtn) {
+        splitSwapBtn.addEventListener('click', () => {
+            swapSplitMode();
         });
     }
 
@@ -3086,6 +3320,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             splashScreen.classList.add('hidden');
             setTimeout(() => splashScreen.classList.add('removed'), 500);
         }
+
+        // Open the split drawer by default so users can select their first app!
+        splitDrawer.classList.add('open');
+        homeBtn.style.display = 'block';
     });
 
     // Initialize audio lazily upon the first actual user interaction (click/touch) on the page.

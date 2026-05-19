@@ -15,7 +15,7 @@ data class AppLaunchRequest(
     val className: String? = null,
     val isVideoApp: Boolean = false,
     val intentExtra: String? = null,
-    val splitMode: Boolean = false,
+    val pane: String = "primary",
     val launchMode: LaunchMode = LaunchMode.STANDARD_APP,
     val url: String? = null,
     val preferredBrowserPackage: String? = null,
@@ -30,8 +30,8 @@ object AppLaunchBus {
     private val _events = MutableSharedFlow<AppLaunchRequest>(extraBufferCapacity = 5)
     val events: SharedFlow<AppLaunchRequest> = _events.asSharedFlow()
 
-    fun requestLaunch(packageName: String, className: String? = null, isVideoApp: Boolean = false, intentExtra: String? = null, splitMode: Boolean = false) {
-        _events.tryEmit(AppLaunchRequest(packageName, className, isVideoApp, intentExtra, splitMode))
+    fun requestLaunch(packageName: String, className: String? = null, isVideoApp: Boolean = false, intentExtra: String? = null, pane: String = "primary") {
+        _events.tryEmit(AppLaunchRequest(packageName, className, isVideoApp, intentExtra, pane))
     }
 
     fun requestLaunch(request: AppLaunchRequest) {

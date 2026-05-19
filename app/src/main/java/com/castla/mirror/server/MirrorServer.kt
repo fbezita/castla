@@ -67,7 +67,7 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     
     // Web Launcher specific listeners
     private var onGoHomeListener: (() -> Unit)? = null
-    private var onAppLaunchListener: ((String, String?, Boolean, String) -> Unit)? = null
+    private var onAppLaunchListener: ((String, String?, String) -> Unit)? = null
     private var onCloseSplitListener: (() -> Unit)? = null
     private var onDisplayDensityListener: ((Float) -> Unit)? = null
     private var onQualityReportListener: ((Int, Double, Int) -> Unit)? = null
@@ -134,7 +134,7 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         onGoHomeListener = listener
     }
     
-    fun setAppLaunchListener(listener: (String, String?, Boolean, String) -> Unit) {
+    fun setAppLaunchListener(listener: (String, String?, String) -> Unit) {
         onAppLaunchListener = listener
     }
 
@@ -398,8 +398,8 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         onAudioCodecListener?.invoke(codec)
     }
     
-    fun onAppLaunchRequest(pkg: String, componentName: String? = null, splitMode: Boolean = false, pane: String = if (splitMode) "secondary" else "primary") {
-        onAppLaunchListener?.invoke(pkg, componentName, splitMode, pane)
+    fun onAppLaunchRequest(pkg: String, componentName: String? = null, pane: String = "primary") {
+        onAppLaunchListener?.invoke(pkg, componentName, pane)
     }
 
     fun onQualityReport(droppedFrames: Int, avgDelayMs: Double, backlogDrops: Int) {

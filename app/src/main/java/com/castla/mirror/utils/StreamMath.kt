@@ -24,7 +24,7 @@ object StreamMath {
     }
 
     /**
-     * Bitrate for the video pane in split mode — boosted 1.5x over secondary base
+     * Bitrate for the video pane in dual-pane streaming — boosted 1.5x over secondary base
      * to prioritize video quality. Capped at 12Mbps to leave headroom for the companion pane.
      */
     fun calculateSplitVideoBitrate(width: Int, height: Int): Int {
@@ -34,7 +34,7 @@ object StreamMath {
     }
 
     /**
-     * Bitrate for the non-video companion pane in split mode — reduced to 0.6x of secondary base.
+     * Bitrate for the non-video companion pane in dual-pane streaming — reduced to 0.6x of secondary base.
      * Frees bandwidth for the video pane while keeping the companion usable.
      */
     fun calculateSplitCompanionBitrate(width: Int, height: Int): Int {

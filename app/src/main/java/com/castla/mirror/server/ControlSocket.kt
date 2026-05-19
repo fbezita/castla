@@ -92,24 +92,23 @@ class ControlSocket(
                 }
                 "launchApp" -> {
                     val pkg = json.optString("pkg", "")
-                    val splitMode = json.optBoolean("splitMode", false)
-                    val pane = json.optString("pane", if (splitMode) "secondary" else "primary")
+                    val pane = json.optString("pane", "primary")
                     val componentName = json.optString("componentName", "")
                         .takeIf { it.isNotEmpty() }
                     if (pkg.isNotEmpty()) {
-                        server.onAppLaunchRequest(pkg, componentName, splitMode, pane)
+                        server.onAppLaunchRequest(pkg, componentName, pane)
                     }
                 }
                 "LAUNCH_APP_PAIR" -> {
                     val left = json.optString("left", "")
                     val right = json.optString("right", "")
                     if (left.isNotEmpty() && right.isNotEmpty()) {
-                        server.onAppLaunchRequest(left, null, false, "primary")
-                        server.onAppLaunchRequest(right, null, true, "secondary")
+                        server.onAppLaunchRequest(left, null, "primary")
+                        server.onAppLaunchRequest(right, null, "secondary")
                     }
                 }
                 "closeSecondary" -> {
-                    server.onAppLaunchRequest("", null, true, "secondary")
+                    server.onAppLaunchRequest("", null, "secondary")
                 }
                 "closeSplit" -> {
                     server.onCloseSplitRequest()

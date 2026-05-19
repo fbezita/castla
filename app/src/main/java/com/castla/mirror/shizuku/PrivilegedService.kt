@@ -672,16 +672,8 @@ class PrivilegedService : IPrivilegedService.Stub() {
         extraValue: String? = null
     ): String {
         val resolvedComponent = resolveLaunchComponent(packageOrComponent)
-        val launchTarget = resolvedComponent ?: packageOrComponent
-        val isSplitBrowserLaunch =
-            (launchTarget.contains("com.castla.mirror/.ui.WebBrowserActivity") ||
-                launchTarget.contains("com.castla.mirror.ui.WebBrowserActivity")) &&
-                extraKey == "url" && extraValue?.contains("#split=true") == true
         return buildString {
             append("am start --display $displayId -f 0x10200000 ") // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
-            if (isSplitBrowserLaunch) {
-                append("--windowingMode 5 ")
-            }
             append("-a android.intent.action.MAIN -c android.intent.category.LAUNCHER ")
             if (resolvedComponent != null) {
                 append("-n ${escapeShellArg(resolvedComponent)} ")
@@ -696,6 +688,11 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
     override fun launchAppOnDisplay(displayId: Int, packageName: String) {
         try {
+            val pkg = if (packageName.contains("/")) packageName.substringBefore("/") else packageName
+            if (pkg.isNotEmpty() && pkg != "com.castla.mirror" && pkg != "com.castla.mirror.debug" && !pkg.startsWith("com.castla.mirror")) {
+                Log.i(TAG, "Force-stopping $pkg before launching on display $displayId to prevent task duplication")
+                execCommand("am force-stop $pkg")
+            }
             val cmd = buildLaunchCommand(displayId, packageName)
             execCommand(cmd)
             Log.i(TAG, "Launched $packageName on display $displayId")
@@ -709,6 +706,11 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
     override fun launchAppWithExtraOnDisplay(displayId: Int, packageName: String, extraKey: String, extraValue: String) {
         try {
+            val pkg = if (packageName.contains("/")) packageName.substringBefore("/") else packageName
+            if (pkg.isNotEmpty() && pkg != "com.castla.mirror" && pkg != "com.castla.mirror.debug" && !pkg.startsWith("com.castla.mirror")) {
+                Log.i(TAG, "Force-stopping $pkg before launching on display $displayId to prevent task duplication")
+                execCommand("am force-stop $pkg")
+            }
             val cmd = buildLaunchCommand(displayId, packageName, extraKey, extraValue)
             execCommand(cmd)
             Log.i(TAG, "Launched $packageName with extra on display $displayId")

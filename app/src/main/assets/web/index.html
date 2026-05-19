@@ -8,12 +8,12 @@
     <style>
         /* Web Native Launcher Styles */
         #web-launcher {
+            display: none !important; /* Unified sidebar launcher is now the primary launcher! Completely hidden. */
             position: absolute;
             top: 0; left: 0; right: 0; bottom: 0;
             background-color: #0F0F1A;
             z-index: 200; /* Above the video player */
             overflow-y: auto;
-            display: flex; /* Flexbox for full centering if needed, but we use block with padding */
             flex-direction: column;
             padding: 30px;
             color: #fff;
@@ -219,14 +219,13 @@
             width: 300px;
             background: rgba(20, 20, 30, 0.95);
             backdrop-filter: blur(10px);
-            z-index: 260;
+            z-index: 600; /* Raised higher than dragOverlay (500) to allow unobstructed dragging & app pairing */
             transition: right 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
             box-shadow: -4px 0 15px rgba(0,0,0,0.5);
-            display: flex;
+            display: flex; /* keep as flex always, controlled by right slide */
             flex-direction: column;
             color: white;
             font-family: sans-serif;
-            display: none; /* hidden during launcher mode */
         }
         #split-drawer.open {
             right: 0;
@@ -580,6 +579,18 @@
             display: none !important;
         }
 
+        /* Swapped split screen layout: flex-direction row-reverse and reverse border */
+        #player-shell.swapped {
+            flex-direction: row-reverse;
+        }
+        #player-shell.swapped #browser-split-pane {
+            border-left: none;
+            border-right: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        #player-shell.swapped.secondary-fullscreen #browser-split-pane {
+            border-right: none !important;
+        }
+
         /* ── Browser-Only Split Pane ── */
         .browser-pane-ui {
             display: flex;
@@ -717,6 +728,96 @@
         #player-shell.browser-split #split-divider {
             display: flex;
         }
+        
+        /* Swapped split divider physical position synchronization */
+        #player-shell.swapped #split-divider {
+            left: calc(100% - var(--split-left-width) - 10px);
+        }
+
+        /* Top Control Pill styled perfectly for divider center-floating */
+        .split-control-pill {
+            position: absolute;
+            top: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            background: rgba(20, 20, 30, 0.92);
+            backdrop-filter: blur(10px);
+            border: 1.5px solid rgba(255, 255, 255, 0.15);
+            border-radius: 20px;
+            padding: 3px 5px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6), 0 0 15px rgba(0, 229, 255, 0.1);
+            z-index: 10;
+            user-select: none;
+            -webkit-user-select: none;
+            pointer-events: auto;
+            transition: all 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+        }
+        
+        .split-control-btn {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: transparent;
+            border: none;
+            color: #00E5FF;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            padding: 6px;
+            box-sizing: border-box;
+            transition: all 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
+        }
+        .split-control-btn svg {
+            width: 100%;
+            height: 100%;
+            transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+        }
+        .split-control-btn:hover {
+            background: rgba(0, 229, 255, 0.2);
+            color: #fff;
+            transform: scale(1.15);
+        }
+        .split-control-btn:active {
+            transform: scale(0.92);
+        }
+        
+        /* Specific rotation effect for swap button */
+        .split-swap-top-btn:hover svg {
+            transform: rotate(180deg);
+        }
+
+        /* Sidebar app-pair 40px icon layout */
+        .split-app-item .app-pair-icon-wrapper {
+            position: relative;
+            width: 40px;
+            height: 40px;
+            margin-right: 12px;
+            flex-shrink: 0;
+        }
+        .split-app-item .app-pair-icon-left {
+            position: absolute;
+            top: 1px;
+            left: 1px;
+            width: 26px;
+            height: 26px;
+            z-index: 2;
+            border: 2px solid #14141e;
+            border-radius: 6px;
+        }
+        .split-app-item .app-pair-icon-right {
+            position: absolute;
+            bottom: 1px;
+            right: 1px;
+            width: 26px;
+            height: 26px;
+            z-index: 3;
+            border: 2px solid #14141e;
+            border-radius: 6px;
+        }
         #split-divider::before {
             content: '';
             width: 4px;
@@ -815,7 +916,6 @@
             box-shadow: 4px -2px 10px rgba(0,0,0,0.5);
         }
 
-        /* ### 수정 시작 ### */
         /* ── Drag & Drop Overlay (Spatial Launching) ── */
         #drag-overlay {
             position: fixed;
@@ -920,7 +1020,6 @@
         #drop-zone-bottom.hovered .drop-zone-icon {
             transform: scale(1.2);
         }
-        /* ### 수정 끝 ### */
 
         /* Drop Zone Previews ( 반투명 기존 매핑 앱 정보 ) */
         .drop-zone-preview {
@@ -1125,7 +1224,7 @@
                 </div>
             </div>
             <div class="split-drawer-header">
-                <span>Split Screen Apps</span>
+                <span>Launcher</span>
                 <span class="close-drawer" onclick="document.getElementById('split-drawer').classList.remove('open')">&times;</span>
             </div>
             <div class="split-app-list" id="split-app-list"></div>
@@ -1136,7 +1235,33 @@
                 <canvas id="display"></canvas>
                 <video id="mse-video" muted autoplay playsinline></video>
             </div>
-            <div id="split-divider" aria-hidden="true"></div>
+            <div id="split-divider" aria-hidden="true">
+                <div class="split-control-pill">
+                    <!-- Left Fullscreen -->
+                    <button id="split-expand-left-btn" class="split-control-btn" title="Left Fullscreen">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="14 6 6 6 6 14"></polyline>
+                            <line x1="6" y1="6" x2="18" y2="18"></line>
+                        </svg>
+                    </button>
+                    <!-- Swap -->
+                    <button id="split-swap-top-btn" class="split-control-btn split-swap-top-btn" title="Swap Screens">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M3 8a5 5 0 0 1 5-5h8a5 5 0 0 1 5 5" />
+                            <polyline points="17 5 21 8 17 11" />
+                            <path d="M21 16a5 5 0 0 1-5 5H8a5 5 0 0 1-5-5" />
+                            <polyline points="7 13 3 16 7 19" />
+                        </svg>
+                    </button>
+                    <!-- Right Fullscreen -->
+                    <button id="split-expand-right-btn" class="split-control-btn" title="Right Fullscreen">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="10 6 18 6 18 14"></polyline>
+                            <line x1="18" y1="6" x2="6" y2="18"></line>
+                        </svg>
+                    </button>
+                </div>
+            </div>
             <div id="browser-split-pane">
                 <canvas id="display-secondary"></canvas>
                 <div class="browser-pane-ui" id="browser-pane-ui">
@@ -1283,6 +1408,7 @@
                     <button class="split-pane-btn split-ratio-btn" data-ratio="0.6">6:4</button>
                     <button class="split-pane-btn split-ratio-btn" data-ratio="0.7">7:3</button>
                     <div class="split-toolbar-sep"></div>
+                    <button id="split-swap-btn" class="split-pane-btn" style="background: rgba(255,255,255,0.08); margin-right: 4px;">좌우 전환</button>
                     <button id="split-close-btn" class="split-pane-btn stop-btn">종료</button>
                 </div>
 
@@ -1302,7 +1428,6 @@
                     transition:opacity 0.3s ease;white-space:nowrap;">
         </div>
 
-        <!-- ### 수정 시작 ### -->
         <!-- Drag & Drop Overlay -->
         <div id="drag-overlay">
             <div class="drag-row-top" style="display: flex; gap: 16px; height: 110px; width: 100%; flex-shrink: 0;">
@@ -1335,7 +1460,6 @@
                 </div>
             </div>
         </div>
-        <!-- ### 수정 끝 ### -->
 
         <!-- App Pair Edit Dialog Overlay -->
         <div id="app-pair-dialog-overlay">

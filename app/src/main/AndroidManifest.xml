@@ -68,16 +68,7 @@
             android:taskAffinity="com.castla.mirror.web"
             android:theme="@android:style/Theme.Translucent.NoTitleBar.Fullscreen" />
 
-        <!-- Split Web Browser Activity for Dual Screen mode -->
-        <activity
-            android:name=".ui.SplitWebBrowserActivity"
-            android:exported="true"
-            android:launchMode="singleTask"
-            android:resizeableActivity="true"
-            android:configChanges="orientation|screenSize|smallestScreenSize|density|screenLayout|keyboardHidden"
-            android:hardwareAccelerated="true"
-            android:taskAffinity="com.castla.mirror.split"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar.Fullscreen" />
+
 
         <!-- Custom Home for Virtual Displays to prevent app reparenting -->
         <activity

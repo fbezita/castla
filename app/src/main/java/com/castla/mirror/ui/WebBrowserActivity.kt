@@ -35,21 +35,21 @@ class WebBrowserActivity : Activity() {
 
         var url = intent.getStringExtra("url") ?: "https://m.youtube.com"
         
-        // Parse splitMode from Intent or from URL hash fragment
-        var isSplit = intent.getBooleanExtra("splitMode", false) || intent.getStringExtra("splitMode") == "true"
-        if (url.contains("#split=true")) {
-            isSplit = true
-            url = url.replace("#split=true", "")
+        val pane = intent.getStringExtra("pane") ?: "primary"
+        var shouldFollowDisplayShape = pane == "secondary"
+        if (url.contains("#pane=secondary")) {
+            shouldFollowDisplayShape = true
+            url = url.replace("#pane=secondary", "")
         }
 
-        // split 화면은 display 비율을 따르도록 두고, 풀스크린 단독 모드만 가로 고정
-        requestedOrientation = if (isSplit) {
+        // Secondary VD is already sized by the browser pane, so let the Activity follow that display.
+        requestedOrientation = if (shouldFollowDisplayShape) {
             ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         } else {
             ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         }
         
-        if (isSplit) {
+        if (shouldFollowDisplayShape) {
             window.setFlags(
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
@@ -105,7 +105,7 @@ class WebBrowserActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
-            setupWebView(this, isSplit)
+            setupWebView(this, shouldFollowDisplayShape)
         }
 
         root.addView(webView)
@@ -118,7 +118,7 @@ class WebBrowserActivity : Activity() {
             webView.restoreState(savedInstanceState)
             Log.i(TAG, "Restored WebView state (URL: ${webView.url})")
         } else {
-            Log.i(TAG, "Loading URL: $url (Split: $isSplit)")
+            Log.i(TAG, "Loading URL: $url (pane=$pane followDisplayShape=$shouldFollowDisplayShape)")
             webView.loadUrl(url)
         }
     }
@@ -133,26 +133,26 @@ class WebBrowserActivity : Activity() {
         Log.d(TAG, "Configuration changed: ${newConfig.screenWidthDp}x${newConfig.screenHeightDp} dpi=${newConfig.densityDpi}")
     }
 
-    private fun setupWebView(webView: WebView, isSplit: Boolean) {
+    private fun setupWebView(webView: WebView, followDisplayShape: Boolean) {
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
             @Suppress("DEPRECATION")
             databaseEnabled = true
             mediaPlaybackRequiresUserGesture = false
-            useWideViewPort = !isSplit
-            loadWithOverviewMode = !isSplit
-            setSupportZoom(!isSplit)
-            builtInZoomControls = !isSplit
+            useWideViewPort = !followDisplayShape
+            loadWithOverviewMode = !followDisplayShape
+            setSupportZoom(!followDisplayShape)
+            builtInZoomControls = !followDisplayShape
             displayZoomControls = false
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            userAgentString = if (isSplit) {
+            userAgentString = if (followDisplayShape) {
                 "Mozilla/5.0 (Linux; Android 15; SM-F741N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Mobile Safari/537.36"
             } else {
                 "Mozilla/5.0 (iPad; CPU OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1"
             }
         }
-        if (isSplit) {
+        if (followDisplayShape) {
             webView.setInitialScale(100)
         }
 
