@@ -195,8 +195,6 @@ class MirrorForegroundService : Service() {
     private val pipelineMutex = Mutex()
     private val secondaryPipelineMutex = Mutex()
     private val primaryVdOperationMutex = Mutex()
-    private val primaryRebuildMutex = Mutex()
-    private val secondaryRebuildMutex = Mutex()
 
     enum class PipelineState { IDLE, REBUILDING }
     data class RebuildRequest(val width: Int, val height: Int, val force: Boolean, val forceSingle: Boolean)
@@ -1392,143 +1390,171 @@ class MirrorForegroundService : Service() {
             }
         }
 
-        private suspend fun executeActualRebuild(targetWidth: Int, targetHeight: Int, force: Boolean = false, forceSingle: Boolean = false) {
-            // 🔴 [개선] 독립된 전용 리빌드 뮤텍스를 선택합니다.
-            val targetLock = if (isPrimary) primaryRebuildMutex else secondaryRebuildMutex
+    private suspend fun executeActualRebuild(targetWidth: Int, targetHeight: Int, force: Boolean = false, forceSingle: Boolean = false) {
+            val effectiveMaxHeight = targetHeight.coerceAtMost(1080)
+            var targetW = targetWidth
+            var targetH = targetHeight
+            if (targetH > effectiveMaxHeight) {
+                val scale = effectiveMaxHeight.toFloat() / targetH
+                targetH = effectiveMaxHeight
+                targetW = (targetW * scale).toInt()
+            }
+            val alignedWidth = ((targetW + 15) and 15.inv()).coerceAtLeast(320)
+            val alignedHeight = ((targetH + 15) and 15.inv()).coerceAtLeast(320)
 
-            // 🔴 무한 대기를 방지하기 위해 400ms 타임아웃 가드를 세웁니다.
-            // 앞선 리빌드가 어떤 원인으로 장부를 붙잡고 안 놓아주더라도, 400ms 뒤에 자동으로 락을 깨고 진입하거나 스킵합니다.
-            val completed = withTimeoutOrNull(400) {
-                targetLock.withLock {
-                    val effectiveMaxHeight = targetHeight.coerceAtMost(1080)
-                    var targetW = targetWidth
-                    var targetH = targetHeight
-                    if (targetH > effectiveMaxHeight) {
-                        val scale = effectiveMaxHeight.toFloat() / targetH
-                        targetH = effectiveMaxHeight
-                        targetW = (targetW * scale).toInt()
-                    }
-                    val alignedWidth = ((targetW + 15) and 15.inv()).coerceAtLeast(320)
-                    val alignedHeight = ((targetH + 15) and 15.inv()).coerceAtLeast(320)
+            if (!force && isPrimary && alignedWidth == width && alignedHeight == height) return
+            if (isPrimary && (alignedWidth > 3840 || alignedHeight > 3840)) return
 
-                    if (!force && isPrimary && alignedWidth == width && alignedHeight == height) return@withLock
-                    if (isPrimary && (alignedWidth > 3840 || alignedHeight > 3840)) return@withLock
+            val w = alignedWidth
+            val h = alignedHeight
+            val dpi = computeVirtualDisplayDpi(w, h)
 
-                    val w = alignedWidth
-                    val h = alignedHeight
-                    val dpi = computeVirtualDisplayDpi(w, h)
-
-                    if (isPrimary) {
-                        val newTargetBitrate = StreamMath.calculateBaseBitrate(w, h)
-                        targetBitrate = if (isVideoApp) StreamMath.calculateOttBitrate(newTargetBitrate) else newTargetBitrate
-                        currentBitrate = targetBitrate
-                    } else {
-                        if (virtualDisplayManager?.isBound() != true) return@withLock
-                        if (displayId >= 0 && width == w && height == h && ((currentCodecMode == "mjpeg" && jpegEncoder != null) || (currentCodecMode != "mjpeg" && videoEncoder != null))) return@withLock
-                    }
-
-                    // 🟢 이제 안전하게 실행 로그가 찍히기 시작합니다.
-                    Log.i(TAG, "[executeActualRebuild] 락 획득 성공. 자원 교체 및 디스플레이 연산 집행.")
-
-                    try {
-                        if (isPrimary) {
-                            virtualDisplayManager?.setSurface(null)
-                        } else {
-                            virtualDisplayManager?.getPrivilegedService()?.setSurface(displayId, null)
-                        }
-                    } catch (_: Exception) {}
-
-                    videoEncoder?.release(); videoEncoder = null
-                    jpegEncoder?.release(); jpegEncoder = null
-
-                    delay(150)
-
-                    var startEncoderTask: (() -> Unit)? = null
-                    val surface = if (currentCodecMode == "mjpeg") {
-                        val jpeg = JpegEncoder(w, h, fps = 15, quality = 65)
-                        val inputSurface = jpeg.createInputSurface()
-                        jpegEncoder = jpeg
-                        startEncoderTask = {
-                            jpeg.start { data, key -> mirrorServer?.broadcastFrame(data, key, name) }
-                        }
-                        mirrorServer?.setKeyframeRequester(name) {
-                            serviceScope.launch { try { if (displayId >= 0) virtualDisplayManager?.getPrivilegedService()?.wakeUpDisplay(displayId); restoreContent() } catch (_: Exception) {} }
-                        }
-                        inputSurface
-                    } else {
-                        val baseBitrate = if (isPrimary) currentBitrate else StreamMath.calculateSecondaryBitrate(w, h)
-                        val encoder = VideoEncoder(w, h, baseBitrate, thermalFpsOverride ?: currentFps)
-                        val inputSurface = encoder.createInputSurface()
-                        videoEncoder = encoder
-                        encoder.onSpsPps = { mirrorServer?.broadcastSpsPps(it, name) }
-                        startEncoderTask = {
-                            encoder.start { data, key -> mirrorServer?.broadcastFrame(data, key, name) }
-                        }
-                        mirrorServer?.setKeyframeRequester(name) { encoder.requestKeyFrame() }
-                        inputSurface
-                    }
-
-                    currentEncoderSurface = surface
-                    width = w
-                    height = h
-
-                    delay(100)
-
-                    if (isPrimary) {
-                        touchInjector = (touchInjector ?: TouchInjector(w, h)).also { it.updateDimensions(w, h) }
-                        if (virtualDisplayManager?.isBound() == true) {
-                            primaryVdOperationMutex.withLock {
-                                val activeId = virtualDisplayManager!!.getDisplayId()
-                                if (activeId >= 0) {
-                                    virtualDisplayManager?.resizeDisplay(activeId, w, h, dpi)
-                                    virtualDisplayManager?.setSurface(surface)
-                                    displayId = activeId
-                                    touchInjector?.setVirtualDisplayInjector { virtualDisplayManager?.injectMotionEvent(it) }
-                                    startEncoderTask?.invoke()
-                                    mainHandler.post {
-                                        // 만약 액티비티의 준비중 다이얼로그나 수명 주기를 제어하는
-                                        // 내부 플래그가 있다면 여기서 확실하게 종결 장부를 찍어줍니다.
-                                        // 예: MainActivity.getInstance()?.notifyReady()
-                                    }
-                                    return@withLock
-                                } else {
-                                    if (virtualDisplayManager?.hasVirtualDisplay() == true) { delay(200) }
-                                    val doubleCheckId = virtualDisplayManager!!.getDisplayId()
-                                    if (doubleCheckId >= 0) {
-                                        virtualDisplayManager?.setSurface(null)
-                                        virtualDisplayManager?.resizeDisplay(doubleCheckId, w, h, dpi)
-                                        virtualDisplayManager?.setSurface(surface)
-                                        displayId = doubleCheckId
-                                        touchInjector?.setVirtualDisplayInjector { virtualDisplayManager?.injectMotionEvent(it) }
-                                        startEncoderTask?.invoke()
-                                        return@withLock
-                                    }
-                                    virtualDisplayManager?.releaseVirtualDisplay()
-                                    delay(50)
-                                    virtualDisplayManager?.createVirtualDisplay(w, h, dpi, surface)
-                                    if (virtualDisplayManager?.hasVirtualDisplay() == true) {
-                                        val newActiveId = virtualDisplayManager!!.getDisplayId()
-                                        displayId = newActiveId
-                                        val gen = markVdCreated(newActiveId, "primary_rebuild")
-                                        touchInjector?.setVirtualDisplayInjector { virtualDisplayManager?.injectMotionEvent(it) }
-                                        startEncoderTask?.invoke()
-                                        restoreContentLocked(gen, newActiveId)
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        // Secondary 로직 생략 (기존 순정 코드 그대로 유지)
-                        // ...
-                    }
-                    true
-                }
+            if (isPrimary) {
+                val newTargetBitrate = StreamMath.calculateBaseBitrate(w, h)
+                targetBitrate = if (isVideoApp) StreamMath.calculateOttBitrate(newTargetBitrate) else newTargetBitrate
+                currentBitrate = targetBitrate
+            } else {
+                if (virtualDisplayManager?.isBound() != true) return
+                if (displayId >= 0 && width == w && height == h && ((currentCodecMode == "mjpeg" && jpegEncoder != null) || (currentCodecMode != "mjpeg" && videoEncoder != null))) return
             }
 
-            if (completed == null) {
-                Log.e(TAG, "[executeActualRebuild] ⚠️ 데드락 경보: 락 획득 타임아웃 발생! 강제 우회 처리를 시행합니다.")
-                // 락 획득에 실패하더라도 인코더가 완전히 멈추는 걸 막기 위해 비동기로 한 번 더 밀어내거나
-                // 안전하게 스킵 후 다음 프레임에서 재시도하도록 유도합니다.
+            try {
+                if (isPrimary) {
+                    virtualDisplayManager?.setSurface(null)
+                } else {
+                    virtualDisplayManager?.getPrivilegedService()?.setSurface(displayId, null)
+                }
+            } catch (_: Exception) {}
+
+            videoEncoder?.release(); videoEncoder = null
+            jpegEncoder?.release(); jpegEncoder = null
+
+            delay(150)
+
+            var startEncoderTask: (() -> Unit)? = null
+            val surface = if (currentCodecMode == "mjpeg") {
+                val jpeg = JpegEncoder(w, h, fps = 15, quality = 65)
+                val inputSurface = jpeg.createInputSurface()
+                jpegEncoder = jpeg
+                startEncoderTask = {
+                    jpeg.start { data, key -> mirrorServer?.broadcastFrame(data, key, name) }
+                }
+                mirrorServer?.setKeyframeRequester(name) {
+                    serviceScope.launch { try { if (displayId >= 0) virtualDisplayManager?.getPrivilegedService()?.wakeUpDisplay(displayId); restoreContent() } catch (_: Exception) {} }
+                }
+                inputSurface
+            } else {
+                val baseBitrate = if (isPrimary) currentBitrate else StreamMath.calculateSecondaryBitrate(w, h)
+                val encoder = VideoEncoder(w, h, baseBitrate, thermalFpsOverride ?: currentFps)
+                val inputSurface = encoder.createInputSurface()
+                videoEncoder = encoder
+                encoder.onSpsPps = { mirrorServer?.broadcastSpsPps(it, name) }
+                startEncoderTask = {
+                    encoder.start { data, key -> mirrorServer?.broadcastFrame(data, key, name) }
+                }
+                mirrorServer?.setKeyframeRequester(name) { encoder.requestKeyFrame() }
+                inputSurface
+            }
+
+            currentEncoderSurface = surface
+            width = w
+            height = h
+
+            delay(100)
+
+            if (isPrimary) {
+                touchInjector = (touchInjector ?: TouchInjector(w, h)).also { it.updateDimensions(w, h) }
+                if (virtualDisplayManager?.isBound() == true) {
+                    primaryVdOperationMutex.withLock {
+                        // 🔴 핵심 변경: 메모리 장부가 아닌 실제 커널 디스플레이 매니저의 활성화 ID를 직접 쿼리합니다.
+                        val activeId = virtualDisplayManager!!.getDisplayId()
+                        if (activeId >= 0) {
+                            Log.i(TAG, "[VDSafeResize] Reusing existing primary Display $activeId")
+                            virtualDisplayManager?.resizeDisplay(activeId, w, h, dpi)
+                            virtualDisplayManager?.setSurface(surface)
+
+                            displayId = activeId
+                            touchInjector?.setVirtualDisplayInjector { virtualDisplayManager?.injectMotionEvent(it) }
+                            startEncoderTask?.invoke()
+                        } else {
+                            // 🔴 [원인 격파] 이미 Shizuku 내부나 다른 코루틴이 디스플레이를 새로 만들고 있다면
+                            // 무작비하게 release 후 Recreate 하지 말고 200ms 안착 대기 마진을 주어 가속 충돌을 방지합니다.
+                            if (virtualDisplayManager?.hasVirtualDisplay() == true) {
+                                Log.w(TAG, "[VDSafeResize] Virtual display installation in progress... waiting for architecture stabilization.")
+                                delay(200)
+                            }
+
+                            val doubleCheckId = virtualDisplayManager!!.getDisplayId()
+                            if (doubleCheckId >= 0) {
+                                // 대기 후 디스플레이가 정상 확보되었다면 즉시 재활용 파이프라인으로 우회 유도
+                                virtualDisplayManager?.setSurface(null)
+                                virtualDisplayManager?.resizeDisplay(doubleCheckId, w, h, dpi)
+                                virtualDisplayManager?.setSurface(surface)
+                                displayId = doubleCheckId
+                                touchInjector?.setVirtualDisplayInjector { virtualDisplayManager?.injectMotionEvent(it) }
+                                startEncoderTask?.invoke()
+                                return@withLock
+                            }
+
+                            // 진짜 아무것도 없을 때만 최초 완벽한 클린 마운트 시행
+                            virtualDisplayManager?.releaseVirtualDisplay()
+                            delay(50) // 커널 자원 반납 최소 시간 보장
+
+                            virtualDisplayManager?.createVirtualDisplay(w, h, dpi, surface)
+                            if (virtualDisplayManager?.hasVirtualDisplay() == true) {
+                                val newActiveId = virtualDisplayManager!!.getDisplayId()
+                                displayId = newActiveId
+                                val gen = markVdCreated(newActiveId, "primary_rebuild")
+                                touchInjector?.setVirtualDisplayInjector { virtualDisplayManager?.injectMotionEvent(it) }
+                                startEncoderTask?.invoke()
+                                restoreContentLocked(gen, newActiveId)
+                                Log.i(TAG, "[VDRebuild] Created primary virtual display successfully. ID: $newActiveId")
+                            } else {
+                                Log.e(TAG, "[VDRebuild] Failed to create primary virtual display")
+                                markTerminal(TerminalReason.VD_RECREATE_FAILED)
+                            }
+                        }
+                    }
+                } else if (!shizukuSetupInProgress) {
+                    trySetupVirtualDisplay(w, h, surface) { success ->
+                        if (!success) Log.e(TAG, "Shizuku rebind failed")
+                        }
+                    }
+            } else {
+                // Secondary 파이프라인 영역
+                val oldDisplayId = displayId
+                if (oldDisplayId >= 0) {
+                    Log.i(TAG, "[VDSafeResize] Resizing secondary Display $oldDisplayId")
+                    virtualDisplayManager?.getPrivilegedService()?.setSurface(oldDisplayId, null)
+                    virtualDisplayManager?.resizeDisplay(oldDisplayId, w, h, dpi)
+                    virtualDisplayManager?.getPrivilegedService()?.setSurface(oldDisplayId, surface)
+
+                    startEncoderTask?.invoke()
+                    touchInjector = (touchInjector ?: TouchInjector(w, h)).also { injector ->
+                        injector.updateDimensions(w, h)
+                        injector.setVirtualDisplayInjector { shizukuSetup?.privilegedService?.injectMotionEvent(oldDisplayId, it) }
+                    }
+                } else {
+                    val newDisplayId = virtualDisplayManager?.createSecondaryVirtualDisplay(w, h, dpi, surface) ?: -1
+                    if (newDisplayId < 0) {
+                        Log.e(TAG, "[VDRebuild] Failed to create secondary virtual display")
+                        release()
+                        return
+                    }
+                    val gen = markVdCreated(newDisplayId, "secondary_rebuild")
+                    try {
+                        if (currentApp.isBlank()) {
+                            currentApp = "HOME"
+                            virtualDisplayManager?.getPrivilegedService()?.launchHomeOnDisplay(newDisplayId)
+                        } else { restoreContentLocked(gen, newDisplayId) }
+                    } catch (_: Exception) {}
+                    displayId = newDisplayId
+                    touchInjector = (touchInjector ?: TouchInjector(w, h)).also { injector ->
+                        injector.updateDimensions(w, h)
+                        injector.setVirtualDisplayInjector { shizukuSetup?.privilegedService?.injectMotionEvent(newDisplayId, it) }
+                    }
+                    startEncoderTask?.invoke()
+                }
             }
         }
 
