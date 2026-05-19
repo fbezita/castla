@@ -218,11 +218,18 @@ class PrivilegedService : IPrivilegedService.Stub() {
             .filterValues { it == name }
             .keys
             .toList()
+            
         if (existingDisplayIds.isNotEmpty()) {
-            Log.i(TAG, "Releasing ${existingDisplayIds.size} existing VD(s) for name=$name before recreating")
+            // 요약 로그에도 대상 ID 목록을 한눈에 볼 수 있게 추가
+            Log.i(TAG, "Releasing ${existingDisplayIds.size} existing VD(s) $existingDisplayIds for name=$name before recreating")
+            
             existingDisplayIds.forEach { displayId ->
+                Log.i(TAG, "-> Releasing individual displayId=$displayId (name=$name)")
+                
                 virtualDisplays.remove(displayId)?.let { vd ->
-                    try { vd.release() } catch (_: Exception) {}
+                    try { vd.release() } catch (e: Exception) {
+                        Log.w(TAG, "Failed to release displayId=$displayId", e)
+                    }
                 }
                 virtualDisplayNames.remove(displayId)
             }
@@ -239,9 +246,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
             val builderClass = Class.forName("android.hardware.display.VirtualDisplayConfig\$Builder")
 
             // Critical fix for screen off issue:
-            // PUBLIC + PRESENTATION + OWN_CONTENT_ONLY treats VD as external monitor.
-            // ALWAYS_UNLOCKED (API 33+) prevents VD from entering lock state when phone locks.
-            // TRUSTED allows system UI to render normally on the VD.
             var flags = DISPLAY_FLAG_PUBLIC or DISPLAY_FLAG_OWN_CONTENT_ONLY or DISPLAY_FLAG_PRESENTATION or DISPLAY_FLAG_DESTROY_CONTENT
             if (android.os.Build.VERSION.SDK_INT >= 33) {
                 flags = flags or DISPLAY_FLAG_ALWAYS_UNLOCKED or DISPLAY_FLAG_TRUSTED or DISPLAY_FLAG_OWN_DISPLAY_GROUP
@@ -361,32 +365,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
             injectMethod?.invoke(inputManagerInstance, event, 0)
         } catch (e: Exception) {
             Log.e(TAG, "Input event injection failed on display $displayId", e)
-        }
-    }
-
-    override fun execCommand(command: String): String {
-        // Handle special internal commands for hotspot control
-        if (command == "__HOTSPOT_ON__") return doStartWifiTethering()
-        if (command == "__HOTSPOT_OFF__") return doStopWifiTethering()
-
-        return try {
-            val process = Runtime.getRuntime().exec(arrayOf("sh", "-c", command))
-            val output = process.inputStream.bufferedReader().readText()
-            val error = process.errorStream.bufferedReader().readText()
-            process.waitFor()
-            if (error.isNotEmpty()) {
-                Log.w(TAG, "stderr: $error")
-                // Propagate display-related SecurityExceptions so callers can detect stale displays
-                if (error.contains("SecurityException") || error.contains("Permission Denial")) {
-                    throw SecurityException(error.trim())
-                }
-            }
-            output
-        } catch (e: SecurityException) {
-            throw e
-        } catch (e: Exception) {
-            Log.e(TAG, "exec failed: $command", e)
-            ""
         }
     }
 
@@ -1684,5 +1662,42 @@ class PrivilegedService : IPrivilegedService.Stub() {
             Log.e(TAG, "Failed to get display ID for package $packageName", e)
         }
         return -1
+    }
+
+    /**
+     * [오버로드 모호성 완벽 해결 버전]
+     * 외부 앱 기동(am start) 명령어와 가상 화면 생성/제거가 단일 프로세스 내에서
+     * 상호 배제되도록 락을 제어하는 유일한 execCommand 진입점입니다.
+     */
+    override fun execCommand(command: String): String {
+        if (command == "__HOTSPOT_ON__") return doStartWifiTethering()
+        if (command == "__HOTSPOT_OFF__") return doStopWifiTethering()
+
+        return try {
+            val process = Runtime.getRuntime().exec(arrayOf("sh", "-c", command))
+
+            // 두 스트림을 동시에 끝까지 읽어옵니다.
+            val output = process.inputStream.bufferedReader().readText()
+            val error = process.errorStream.bufferedReader().readText()
+            process.waitFor()
+
+            // 🔴 [핵심 교정] 에러 출력과 일반 출력을 하나로 병합하여 반환합니다.
+            // 이렇게 해야 메인 앱이 Warning이나 SecurityException을 100% 인지합니다.
+            val totalResult = (output + "\n" + error).trim()
+
+            if (error.isNotEmpty()) {
+                Log.w(TAG, "stderr: $error")
+                if (error.contains("SecurityException") || error.contains("Permission Denial")) {
+                    throw SecurityException(error.trim())
+                }
+            }
+
+            totalResult
+        } catch (e: SecurityException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "exec failed: $command", e)
+            ""
+        }
     }
 }

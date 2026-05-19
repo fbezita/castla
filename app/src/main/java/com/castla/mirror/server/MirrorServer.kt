@@ -68,7 +68,6 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     // Web Launcher specific listeners
     private var onGoHomeListener: (() -> Unit)? = null
     private var onAppLaunchListener: ((String, String?, String) -> Unit)? = null
-    private var onCloseSplitListener: (() -> Unit)? = null
     private var onDisplayDensityListener: ((Float) -> Unit)? = null
     private var onQualityReportListener: ((Int, Double, Int) -> Unit)? = null
     private var onBubbleClosedListener: (() -> Unit)? = null
@@ -138,10 +137,6 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         onAppLaunchListener = listener
     }
 
-    fun setCloseSplitListener(listener: () -> Unit) {
-        onCloseSplitListener = listener
-    }
-
     fun setDisplayDensityListener(listener: (Float) -> Unit) {
         onDisplayDensityListener = listener
     }
@@ -156,10 +151,6 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
 
     fun isBrowserConnected(): Boolean = isBrowserConnected
 
-
-    fun onCloseSplitRequest() {
-        onCloseSplitListener?.invoke()
-    }
 
     fun onDisplayDensityChange(scale: Float) {
         onDisplayDensityListener?.invoke(scale)

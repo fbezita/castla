@@ -62,7 +62,7 @@ class ControlSocket(
                     val height = json.optInt("height", 0)
                     val pane = json.optString("pane", "primary")
                     val layoutMode = json.optString("layoutMode", "")
-                    if (width > 0 && height > 0) {
+                    if (width >= 0 && height >= 0) {
                         server.onViewportChange(pane, width, height, layoutMode)
                     }
                 }
@@ -99,19 +99,9 @@ class ControlSocket(
                         server.onAppLaunchRequest(pkg, componentName, pane)
                     }
                 }
-                "LAUNCH_APP_PAIR" -> {
-                    val left = json.optString("left", "")
-                    val right = json.optString("right", "")
-                    if (left.isNotEmpty() && right.isNotEmpty()) {
-                        server.onAppLaunchRequest(left, null, "primary")
-                        server.onAppLaunchRequest(right, null, "secondary")
-                    }
-                }
-                "closeSecondary" -> {
-                    server.onAppLaunchRequest("", null, "secondary")
-                }
-                "closeSplit" -> {
-                    server.onCloseSplitRequest()
+
+                "closeSecondary", "closeSplit" -> {
+                    server.onViewportChange("secondary", 0, 0)
                 }
                 "displayDensity" -> {
                     val scale = json.optDouble("scale", 1.0).toFloat()

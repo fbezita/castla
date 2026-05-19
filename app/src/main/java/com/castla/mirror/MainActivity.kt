@@ -125,7 +125,9 @@ class MainActivity : AppCompatActivity() {
             val serviceWasAlreadyRunning = localBinder.service.isRunning
             if (streamSettings.mirroringMode == MirroringMode.FULL_SCREEN && !serviceWasAlreadyRunning) {
                 localBinder.service.setBrowserConnectionListener { connected ->
-                    if (connected) runOnUiThread { moveTaskToBack(true) }
+                    if (connected) runOnUiThread {
+//                        moveTaskToBack(true)
+                    }
                 }
             }
 

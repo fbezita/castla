@@ -104,20 +104,34 @@ document.addEventListener('DOMContentLoaded', async () => {
     const splitHandle = document.getElementById('split-handle');
     const splitAppList = document.getElementById('split-app-list');
 
-    const DEFAULT_BROWSER_SPLIT_RATIO = 0.42;
-    let browserSplitState = {
-        active: false,
-        app: null,
-        url: null,
-        ratio: DEFAULT_BROWSER_SPLIT_RATIO,
-        resizing: false,
-        fitMode: 'cover',
-        lockedPrimaryViewport: null,
-        lockedSecondaryViewport: null,
-        preset: null,
-        swapped: false
+    const DEFAULT_SPLIT_RATIO = 0.50;
+    let splitRatio = DEFAULT_SPLIT_RATIO;
+    let isResizing = false;
+    let leftLockedViewport = null;
+    let rightLockedViewport = null;
+
+    // 🔴 대칭적인 2가지 가상 디스플레이 독립 실행 정보 (SSOT 리액티브 상태 엔진)
+    let _leftApp = null;
+    let _rightApp = null;
+
+    const state = {
+        get left() { return _leftApp; },
+        set left(app) {
+            if (_leftApp === app) return;
+            console.log(`[State] Left display app changed: ${app ? app.label : 'null'}`);
+            _leftApp = app;
+            requestAnimationFrame(() => updateLayoutUI());
+        },
+        get right() { return _rightApp; },
+        set right(app) {
+            if (_rightApp === app) return;
+            console.log(`[State] Right display app changed: ${app ? app.label : 'null'}`);
+            _rightApp = app;
+            requestAnimationFrame(() => updateLayoutUI());
+        }
     };
 
+    let browserSplitState = { url: null, preset: null, swapped: false };
     const BROWSER_PRESETS = [
         { label: 'YouTube', url: 'https://m.youtube.com' },
         { label: 'Netflix', url: 'https://www.netflix.com' },
@@ -153,11 +167,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function getEffectivePrimaryFitMode() {
-        return browserSplitState.active ? 'fill' : streamPolicy.fitMode;
+        return (!!state.right) ? 'fill' : streamPolicy.fitMode;
     }
 
     function getEffectiveSecondaryFitMode() {
-        return browserSplitState.active ? 'fill' : streamPolicy.fitMode;
+        return (!!state.right) ? 'fill' : streamPolicy.fitMode;
     }
 
     function alignDimension(value) {
@@ -222,7 +236,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const shellWidth = Math.round(playerShell?.clientWidth || window.innerWidth || 0);
         const shellHeight = Math.round(playerShell?.clientHeight || window.innerHeight || 0);
         if (shellWidth <= 0 || shellHeight <= 0 || !Number.isFinite(primaryAspectRatio) || primaryAspectRatio <= 0) {
-            return DEFAULT_BROWSER_SPLIT_RATIO;
+            return DEFAULT_SPLIT_RATIO;
         }
 
         const desiredPrimaryWidth = Math.round(shellHeight * primaryAspectRatio);
@@ -245,36 +259,36 @@ document.addEventListener('DOMContentLoaded', async () => {
         };
     }
 
-    function lockBrowserSplitViewports(app = browserSplitState.app) {
-        if (!browserSplitState.active) return;
-        const preset = resolveSplitPreset(currentPrimaryApp, app);
-        browserSplitState.preset = preset;
+    function lockBrowserSplitViewports(app = state.right) {
+        if (!(!!state.right)) return;
+        const preset = resolveSplitPreset(state.left, app);
+        
 
         // Use current ratio (may have been changed by divider drag), not preset ratio
-        const activeRatio = browserSplitState.ratio;
+        const activeRatio = splitRatio;
         const { primaryWidth, secondaryWidth, shellHeight } = getDesiredSplitWidths(activeRatio);
         const primaryHeight = Math.round(streamPane?.clientHeight || canvas?.clientHeight || shellHeight || window.innerHeight || 0);
 
         console.log(`[ViewportLockDebug] activeRatio=${activeRatio} primaryWidth=${primaryWidth} secondaryWidth=${secondaryWidth} shellHeight=${shellHeight} isFullscreen=${playerShell?.classList.contains('secondary-fullscreen')}`);
 
         if (primaryWidth > 0 && primaryHeight > 0) {
-            browserSplitState.lockedPrimaryViewport = buildLockedViewport(
+            leftLockedViewport = buildLockedViewport(
                 primaryWidth,
                 primaryHeight
             );
         } else {
-            browserSplitState.lockedPrimaryViewport = null;
+            leftLockedViewport = null;
         }
 
         if (SPLIT_STRATEGY === 'dual_stream') {
             const secondaryHeight = shellHeight;
             if (secondaryWidth > 0 && secondaryHeight > 0) {
-                browserSplitState.lockedSecondaryViewport = buildLockedViewport(
+                rightLockedViewport = buildLockedViewport(
                     secondaryWidth,
                     secondaryHeight,
                     preset.secondaryAspectRatio
                 );
-                console.log(`[ViewportLockDebug] lockedSecondaryViewport locked! width=${browserSplitState.lockedSecondaryViewport.width} height=${browserSplitState.lockedSecondaryViewport.height}`);
+                console.log(`[ViewportLockDebug] lockedSecondaryViewport locked! width=${rightLockedViewport.width} height=${rightLockedViewport.height}`);
             } else {
                 console.warn(`[ViewportLockDebug] Secondary lock skipped because secondaryWidth=${secondaryWidth} or secondaryHeight=${secondaryHeight}`);
             }
@@ -288,7 +302,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     function applyActiveFitModes() {
         const primaryFitMode = getEffectivePrimaryFitMode();
         const secondaryFitMode = getEffectiveSecondaryFitMode();
-        document.body.dataset.fitMode = browserSplitState.active ? secondaryFitMode : primaryFitMode;
+        document.body.dataset.fitMode = (!!state.right) ? secondaryFitMode : primaryFitMode;
         getActiveRenderer()?.setFitMode?.(primaryFitMode);
         getActiveSecondaryRenderer()?.setFitMode?.(secondaryFitMode);
         updateSplitFitButton();
@@ -300,7 +314,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         return { shellWidth, shellHeight };
     }
 
-    function getDesiredSplitWidths(ratio = browserSplitState.ratio) {
+    function getDesiredSplitWidths(ratio = splitRatio) {
         const { shellWidth, shellHeight } = getSplitShellSize();
         if (shellWidth <= 0 || shellHeight <= 0) {
             return { primaryWidth: 0, secondaryWidth: 0, shellWidth, shellHeight };
@@ -322,12 +336,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function updateSplitToolbarVisibility() {
         if (!splitToolbar) return;
-        splitToolbar.style.display = browserSplitState.active ? 'flex' : 'none';
+        splitToolbar.style.display = (!!state.right) ? 'flex' : 'none';
     }
 
     function setBrowserSplitRatio(nextRatio) {
         const ratio = Math.max(0.10, Math.min(0.90, nextRatio));
-        browserSplitState.ratio = ratio;
+        splitRatio = ratio;
         const { primaryWidth, shellWidth } = getDesiredSplitWidths(ratio);
         if (primaryWidth > 0 && shellWidth > 0) {
             playerShell?.style.setProperty('--split-left-width', `${primaryWidth}px`);
@@ -419,7 +433,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function connectSecondaryVideo(isHotRefresh = false) {
-        if (!browserSplitState.active) return;
+        if (!(!!state.right)) return;
         if (secondaryVideoSocket) {
             try { secondaryVideoSocket.close(); } catch (_) {}
         }
@@ -442,16 +456,16 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         };
         secondaryVideoSocket.onclose = () => {
-            if (browserSplitState.active) scheduleReconnect();
+            if ((!!state.right)) scheduleReconnect();
         };
         secondaryVideoSocket.onerror = (error) => console.error('[Main] Secondary video WebSocket error:', error);
     }
 
     function sendSecondaryLaunchRequest() {
-        if (!browserSplitState.active || !browserSplitState.app) return;
+        if (!(!!state.right) || !state.right) return;
         if (!controlSocket || controlSocket.readyState !== WebSocket.OPEN) return;
 
-        const app = browserSplitState.app;
+        const app = state.right;
         const message = {
             type: 'launchApp',
             pkg: app.packageName,
@@ -461,55 +475,137 @@ document.addEventListener('DOMContentLoaded', async () => {
         controlSocket.send(JSON.stringify(message));
     }
 
-    async function enableBrowserSplit(app) {
-        if (!app) return;
+    async function updateLayoutUI() {
+        const hasLeft = !!state.left;
+        const hasRight = !!state.right;
 
-        destroySecondaryTransport();
-        browserSplitState.active = true;
-        browserSplitState.app = app;
-        browserSplitState.fitMode = 'contain';
-        browserSplitState.lockedPrimaryViewport = null;
-        browserSplitState.lockedSecondaryViewport = null;
-        browserSplitState.preset = resolveSplitPreset(currentPrimaryApp, app);
-        streamPolicy.layoutMode = 'browser_split';
-        document.body.dataset.layoutMode = streamPolicy.layoutMode;
-        const initialRatio = browserSplitState.preset.ratio || browserSplitState.ratio || DEFAULT_BROWSER_SPLIT_RATIO;
-        setBrowserSplitRatio(initialRatio);
-        // Highlight the closest ratio button
-        document.querySelectorAll('.split-ratio-btn').forEach(b => {
-            const btnRatio = parseFloat(b.dataset.ratio);
-            b.classList.toggle('active', Math.abs(btnRatio - initialRatio) < 0.05);
-        });
-        playerShell?.classList.remove('secondary-fullscreen');
-        playerShell?.classList.add('browser-split');
-        updateSplitToolbarVisibility();
-        applyActiveFitModes();
-        await new Promise((resolve) => requestAnimationFrame(() => resolve()));
-        lockBrowserSplitViewports(app);
-        await initSecondaryDecoder();
-        if (secondaryTouchHandler) {
-            secondaryTouchHandler.destroy();
+        console.log(`[Launcher] updateLayoutUI: hasLeft=${hasLeft}, hasRight=${hasRight}`);
+
+        if (hasLeft && hasRight) {
+            // ==========================================
+            // 🔴 상황 1: 둘 다 실행된 상태 -> 2개 보이는 듀얼 스플릿(left & right) UI 구성!
+            // ==========================================
+            destroySecondaryTransport();
+            
+            leftLockedViewport = null;
+            rightLockedViewport = null;
+            
+            streamPolicy.layoutMode = 'browser_split';
+            document.body.dataset.layoutMode = streamPolicy.layoutMode;
+
+            const initialRatio = splitRatio || splitRatio || DEFAULT_SPLIT_RATIO;
+            setBrowserSplitRatio(initialRatio);
+
+            // Highlight the closest ratio button
+            document.querySelectorAll('.split-ratio-btn').forEach(b => {
+                const btnRatio = parseFloat(b.dataset.ratio);
+                b.classList.toggle('active', Math.abs(btnRatio - initialRatio) < 0.05);
+            });
+
+            playerShell?.classList.remove('secondary-fullscreen');
+            playerShell?.classList.add('browser-split');
+            updateSplitToolbarVisibility();
+            applyActiveFitModes();
+
+            await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+            lockBrowserSplitViewports(state.right);
+            await initSecondaryDecoder();
+            if (secondaryTouchHandler) {
+                secondaryTouchHandler.destroy();
+            }
+            secondaryTouchHandler = new TouchHandler(secondaryCanvas, getActiveSecondaryRenderer(), controlSocket, 'secondary');
+            applyActiveFitModes();
+            connectSecondaryVideo();
+            requestAnimationFrame(() => sendViewportSize(true));
+
+        } else if (hasRight) {
+            // ==========================================
+            // 🔴 상황 2: state.right(오른쪽)만 단독 실행된 상태 -> 1개용 right 단독 풀 UI 구성!
+            // ==========================================
+            destroySecondaryTransport();
+            
+            leftLockedViewport = null;
+            rightLockedViewport = null;
+            
+            streamPolicy.layoutMode = 'browser_split';
+            document.body.dataset.layoutMode = streamPolicy.layoutMode;
+
+            const initialRatio = 0.5; // 단독 기동 시 중앙 밸런싱 배치
+            setBrowserSplitRatio(initialRatio);
+
+            // Highlight the closest ratio button
+            document.querySelectorAll('.split-ratio-btn').forEach(b => {
+                const btnRatio = parseFloat(b.dataset.ratio);
+                b.classList.toggle('active', Math.abs(btnRatio - initialRatio) < 0.05);
+            });
+
+            playerShell?.classList.add('secondary-fullscreen');
+            playerShell?.classList.add('browser-split');
+            updateSplitToolbarVisibility();
+            applyActiveFitModes();
+
+            await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+            lockBrowserSplitViewports(state.right);
+            await initSecondaryDecoder();
+            if (secondaryTouchHandler) {
+                secondaryTouchHandler.destroy();
+            }
+            secondaryTouchHandler = new TouchHandler(secondaryCanvas, getActiveSecondaryRenderer(), controlSocket, 'secondary');
+            applyActiveFitModes();
+            connectSecondaryVideo();
+            requestAnimationFrame(() => sendViewportSize(true));
+
+        } else if (hasLeft) {
+            // ==========================================
+            // 🔴 상황 3: state.left(왼쪽)만 단독 실행된 상태 -> 1개용 left 단독 풀 UI 구성!
+            // ==========================================
+            destroySecondaryTransport();
+            updateSplitToolbarVisibility();
+            
+            playerShell?.classList.remove('secondary-fullscreen');
+            playerShell?.classList.remove('browser-split');
+            
+            isLauncherMode = false;
+            webLauncher.classList.add('hidden');
+            splitDrawer.style.display = 'flex';
+            homeBtn.style.display = 'block';
+            
+            clearCanvas();
+            applyActiveFitModes();
+            sendViewportSize();
+
+        } else {
+            // ==========================================
+            // 🔴 상황 4: 둘 다 실행이 안 된 상태 -> 깨끗하게 홈 런처로 환원!
+            // ==========================================
+            destroySecondaryTransport();
+            updateSplitToolbarVisibility();
+            
+            playerShell?.classList.remove('secondary-fullscreen');
+            playerShell?.classList.remove('browser-split');
+            
+            state.left = null;
+            state.right = null;
+            isLauncherMode = true;
+            webLauncher.classList.remove('hidden');
+            splitDrawer.style.display = 'none';
+            homeBtn.style.display = 'none';
+            
+            clearCanvas();
         }
-        secondaryTouchHandler = new TouchHandler(secondaryCanvas, getActiveSecondaryRenderer(), controlSocket, 'secondary');
-        applyActiveFitModes();
-        connectSecondaryVideo();
-        // Send viewport immediately — the 500ms debounce can cause the primary
-        // Keep the primary VD at its full display size while opening the secondary pane.
-        requestAnimationFrame(() => sendViewportSize(true));
-        setTimeout(() => sendSecondaryLaunchRequest(), 120);
     }
 
     function disableBrowserSplit(options = {}) {
         const { notifyServer = true } = options;
-        const wasActive = browserSplitState.active;
-        browserSplitState.active = false;
+        const wasActive = (!!state.right);
+        state.right = null;
         updateSplitToolbarVisibility();
-        browserSplitState.resizing = false;
-        browserSplitState.app = null;
+        isResizing = false;
+        state.right = null;
         browserSplitState.url = null;
-        browserSplitState.fitMode = 'contain';
-        browserSplitState.lockedPrimaryViewport = null;
-        browserSplitState.lockedSecondaryViewport = null;
+        
+        leftLockedViewport = null;
+        rightLockedViewport = null;
         browserSplitState.preset = null;
         browserSplitState.swapped = false;
         playerShell?.classList.remove('swapped');
@@ -882,7 +978,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         browserErrorClose.addEventListener('click', () => showBrowserHome());
     }
 
-    setBrowserSplitRatio(DEFAULT_BROWSER_SPLIT_RATIO);
+    setBrowserSplitRatio(DEFAULT_SPLIT_RATIO);
     updateSplitFitButton();
     hideOverlay();
 
@@ -1142,7 +1238,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 console.log('[Main] Reconnecting video socket...');
                 connectVideo();
             }
-            if (SPLIT_STRATEGY === 'dual_stream' && browserSplitState.active && (!secondaryVideoSocket || secondaryVideoSocket.readyState === WebSocket.CLOSED || secondaryVideoSocket.readyState === WebSocket.CLOSING)) {
+            if (SPLIT_STRATEGY === 'dual_stream' && (!!state.right) && (!secondaryVideoSocket || secondaryVideoSocket.readyState === WebSocket.CLOSED || secondaryVideoSocket.readyState === WebSocket.CLOSING)) {
                 console.log('[Main] Reconnecting secondary video socket...');
                 connectSecondaryVideo();
             }
@@ -1176,17 +1272,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         clearTimeout(resizeTimer);
         const doSend = () => {
-            const primaryViewport = browserSplitState.active && browserSplitState.lockedPrimaryViewport
-                ? browserSplitState.lockedPrimaryViewport
+            const primaryViewport = (!!state.right) && leftLockedViewport
+                ? leftLockedViewport
                 : { width: livePrimaryWidth, height: livePrimaryHeight };
 
             // Only send secondary viewport in legacy dual-stream mode
-            console.log(`[ViewportSendDebug] SPLIT_STRATEGY=${SPLIT_STRATEGY} active=${browserSplitState.active} browserSplitPane=${!!browserSplitPane}`);
-            if (SPLIT_STRATEGY === 'dual_stream' && browserSplitState.active && browserSplitPane) {
-                const secondaryViewport = browserSplitState.lockedSecondaryViewport;
+            console.log(`[ViewportSendDebug] SPLIT_STRATEGY=${SPLIT_STRATEGY} active=${(!!state.right)} browserSplitPane=${!!browserSplitPane}`);
+            if (SPLIT_STRATEGY === 'dual_stream' && (!!state.right) && browserSplitPane) {
+                const secondaryViewport = rightLockedViewport;
                 console.log(`[ViewportSendDebug] secondaryViewport=${JSON.stringify(secondaryViewport)}`);
                 if (secondaryViewport && secondaryViewport.width > 0 && secondaryViewport.height > 0) {
-                    console.log(`[Main] Sending viewport pane=secondary requested=${secondaryViewport.width}x${secondaryViewport.height} fitMode=${getEffectiveSecondaryFitMode()} locked=${describeViewport(secondaryViewport)} split=${browserSplitState.active}`);
+                    console.log(`[Main] Sending viewport pane=secondary requested=${secondaryViewport.width}x${secondaryViewport.height} fitMode=${getEffectiveSecondaryFitMode()} locked=${describeViewport(secondaryViewport)} split=${(!!state.right)}`);
                     controlSocket.send(JSON.stringify({
                         type: 'viewport',
                         pane: 'secondary',
@@ -1198,7 +1294,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
             }
 
-            console.log(`[Main] Sending viewport pane=primary requested=${primaryViewport.width}x${primaryViewport.height} fitMode=${getEffectivePrimaryFitMode()} locked=${describeViewport(browserSplitState.lockedPrimaryViewport)} split=${browserSplitState.active}`);
+            console.log(`[Main] Sending viewport pane=primary requested=${primaryViewport.width}x${primaryViewport.height} fitMode=${getEffectivePrimaryFitMode()} locked=${describeViewport(leftLockedViewport)} split=${(!!state.right)}`);
 
             controlSocket.send(JSON.stringify({
                 type: 'viewport',
@@ -1246,7 +1342,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (touchHandler) touchHandler.destroy();
             const renderer = (decoder && decoder.renderer) ? decoder.renderer : null;
             touchHandler = new TouchHandler(canvas, renderer, controlSocket, 'primary');
-            if (SPLIT_STRATEGY === 'dual_stream' && browserSplitState.active && secondaryCanvas) {
+            if (SPLIT_STRATEGY === 'dual_stream' && (!!state.right) && secondaryCanvas) {
                 if (secondaryTouchHandler) secondaryTouchHandler.destroy();
                 secondaryTouchHandler = new TouchHandler(secondaryCanvas, getActiveSecondaryRenderer(), controlSocket, 'secondary');
             }
@@ -1256,7 +1352,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             // force rebuild (which otherwise uses stale full-screen size).
             sendViewportSize(true);
 
-            if (SPLIT_STRATEGY === 'dual_stream' && browserSplitState.active) {
+            if (SPLIT_STRATEGY === 'dual_stream' && (!!state.right)) {
                 if (!secondaryVideoSocket || secondaryVideoSocket.readyState === WebSocket.CLOSED) {
                     connectSecondaryVideo();
                 }
@@ -1348,16 +1444,16 @@ document.addEventListener('DOMContentLoaded', async () => {
                 } else if (msg.type === 'resolutionChanged') {
                     const pane = msg.pane || 'primary';
                     const lockedViewport = pane === 'secondary'
-                        ? browserSplitState.lockedSecondaryViewport
-                        : browserSplitState.lockedPrimaryViewport;
+                        ? rightLockedViewport
+                        : leftLockedViewport;
                     const fitMode = pane === 'secondary'
                         ? getEffectiveSecondaryFitMode()
                         : getEffectivePrimaryFitMode();
-                    console.log(`[Main] Server resolution changed pane=${pane} server=${msg.width}x${msg.height} fitMode=${fitMode} locked=${describeViewport(lockedViewport)} split=${browserSplitState.active}`);
+                    console.log(`[Main] Server resolution changed pane=${pane} server=${msg.width}x${msg.height} fitMode=${fitMode} locked=${describeViewport(lockedViewport)} split=${(!!state.right)}`);
 
                     // Safely hot-refresh the specific active decoder and request a keyframe immediately to maintain zero-restart clean feed
                     if (pane === 'secondary') {
-                        if (browserSplitState.active) {
+                        if ((!!state.right)) {
                             console.log('[Main] Performing hot-refresh on secondary decoder to prevent rainbow artifacts');
                             initSecondaryDecoder(false).then(() => { // Clear old resolution cache
                                 connectSecondaryVideo(false); // Reset sequence/cache for new resolution stream
@@ -1643,8 +1739,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Update live viewport task guides inside spatial drop zones
         const leftGuide = dropZoneLaunchLeft ? dropZoneLaunchLeft.querySelector('span:last-of-type') : null;
         if (leftGuide) {
-            if (currentPrimaryApp) {
-                leftGuide.innerHTML = `<img src="/api/icon?pkg=${currentPrimaryApp.packageName}" style="width:16px;height:16px;object-fit:contain;vertical-align:middle;margin-right:4px;border-radius:4px;"/> <strong style="color:#00E5FF;">${currentPrimaryApp.label}</strong> 실행 중`;
+            if (state.left) {
+                leftGuide.innerHTML = `<img src="/api/icon?pkg=${state.left.packageName}" style="width:16px;height:16px;object-fit:contain;vertical-align:middle;margin-right:4px;border-radius:4px;"/> <strong style="color:#00E5FF;">${state.left.label}</strong> 실행 중`;
             } else {
                 leftGuide.innerHTML = `<span style="color:rgba(255,255,255,0.35);">빈 화면 (VD_1)</span>`;
             }
@@ -1652,8 +1748,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         const rightGuide = dropZoneLaunchRight ? dropZoneLaunchRight.querySelector('span:last-of-type') : null;
         if (rightGuide) {
-            if (browserSplitState.active && browserSplitState.app) {
-                rightGuide.innerHTML = `<img src="/api/icon?pkg=${browserSplitState.app.packageName}" style="width:16px;height:16px;object-fit:contain;vertical-align:middle;margin-right:4px;border-radius:4px;"/> <strong style="color:#E040FB;">${browserSplitState.app.label}</strong> 실행 중`;
+            if ((!!state.right) && state.right) {
+                rightGuide.innerHTML = `<img src="/api/icon?pkg=${state.right.packageName}" style="width:16px;height:16px;object-fit:contain;vertical-align:middle;margin-right:4px;border-radius:4px;"/> <strong style="color:#E040FB;">${state.right.label}</strong> 실행 중`;
             } else {
                 rightGuide.innerHTML = `<span style="color:rgba(255,255,255,0.35);">빈 화면 (VD_2)</span>`;
             }
@@ -2002,26 +2098,29 @@ document.addEventListener('DOMContentLoaded', async () => {
             showLauncherNotice(`${app.label} set to Auto-run.`);
         } else if (zone === 'launch_left') {
             console.log(`[Launcher] Drag-launching Primary (VD_1): ${app.label}`);
-            if (browserSplitState.active && browserSplitState.app && browserSplitState.app.packageName === pkg) {
+            // 1. 이미 동일한 왼쪽 화면에 켜져 있으면 에러 공지 없이 조용히 무음 리턴!
+            if (state.left && state.left.packageName === pkg) {
+                return;
+            }
+            // 2. 반대쪽인 오른쪽 화면에 이미 실행 중인 경우에만 경고 알림 후 리턴 차단!
+            if ((!!state.right) && state.right && state.right.packageName === pkg) {
                 showLauncherNotice('이미 오른쪽 화면(Secondary)에서 실행 중인 앱입니다.');
                 return;
             }
-            launchApp(app, false);
+            launchApp(app, false); // 반대쪽 실행 정보가 이미 채워져 있으므로 그대로 런칭!
         } else if (zone === 'launch_right') {
             console.log(`[Launcher] Drag-launching Secondary (VD_2): ${app.label}`);
-            if (currentPrimaryApp && currentPrimaryApp.packageName === pkg) {
+            // 3. 이미 동일한 오른쪽 화면에 켜져 있으면 에러 공지 없이 조용히 무음 리턴!
+            if ((!!state.right) && state.right && state.right.packageName === pkg) {
+                return;
+            }
+            // 4. 반대쪽인 왼쪽 화면에 이미 실행 중인 경우에만 경고 알림 후 리턴 차단!
+            if (state.left && state.left.packageName === pkg) {
                 showLauncherNotice('이미 왼쪽 화면(Primary)에서 실행 중인 앱입니다.');
                 return;
             }
-            if (currentPrimaryApp) {
-                if (!isDualStreamCapable(app)) {
-                    showLauncherNotice('이 앱은 듀얼 스트림을 지원하지 않습니다.');
-                    return;
-                }
-                enableBrowserSplit(app);
-            } else {
-                launchAppOnSecondaryIndependently(app);
-            }
+            // 5. 공통 기동 파이프라인 호출로 전후 상황 파악 및 UI 업데이트 자동 위임!
+            launchApp(app, true); // 반대쪽 실행 정보가 이미 채워져 있으므로 그대로 런칭!
         } else if (zone === 'bottom') {
             if (sourceCat === 'FAVORITES') {
                 let favorites = getFavorites().filter(p => p !== pkg);
@@ -2349,7 +2448,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                     if (app.isPair) {
                         launchAppPair(app.left, app.right);
                     } else {
-                        launchApp(app, false); // Launch directly as Primary full screen
+                        // 🔴 낱개 앱 일반 클릭 시에는 단독 실행이므로 반대쪽 실행 정보를 SSOT에 맞춰 비워줍니다!
+                        state.right = null; 
+                        launchApp(app, false); 
                     }
                     splitDrawer.classList.remove('open');
                 });
@@ -2694,16 +2795,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         // 1. Prepare browser layout state for split screen
         destroySecondaryTransport();
-        browserSplitState.active = true;
-        browserSplitState.app = secondaryApp;
-        browserSplitState.fitMode = 'contain';
-        browserSplitState.lockedPrimaryViewport = null;
-        browserSplitState.lockedSecondaryViewport = null;
+        
+        state.right = secondaryApp;
+        
+        leftLockedViewport = null;
+        rightLockedViewport = null;
         browserSplitState.preset = resolveSplitPreset(primaryApp, secondaryApp);
         streamPolicy.layoutMode = 'browser_split';
         document.body.dataset.layoutMode = streamPolicy.layoutMode;
 
-        const initialRatio = browserSplitState.preset.ratio || browserSplitState.ratio || DEFAULT_BROWSER_SPLIT_RATIO;
+        const initialRatio = splitRatio || splitRatio || DEFAULT_SPLIT_RATIO;
         setBrowserSplitRatio(initialRatio);
 
         // Highlight the closest ratio button
@@ -2717,7 +2818,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         applyActiveFitModes();
 
         // 2. Clear launcher UI state
-        currentPrimaryApp = primaryApp;
+        state.left = primaryApp;
         isLauncherMode = false;
         webLauncher.classList.add('hidden');
         splitDrawer.style.display = 'flex';
@@ -2764,102 +2865,58 @@ document.addEventListener('DOMContentLoaded', async () => {
         }, 500);
     }
 
-    async function launchAppOnSecondaryIndependently(app) {
-        console.log(`[Launcher] Launching independent app on Secondary (VD_2): ${app.packageName}`);
-        lastLaunchTime = Date.now();
 
-        // 1. Prepare browser layout state for split screen with empty primary
-        destroySecondaryTransport();
-        browserSplitState.active = true;
-        browserSplitState.app = app;
-        browserSplitState.fitMode = 'contain';
-        browserSplitState.lockedPrimaryViewport = null;
-        browserSplitState.lockedSecondaryViewport = null;
-        browserSplitState.preset = resolveSplitPreset(null, app);
-        streamPolicy.layoutMode = 'browser_split';
-        document.body.dataset.layoutMode = streamPolicy.layoutMode;
-
-        // Force a balanced 50:50 ratio for secondary launching independently
-        const initialRatio = 0.5;
-        setBrowserSplitRatio(initialRatio);
-
-        // Highlight the closest ratio button
-        document.querySelectorAll('.split-ratio-btn').forEach(b => {
-            const btnRatio = parseFloat(b.dataset.ratio);
-            b.classList.toggle('active', Math.abs(btnRatio - initialRatio) < 0.05);
-        });
-
-        playerShell?.classList.add('secondary-fullscreen');
-        playerShell?.classList.add('browser-split');
-        updateSplitToolbarVisibility();
-        applyActiveFitModes();
-
-        // 2. Clear launcher UI state
-        currentPrimaryApp = null;
-        isLauncherMode = false;
-        webLauncher.classList.add('hidden');
-        splitDrawer.style.display = 'flex';
-        homeBtn.style.display = 'block';
-        clearLaunchTimeout();
-        clearFrameWatchdog();
-        clearCanvas();
-
-        // 3. Force lock the split viewports
-        lockBrowserSplitViewports(app);
-
-        // 4. Initialize secondary decoder and video connection
-        await initSecondaryDecoder();
-        if (secondaryTouchHandler) {
-            secondaryTouchHandler.destroy();
-        }
-        secondaryTouchHandler = new TouchHandler(secondaryCanvas, getActiveSecondaryRenderer(), controlSocket, 'secondary');
-        applyActiveFitModes();
-        connectSecondaryVideo();
-
-        // 5. Send initial viewport resolutions cleanly and trigger unified launch
-        sendViewportSize(true);
-        setTimeout(() => {
-            if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
-                controlSocket.send(JSON.stringify({
-                    type: 'launchApp',
-                    pkg: app.packageName,
-                    pane: 'secondary'
-                }));
-            }
-        }, 150);
-    }
 
     function launchAppPair(leftPkg, rightPkg) {
         console.log(`[Launcher] Launching App Pair: left=${leftPkg}, right=${rightPkg}`);
         if (Date.now() < launchGuardUntil) return;
         lastLaunchTime = Date.now(); // Record launch timestamp
 
-        const leftApp = allApps.find(a => a.packageName === leftPkg);
-        const rightApp = allApps.find(a => a.packageName === rightPkg);
+        const targetLeftApp = allApps.find(a => a.packageName === leftPkg);
+        const targetRightApp = allApps.find(a => a.packageName === rightPkg);
 
-        if (leftApp && rightApp) {
-            launchDualAppsDirectly(leftApp, rightApp);
-        } else if (leftApp) {
-            launchApp(leftApp, false);
+        if (targetLeftApp && targetRightApp) {
+            // 앱 페어 실행 시에는 실행 정보가 둘 다 보존되어 채워지도록 순차 호출!
+            launchApp(targetLeftApp, false);
+            setTimeout(() => {
+                launchApp(targetRightApp, true);
+            }, 300);
+        } else {
+            console.warn(`[Launcher] Failed to launch App Pair: one or both apps are missing.`);
         }
     }
 
-    function launchApp(app, launchOnSecondary = false) {
+    function launchApp(app, isRight = false) {
         if (app.isPair) {
             launchAppPair(app.left, app.right);
             return;
         }
 
         // Strict Duplication Safeguard:
-        // Prevent running the exact same app on both VD_1 and VD_2 simultaneously
+        // Prevent running the exact same app on both VD_1 (left) and VD_2 (right) simultaneously.
         const pkgName = app.packageName;
-        if (launchOnSecondary && currentPrimaryApp && currentPrimaryApp.packageName === pkgName) {
-            showLauncherNotice('이미 왼쪽 화면(Primary)에서 실행 중인 앱입니다.');
-            return;
-        }
-        if (!launchOnSecondary && browserSplitState.active && browserSplitState.app && browserSplitState.app.packageName === pkgName) {
-            showLauncherNotice('이미 오른쪽 화면(Secondary)에서 실행 중인 앱입니다.');
-            return;
+        if (isRight) {
+            // 1. 이미 동일한 오른쪽(right) 화면에 실행 중이라면, 에러 공지 없이 조용히 리턴!
+            if (state.right && state.right.packageName === pkgName) {
+                console.log(`[Launcher] ${pkgName} is already running on Right. Skipping redundant launch without Notice.`);
+                return;
+            }
+            // 2. 반대쪽인 왼쪽(left) 화면에 이미 실행 중인 경우에만 고급 알림을 주고 차단!
+            if (state.left && state.left.packageName === pkgName) {
+                showLauncherNotice('이미 왼쪽 화면(Primary)에서 실행 중인 앱입니다.');
+                return;
+            }
+        } else {
+            // 3. 이미 동일한 왼쪽(left) 화면에 실행 중이라면, 에러 공지 없이 조용히 리턴!
+            if (state.left && state.left.packageName === pkgName) {
+                console.log(`[Launcher] ${pkgName} is already running on Left. Skipping redundant launch without Notice.`);
+                return;
+            }
+            // 4. 반대쪽인 오른쪽(right) 화면에 이미 실행 중인 경우에만 고급 알림을 주고 차단!
+            if (state.right && state.right.packageName === pkgName) {
+                showLauncherNotice('이미 오른쪽 화면(Secondary)에서 실행 중인 앱입니다.');
+                return;
+            }
         }
 
         // Block accidental launches right after splash dismiss
@@ -2869,46 +2926,22 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         lastLaunchTime = Date.now(); // Record launch timestamp
         const componentName = app.componentName || null;
-        console.log(`[Launcher] Launching app: ${pkgName} (pane=${launchOnSecondary ? 'secondary' : 'primary'})`);
+        console.log(`[Launcher] Launching app: ${pkgName} (pane=${isRight ? 'secondary' : 'primary'})`);
 
-        if (launchOnSecondary) {
-            if (isLauncherMode) {
-                showLauncherNotice('먼저 왼쪽에 실행할 앱을 선택하세요.');
-                return;
-            }
-            if (!isDualStreamCapable(app)) {
-                showLauncherNotice('이 앱은 듀얼 스트림을 지원하지 않습니다.');
-                return;
-            }
-            enableBrowserSplit(app);
-            return;
+        // 🔴 1. 기동 상태 변수들을 현재 디스플레이 타겟 정보(state.left, state.right)에만 대칭 갱신 -> 자율 Reactive 바인딩에 의해 자동으로 updateLayoutUI() 연쇄 기동!
+        if (isRight) {
+            state.right = app;
+        } else {
+            state.left = app;
         }
 
-        const keepSplit = browserSplitState.active;
-
-        if (!keepSplit) {
-            disableBrowserSplit();
-        }
-        currentPrimaryApp = app;
-        isLauncherMode = false;
-        webLauncher.classList.add('hidden');
-        splitDrawer.style.display = 'flex';
-        homeBtn.style.display = 'block';
-        clearLaunchTimeout();
-        clearFrameWatchdog();
-
-        // Clear the previous app's last frame immediately so it doesn't
-        // flash during the transition to the new app
-        if (!keepSplit) {
-            clearCanvas();
-        }
-
+        // 🔴 3. 백엔드로 안정적으로 소켓 런칭 요청 송출!
         setTimeout(() => {
             if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
                 const message = {
                     type: 'launchApp',
                     pkg: pkgName,
-                    pane: 'primary'
+                    pane: isRight ? 'secondary' : 'primary'
                 };
                 if (componentName) message.componentName = componentName;
 
@@ -2918,8 +2951,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     controlSocket.send(JSON.stringify({ type: 'codec', mode: 'mjpeg' }));
                 }
 
-                sendViewportSize();
-                firstFrameReceived = false; // Reset here to avoid race condition with frames decoded within the 50ms window
+                firstFrameReceived = false;
                 setStatus('Loading...', '');
                 showOverlay();
                 launchTimeout = setTimeout(() => {
@@ -2932,7 +2964,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     showLauncherNotice('Launch timed out. Try again.');
                 }, 5000);
             }
-        }, 50);
+        }, 150);
 
     }
 
@@ -3009,14 +3041,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // Split toolbar lives inside #overlay-menu-panel; visibility is driven by
-    // browserSplitState.active so it appears only when a split is actually open.
+    // (!!state.right) so it appears only when a split is actually open.
     const splitToolbar = document.getElementById('split-pane-toolbar');
 
     // Split ratio buttons
     document.querySelectorAll('.split-ratio-btn').forEach(btn => {
         btn.addEventListener('click', () => {
             const ratio = parseFloat(btn.dataset.ratio);
-            if (!ratio || !browserSplitState.active) return;
+            if (!ratio || !(!!state.right)) return;
             const rect = playerShell.getBoundingClientRect();
             if (rect.width <= 0) return;
 
@@ -3027,13 +3059,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             document.querySelectorAll('.split-ratio-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             setBrowserSplitRatio(constrainedRatio);
-            lockBrowserSplitViewports(browserSplitState.app);
+            lockBrowserSplitViewports(state.right);
             requestAnimationFrame(() => sendViewportSize());
         });
     });
 
     function swapSplitMode() {
-        if (!browserSplitState.active) return;
+        if (!(!!state.right)) return;
         browserSplitState.swapped = !browserSplitState.swapped;
         playerShell?.classList.toggle('swapped', browserSplitState.swapped);
         if (navigator.vibrate) {
@@ -3042,10 +3074,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         console.log('[SplitSwap] Swapped split panes. Swapped status:', browserSplitState.swapped);
         
         // Re-apply ratio to trigger physical updates
-        setBrowserSplitRatio(browserSplitState.ratio);
+        setBrowserSplitRatio(splitRatio);
         
         // Lock viewports and send to server
-        lockBrowserSplitViewports(browserSplitState.app);
+        lockBrowserSplitViewports(state.right);
         requestAnimationFrame(() => sendViewportSize());
     }
 
@@ -3074,7 +3106,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             });
             splitExpandLeftBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                if (!browserSplitState.active) return;
+                if (!(!!state.right)) return;
                 if (navigator.vibrate) navigator.vibrate(30);
 
                 if (!browserSplitState.swapped) {
@@ -3084,7 +3116,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 } else {
                     // Left is Secondary. Maximize Left means promoting Secondary to Primary and maximizing.
                     console.log('[ExpandLeft] Promoting and maximizing Left (Secondary).');
-                    const secondaryApp = browserSplitState.app;
+                    const secondaryApp = state.right;
                     if (secondaryApp) {
                         disableBrowserSplit({ notifyServer: false });
                         launchApp(secondaryApp, false);
@@ -3117,7 +3149,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             });
             splitExpandRightBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                if (!browserSplitState.active) return;
+                if (!(!!state.right)) return;
                 if (navigator.vibrate) navigator.vibrate(30);
 
                 if (browserSplitState.swapped) {
@@ -3127,7 +3159,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 } else {
                     // Right is Secondary. Maximize Right means promoting Secondary to Primary and maximizing.
                     console.log('[ExpandRight] Promoting and maximizing Right (Secondary).');
-                    const secondaryApp = browserSplitState.app;
+                    const secondaryApp = state.right;
                     if (secondaryApp) {
                         disableBrowserSplit({ notifyServer: false });
                         launchApp(secondaryApp, false);
@@ -3137,14 +3169,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         splitDivider.addEventListener('pointerdown', (e) => {
-            if (!browserSplitState.active) return;
+            if (!(!!state.right)) return;
             isDraggingDivider = true;
             splitDivider.setPointerCapture(e.pointerId);
             playerShell?.classList.add('resizing-divider');
         });
 
         splitDivider.addEventListener('pointermove', (e) => {
-            if (!isDraggingDivider || !browserSplitState.active) return;
+            if (!isDraggingDivider || !(!!state.right)) return;
 
             const rect = playerShell.getBoundingClientRect();
             if (rect.width <= 0) return;
@@ -3167,7 +3199,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             try { splitDivider.releasePointerCapture(e.pointerId); } catch (_) {}
             playerShell?.classList.remove('resizing-divider');
 
-            const currentRatio = browserSplitState.ratio;
+            const currentRatio = splitRatio;
             if (currentRatio >= 0.85) {
                 // Extreme drag right: Maximize Left (Primary) app to 100%
                 console.log('[SplitDivider] Dragged extreme right. Maximizing Primary app to 100%.');
@@ -3176,7 +3208,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             } else if (currentRatio <= 0.15) {
                 // Extreme drag left: Maximize Right (Secondary) app to 100% (Promote it to primary)
                 console.log('[SplitDivider] Dragged extreme left. Promoting and maximizing Secondary app.');
-                const secondaryApp = browserSplitState.app;
+                const secondaryApp = state.right;
                 if (secondaryApp) {
                     disableBrowserSplit({ notifyServer: false });
                     launchApp(secondaryApp, false);
@@ -3185,7 +3217,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
 
             // Save and sync with server
-            lockBrowserSplitViewports(browserSplitState.app);
+            lockBrowserSplitViewports(state.right);
             requestAnimationFrame(() => sendViewportSize());
 
             // Highlight nearest ratio button if any close match exists
@@ -3273,10 +3305,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     window.addEventListener('resize', () => {
-        if (browserSplitState.active) {
+        if ((!!state.right)) {
             requestAnimationFrame(() => {
-                setBrowserSplitRatio(browserSplitState.ratio);
-                lockBrowserSplitViewports(browserSplitState.app);
+                setBrowserSplitRatio(splitRatio);
+                lockBrowserSplitViewports(state.right);
                 sendViewportSize();
             });
             return;

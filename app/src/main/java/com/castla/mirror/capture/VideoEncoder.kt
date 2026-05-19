@@ -79,9 +79,11 @@ class VideoEncoder(
             // Force repeat previous frame after 100ms of idling to keep the frontend watchdog fed
             // and eliminate packet loss artifacts on steady streams.
             setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000) // 100,000 microseconds (0.1s)
-            
-            setInteger(MediaFormat.KEY_PRIORITY, 0) // Real-time priority
+
+            setInteger("android.media.playback-params.low-latency", 1)
+            setInteger(MediaFormat.KEY_PRIORITY, 1) // Real-time priority
             setInteger("max-bframes", 0) // Explicitly disable B-frames to bypass Samsung-specific rendering quirks
+            setInteger("vendor.rtc-ext-dec-low-latency.enable", 1)
         }
 
         val encoder = MediaCodec.createEncoderByType(MIME_TYPE)

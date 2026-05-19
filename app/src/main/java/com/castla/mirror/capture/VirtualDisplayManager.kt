@@ -125,7 +125,7 @@ class VirtualDisplayManager {
         } catch (e: Exception) {}
     }
 
-    fun setSurface(surface: Surface) {
+    fun setSurface(surface: Surface?) {
         if (displayId >= 0 && privilegedService != null) {
             try {
                 privilegedService?.setSurface(displayId, surface)

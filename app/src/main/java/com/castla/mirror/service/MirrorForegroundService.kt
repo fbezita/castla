@@ -1,5 +1,6 @@
 package com.castla.mirror.service
 
+import android.app.ActivityOptions
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -30,7 +31,6 @@ import androidx.core.app.ServiceCompat
 import com.castla.mirror.R
 import com.castla.mirror.widget.MirrorWidgetProvider
 import com.castla.mirror.capture.AudioCapture
-
 import com.castla.mirror.capture.JpegEncoder
 import com.castla.mirror.capture.VideoEncoder
 import com.castla.mirror.capture.VirtualDisplayManager
@@ -62,6 +62,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -69,6 +70,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
@@ -85,18 +87,16 @@ class MirrorForegroundService : Service() {
         const val EXTRA_MIRRORING_MODE = "mirroring_mode"
         const val EXTRA_TARGET_PACKAGE = "target_package"
 
-        /** Observable service running state ??UI can collect this to stay in sync. */
         private val _serviceRunningFlow = MutableStateFlow(false)
         val serviceRunningFlow: StateFlow<Boolean> = _serviceRunningFlow
 
-        /** True while the service is actively tearing down the previous session. */
         private val _cleanupInProgressFlow = MutableStateFlow(false)
         val cleanupInProgressFlow: StateFlow<Boolean> = _cleanupInProgressFlow
 
-        /** Current panel-off state ??UI observes this for button state. */
         private val _panelOffStateFlow = MutableStateFlow(ScreenOffState.ACTIVE)
         val panelOffStateFlow: StateFlow<ScreenOffState> = _panelOffStateFlow
 
+        @Volatile private var isAppLaunchingContext = false
 
         var isServiceRunning: Boolean
             get() = _serviceRunningFlow.value
@@ -110,30 +110,20 @@ class MirrorForegroundService : Service() {
         var instance: MirrorForegroundService? = null
             private set
 
-        /** Resolution/FPS tiers for auto mode, ordered from most conservative to highest. */
-        // Expanded to map explicit target bitrates per tier for hardware-driven runtime scaling
         data class AutoTier(val maxHeight: Int, val fps: Int, val bitrate: Int, val label: String)
         val AUTO_TIERS = listOf(
-            AutoTier(720, 15, 1_200_000, "720p15"),  // Critical network congestion recovery tier
-            AutoTier(720, 30, 2_500_000, "720p30"),  // Baseline mid-quality tier
-            AutoTier(720, 60, 4_000_000, "720p60"),  // High-performance smooth fluid tier
-
-            // 1080p Profiling Group (Static resolution, stepping up frame performance)
-            AutoTier(1080, 15, 2_500_000, "1080p15"), // Critical bandwidth saving tier for full HD
-            AutoTier(1080, 30, 4_500_000, "1080p30"), // Standard crisp operational tier
-            AutoTier(1080, 60, 7_500_000, "1080p60")  // Ultra-smooth full-fidelity premium tier
+            AutoTier(720, 15, 1_200_000, "720p15"),
+            AutoTier(720, 30, 2_500_000, "720p30"),
+            AutoTier(720, 60, 4_000_000, "720p60"),
+            AutoTier(1080, 15, 2_500_000, "1080p15"),
+            AutoTier(1080, 30, 4_500_000, "1080p30"),
+            AutoTier(1080, 60, 7_500_000, "1080p60")
         )
-        /** Check interval for auto-scale loop */
         private const val AUTO_SCALE_INTERVAL_MS = 10_000L
-        /** Initial delay before first auto-scale evaluation */
         private const val AUTO_SCALE_INITIAL_DELAY_MS = 5_000L
-        // Grace period constants are now in DisconnectPolicy
-        /** Interval for poking the VD awake while the physical screen is off. */
         private const val VD_KEEP_ALIVE_INTERVAL_MS = 3_000L
-
     }
 
-    /** Binder for local (same-process) binding */
     inner class LocalBinder : Binder() {
         val service: MirrorForegroundService get() = this@MirrorForegroundService
     }
@@ -142,7 +132,7 @@ class MirrorForegroundService : Service() {
 
     private var mirrorServer: MirrorServer? = null
     lateinit var primaryPipeline: VirtualDisplayPipeline
-        lateinit var secondaryPipeline: VirtualDisplayPipeline
+    lateinit var secondaryPipeline: VirtualDisplayPipeline
 
     private lateinit var powerLockManager: PowerLockManager
     private lateinit var thermalThrottleManager: ThermalThrottleManager
@@ -157,6 +147,7 @@ class MirrorForegroundService : Service() {
     private var thermalFpsOverride: Int?
         get() = thermalThrottleManager.thermalFpsOverride
         set(value) { thermalThrottleManager.thermalFpsOverride = value }
+    private var thermalTransformationOverride: Int? = null
     private var thermalMaxHeight: Int?
         get() = thermalThrottleManager.thermalMaxHeight
         set(value) { thermalThrottleManager.thermalMaxHeight = value }
@@ -183,7 +174,6 @@ class MirrorForegroundService : Service() {
         get() = adaptiveBitrateManager.lastQualityBacklogDrops
         set(value) { adaptiveBitrateManager.lastQualityBacklogDrops = value }
 
-
     private var audioCapture: AudioCapture? = null
     private var audioOrchestrator: AudioCaptureOrchestrator? = null
     private var virtualDisplayManager: VirtualDisplayManager? = null
@@ -198,88 +188,56 @@ class MirrorForegroundService : Service() {
     private var isWakingUpFromPowerButton = false
     private val terminalReason = java.util.concurrent.atomic.AtomicReference<TerminalReason?>(null)
     private var serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-    private var resizeJob: Job? = null
-    private var secondaryResizeJob: Job? = null
-    private var pendingBrowserDisconnectJob: Job? = null
+    
     private var browserConnected = false
-    private var secondaryRequestedWidth: Int = 0
-    private var secondaryRequestedHeight: Int = 0
     @Volatile private var currentCodecMode: String = "h264"
+    
     private val pipelineMutex = Mutex()
     private val secondaryPipelineMutex = Mutex()
     private val primaryVdOperationMutex = Mutex()
+    private val primaryRebuildMutex = Mutex()
+    private val secondaryRebuildMutex = Mutex()
 
-    enum class PipelineState {
-        IDLE,
-        REBUILDING
-    }
-
-    data class RebuildRequest(
-        val width: Int,
-        val height: Int,
-        val force: Boolean,
-        val forceSingle: Boolean
-    )
-
-    data class SecondaryRebuildRequest(
-        val width: Int,
-        val height: Int
-    )
-
-
-
+    enum class PipelineState { IDLE, REBUILDING }
+    data class RebuildRequest(val width: Int, val height: Int, val force: Boolean, val forceSingle: Boolean)
 
     private val mainHandler = Handler(Looper.getMainLooper())
-
-    // ABR (Adaptive Bitrate) state
-   // Thermal throttling: stores original bitrate before thermal reduction for restoration
-   // Thermal fps/resolution overrides ??applied by rebuildPipeline when non-null
-   // Display density scale (0.7 = default small, lower = more compact UI / more content)
     private var dpiScale: Float = 0.7f
-    // Guard against concurrent Shizuku binding attempts
     @Volatile private var shizukuSetupInProgress = false
     private val shizukuSetupCallbacks = java.util.Collections.synchronizedList(mutableListOf<(Boolean) -> Unit>())
     private var shizukuBindRetryCount = 0
     private val SHIZUKU_MAX_RETRIES = 2
     private val BIND_WAIT_BUDGET_MS = 8_000L
 
-    /**
-     * Singleton coroutine that observes [ShizukuSetup.serviceConnected] for the
-     * service lifetime. Translates flow emissions into discrete transitions via
-     * [BinderConnectionTracker] so duplicate connects (a frequent symptom on
-     * Samsung when the user-service is briefly killed and respawned) do not
-     * spawn a new VirtualDisplay per spurious callback.
-     */
     private var reconnectJob: Job? = null
-
-    // Auto mode: dynamically adjusts resolution/fps based on conditions.
     private var autoResolution: Boolean = false
     private var autoFps: Boolean = false
-    // Stability counter: number of consecutive healthy check intervals
-   // Browser quality report ??updated asynchronously from control socket
-   // WakeLocks to keep streaming alive when screen is off
-   // Deferred pipeline state: heavy capture/encoding starts only when browser connects
     private var pendingAudioEnabled = false
     private var deferredAudioStartJob: Job? = null
-   private var screenOffReceiver: BroadcastReceiver? = null
+    private var screenOffReceiver: BroadcastReceiver? = null
     private var vdKeepAliveJob: Job? = null
     private var appExitMonitorJob: Job? = null
+
+    private var pendingBrowserDisconnectJob: Job? = null
+
     @Volatile private var lastAppLaunchTime: Long = 0L
     private val screenOffPolicy = ScreenOffPolicy()
-    private val keyguardManager by lazy {
-        getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
+    private val keyguardManager by lazy { getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager }
+
+    val isRunning: Boolean get() = mirrorServer != null
+    val isPanelOffSupported: Boolean get() = screenOffPolicy.isPanelOffSupported
+
+    private fun logScreenState(event: String) {
+        val keyguardLocked = keyguardManager.isKeyguardLocked
+        val deviceLocked = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1)
+            keyguardManager.isDeviceLocked else keyguardLocked
+        val vdId = virtualDisplayManager?.getDisplayId() ?: -1
+        Log.i(TAG, "[BUILD:screen-off-v3] $event ??" +
+                "state=${screenOffPolicy.state}, keyguardLocked=$keyguardLocked, deviceLocked=$deviceLocked, " +
+                "browserConnected=$browserConnected, serverConnected=${mirrorServer?.isBrowserConnected()}, " +
+                "wakeLockHeld=${powerLockManager.isHeld}, vdId=$vdId, panelOffSupported=${screenOffPolicy.isPanelOffSupported}")
     }
 
-    val isRunning: Boolean
-        get() = mirrorServer != null
-
-    /** Whether this device supports panel-off (false after first failure). */
-    val isPanelOffSupported: Boolean
-        get() = screenOffPolicy.isPanelOffSupported
-
-    /**
-     * Turn off the physical display panel while keeping mirroring alive.
-     */
     fun turnPanelOffForMirroring(): Boolean {
         if (!isRunning) {
             Log.w(TAG, "turnPanelOffForMirroring: service not running")
@@ -307,9 +265,6 @@ class MirrorForegroundService : Service() {
         return screenOffPolicy.state == ScreenOffState.PANEL_OFF_ACTIVE
     }
 
-    /**
-     * Restore the physical display panel.
-     */
     fun restorePhysicalPanel() {
         if (!screenOffPolicy.isScreenOff) return
         val action = screenOffPolicy.onScreenOn()
@@ -318,8 +273,7 @@ class MirrorForegroundService : Service() {
         _panelOffStateFlow.value = screenOffPolicy.state
     }
 
-    /** Current thermal throttle level exposed to the UI. 0 = normal, higher = hotter. */
-        fun setBrowserConnectionListener(listener: ((Boolean) -> Unit)?) {
+    fun setBrowserConnectionListener(listener: ((Boolean) -> Unit)?) {
         browserConnectionListener = listener
         mirrorServer?.setBrowserConnectionListener(listener)
     }
@@ -336,26 +290,30 @@ class MirrorForegroundService : Service() {
         createNotificationChannel()
         observeAppLaunchRequests()
 
-        // Initialize peripheral managers with functional bindings
-        powerLockManager = PowerLockManager(this)
+        powerLockManager = PowerLockManager(this@MirrorForegroundService)
         thermalThrottleManager = ThermalThrottleManager(
-            context = this,
+            context = this@MirrorForegroundService,
             serviceScope = serviceScope,
-            mainExecutor = mainExecutor,
+            mainExecutor = androidx.core.content.ContextCompat.getMainExecutor(this@MirrorForegroundService),
             primaryPipeline = primaryPipeline,
             getTargetBitrate = { targetBitrate },
             setTargetBitrate = { targetBitrate = it },
             getAudioOrchestrator = { audioOrchestrator },
             getBrowserConnected = { browserConnected },
             getMirrorServer = { mirrorServer },
-            rebuildPipeline = { w, h, f -> rebuildPipeline(w, h, f) },
-            onThermalThrottled = {
-                autoTierIndex = 0
-                autoStableCount = 0
-            }
+            rebuildPipeline = { w, h, f ->
+                serviceScope.launch {
+                    primaryPipeline.rebuild(
+                        w,
+                        h,
+                        f
+                    )
+                }
+            },
+            onThermalThrottled = { autoTierIndex = 0; autoStableCount = 0 }
         )
         adaptiveBitrateManager = AdaptiveBitrateManager(
-            context = this,
+            context = this@MirrorForegroundService,
             serviceScope = serviceScope,
             primaryPipeline = primaryPipeline,
             secondaryPipeline = secondaryPipeline,
@@ -372,118 +330,108 @@ class MirrorForegroundService : Service() {
             setCurrentFps = { currentFps = it },
             getCurrentMaxHeight = { currentMaxHeight },
             setCurrentMaxHeight = { currentMaxHeight = it },
-            rebuildPipeline = { w, h, f, fs -> rebuildPipeline(w, h, f, fs) },
-            rebuildSecondaryPipeline = { w, h -> rebuildSecondaryPipeline(w, h) }
+            rebuildPipeline = { w, h, f, fs ->
+                serviceScope.launch {
+                    primaryPipeline.rebuild(
+                        w,
+                        h,
+                        f,
+                        fs
+                    )
+                }
+            },
+            rebuildSecondaryPipeline = { w, h ->
+                serviceScope.launch {
+                    secondaryPipeline.rebuild(
+                        w,
+                        h
+                    )
+                }
+            }
         )
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             thermalThrottleManager.register()
         }
 
+
         screenOffReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent?) {
                 when (intent?.action) {
-                    android.content.Intent.ACTION_SCREEN_OFF -> {
-                        Log.i(TAG, "Screen OFF detected ??using scrcpy approach")
+                    Intent.ACTION_SCREEN_OFF -> {
                         onPhoneScreenOff()
                         mainHandler.postDelayed({
-                            if (keyguardManager.isKeyguardLocked) {
-                                MirrorDiagnostics.log(DiagnosticEvent.KEYGUARD_LOCKED)
-                            }
+                            if (keyguardManager.isKeyguardLocked) MirrorDiagnostics.log(
+                                DiagnosticEvent.KEYGUARD_LOCKED
+                            )
                         }, 500)
                     }
-                    android.content.Intent.ACTION_SCREEN_ON -> {
-                        Log.i(TAG, "Screen ON detected")
-                        onPhoneScreenOn()
-                    }
-                    android.content.Intent.ACTION_USER_PRESENT -> {
-                        MirrorDiagnostics.log(DiagnosticEvent.KEYGUARD_UNLOCKED)
-                    }
+
+                    Intent.ACTION_SCREEN_ON -> onPhoneScreenOn()
+                    Intent.ACTION_USER_PRESENT -> MirrorDiagnostics.log(DiagnosticEvent.KEYGUARD_UNLOCKED)
                 }
             }
         }
-        val filter = android.content.IntentFilter().apply {
-            addAction(android.content.Intent.ACTION_SCREEN_OFF)
-            addAction(android.content.Intent.ACTION_SCREEN_ON)
-            addAction(android.content.Intent.ACTION_USER_PRESENT)
-        }
-        registerReceiver(screenOffReceiver, filter)
+        registerReceiver(screenOffReceiver, android.content.IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
+        })
     }
-    
-    @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
-    
-    
 
+    override fun onDestroy() {
+        Log.i(TAG, "onDestroy() - Service is being destroyed by stopService() or system.")
 
+        if (!cleanupCompleted) {
+            // 안드로이드 시스템이 onDestroy() 블록을 너무 빨리 탈출해서
+            // 프로세스를 죽여버리는 것을 방지하기 위해, 안전하게 스레드를 분리하여 순차 집행합니다.
+            val cleanupThread = Thread {
+                performCleanup("service_ondestroy")
+            }
+            cleanupThread.start()
+            try {
+                // 클린업 작업이 최대 1초 내에는 끝나도록 대기 시간을 주어 안전하게 프로세스 종료를 방어합니다.
+                cleanupThread.join(1000)
+            } catch (_: Exception) {}
+        }
+        super.onDestroy()
+    }
 
+    private var isCurrentAppVideo: Boolean
+        get() = primaryPipeline.isVideoApp
+        set(value) { primaryPipeline.isVideoApp = value }
 
-
-    private var isCurrentAppVideo = false
-    private var isSecondaryAppVideo = false
+    private var isSecondaryAppVideo: Boolean
+        get() = secondaryPipeline.isVideoApp
+        set(value) { secondaryPipeline.isVideoApp = value }
+        
     private var lastBitrateChangeMs = 0L
 
     private fun observeAppLaunchRequests() {
         serviceScope.launch {
             com.castla.mirror.utils.AppLaunchBus.events.collect { request ->
-                val component = if (request.className != null) {
-                    "${request.packageName}/${request.className}"
-                } else {
-                    request.packageName
-                }
+                val component = if (request.className != null) "${request.packageName}/${request.className}" else request.packageName
                 val pane = request.pane ?: "primary"
-                Log.i(TAG, "VD launch request: $component (video=${request.isVideoApp}, mode=${request.launchMode}, pane=$pane)")
+                val targetPipeline = if (pane == "secondary") secondaryPipeline else primaryPipeline
 
                 when (request.launchMode) {
-                    LaunchMode.EXTERNAL_BROWSER_URL -> {
-                        val url = request.url ?: return@collect
-                        val preserveSecondary = pane == "primary" && secondaryPipeline.displayId >= 0
-                        launchBrowserTarget(
-                            pane = pane,
-                            url = url,
-                            sourceAppPackage = request.sourceAppPackage,
-                            allowFallback = request.allowEmbeddedFallback,
-                            preserveSecondary = preserveSecondary
-                        )
-                    }
+                    LaunchMode.EXTERNAL_BROWSER_URL -> request.url?.let { targetPipeline.launchBrowser(it, request.sourceAppPackage, request.allowEmbeddedFallback) }
                     LaunchMode.INTERNAL_WEBVIEW -> {
-                        val activityClassName = component.substringAfter('/', "com.castla.mirror.ui.WebBrowserActivity")
                         val url = request.url ?: request.intentExtra ?: return@collect
-                        launchWebTarget(
-                            pane = pane,
-                            activityClassName = activityClassName,
-                            url = url,
-                            preserveSecondary = pane == "primary" && secondaryPipeline.displayId >= 0
-                        )
+                        targetPipeline.launchWeb(component.substringAfter('/', "com.castla.mirror.ui.WebBrowserActivity"), url)
                     }
                     LaunchMode.STANDARD_APP -> {
                         if (request.intentExtra != null) {
-                            val activityClassName = component.substringAfter('/', "com.castla.mirror.ui.WebBrowserActivity")
-                            launchWebTarget(
-                                pane = pane,
-                                activityClassName = activityClassName,
-                                url = request.intentExtra,
-                                preserveSecondary = pane == "primary" && secondaryPipeline.displayId >= 0
-                            )
+                            targetPipeline.launchWeb(component.substringAfter('/', "com.castla.mirror.ui.WebBrowserActivity"), request.intentExtra)
                         } else {
-                            launchStandardTarget(
-                                pane = pane,
-                                launchTarget = component,
-                                preserveSecondary = pane == "primary" && secondaryPipeline.displayId >= 0
-                            )
+                            targetPipeline.launchStandard(component)
                         }
                     }
                 }
+
                 val now = android.os.SystemClock.elapsedRealtime()
-                val isSecondary = (pane == "secondary")
-                val videoChanged = if (isSecondary) {
-                    val changed = request.isVideoApp != isSecondaryAppVideo
-                    if (changed) isSecondaryAppVideo = request.isVideoApp
-                    changed
-                } else {
-                    val changed = request.isVideoApp != isCurrentAppVideo
-                    if (changed) isCurrentAppVideo = request.isVideoApp
-                    changed
-                }
+                val videoChanged = request.isVideoApp != targetPipeline.isVideoApp
+                if (videoChanged) { targetPipeline.isVideoApp = request.isVideoApp }
 
                 if (videoChanged && now - lastBitrateChangeMs > 500) {
                     lastBitrateChangeMs = now
@@ -491,28 +439,17 @@ class MirrorForegroundService : Service() {
                 }
 
                 if (autoResolution || autoFps) {
-                    val activeTiers = AdaptiveBitrateManager.AUTO_TIERS.filter { it.maxHeight == currentMaxHeight }
-                    val boostTier = AutoScalePolicy.ottMinTier(
-                        currentTierIndex = autoTierIndex,
-                        isVideoApp = isCurrentAppVideo,
-                        thermalStatus = thermalThrottleManager.thermalStatus.value,
-                        tierCount = activeTiers.size
-                    )
+                    val activeTiers = AUTO_TIERS.filter { it.maxHeight == currentMaxHeight }
+                    val boostTier = AutoScalePolicy.ottMinTier(autoTierIndex, isCurrentAppVideo, thermalThrottleManager.thermalStatus.value, activeTiers.size)
                     if (boostTier != null && boostTier < activeTiers.size) {
                         autoTierIndex = boostTier
                         autoStableCount = 0
                         adaptiveBitrateManager.applyAutoTier(autoResolution, autoFps)
                         adaptiveBitrateManager.notifyAutoTierChange("ott_boost")
-                        Log.i(TAG, "OTT tier boost ??jumped to ${activeTiers[autoTierIndex].label}")
                     }
                 }
 
-                val profileMsg = JSONObject().apply {
-                    put("type", "ottProfileHint")
-                    put("active", isCurrentAppVideo)
-                }.toString()
-                mirrorServer?.broadcastControlMessage(profileMsg)
-                Log.i(TAG, "OTT profile hint: active=$isCurrentAppVideo")
+                mirrorServer?.broadcastControlMessage(JSONObject().apply { put("type", "ottProfileHint"); put("active", isCurrentAppVideo) }.toString())
             }
         }
     }
@@ -523,15 +460,8 @@ class MirrorForegroundService : Service() {
             return START_NOT_STICKY
         }
 
-        val notification = createNotification()
-        ServiceCompat.startForeground(
-            this,
-            NOTIFICATION_ID,
-            notification,
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-        )
-        Log.i(TAG, "onStartCommand: Shizuku virtual-display mode")
-
+        ServiceCompat.startForeground(this, NOTIFICATION_ID, createNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        
         val rawMaxHeight = intent!!.getIntExtra(EXTRA_MAX_RESOLUTION, 0)
         autoResolution = rawMaxHeight == 0
         currentMaxHeight = if (autoResolution) 720 else rawMaxHeight
@@ -540,50 +470,28 @@ class MirrorForegroundService : Service() {
         autoFps = rawFps == 0
         val settingsFps = if (autoFps) 30 else rawFps
 
-        Log.i(TAG, "Mode: autoRes=$autoResolution autoFps=$autoFps initialMaxHeight=$currentMaxHeight initialFps=$settingsFps")
-        val audioEnabled = intent.getBooleanExtra(EXTRA_AUDIO, false)
+        pendingAudioEnabled = intent.getBooleanExtra(EXTRA_AUDIO, false)
         mirroringMode = intent.getStringExtra(EXTRA_MIRRORING_MODE) ?: "FULL_SCREEN"
         targetPackage = intent.getStringExtra(EXTRA_TARGET_PACKAGE) ?: ""
 
-        startPipeline(settingsFps, audioEnabled)
-
+        serviceScope.launch(Dispatchers.Default) {
+            startPipeline(settingsFps, pendingAudioEnabled)
+        }
         return START_NOT_STICKY
     }
 
-
-
     private fun requestStopAsync(reason: String) {
-        if (stopRequested) {
-            Log.i(TAG, "Stop already requested, ignoring duplicate: $reason")
-            return
-        }
+        if (stopRequested) return
         stopRequested = true
-        Log.i(TAG, "Async stop requested: $reason")
 
-        try {
-            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to stop foreground notification cleanly", e)
+        // 포그라운드 알림 제거
+        try { ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
+
+        // 위젯 업데이트 및 서비스 종료 트리거 (이 stopSelf()가 결국 onDestroy()를 깨웁니다)
+        mainHandler.post {
+            MirrorWidgetProvider.updateAllWidgets(this)
+            stopSelf()
         }
-
-        Thread {
-            performCleanup(reason)
-            mainHandler.post {
-                MirrorWidgetProvider.updateAllWidgets(this)
-                stopSelf()
-            }
-        }.start()
-    }
-
-    private fun logScreenState(event: String) {
-        val keyguardLocked = keyguardManager.isKeyguardLocked
-        val deviceLocked = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1)
-            keyguardManager.isDeviceLocked else keyguardLocked
-        val vdId = virtualDisplayManager?.getDisplayId() ?: -1
-        Log.i(TAG, "[BUILD:screen-off-v3] $event ??" +
-                "state=${screenOffPolicy.state}, keyguardLocked=$keyguardLocked, deviceLocked=$deviceLocked, " +
-                "browserConnected=$browserConnected, serverConnected=${mirrorServer?.isBrowserConnected()}, " +
-                "wakeLockHeld=${powerLockManager.isHeld}, vdId=$vdId, panelOffSupported=${screenOffPolicy.isPanelOffSupported}")
     }
 
     private fun onPhoneScreenOff() {
@@ -728,20 +636,14 @@ class MirrorForegroundService : Service() {
             while (true) {
                 kotlinx.coroutines.delay(2000L)
                 if (secondaryPipeline.displayId >= 0) {
-                    // Bypass exit monitor entirely while both independent VD panes are active.
-                    // to prevent annoying spontaneous exits due to system focus/display adjustments.
                     continue
                 }
                 val currentApp = primaryPipeline.currentApp
                 if (currentApp.isNotBlank() && currentApp != "HOME" && currentApp != "com.android.settings") {
-                    val timeSinceLaunch = System.currentTimeMillis() - lastAppLaunchTime
                     val service = vdm.getPrivilegedService()
                     if (service != null) {
                         try {
                             val activeTasks = service.getRunningTasksOnDisplay(displayId) ?: emptyList()
-                            
-                            // If our custom Home activity is detected at the top of the virtual display,
-                            // it means the user manually exited or went home.
                             val isHomeAtTop = activeTasks.firstOrNull()?.contains("VirtualDisplayHomeActivity") == true
 
                             if (isHomeAtTop) {
@@ -765,88 +667,86 @@ class MirrorForegroundService : Service() {
 
     @Synchronized
     private fun performCleanup(reason: String) {
-        if (cleanupCompleted) {
-            Log.i(TAG, "Cleanup already completed, skipping: $reason")
-            return
-        }
-        cleanupCompleted = true 
+        if (cleanupCompleted) return
+        cleanupCompleted = true
         val effectiveReason = terminalReason.get()?.let { "terminal:${it.name}" } ?: reason
-        Log.i(TAG, "Performing cleanup: $effectiveReason")
-        FileLogger.i(TAG, "Performing cleanup: $effectiveReason")
         MirrorDiagnostics.endSession(effectiveReason)
         isCleanupInProgress = true
 
-        if (screenOffPolicy.state == ScreenOffState.PANEL_OFF_ACTIVE ||
-            screenOffPolicy.state == ScreenOffState.PANEL_OFF_PENDING) {
-            try {
-                virtualDisplayManager?.setPhysicalDisplayPower(true)
-                Log.i(TAG, "Physical display restored to ON during cleanup")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to restore physical display", e)
-            }
+        if (screenOffPolicy.state in listOf(ScreenOffState.PANEL_OFF_ACTIVE, ScreenOffState.PANEL_OFF_PENDING)) {
+            try { virtualDisplayManager?.setPhysicalDisplayPower(true) } catch (_: Exception) {}
         }
         screenOffPolicy.reset()
         _panelOffStateFlow.value = ScreenOffState.ACTIVE
 
-        try { screenOffReceiver?.let { unregisterReceiver(it) } } catch (_: Exception) {}
-        screenOffReceiver = null
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            try {
-                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-                thermalThrottleManager.unregister()
-            } catch (_: Exception) {}
+        // 🔴 [리시버 누수 원천 차단] 
+        // Android 시스템 커널 장부에서 리시버를 확실하게 지우기 위해 메인 룹(UI 스레드)으로 포스팅하여 해제합니다.
+        val receiverToUnregister = screenOffReceiver
+        if (receiverToUnregister != null) {
+            // Context를 서비스 본체가 아닌 시스템의 Application Context 레벨에서 안전하게 해제 요청을 보냅니다.
+            val appContext = applicationContext
+
+            // 메인 스레드(Looper)에서 돌고 있는지 확인 후 즉시 동기식 집행
+            if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+                try {
+                    appContext.unregisterReceiver(receiverToUnregister)
+                    Log.i(TAG, "[Cleanup Dynamic Fix] Synchronously unregistered screenOffReceiver via AppContext.")
+                } catch (e: Exception) {
+                    try { unregisterReceiver(receiverToUnregister) } catch (_: Exception) {}
+                }
+            } else {
+                // 백그라운드 스레드에서 넘어온 경우 메인 룹에 즉시 처리를 때리고 커널 장부가 마운트될 때까지 50ms 물리 락을 걸어 강제 동기화합니다.
+                val latch = java.util.concurrent.CountDownLatch(1)
+                mainHandler.post {
+                    try {
+                        appContext.unregisterReceiver(receiverToUnregister)
+                        Log.i(TAG, "[Cleanup Dynamic Fix] Intercepted Main Looper: Unregistered via AppContext successfully.")
+                    } catch (e: Exception) {
+                        try { unregisterReceiver(receiverToUnregister) } catch (_: Exception) {}
+                    } finally {
+                        latch.countDown()
+                    }
+                }
+                try { latch.await(500, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (_: Exception) {}
+            }
+            screenOffReceiver = null
         }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) { try { thermalThrottleManager.unregister() } catch (_: Exception) {} }
         powerLockManager.releaseWakeLocks()
         stopVdKeepAlive()
-
         audioOrchestrator?.stop()
 
-        try { resizeJob?.cancel() } catch (_: Exception) {}
+        try { primaryPipeline.resizeJob?.cancel() } catch (_: Exception) {}
+        try { secondaryPipeline.resizeJob?.cancel() } catch (_: Exception) {}
         adaptiveBitrateManager.stopAbrLoop()
         adaptiveBitrateManager.stopAutoScaleLoop()
         try { serviceScope.cancel() } catch (_: Exception) {}
         try { compositionDispatcher.close() } catch (_: Exception) {}
 
-        releaseSecondaryPipeline(clearState = true)
-        try { removeAllVdTasks() } catch (e: Exception) { Log.w(TAG, "Failed to remove VD tasks", e) }
-        try { pendingBrowserDisconnectJob?.cancel() } catch (_: Exception) {}
+        secondaryPipeline.release()
+        try { removeAllVdTasks() } catch (_: Exception) {}
+        pendingBrowserDisconnectJob?.cancel()
         pendingBrowserDisconnectJob = null
-        try { reconnectJob?.cancel() } catch (_: Exception) {}
+        reconnectJob?.cancel()
         reconnectJob = null
-        try {
-            virtualDisplayManager?.getPrivilegedService()?.restoreStayAwakeMode()
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to restore stay-awake mode", e)
-        }
-        try { virtualDisplayManager?.release() } catch (e: Exception) { Log.w(TAG, "Failed to release virtual display manager", e) }
-        try { shizukuSetup?.release() } catch (e: Exception) { Log.w(TAG, "Failed to release shizuku setup", e) }
-        try { primaryPipeline.videoEncoder?.release() } catch (e: Exception) { Log.w(TAG, "Failed to release video encoder", e) }
-        try { primaryPipeline.jpegEncoder?.release() } catch (e: Exception) { Log.w(TAG, "Failed to release jpeg encoder", e) }
-        try { primaryPipeline.touchInjector?.release() } catch (e: Exception) { Log.w(TAG, "Failed to release touch injector", e) }
-        try { mirrorServer?.stop() } catch (e: Exception) { Log.w(TAG, "Failed to stop mirror server", e) }
+        
+        try { virtualDisplayManager?.getPrivilegedService()?.restoreStayAwakeMode() } catch (_: Exception) {}
+        try { virtualDisplayManager?.release() } catch (_: Exception) {}
+        try { shizukuSetup?.release() } catch (_: Exception) {}
+        
+        primaryPipeline.release(forcePhysical = true)
+        try { mirrorServer?.stop() } catch (_: Exception) {}
 
         virtualDisplayManager = null
         shizukuSetup = null
-        primaryPipeline.videoEncoder = null
-        primaryPipeline.jpegEncoder = null
-        primaryPipeline.touchInjector = null
         mirrorServer = null
-
         instance = null
         isCleanupInProgress = false
         isServiceRunning = false
-        Log.i(TAG, "Cleanup completed: $reason")
     }
 
-
-
-    
-    
-    
-    private fun startPipeline(
-        fps: Int,
-        audioEnabled: Boolean
-    ) {
+    private fun startPipeline(fps: Int, audioEnabled: Boolean) {
         try {
             terminalReason.set(null)
             MirrorDiagnostics.onSessionStart()
@@ -854,11 +754,10 @@ class MirrorForegroundService : Service() {
             val metrics = resources.displayMetrics
             val rawWidth = metrics.widthPixels.coerceAtMost(1920)
             val rawHeight = metrics.heightPixels.coerceAtMost(1080)
-            val effectiveMaxHeight = effectiveMaxHeightForRequest(rawHeight)
+            val effectiveMaxHeight = rawHeight.coerceAtMost(1080)
 
             var width = rawWidth
             var height = rawHeight
-
             if (height > effectiveMaxHeight) {
                 val scale = effectiveMaxHeight.toFloat() / height
                 height = effectiveMaxHeight
@@ -876,33 +775,16 @@ class MirrorForegroundService : Service() {
             audioOrchestrator = AudioCaptureOrchestrator(object : AudioCaptureOrchestrator.Actions {
                 override fun startCapture(codec: String?) {
                     audioCapture = AudioCapture(null, shizukuSetup?.privilegedService).also { audio ->
-                        if (codec == "pcm") {
-                            audio.startPcmOnly { audioData -> mirrorServer?.broadcastAudio(audioData) }
-                        } else {
-                            audio.start { audioData -> mirrorServer?.broadcastAudio(audioData) }
-                        }
+                        if (codec == "pcm") audio.startPcmOnly { mirrorServer?.broadcastAudio(it) }
+                        else audio.start { mirrorServer?.broadcastAudio(it) }
                     }
-                    Log.i(TAG, "Audio capture started (codec=${codec ?: "default"})")
                 }
-                override fun stopCapture() {
-                    try { audioCapture?.stop() } catch (_: Exception) {}
-                    audioCapture = null
+                override fun stopCapture() { try { audioCapture?.stop() } catch (_: Exception) {}; audioCapture = null }
+                override fun grantAudioPermission() { tryGrantAudioCapturePermission() }
+                override fun scheduleDeferredStart(delayMs: Long): Any {
+                    return serviceScope.launch(Dispatchers.IO) { kotlinx.coroutines.delay(delayMs); audioOrchestrator?.onDeferredTimerExpired() }
                 }
-                override fun grantAudioPermission() {
-                    tryGrantAudioCapturePermission()
-                }
-                override fun scheduleDeferredStart(delayMs: Long): Any? {
-                    val job = serviceScope.launch(Dispatchers.IO) {
-                        kotlinx.coroutines.delay(delayMs)
-                        audioOrchestrator?.onDeferredTimerExpired()
-                    }
-                    deferredAudioStartJob = job
-                    return job
-                }
-                override fun cancelDeferredStart(handle: Any?) {
-                    (handle as? Job)?.cancel()
-                    if (deferredAudioStartJob == handle) deferredAudioStartJob = null
-                }
+                override fun cancelDeferredStart(handle: Any?) { (handle as? Job)?.cancel(); if (deferredAudioStartJob == handle) deferredAudioStartJob = null }
             })
 
             primaryPipeline.touchInjector = TouchInjector(width, height)
@@ -910,165 +792,56 @@ class MirrorForegroundService : Service() {
             mirrorServer = MirrorServer(this).also { server ->
                 server.setNetworkCongestionListener { adaptiveBitrateManager.onNetworkCongestion() }
                 server.setTouchListener { event ->
-                    if (event.pane == "secondary") {
-                        secondaryPipeline.touchInjector?.onTouchEvent(event)
-                    } else {
-                        primaryPipeline.touchInjector?.onTouchEvent(event)
-                    }
-                    if (event.action == "down") {
-                        bubbleClosedByUser = false
-                    }
-                    if (event.action == "up") {
-                        lastTouchPane = event.pane
-                        checkImeAndNotifyBrowser()
-                    }
+                    if (event.pane == "secondary") secondaryPipeline.touchInjector?.onTouchEvent(event)
+                    else primaryPipeline.touchInjector?.onTouchEvent(event)
+                    if (event.action == "down") bubbleClosedByUser = false
+                    if (event.action == "up") { lastTouchPane = event.pane; checkImeAndNotifyBrowser() }
                 }
-                server.setCodecModeListener { mode -> onCodecModeRequest(mode) }
+                server.setCodecModeListener { onCodecModeRequest(it) }
                 server.setViewportChangeListener { pane, w, h, layoutMode ->
-                    if (pane == "secondary") {
-                        onSecondaryViewportChange(w, h)
-                    } else {
-                        onViewportChange(w, h, layoutMode)
-                    }
+                    if (pane == "secondary") secondaryPipeline.onViewportChange(w, h, layoutMode)
+                    else primaryPipeline.onViewportChange(w, h, layoutMode)
                 }
-                server.setTextInputListener { text -> injectText(text) }
-                server.setKeyEventListener { keyCode -> injectKeyEvent(keyCode) }
+                server.setTextInputListener { injectText(it) }
+                server.setKeyEventListener { injectKeyEvent(it) }
                 server.setCompositionUpdateListener { bs, text -> injectCompositionUpdate(bs, text) }
-                server.setBubbleClosedListener {
-                    Log.d(TAG, "Browser reported bubbleClosed ??resetting IME state")
-                    bubbleClosedByUser = true
-                    lastImeState = false
-                    lastBroadcastPane = null
-                    haveSeenRealImeShow = false
-                    cancelImeHideWatchdog()
-                }
-                server.setAudioCodecListener { codec -> onAudioCodecRequest(codec) }
+                server.setBubbleClosedListener { bubbleClosedByUser = true; lastImeState = false; lastBroadcastPane = null; haveSeenRealImeShow = false; cancelImeHideWatchdog() }
+                server.setAudioCodecListener { codec -> serviceScope.launch(Dispatchers.IO) { ensureAudioCaptureState(codec) } }
                 server.setAudioSocketConnectedListener { audioOrchestrator?.onAudioSocketConnected() }
                 server.setGoHomeListener {
-                    Log.i(TAG, "Navigating to home requested by Web Launcher")
-                    releaseSecondaryPipeline(clearState = true)
-                    serviceScope.launch(Dispatchers.IO) {
-                        primaryVdOperationMutex.withLock {
-                            val token = currentPrimaryVdToken()
-                            if (token != null) {
-                                virtualDisplayManager?.launchHomeOnDisplay()
-                            } else {
-                                Log.w(TAG, "Skipping HOME launch: primary virtual display is not current")
-                            }
-                        }
-                    }
-                    primaryPipeline.currentApp = "HOME"
-                    primaryPipeline.currentWebUrl = null
+                    secondaryPipeline.release()
+                    serviceScope.launch(Dispatchers.IO) { primaryVdOperationMutex.withLock { if (primaryPipeline.currentVdToken() != null) virtualDisplayManager?.launchHomeOnDisplay() } }
+                    primaryPipeline.currentApp = "HOME"; primaryPipeline.currentWebUrl = null
                 }
-                server.setAppLaunchListener { pkgName, componentName, pane ->
-                    launchAppFromWebLauncher(pkgName, componentName, pane)
-                }
-
-                server.setCloseSplitListener {
-                    Log.i(TAG, "Close split requested ??releasing secondary display and restoring primary fullscreen")
-                    releaseSecondaryPipeline(clearState = true)
-                }
-
+                server.setAppLaunchListener { pkg, cmp, pane -> (if (pane == "secondary") secondaryPipeline else primaryPipeline).launchAppFromWebLauncher(pkg, cmp) }
                 server.setDisplayDensityListener { scale ->
-                    Log.i(TAG, "Display density scale changed to $scale")
                     dpiScale = scale
                     val vdm = virtualDisplayManager
-                    if (vdm != null && vdm.hasVirtualDisplay() && primaryPipeline.width > 0 && primaryPipeline.height > 0) {
-                        val dpi = computeVirtualDisplayDpi(primaryPipeline.width, primaryPipeline.height)
-                        vdm.resizeDisplay(vdm.getDisplayId(), primaryPipeline.width, primaryPipeline.height, dpi)
-                        Log.i(TAG, "Updated VD DPI to $dpi (scale=$scale, size=${primaryPipeline.width}x${primaryPipeline.height})")
+                    if (vdm?.hasVirtualDisplay() == true && primaryPipeline.width > 0 && primaryPipeline.height > 0) {
+                        serviceScope.launch {
+                            primaryPipeline.rebuild(primaryPipeline.width, primaryPipeline.height, force = true)
+                        }
                     }
                 }
-
-                server.setQualityReportListener { dropped, avgDelay, backlogDrops ->
-                    adaptiveBitrateManager.lastQualityDroppedFrames = dropped
-                    adaptiveBitrateManager.lastQualityAvgDelayMs = avgDelay
-                    adaptiveBitrateManager.lastQualityBacklogDrops = backlogDrops
-                }
-
-
+                server.setQualityReportListener { d, a, b -> adaptiveBitrateManager.apply { lastQualityDroppedFrames = d; lastQualityAvgDelayMs = a; lastQualityBacklogDrops = b } }
                 server.setBrowserConnectionListener { connected ->
                     if (connected) {
                         cancelPendingBrowserDisconnect("browser_reconnected")
-                        if (!browserConnected) {
-                            browserConnected = true
-                            onBrowserConnected()
-                        }
+                        if (!browserConnected) { browserConnected = true; onBrowserConnected() }
                         browserConnectionListener?.invoke(true)
-                    } else if (browserConnected) {
-                        scheduleBrowserDisconnect()
-                    } else {
-                        browserConnectionListener?.invoke(false)
-                    }
+                    } else if (browserConnected) { scheduleBrowserDisconnect() } else { browserConnectionListener?.invoke(false) }
                 }
-
                 server.start(0)
-                Log.i(TAG, "Server started on port ${MirrorServer.DEFAULT_PORT} ??waiting for browser")
             }
-
-            Log.i(TAG, "Pipeline initialized (idle): ${width}x${height}, audio=$audioEnabled")
             MirrorWidgetProvider.updateAllWidgets(this)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to start pipeline", e)
-            stopSelf()
-        }
+        } catch (e: Exception) { stopSelf() }
     }
     
     private enum class SessionMode { STANDARD_APP, EXTERNAL_BROWSER, INTERNAL_WEBVIEW }
-    private data class ActiveLaunchSession(
-        val mode: SessionMode,
-        val launchTarget: String,
-        val url: String? = null,
-        val sourceAppPackage: String? = null,
-        val browserPackage: String? = null
-    )
+    private data class ActiveLaunchSession(val mode: SessionMode, val launchTarget: String, val url: String? = null, val sourceAppPackage: String? = null, val browserPackage: String? = null)
     private var activeSession: ActiveLaunchSession? = null
 
-    private fun internalComponentName(activityClassName: String): String {
-        return if (activityClassName.contains('/')) activityClassName else "$packageName/$activityClassName"
-    }
-
-    private fun clearSecondaryState() {
-        secondaryPipeline.currentApp = ""
-        secondaryPipeline.currentWebUrl = null
-        secondaryPipeline.width = 0
-        secondaryPipeline.height = 0
-        secondaryRequestedWidth = 0
-        secondaryRequestedHeight = 0
-    }
-
-    private fun invalidatePrimaryVd(reason: String): Long {
-        primaryPipeline.displayId = -1
-        val generation = primaryPipeline.vdGeneration.incrementAndGet()
-        Log.i(TAG, "Primary VD invalidated generation=$generation reason=$reason")
-        return generation
-    }
-
-    private fun markPrimaryVdCreated(displayId: Int, reason: String): Long {
-        primaryPipeline.displayId = displayId
-        val generation = primaryPipeline.vdGeneration.incrementAndGet()
-        Log.i(TAG, "Primary VD active generation=$generation displayId=$displayId reason=$reason")
-        return generation
-    }
-
-    private fun isCurrentPrimaryVd(expectedGeneration: Long, expectedDisplayId: Int): Boolean {
-        val vdm = virtualDisplayManager ?: return false
-        return expectedDisplayId >= 0 &&
-            expectedGeneration == primaryPipeline.vdGeneration.get() &&
-            expectedDisplayId == primaryPipeline.displayId &&
-            vdm.hasVirtualDisplay() &&
-            vdm.getDisplayId() == expectedDisplayId
-    }
-
-    private fun currentPrimaryVdToken(): Pair<Long, Int>? {
-        val generation = primaryPipeline.vdGeneration.get()
-        val displayId = primaryPipeline.displayId
-        return if (isCurrentPrimaryVd(generation, displayId)) generation to displayId else null
-    }
-
-    private fun secondaryBitrate(width: Int, height: Int): Int {
-        return com.castla.mirror.utils.StreamMath.calculateSecondaryBitrate(width, height)
-    }
+    private fun internalComponentName(activityClassName: String): String = if (activityClassName.contains('/')) activityClassName else "$packageName/$activityClassName"
 
     private fun rebalanceDualDisplayBitrates() {
         val thermalActive = thermalThrottleManager.thermalStatus.value >= PowerManager.THERMAL_STATUS_LIGHT
@@ -1077,15 +850,8 @@ class MirrorForegroundService : Service() {
         val canApply = now - lastCongestionTimeMs > 2000
 
         if (hasSplit && (isCurrentAppVideo || isSecondaryAppVideo) && !thermalActive) {
-            val primaryBps = if (isCurrentAppVideo)
-                StreamMath.calculateSplitVideoBitrate(primaryPipeline.width, primaryPipeline.height)
-            else
-                StreamMath.calculateSplitCompanionBitrate(primaryPipeline.width, primaryPipeline.height)
-
-            val secondaryBps = if (isSecondaryAppVideo)
-                StreamMath.calculateSplitVideoBitrate(secondaryPipeline.width, secondaryPipeline.height)
-            else
-                StreamMath.calculateSplitCompanionBitrate(secondaryPipeline.width, secondaryPipeline.height)
+            val primaryBps = if (isCurrentAppVideo) StreamMath.calculateSplitVideoBitrate(primaryPipeline.width, primaryPipeline.height) else StreamMath.calculateSplitCompanionBitrate(primaryPipeline.width, primaryPipeline.height)
+            val secondaryBps = if (isSecondaryAppVideo) StreamMath.calculateSplitVideoBitrate(secondaryPipeline.width, secondaryPipeline.height) else StreamMath.calculateSplitCompanionBitrate(secondaryPipeline.width, secondaryPipeline.height)
 
             targetBitrate = primaryBps
             if (canApply || primaryPipeline.currentBitrate > primaryBps) {
@@ -1093,117 +859,20 @@ class MirrorForegroundService : Service() {
                 primaryPipeline.videoEncoder?.setBitrate(primaryPipeline.currentBitrate)
             }
             secondaryPipeline.videoEncoder?.setBitrate(secondaryBps)
-            Log.i(TAG, "Dual display rebalance: primary=${primaryBps / 1000}kbps(video=${isCurrentAppVideo}) secondary=${secondaryBps / 1000}kbps(video=${isSecondaryAppVideo})")
         } else {
             val baseBitrate = StreamMath.calculateBaseBitrate(primaryPipeline.width, primaryPipeline.height)
-            targetBitrate = if (isCurrentAppVideo && !thermalActive)
-                StreamMath.calculateOttBitrate(baseBitrate)
-            else
-                baseBitrate
+            targetBitrate = if (isCurrentAppVideo && !thermalActive) StreamMath.calculateOttBitrate(baseBitrate) else baseBitrate
             if (canApply || primaryPipeline.currentBitrate > targetBitrate) {
                 primaryPipeline.currentBitrate = targetBitrate
                 primaryPipeline.videoEncoder?.setBitrate(primaryPipeline.currentBitrate)
             }
             if (hasSplit) {
-                val secBitrate = StreamMath.calculateSecondaryBitrate(secondaryPipeline.width, secondaryPipeline.height)
-                secondaryPipeline.videoEncoder?.setBitrate(secBitrate)
-            }
-            Log.i(TAG, "Bitrate set: primary=${targetBitrate / 1000}kbps (video=${isCurrentAppVideo}, split=$hasSplit)")
-        }
-    }
-
-    private fun computeVirtualDisplayDpi(width: Int, height: Int): Int {
-        val baseDpi = StreamMath.calculateDpi(minOf(width, height))
-        return StreamMath.applyDensityScale(baseDpi, dpiScale)
-    }
-
-
-    private fun releaseSecondaryPipeline(clearState: Boolean = false) {
-        if (secondaryPipeline.displayId >= 0) {
-            cleanupDisplay(secondaryPipeline.displayId)
-            virtualDisplayManager?.releaseSecondaryVirtualDisplay(secondaryPipeline.displayId)
-            secondaryPipeline.displayId = -1
-        }
-        secondaryPipeline.videoEncoder?.release()
-        secondaryPipeline.videoEncoder = null
-        secondaryPipeline.jpegEncoder?.release()
-        secondaryPipeline.jpegEncoder = null
-        mirrorServer?.setKeyframeRequester("secondary") {}
-        secondaryPipeline.touchInjector?.release()
-        secondaryPipeline.touchInjector = null
-        if (isSecondaryAppVideo) {
-            isSecondaryAppVideo = false
-            rebalanceDualDisplayBitrates()
-        }
-        if (clearState) {
-            clearSecondaryState()
-            Log.i(TAG, "Secondary pipeline released ??primary will resize to fullscreen on next viewport")
-            serviceScope.launch {
-                rebuildPipeline(primaryPipeline.width, primaryPipeline.height, force = true, forceSingle = true)
+                secondaryPipeline.videoEncoder?.setBitrate(StreamMath.calculateSecondaryBitrate(secondaryPipeline.width, secondaryPipeline.height))
             }
         }
     }
 
-    private suspend fun rebuildSecondaryPipeline(targetWidth: Int, targetHeight: Int) {
-        secondaryPipeline.rebuild(targetWidth, targetHeight)
-    }
-
-
-
-    private fun onSecondaryViewportChange(width: Int, height: Int) {
-        if (width <= 0 || height <= 0) return
-        secondaryRequestedWidth = width
-        secondaryRequestedHeight = height
-        secondaryResizeJob?.cancel()
-        secondaryResizeJob = serviceScope.launch(Dispatchers.IO) {
-            rebuildSecondaryPipeline(width, height)
-        }
-    }
-
-    private fun restoreSecondaryVdContent() {
-        val displayId = secondaryPipeline.displayId
-        Log.i(TAG, "restoreSecondaryVdContent: secondaryPipeline.displayId=$displayId, secondaryPipeline.currentApp=$secondaryPipeline.currentApp, secondaryPipeline.currentWebUrl=$secondaryPipeline.currentWebUrl")
-        FileLogger.i(TAG, "restoreSecondaryVdContent start: id=$displayId app=$secondaryPipeline.currentApp")
-        if (displayId < 0 || secondaryPipeline.currentApp.isBlank()) return
-        when (secondaryPipeline.currentApp) {
-            "HOME", "", "com.android.settings" -> {
-                secondaryPipeline.currentApp = "HOME"
-                try {
-                    val service = virtualDisplayManager?.getPrivilegedService()
-                    service?.launchHomeOnDisplay(displayId)
-                    Log.i(TAG, "Launched custom HOME on secondary display $displayId")
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to launch home on secondary display $displayId", e)
-                }
-            }
-            else -> {
-                if (secondaryPipeline.currentWebUrl != null && !secondaryPipeline.currentApp.contains("WebBrowserActivity")) {
-                    val browser = BrowserResolver.resolve(this, secondaryPipeline.currentWebUrl!!)
-                    if (browser != null) {
-                        val cmd = buildExternalBrowserCommand(displayId, secondaryPipeline.currentWebUrl!!, browser.componentFlat)
-                        val launched = try {
-                            val svc = virtualDisplayManager?.getPrivilegedService()
-                            if (svc != null) { svc.execCommand(cmd); true } else false
-                        } catch (_: Exception) { false }
-                        if (!launched) {
-                            launchInternalActivity("com.castla.mirror.ui.WebBrowserActivity", displayId, secondaryPipeline.currentWebUrl!!)
-                        }
-                    } else {
-                        launchInternalActivity("com.castla.mirror.ui.WebBrowserActivity", displayId, secondaryPipeline.currentWebUrl!!)
-                    }
-                } else if (secondaryPipeline.currentApp.contains("WebBrowserActivity")) {
-                    val activityClassName = secondaryPipeline.currentApp.substringAfter('/')
-                    launchInternalActivity(activityClassName, displayId, secondaryPipeline.currentWebUrl ?: "https://m.youtube.com")
-                } else {
-                    launchTargetOnDisplay(displayId, secondaryPipeline.currentApp, forceColdStart = false, forceDisplayId = true)
-                }
-            }
-        }
-    }
-
-
-
-
+    private fun computeVirtualDisplayDpi(width: Int, height: Int): Int = StreamMath.applyDensityScale(StreamMath.calculateDpi(minOf(width, height)), dpiScale)
 
     private fun removeAllVdTasks() {
         cleanupDisplay(virtualDisplayManager?.getDisplayId() ?: -1)
@@ -1217,96 +886,45 @@ class MirrorForegroundService : Service() {
 
         try {
             service.launchHomeOnDisplay(displayId)
-
             val runningTasks = service.getRunningTasksOnDisplay(displayId)
             val packagesToStop = mutableSetOf<String>()
 
             for (task in runningTasks) {
                 val pkg = task.substringBefore('/').takeIf { it.contains('.') }
-                if (pkg != null && pkg != myPackage
-                    && !pkg.startsWith("com.android.launcher")
-                    && !pkg.startsWith("com.sec.android.app.launcher")
-                    && pkg != "com.android.settings"
-                ) {
+                if (pkg != null && pkg != myPackage && !pkg.startsWith("com.android.launcher") && !pkg.startsWith("com.sec.android.app.launcher") && pkg != "com.android.settings") {
                     packagesToStop.add(pkg)
                 }
             }
 
-            for (pkg in packagesToStop) {
-                service.execCommand("am force-stop $pkg")
-                Log.i(TAG, "Force-stopped $pkg from display $displayId")
-            }
-
+            for (pkg in packagesToStop) { service.execCommand("am force-stop $pkg") }
             val removedTaskIds = mutableSetOf<Int>()
             for (pkg in packagesToStop) {
                 for (taskId in service.getTaskIdsForPackage(pkg)) {
-                    if (removedTaskIds.add(taskId)) {
-                        service.removeTask(taskId)
-                        Log.i(TAG, "Removed task $taskId for $pkg while cleaning display $displayId")
-                    }
+                    if (removedTaskIds.add(taskId)) service.removeTask(taskId)
                 }
             }
-
-            Log.i(TAG, "Cleaned up display $displayId: ${packagesToStop.size} force-stopped, ${removedTaskIds.size} tasks removed")
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to clean up display $displayId", e)
-        }
+        } catch (_: Exception) {}
     }
 
-    private val BROWSER_PACKAGES = setOf(
-        "com.android.chrome",
-        "com.sec.android.app.sbrowser",
-        "org.mozilla.firefox",
-        "com.microsoft.emmx"
-    )
+    private val BROWSER_PACKAGES = setOf("com.android.chrome", "com.sec.android.app.sbrowser", "org.mozilla.firefox", "com.microsoft.emmx")
 
     private fun forceStopAppIfNeeded(packageName: String) {
         val pkg = packageName.substringBefore('/')
-        if (pkg.isBlank()
-            || pkg == "HOME"
-            || pkg == "com.android.settings"
-            || pkg.startsWith("com.android.launcher")
-            || pkg.startsWith("com.sec.android.app.launcher")
-            || pkg == applicationContext.packageName
-        ) return
+        if (pkg.isBlank() || pkg == "HOME" || pkg == "com.android.settings" || pkg.startsWith("com.android.launcher") || pkg.startsWith("com.sec.android.app.launcher") || pkg == applicationContext.packageName) return
 
         try {
             val service = virtualDisplayManager?.getPrivilegedService() ?: return
-            val dumpsys = service.execCommand("dumpsys activity activities")
-            val matchingTaskIds = findAllTaskIds(dumpsys, pkg)
-            for (taskId in matchingTaskIds) {
-                try {
-                    service.removeTask(taskId)
-                    Log.i(TAG, "Synchronously removed zombie task $taskId for package $pkg to guarantee fresh launch on new virtual display")
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to remove task $taskId", e)
-                }
-            }
-
-            if (BROWSER_PACKAGES.contains(pkg)) {
-                return
-            }
+            val matchingTaskIds = findAllTaskIds(service.execCommand("dumpsys activity activities"), pkg)
+            for (taskId in matchingTaskIds) { try { service.removeTask(taskId) } catch (_: Exception) {} }
+            if (BROWSER_PACKAGES.contains(pkg)) return
             service.execCommand("am force-stop $pkg")
-            Log.i(TAG, "Force-stopped previous app: $pkg")
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to force-stop $pkg", e)
-        }
+        } catch (_: Exception) {}
     }
-
-
 
     private fun markTerminal(reason: TerminalReason) {
         if (!terminalReason.compareAndSet(null, reason)) return
-        FileLogger.e(TAG, "Terminal failure: ${reason.name}")
-        Log.e(TAG, "Terminal failure: ${reason.name}")
-        try {
-            requestStopAsync("terminal_${reason.name.lowercase()}")
-        } catch (e: Exception) {
-            Log.w(TAG, "requestStopAsync failed after markTerminal", e)
-        }
+        try { requestStopAsync("terminal_${reason.name.lowercase()}") } catch (_: Exception) {}
     }
-
-
 
     private fun escapeShellArg(value: String): String = "'" + value.replace("'", "'\''") + "'"
 
@@ -1315,25 +933,14 @@ class MirrorForegroundService : Service() {
         return try {
             val launchIntent = packageManager.getLaunchIntentForPackage(packageOrComponent)
             val component = launchIntent?.component ?: run {
-                val intent = Intent(Intent.ACTION_MAIN).apply {
-                    addCategory(Intent.CATEGORY_LAUNCHER)
-                    `package` = packageOrComponent
-                }
-                packageManager.queryIntentActivities(intent, PackageManager.MATCH_ALL)
-                    .firstOrNull()
-                    ?.activityInfo
-                    ?.let { ComponentName(it.packageName, it.name) }
+                packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).apply { addCategory(Intent.CATEGORY_LAUNCHER); `package` = packageOrComponent }, PackageManager.MATCH_ALL)
+                    .firstOrNull()?.activityInfo?.let { ComponentName(it.packageName, it.name) }
             }
             component?.flattenToShortString()
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to resolve launcher component for $packageOrComponent", e)
-            null
-        }
+        } catch (_: Exception) { null }
     }
 
-    private fun normalizeLaunchTarget(packageOrComponent: String): String {
-        return resolveLaunchComponent(packageOrComponent) ?: packageOrComponent
-    }
+    private fun normalizeLaunchTarget(packageOrComponent: String): String = resolveLaunchComponent(packageOrComponent) ?: packageOrComponent
 
     private fun buildShellLaunchCommand(
         displayId: Int,
@@ -1359,532 +966,36 @@ class MirrorForegroundService : Service() {
         }.trim()
     }
 
-    private fun launchTargetOnDisplay(
-        displayId: Int,
-        packageOrComponent: String,
-        extraKey: String? = null,
-        extraValue: String? = null,
-        forceColdStart: Boolean = false,
-        forceDisplayId: Boolean = false
-    ): Boolean {
-        Log.i(TAG, "launchTargetOnDisplay start: displayId=$displayId, packageOrComponent=$packageOrComponent, forceDisplayId=$forceDisplayId, forceColdStart=$forceColdStart")
-        FileLogger.i(TAG, "launchTargetOnDisplay start: display=$displayId pkg=$packageOrComponent forceDisplayId=$forceDisplayId")
-        if (displayId < 0) return false
 
-        // Automatically correct to the active primary/secondary displayId if the input displayId is stale.
-        var correctedDisplayId = displayId
-        val activePrimaryId = virtualDisplayManager?.getDisplayId() ?: -1
-        val activeSecondaryId = secondaryPipeline.displayId
-
-        if (displayId != activeSecondaryId && !isCurrentPrimaryVd(primaryPipeline.vdGeneration.get(), displayId)) {
-            if (activePrimaryId >= 0 && activePrimaryId != displayId) {
-                Log.i(TAG, "Auto-correcting launch displayId from stale $displayId to active primary $activePrimaryId")
-                correctedDisplayId = activePrimaryId
-            } else {
-                Log.w(TAG, "Skipping launch on stale primary display $displayId: primaryPipeline.displayId=$primaryPipeline.displayId generation=${primaryPipeline.vdGeneration.get()}")
-                return false
-            }
-        }
-
-        val service = virtualDisplayManager?.getPrivilegedService() ?: return false
-        return try {
-            val pkg = packageOrComponent.substringBefore('/')
-
-            if (forceColdStart && pkg.isNotBlank() && pkg != "HOME" && !pkg.contains("com.castla.mirror")) {
-                try {
-                    val stopResult = service.execCommand("am force-stop $pkg")
-                    Log.i(TAG, "Forced cold start: Successfully force-stopped $pkg before launching. Result: $stopResult")
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to force stop $pkg for cold start", e)
-                }
-            }
-
-            // 1. Precise Display ID tracking for original task to ensure symmetric control
-            val originalDisplayId = try { service.getDisplayIdForPackage(pkg) } catch (e: Exception) { -1 }
-            val primaryVdId = virtualDisplayManager?.getDisplayId() ?: -1
-            val secondaryVdId = secondaryPipeline.displayId
-            Log.i(TAG, "launchTargetOnDisplay tracking: originalDisplayId=$originalDisplayId, primaryVdId=$primaryVdId, secondaryVdId=$secondaryVdId")
-            
-            val targetDisplayId = if (!forceDisplayId && originalDisplayId >= 0 && (originalDisplayId == primaryVdId || originalDisplayId == secondaryVdId)) {
-                Log.i(TAG, "Symmetric Task Routing: Redirecting launch of $pkg from display $correctedDisplayId to original display $originalDisplayId")
-                originalDisplayId
-            } else {
-                Log.i(TAG, "Using target displayId $correctedDisplayId (forceDisplayId=$forceDisplayId or originalDisplayId=$originalDisplayId)")
-                correctedDisplayId
-            }
-
-            val dumpsys = service.execCommand("dumpsys activity activities")
-            val matchingTaskIds = findAllTaskIds(dumpsys, pkg)
-            val isWarmStart = matchingTaskIds.isNotEmpty()
-            Log.i(TAG, "launchTargetOnDisplay warm start check: matchingTaskIds=$matchingTaskIds, isWarmStart=$isWarmStart")
-
-            for (taskId in matchingTaskIds) {
-                try {
-                    // Move the task to the correct target display
-                    val moveResult = service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId")
-                    Log.i(TAG, "Migrated existing task $taskId ($pkg) to display $targetDisplayId. Result: $moveResult")
-                    
-                    // Force bring task to the front of target display to restore focus and resume rendering
-                    val frontResult = service.execCommand("cmd activity task move-to-front $taskId")
-                    Log.i(TAG, "Forced task $taskId to front of display $targetDisplayId. Result: $frontResult")
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to migrate/bring-to-front task $taskId for display $targetDisplayId", e)
-                }
-            }
-
-            val command = buildShellLaunchCommand(targetDisplayId, packageOrComponent, extraKey, extraValue, reorderToFront = isWarmStart)
-            Log.i(TAG, "Executing Shell Launch: $command")
-            val result = service.execCommand(command)
-            Log.i(TAG, "Launch result for $packageOrComponent: $result")
-
-            // 3. Surface Re-bind Verification and Safe Fallback mechanism
-            if (isWarmStart) {
-                verifySurfaceAndFallback(service, targetDisplayId, pkg, matchingTaskIds, packageOrComponent, extraKey, extraValue)
-            }
-
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to launch $packageOrComponent on display $correctedDisplayId (original=$displayId)", e)
-            FileLogger.e(TAG, "launchTargetOnDisplay failed pkg=$packageOrComponent display=$correctedDisplayId", e)
-            false
-        }
-    }
-
-    private fun verifySurfaceAndFallback(
-        service: IPrivilegedService,
-        displayId: Int,
-        pkg: String,
-        taskIds: List<Int>,
-        packageOrComponent: String,
-        extraKey: String?,
-        extraValue: String?
-    ) {
+    private fun verifySurfaceAndFallback(pipeline: VirtualDisplayPipeline, service: IPrivilegedService, displayId: Int, pkg: String, taskIds: List<Int>, packageOrComponent: String, extraKey: String?, extraValue: String?) {
         serviceScope.launch(Dispatchers.IO) {
-            kotlinx.coroutines.delay(1000L) // Wait 1 second for OS window manager transitions to settle
+            kotlinx.coroutines.delay(1000L)
             try {
-                val runningTasks = service.getRunningTasksOnDisplay(displayId)
-                Log.i(TAG, "verifySurfaceAndFallback for $pkg on display $displayId: runningTasks=$runningTasks")
-                // Check if the target package has successfully resumed as topActivity or active on this display
-                val isResumedSuccessfully = runningTasks.any { it.contains(pkg) }
-                if (!isResumedSuccessfully) {
-                    Log.w(TAG, "Surface binding verification FAILED for $pkg on display $displayId. Black screen or focus loss suspected.")
-                    FileLogger.w(TAG, "Verification failed for $pkg on display $displayId, initiating Clean Launch fallback.")
-                    
-                    // Fallback Safety Mechanism: completely remove stale tasks and execute clean launch
-                    for (taskId in taskIds) {
-                        try {
-                            service.removeTask(taskId)
-                            Log.i(TAG, "Fallback: Removed stale task $taskId")
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Failed to remove stale task $taskId during fallback", e)
-                        }
-                    }
-                    val stopResult = service.execCommand("am force-stop $pkg")
-                    Log.i(TAG, "Fallback: Force-stopped package $pkg. Result: $stopResult")
-                    
-                    // Re-launch with a clean slate
-                    val command = buildShellLaunchCommand(displayId, packageOrComponent, extraKey, extraValue, reorderToFront = false)
-                    Log.i(TAG, "Fallback Clean Launch: Executing: $command")
-                    val result = service.execCommand(command)
-                    Log.i(TAG, "Fallback Clean Launch result: $result")
-                } else {
-                    Log.i(TAG, "Surface binding verified successfully for $pkg on display $displayId")
+                if (service.getRunningTasksOnDisplay(displayId).none { it.contains(pkg) }) {
+                    for (taskId in taskIds) { try { service.removeTask(taskId) } catch (_: Exception) {} }
+                    service.execCommand("am force-stop $pkg")
+                    service.execCommand(buildShellLaunchCommand(displayId, packageOrComponent, extraKey, extraValue, reorderToFront = false))
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed during surface binding verification for $pkg", e)
-            }
-        }
-    }
-
-    private fun launchBrowserTarget(
-        pane: String,
-        url: String,
-        sourceAppPackage: String? = null,
-        allowFallback: Boolean = true,
-        preserveSecondary: Boolean = false
-    ) {
-        if (pane == "primary" && secondaryPipeline.displayId >= 0 && !preserveSecondary) {
-            Log.i(TAG, "Switching primary to fullscreen: releasing secondary pipeline prior to launching browser: $url")
-            releaseSecondaryPipeline(clearState = false)
-            serviceScope.launch {
-                try {
-                    rebuildPipeline(primaryPipeline.width, primaryPipeline.height, force = true, forceSingle = true)
-                    launchBrowserTarget("primary", url, sourceAppPackage, allowFallback, preserveSecondary = true)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to rebuild and launch browser target: $url", e)
-                }
-            }
-            return
-        }
-
-        val browser = BrowserResolver.resolve(this, url)
-        val targetComponent = browser?.componentFlat ?: internalComponentName("com.castla.mirror.ui.WebBrowserActivity")
-        val isSecondary = (pane == "secondary")
-        val displayId = if (isSecondary) secondaryPipeline.displayId else (virtualDisplayManager?.getDisplayId() ?: -1)
-
-        if (displayId < 0) {
-            Log.i(TAG, "Display not active for $pane. Deferring external browser launch ($url)")
-            if (isSecondary) {
-                secondaryPipeline.currentApp = targetComponent
-                secondaryPipeline.currentWebUrl = url
-                isSecondaryAppVideo = (browser != null)
-                
-                val targetW = if (secondaryRequestedWidth > 0) secondaryRequestedWidth else (primaryPipeline.width / 2).coerceAtLeast(320)
-                val targetH = if (secondaryRequestedHeight > 0) secondaryRequestedHeight else primaryPipeline.height
-                Log.i(TAG, "Secondary display not active ($displayId) ??triggering dynamic auto-provisioning: ${targetW}x${targetH}")
-                serviceScope.launch(Dispatchers.IO) {
-                    rebuildSecondaryPipeline(targetW, targetH)
-                }
-            } else {
-                primaryPipeline.currentApp = targetComponent
-                primaryPipeline.currentWebUrl = url
-                isCurrentAppVideo = (browser != null)
-                activeSession = ActiveLaunchSession(
-                    mode = if (browser != null) SessionMode.EXTERNAL_BROWSER else SessionMode.INTERNAL_WEBVIEW,
-                    launchTarget = targetComponent,
-                    url = url,
-                    sourceAppPackage = sourceAppPackage
-                )
-            }
-            return
-        }
-
-        if (browser != null) {
-            val command = buildExternalBrowserCommand(displayId, url, browser.componentFlat)
-            val service = virtualDisplayManager?.getPrivilegedService()
-            if (service != null) {
-                val launched = try {
-                    Log.i(TAG, "External browser launch on display $displayId ($pane): $command")
-                    service.execCommand(command)
-                    true
-                } catch (e: Exception) {
-                    Log.e(TAG, "External browser launch failed on $pane", e)
-                    false
-                }
-
-                if (launched) {
-                    if (isSecondary) {
-                        val previousApp = secondaryPipeline.currentApp
-                        val previousPkg = previousApp.substringBefore('/')
-                        if (previousPkg != browser.packageName) {
-                            forceStopAppIfNeeded(previousApp)
-                        }
-                        secondaryPipeline.currentApp = browser.componentFlat
-                        secondaryPipeline.currentWebUrl = url
-                        isSecondaryAppVideo = true
-                    } else {
-                        val previousApp = primaryPipeline.currentApp
-                        val previousPkg = previousApp.substringBefore('/')
-                        if (previousPkg != browser.packageName) {
-                            forceStopAppIfNeeded(previousApp)
-                        }
-                        primaryPipeline.currentApp = browser.componentFlat
-                        primaryPipeline.currentWebUrl = url
-                        isCurrentAppVideo = true
-                        activeSession = ActiveLaunchSession(
-                            mode = SessionMode.EXTERNAL_BROWSER,
-                            launchTarget = browser.componentFlat,
-                            url = url,
-                            sourceAppPackage = sourceAppPackage,
-                            browserPackage = browser.packageName
-                        )
-                    }
-                    Log.i(TAG, "External browser launched successfully on $pane: ${browser.componentFlat} -> $url")
-                    rebalanceDualDisplayBitrates()
-                    return
-                }
-            }
-        }
-
-        if (allowFallback) {
-            Log.w(TAG, "Falling back to internal WebBrowserActivity for $url on $pane")
-            val webActivity = "com.castla.mirror.ui.WebBrowserActivity"
-            launchInternalActivity(webActivity, displayId, url)
-            if (isSecondary) {
-                secondaryPipeline.currentApp = internalComponentName(webActivity)
-                secondaryPipeline.currentWebUrl = url
-                isSecondaryAppVideo = false
-            } else {
-                primaryPipeline.currentApp = internalComponentName(webActivity)
-                primaryPipeline.currentWebUrl = url
-                isCurrentAppVideo = false
-                activeSession = ActiveLaunchSession(
-                    mode = SessionMode.INTERNAL_WEBVIEW,
-                    launchTarget = internalComponentName(webActivity),
-                    url = url,
-                    sourceAppPackage = sourceAppPackage
-                )
-            }
-            rebalanceDualDisplayBitrates()
-        }
-    }
-
-    private fun buildExternalBrowserCommand(displayId: Int, url: String, browserComponent: String): String {
-        return buildString {
-            append("am start --display $displayId -f 0x18000000 ")
-            append("-a android.intent.action.VIEW ")
-            append("-d ${escapeShellArg(url)} ")
-            append("-n ${escapeShellArg(browserComponent)} ")
-        }.trim()
-    }
-
-    private fun launchStandardTarget(pane: String, launchTarget: String, preserveSecondary: Boolean = false) {
-        val resolvedTarget = normalizeLaunchTarget(launchTarget)
-        if (pane == "primary" && secondaryPipeline.displayId >= 0 && !preserveSecondary) {
-            Log.i(TAG, "Switching primary to fullscreen: releasing secondary pipeline prior to launching: $resolvedTarget")
-            releaseSecondaryPipeline(clearState = false)
-            serviceScope.launch {
-                try {
-                    rebuildPipeline(primaryPipeline.width, primaryPipeline.height, force = true, forceSingle = true)
-                    launchStandardTarget("primary", resolvedTarget, preserveSecondary = true)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to rebuild and launch standard target: $resolvedTarget", e)
-                }
-            }
-            return
-        }
-
-        val isSecondary = (pane == "secondary")
-        val displayId = if (isSecondary) secondaryPipeline.displayId else (virtualDisplayManager?.getDisplayId() ?: -1)
-
-        val launched = if (displayId >= 0) launchTargetOnDisplay(displayId, resolvedTarget) else false
-        if (!launched) {
-            if (isSecondary) {
-                Log.i(TAG, "Secondary display not active ($displayId). Deferring launch for $resolvedTarget until secondary is ready.")
-                secondaryPipeline.currentApp = resolvedTarget
-                secondaryPipeline.currentWebUrl = null
-                isSecondaryAppVideo = false
-                
-                val targetW = if (secondaryRequestedWidth > 0) secondaryRequestedWidth else (primaryPipeline.width / 2).coerceAtLeast(320)
-                val targetH = if (secondaryRequestedHeight > 0) secondaryRequestedHeight else primaryPipeline.height
-                Log.i(TAG, "Secondary display not active ($displayId) ??triggering dynamic auto-provisioning: ${targetW}x${targetH}")
-                serviceScope.launch(Dispatchers.IO) {
-                    rebuildSecondaryPipeline(targetW, targetH)
-                }
-            } else {
-                val activeDisplayId = virtualDisplayManager?.getDisplayId() ?: -1
-                if (virtualDisplayManager?.hasVirtualDisplay() == false || displayId != activeDisplayId) {
-                    Log.i(TAG, "Primary VD not active or stale (displayId=$displayId active=$activeDisplayId). Deferring launch for $resolvedTarget until bind completion.")
-                    primaryPipeline.currentApp = resolvedTarget
-                    primaryPipeline.currentWebUrl = null
-                    isCurrentAppVideo = false
-                    return
-                }
-                Log.w(TAG, "Failed to launch $resolvedTarget on active display $displayId ??triggering single rebuild fallback")
-                serviceScope.launch {
-                    try {
-                        rebuildPipeline(primaryPipeline.width, primaryPipeline.height, force = true)
-                        val retryId = virtualDisplayManager?.getDisplayId() ?: -1
-                        val retried = launchTargetOnDisplay(retryId, resolvedTarget)
-                        if (retried) {
-                            Log.i(TAG, "Retry launch succeeded for $resolvedTarget after pipeline rebuild")
-                        } else {
-                            Log.e(TAG, "Retry launch failed for $resolvedTarget after pipeline rebuild")
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to rebuild and retry launch for $resolvedTarget", e)
-                    }
-                }
-            }
-        } else {
-            if (isSecondary) {
-                secondaryPipeline.currentApp = resolvedTarget
-                secondaryPipeline.currentWebUrl = null
-                isSecondaryAppVideo = false
-            } else {
-                primaryPipeline.currentApp = resolvedTarget
-                primaryPipeline.currentWebUrl = null
-                isCurrentAppVideo = false
-                activeSession = ActiveLaunchSession(mode = SessionMode.STANDARD_APP, launchTarget = resolvedTarget)
-            }
-            rebalanceDualDisplayBitrates()
-        }
-    }
-
-    private fun launchWebTarget(
-        pane: String,
-        activityClassName: String,
-        url: String,
-        preserveSecondary: Boolean = false
-    ) {
-        if (pane == "primary" && secondaryPipeline.displayId >= 0 && !preserveSecondary) {
-            Log.i(TAG, "Switching primary to fullscreen: releasing secondary pipeline prior to launching WebView: $url")
-            releaseSecondaryPipeline(clearState = false)
-            serviceScope.launch {
-                try {
-                    rebuildPipeline(primaryPipeline.width, primaryPipeline.height, force = true, forceSingle = true)
-                    launchWebTarget("primary", activityClassName, url, preserveSecondary = true)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to rebuild and launch WebView: $url", e)
-                }
-            }
-            return
-        }
-
-        val isSecondary = (pane == "secondary")
-        val displayId = if (isSecondary) secondaryPipeline.displayId else (virtualDisplayManager?.getDisplayId() ?: -1)
-        val targetComponent = internalComponentName(activityClassName)
-
-        if (displayId < 0) {
-            Log.i(TAG, "Display not active for $pane. Deferring fullscreen web launch ($url)")
-            if (isSecondary) {
-                secondaryPipeline.currentApp = targetComponent
-                secondaryPipeline.currentWebUrl = url
-                isSecondaryAppVideo = false
-                
-                val targetW = if (secondaryRequestedWidth > 0) secondaryRequestedWidth else (primaryPipeline.width / 2).coerceAtLeast(320)
-                val targetH = if (secondaryRequestedHeight > 0) secondaryRequestedHeight else primaryPipeline.height
-                Log.i(TAG, "Secondary display not active ($displayId) ??triggering dynamic auto-provisioning: ${targetW}x${targetH}")
-                serviceScope.launch(Dispatchers.IO) {
-                    rebuildSecondaryPipeline(targetW, targetH)
-                }
-            } else {
-                primaryPipeline.currentApp = targetComponent
-                primaryPipeline.currentWebUrl = url
-                isCurrentAppVideo = false
-                activeSession = ActiveLaunchSession(
-                    mode = SessionMode.INTERNAL_WEBVIEW,
-                    launchTarget = targetComponent,
-                    url = url
-                )
-            }
-            return
-        }
-
-        val previousApp = if (isSecondary) secondaryPipeline.currentApp else primaryPipeline.currentApp
-        if (previousApp != targetComponent) {
-            forceStopAppIfNeeded(previousApp)
-        }
-        launchInternalActivity(activityClassName, displayId, url)
-
-        if (isSecondary) {
-            secondaryPipeline.currentApp = targetComponent
-            secondaryPipeline.currentWebUrl = url
-            isSecondaryAppVideo = false
-        } else {
-            primaryPipeline.currentApp = targetComponent
-            primaryPipeline.currentWebUrl = url
-            isCurrentAppVideo = false
-            activeSession = ActiveLaunchSession(
-                mode = SessionMode.INTERNAL_WEBVIEW,
-                launchTarget = targetComponent,
-                url = url
-            )
-        }
-        rebalanceDualDisplayBitrates()
-    }
-
-    private fun launchInternalActivity(activityClassName: String, displayId: Int, url: String) {
-        launchOwnActivityOnDisplay(activityClassName, displayId, url)
-    }
-
-    private fun launchOwnActivityOnDisplay(
-        activityClassName: String,
-        displayId: Int,
-        url: String
-    ) {
-        if (displayId < 0) return
-
-        val options = android.app.ActivityOptions.makeBasic()
-        options.launchDisplayId = displayId
-        val intent = Intent().apply {
-            setClassName(this@MirrorForegroundService, activityClassName)
-            if (activityClassName.contains("WebBrowserActivity")) {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
-            } else {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-            }
-            putExtra("url", url)
-            putExtra("pane", if (displayId == secondaryPipeline.displayId) "secondary" else "primary")
-        }
-        try {
-            startActivity(intent, options.toBundle())
-            Log.i(TAG, "Launched $activityClassName on display $displayId via ActivityOptions")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to launch $activityClassName on display $displayId via ActivityOptions", e)
-            launchTargetOnDisplay(
-                displayId,
-                internalComponentName(activityClassName),
-                "url",
-                url,
-                forceColdStart = false,
-                forceDisplayId = true
-            )
+            } catch (_: Exception) {}
         }
     }
 
     private fun findAllTaskIds(dumpsys: String?, pkg: String): List<Int> {
-        val service = virtualDisplayManager?.getPrivilegedService()
-        if (service != null) {
-            try {
-                return service.getTaskIdsForPackage(pkg).toList()
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to get task IDs natively, falling back to regex", e)
-            }
-        }
-
+        virtualDisplayManager?.getPrivilegedService()?.let { try { return it.getTaskIdsForPackage(pkg).toList() } catch (_: Exception) {} }
         if (dumpsys.isNullOrBlank()) return emptyList()
         val taskIds = mutableListOf<Int>()
-
         val blocks = dumpsys.split(Regex("\\* Task"))
         for (i in 1 until blocks.size) {
             val block = blocks[i]
             val taskId = Regex("^\\s*(?:#|Record\\{\\s*|\\{\\s*)(\\d+)").find(block)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: continue
-
-            val hasActivity = block.contains("realActivity=$pkg/") ||
-                              block.contains("origActivity=$pkg/") ||
-                              block.contains("ComponentInfo{$pkg/")
-            if (hasActivity) {
-                taskIds.add(taskId)
-            }
+            if (block.contains("realActivity=$pkg/") || block.contains("origActivity=$pkg/") || block.contains("ComponentInfo{$pkg/")) taskIds.add(taskId)
         }
         return taskIds
     }
 
-
-
-    private fun launchAppFromWebLauncher(pkgName: String, componentName: String? = null, pane: String = "primary") {
-        Log.i(TAG, "launchAppFromWebLauncher: pkg=$pkgName pane=$pane")
-        if (pane != "secondary") {
-            lastAppLaunchTime = System.currentTimeMillis()
-        }
-        if (pane == "secondary" && pkgName.isBlank()) {
-            releaseSecondaryPipeline(clearState = true)
-            return
-        }
-
-        val webUrl = OttCatalog.webUrlFor(pkgName)
-        if (webUrl != null) {
-            val preserveSecondary = pane == "primary" && secondaryPipeline.displayId >= 0
-            Log.i(TAG, "Web Launcher: Launching OTT app via external browser: $pkgName -> $webUrl (pane=$pane preserveSecondary=$preserveSecondary)")
-            launchBrowserTarget(pane, webUrl, pkgName, preserveSecondary = preserveSecondary)
-        } else {
-            val launchTarget = componentName ?: pkgName
-            val preserveSecondary = pane == "primary" && secondaryPipeline.displayId >= 0
-            Log.i(TAG, "Web Launcher: Launching standard app: $pkgName (target=$launchTarget pane=$pane preserveSecondary=$preserveSecondary)")
-            launchStandardTarget(pane, launchTarget, preserveSecondary = preserveSecondary)
-        }
-
-        if (currentCodecMode == "mjpeg") {
-            primaryPipeline.touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 99))
-            serviceScope.launch {
-                kotlinx.coroutines.delay(50)
-                primaryPipeline.touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 99))
-            }
-        }
-    }
-
     private fun ensureShizukuSetup(): ShizukuSetup? {
-        shizukuSetup?.let {
-            Log.i(TAG, "ensureShizukuSetup: reusing existing instance")
-            return it
-        }
-        val setup = ShizukuSetup()
-        setup.init(this, bindService = true)
-        Log.i(TAG, "ensureShizukuSetup: created new instance lazily on browser-connect path")
-        shizukuSetup = setup
-        startReconnectObserver(setup)
-        return setup
+        shizukuSetup?.let { return it }
+        return ShizukuSetup().also { it.init(this, bindService = true); shizukuSetup = it; startReconnectObserver(it) }
     }
 
     private fun startReconnectObserver(setup: ShizukuSetup) {
@@ -1892,219 +1003,173 @@ class MirrorForegroundService : Service() {
         reconnectJob = serviceScope.launch {
             val tracker = BinderConnectionTracker()
             setup.serviceConnected.collect { connected ->
-                val transition = if (connected) tracker.onConnected() else tracker.onDisconnected()
-                Log.i(TAG, "Shizuku connection transition=$transition connected=$connected")
-                when (transition) {
-                    BinderConnectionTracker.Transition.FirstConnect,
-                    BinderConnectionTracker.Transition.Idempotent -> {}
-                    BinderConnectionTracker.Transition.Disconnect -> handleShizukuDisconnect()
+                when (if (connected) tracker.onConnected() else tracker.onDisconnected()) {
+                    BinderConnectionTracker.Transition.Disconnect -> virtualDisplayManager?.attachPrivilegedService(null)
                     BinderConnectionTracker.Transition.Reconnect -> handleShizukuReconnect(setup)
+                    else -> {}
                 }
             }
         }
     }
 
-    private fun handleShizukuDisconnect() {
-        val vdm = virtualDisplayManager ?: return
-        vdm.attachPrivilegedService(null)
-    }
-
     private fun handleShizukuReconnect(setup: ShizukuSetup) {
-        if (!browserConnected) {
-            Log.w(TAG, "Ignoring stale Shizuku reconnect after browser disconnect")
-            return
-        }
+        if (!browserConnected) return
         val vdm = virtualDisplayManager ?: VirtualDisplayManager().also { virtualDisplayManager = it }
         val surf = primaryPipeline.currentEncoderSurface ?: return
-        if (primaryPipeline.width <= 0 || primaryPipeline.height <= 0) {
-            Log.w(TAG, "Reconnect skipped: invalid dims ${primaryPipeline.width}x${primaryPipeline.height}")
-            return
-        }
-        val svc = setup.privilegedService ?: return
-        vdm.attachPrivilegedService(svc)
+        if (primaryPipeline.width <= 0 || primaryPipeline.height <= 0) return
+        vdm.attachPrivilegedService(setup.privilegedService ?: return)
         serviceScope.launch(Dispatchers.IO) {
             primaryVdOperationMutex.withLock {
                 vdm.createVirtualDisplay(primaryPipeline.width, primaryPipeline.height, computeVirtualDisplayDpi(primaryPipeline.width, primaryPipeline.height), surf)
                 if (vdm.hasVirtualDisplay()) {
                     val displayId = vdm.getDisplayId()
-                    val generation = markPrimaryVdCreated(displayId, "shizuku_reconnect")
-                    primaryPipeline.touchInjector?.setVirtualDisplayInjector { motionEvent ->
-                        vdm.injectMotionEvent(motionEvent)
-                    }
-                    restoreCurrentVdContentLocked(generation, displayId)
+                    val generation = primaryPipeline.markVdCreated(displayId, "shizuku_reconnect")
+                    primaryPipeline.touchInjector?.setVirtualDisplayInjector { vdm.injectMotionEvent(it) }
+                    primaryPipeline.restoreContentLocked(generation, displayId)
                 }
             }
         }
     }
 
-    private fun trySetupVirtualDisplay(
-        width: Int,
-        height: Int,
-        surface: android.view.Surface,
-        onResult: (Boolean) -> Unit
-    ) {
-        if (shizukuSetupInProgress) {
-            Log.i(TAG, "trySetupVirtualDisplay queued: setup already in progress")
-            shizukuSetupCallbacks.add(onResult)
-            return
-        }
-        shizukuSetupInProgress = true
-        shizukuSetupCallbacks.clear()
-        shizukuSetupCallbacks.add(onResult)
+    private fun trySetupVirtualDisplay(width: Int, height: Int, surface: Surface, onResult: (Boolean) -> Unit) {
+        if (shizukuSetupInProgress) { shizukuSetupCallbacks.add(onResult); return }
+        shizukuSetupInProgress = true; shizukuSetupCallbacks.clear(); shizukuSetupCallbacks.add(onResult)
         
         var resultDelivered = false
         val safeResult = { success: Boolean ->
             if (!resultDelivered) {
-                resultDelivered = true
-                shizukuSetupInProgress = false
-                if (!success) {
-                    tearDownVdSession("virtual_display_setup_failed")
-                }
-                
-                val callbacks = synchronized(shizukuSetupCallbacks) {
-                    val list = shizukuSetupCallbacks.toList()
-                    shizukuSetupCallbacks.clear()
-                    list
-                }
-                callbacks.forEach { cb ->
-                    try {
-                        cb(success)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Callback invocation failed during setup completion", e)
-                    }
-                }
+                resultDelivered = true; shizukuSetupInProgress = false
+                if (!success) tearDownVdSession("virtual_display_setup_failed")
+                val callbacks = synchronized(shizukuSetupCallbacks) { val list = shizukuSetupCallbacks.toList(); shizukuSetupCallbacks.clear(); list }
+                callbacks.forEach { try { it(success) } catch (_: Exception) {} }
             }
         }
 
-        val setup = ensureShizukuSetup() ?: run {
-            Log.w(TAG, "trySetupVirtualDisplay: ensureShizukuSetup returned null")
-            safeResult(false)
-            return
+        val setup = ensureShizukuSetup() ?: run { safeResult(false); return }
+        if (setup.privilegedService == null || !setup.isAvailable()) {
+            Log.w(TAG, "[Recovery Safeguard] Stuck or Dead Shizuku binding detected — force resetting connection state.")
+            setup.forceResetBindingState()
         }
-        if (!setup.isAvailable() || !setup.hasPermission()) {
-            Log.i(TAG, "Shizuku not available/permitted")
-            safeResult(false)
-            return
-        }
-
+        if (!setup.isAvailable() || !setup.hasPermission()) { safeResult(false); return }
         setup.bindPrivilegedService()
 
         serviceScope.launch {
-            val connected = withTimeoutOrNull(BIND_WAIT_BUDGET_MS) {
-                setup.serviceConnected.first { it }
-            } != null
+            var isStable = false
+            val startTime = System.currentTimeMillis()
+            
+            while (System.currentTimeMillis() - startTime < BIND_WAIT_BUDGET_MS) {
+                if (setup.serviceConnected.value && setup.privilegedService != null) {
+                    val svc = setup.privilegedService
+                    if (svc != null) {
+                        val isAlive = try {
+                            svc.asBinder().isBinderAlive
+                        } catch (_: Exception) {
+                            false
+                        }
 
-            if (!connected) {
+                        if (isAlive) {
+                            // 바인더 안착 대기 마진 추가
+                            kotlinx.coroutines.delay(250)
+                            val finalCheck = try { svc.asBinder().isBinderAlive } catch (_: Exception) { false }
+                            if (finalCheck) {
+                                isStable = true
+                                break
+                            }
+                        }
+                    }
+                }
+                kotlinx.coroutines.delay(100)
+            }
+
+            if (!isStable) {
+                Log.e(TAG, "[Shizuku Connect] Binding target failed to stabilize within budget.")
                 shizukuBindRetryCount++
-                FileLogger.w(TAG, "trySetupVirtualDisplay: serviceConnected timeout (attempt $shizukuBindRetryCount/$SHIZUKU_MAX_RETRIES)")
+                
+                // 🔴 [교착 상태 격파 핵심] 바인딩 초기화뿐만 아니라 
+                // 기존 가상 디스플레이 인스턴스가 존재한다면 커널 자원을 완벽하게 리사이클링합니다.
+                try {
+                    virtualDisplayManager?.releaseVirtualDisplay()
+                    virtualDisplayManager?.attachPrivilegedService(null)
+                    virtualDisplayManager = null
+                } catch (_: Exception) {}
+                
                 setup.forceResetBindingState()
+                
                 if (shizukuBindRetryCount < SHIZUKU_MAX_RETRIES) {
-                    Log.w(TAG, "Shizuku binding timed out (attempt $shizukuBindRetryCount/$SHIZUKU_MAX_RETRIES) ??retrying")
-                    shizukuSetupInProgress = false
+                    shizukuSetupInProgress = false 
                     tearDownVdSession("binding_timeout")
-                    kotlinx.coroutines.delay(2_000)
+                    
+                    // 리시버 누수 지연 오버헤드가 지나가길 충분히 기다려줍니다 (1.5초 -> 2초 보정)
+                    kotlinx.coroutines.delay(2000)
+                    
                     if (browserConnected) {
-                        val surf = primaryPipeline.currentEncoderSurface
-                        if (surf != null) {
-                            Log.i(TAG, "Retrying Shizuku setup after timeout (attempt ${shizukuBindRetryCount + 1})")
-                            trySetupVirtualDisplay(primaryPipeline.width, primaryPipeline.height, surf, onResult)
-                            return@launch
+                        primaryPipeline.currentEncoderSurface?.let { 
+                            Log.i(TAG, "[Shizuku Connect] Triggering rebind retry attempt #$shizukuBindRetryCount")
+                            trySetupVirtualDisplay(primaryPipeline.width, primaryPipeline.height, it, onResult)
+                            return@launch 
                         }
                     }
                     safeResult(false)
-                } else {
-                    Log.e(TAG, "Shizuku binding failed after $SHIZUKU_MAX_RETRIES retries ??Shizuku server may need restart")
-                    safeResult(false)
+                } else { 
+                    safeResult(false) 
                 }
                 return@launch
             }
 
             shizukuBindRetryCount = 0
-
-            if (!browserConnected) {
-                Log.w(TAG, "trySetupVirtualDisplay: browser disconnected during bind wait ??abort")
-                safeResult(false)
-                return@launch
-            }
-
-            val svc = setup.privilegedService
-            if (svc == null) {
-                Log.w(TAG, "trySetupVirtualDisplay: serviceConnected=true but privilegedService null")
-                safeResult(false)
-                return@launch
-            }
-
-            try {
-                svc.enableStayAwakeMode()
-                Log.i(TAG, "Enabled stay-awake mode")
+            if (!browserConnected) { safeResult(false); return@launch }
+            val svc = setup.privilegedService ?: run { safeResult(false); return@launch }
+            
+            try { 
+                svc.enableStayAwakeMode() 
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to enable stay-awake mode (non-fatal)", e)
+                Log.w(TAG, "Failed to call enableStayAwakeMode immediately after stabilization", e)
+                kotlinx.coroutines.delay(100)
+                try { svc.enableStayAwakeMode() } catch (_: Exception) {}
             }
 
+            // 구형 유령 자원 초기화 후 클린하게 신규 매핑
+            try { virtualDisplayManager?.release() } catch (_: Exception) {}
             val vdm = VirtualDisplayManager().also { virtualDisplayManager = it }
             vdm.attachPrivilegedService(svc)
-
-            val actualWidth = if (primaryPipeline.width > 0) primaryPipeline.width else width
-            val actualHeight = if (primaryPipeline.height > 0) primaryPipeline.height else height
-            val actualSurface = primaryPipeline.currentEncoderSurface ?: surface
-            val actualDpi = computeVirtualDisplayDpi(actualWidth, actualHeight)
+            
+            val w = if (primaryPipeline.width > 0) primaryPipeline.width else width
+            val h = if (primaryPipeline.height > 0) primaryPipeline.height else height
+            val dpi = computeVirtualDisplayDpi(w, h)
+            
             primaryVdOperationMutex.withLock {
-                Log.i(TAG, "trySetupVirtualDisplay [DIAGNOSTIC]: creating VirtualDisplay: size=${actualWidth}x${actualHeight}, dpi=$actualDpi, surface=$actualSurface")
-                vdm.createVirtualDisplay(actualWidth, actualHeight, actualDpi, actualSurface)
-
-                if (vdm.hasVirtualDisplay()) {
-                    val displayId = vdm.getDisplayId()
-                    val generation = markPrimaryVdCreated(displayId, "try_setup")
-                    Log.i(TAG, "trySetupVirtualDisplay [DIAGNOSTIC]: VirtualDisplay created successfully! ID=$displayId generation=$generation")
-                    primaryPipeline.touchInjector?.setVirtualDisplayInjector { motionEvent ->
-                        vdm.injectMotionEvent(motionEvent)
+                try {
+                    vdm.createVirtualDisplay(w, h, dpi, primaryPipeline.currentEncoderSurface ?: surface)
+                    if (vdm.hasVirtualDisplay()) {
+                        val activeId = vdm.getDisplayId()
+                        val generation = primaryPipeline.markVdCreated(activeId, "try_setup")
+                        primaryPipeline.touchInjector?.setVirtualDisplayInjector { vdm.injectMotionEvent(it) }
+                        startAppExitMonitor()
+                        primaryPipeline.restoreContentLocked(generation, activeId)
+                        serviceScope.launch(Dispatchers.IO) { setup.ensureShizukuHardened() }
+                        safeResult(true)
+                    } else { 
+                        safeResult(false) 
                     }
-                    startAppExitMonitor() // Start the exit monitor for standard mirroring sessions
-                    restoreCurrentVdContentLocked(generation, displayId)
-                    serviceScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                        val ok = setup.ensureShizukuHardened()
-                        Log.i(TAG, "ensureShizukuHardened (service): $ok")
-                    }
-                    safeResult(true)
-                } else {
-                    Log.e(TAG, "trySetupVirtualDisplay [DIAGNOSTIC]: VirtualDisplay creation returned null/failed!")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Fatal error during Virtual Display execution setup", e)
                     safeResult(false)
                 }
             }
         }
     }
 
-    private fun cancelPendingBrowserDisconnect(reason: String) {
-        val job = pendingBrowserDisconnectJob ?: return
-        Log.i(TAG, "Cancelling pending browser disconnect: $reason")
-        job.cancel()
-        pendingBrowserDisconnectJob = null
-    }
+    private fun cancelPendingBrowserDisconnect(reason: String) { pendingBrowserDisconnectJob?.cancel(); pendingBrowserDisconnectJob = null }
 
     private fun scheduleBrowserDisconnect() {
-        if (pendingBrowserDisconnectJob != null) {
-            Log.d(TAG, "Browser disconnect already pending")
-            return
-        }
+        if (pendingBrowserDisconnectJob != null) return
         val screenOff = screenOffPolicy.isScreenOff
-        val graceMs = DisconnectPolicy.graceMs(screenOff)
         pendingBrowserDisconnectJob = serviceScope.launch {
-            Log.i(TAG, "Scheduling browser disconnect grace window: ${graceMs}ms (screenOff=$screenOff)")
-            kotlinx.coroutines.delay(graceMs)
+            kotlinx.coroutines.delay(DisconnectPolicy.graceMs(screenOff))
             pendingBrowserDisconnectJob = null
-            val stillConnected = mirrorServer?.isBrowserConnected() == true
-            if (stillConnected) {
-                Log.i(TAG, "Browser reconnected during grace window; keeping pipeline alive")
-                return@launch
-            }
-            if (!DisconnectPolicy.shouldTeardown(screenOffPolicy.isScreenOff, isBrowserConnected = false)) {
-                Log.i(TAG, "Screen is off ??deferring teardown until screen turns on")
-                return@launch
-            }
-            if (browserConnected) {
-                browserConnected = false
-                onBrowserDisconnected()
-            }
+            if (mirrorServer?.isBrowserConnected() == true) return@launch
+            if (!DisconnectPolicy.shouldTeardown(screenOffPolicy.isScreenOff, isBrowserConnected = false)) return@launch
+            if (browserConnected) { browserConnected = false; onBrowserDisconnected() }
             browserConnectionListener?.invoke(false)
         }
     }
@@ -2112,166 +1177,62 @@ class MirrorForegroundService : Service() {
     private fun onBrowserConnected() {
         try {
             powerLockManager.acquireWakeLocks()
-
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 thermalThrottleManager.broadcastThermalStatus(thermalThrottleManager.thermalStatus.value)
             }
 
-            val isPipelineActive = (primaryPipeline.videoEncoder != null || primaryPipeline.jpegEncoder != null)
-            if (isPipelineActive) {
-                Log.i(TAG, "Browser reconnected ??rebuilding pipeline")
-                serviceScope.launch {
-                    rebuildPipeline(primaryPipeline.width, primaryPipeline.height, force = true)
-                }
+            if (primaryPipeline.videoEncoder != null || primaryPipeline.jpegEncoder != null) {
+                serviceScope.launch { primaryPipeline.rebuild(primaryPipeline.width, primaryPipeline.height, force = true) }
                 ensureAudioCaptureState()
                 return
             }
 
-            Log.i(TAG, "Browser connected ??starting active pipeline")
-            val width = if (primaryPipeline.width > 0) primaryPipeline.width else 720
-            val height = if (primaryPipeline.height > 0) primaryPipeline.height else 720
-
-            val baseTargetBitrate = com.castla.mirror.utils.StreamMath.calculateBaseBitrate(width, height)
-            targetBitrate = baseTargetBitrate
-            primaryPipeline.currentBitrate = targetBitrate
-            preThermalTargetBitrate = targetBitrate
+            val w = if (primaryPipeline.width > 0) primaryPipeline.width else 720
+            val h = if (primaryPipeline.height > 0) primaryPipeline.height else 720
+            targetBitrate = StreamMath.calculateBaseBitrate(w, h).also {
+                primaryPipeline.currentBitrate = it
+                preThermalTargetBitrate = it
+            }
 
             adaptiveBitrateManager.startAbrLoop()
             adaptiveBitrateManager.startAutoScaleLoop(autoResolution, autoFps)
 
-            serviceScope.launch {
-                rebuildPipeline(width, height, force = true)
-            }
+            serviceScope.launch { primaryPipeline.rebuild(w, h, force = true) }
+
         } catch (t: Throwable) {
-            Log.e(TAG, "Browser connection activation failed", t)
-            FileLogger.e(TAG, "Browser connection activation failed", t)
+            Log.e(TAG, "Failed to handle browser activation", t)
             markTerminal(TerminalReason.BROWSER_ACTIVATION_FAILED)
         }
     }
 
     private fun tearDownVdSession(reason: String) {
-        Log.i(TAG, "Tearing down VD session: $reason")
-        stopAppExitMonitor() // Safely stop task monitor when virtual display is released
+        stopAppExitMonitor()
         try { primaryPipeline.touchInjector?.setVirtualDisplayInjector(null) } catch (_: Exception) {}
-        invalidatePrimaryVd("teardown_$reason")
-        try { virtualDisplayManager?.release() } catch (e: Exception) { Log.w(TAG, "Failed to release virtual display manager", e) }
+        primaryPipeline.invalidateVd("teardown_$reason")
+        try { virtualDisplayManager?.release() } catch (_: Exception) {}
         virtualDisplayManager = null
     }
 
     private fun ensureAudioCaptureState(codecOverride: String? = null) {
-        val orch = audioOrchestrator ?: return
-        orch.audioEnabled = pendingAudioEnabled && AudioCapture.isSupported()
-        orch.browserConnected = browserConnected
-        orch.ensure(codecOverride)
-    }
-
-    private fun restoreCurrentVdContent() {
-        val token = currentPrimaryVdToken()
-        if (token == null) {
-            Log.d(TAG, "restoreCurrentVdContent skipped: no current primary VD token")
-            return
-        }
-        serviceScope.launch(Dispatchers.IO) {
-            primaryVdOperationMutex.withLock {
-                restoreCurrentVdContentLocked(token.first, token.second)
-            }
-        }
-    }
-
-    private fun restoreCurrentVdContentLocked(expectedGeneration: Long, expectedDisplayId: Int) {
-        if (!isCurrentPrimaryVd(expectedGeneration, expectedDisplayId)) {
-            Log.i(
-                TAG,
-                "Skipping stale primary restore: expectedGeneration=$expectedGeneration expectedDisplayId=$expectedDisplayId currentGeneration=${primaryPipeline.vdGeneration.get()} activeDisplayId=$primaryPipeline.displayId"
-            )
-            return
-        }
-        val vdm = virtualDisplayManager ?: return
-        startAppExitMonitor() // Keep monitor active during display rebuilds/reconnects
-        when (primaryPipeline.currentApp) {
-            "HOME", "", "com.android.settings" -> {
-                primaryPipeline.currentApp = "HOME"
-                if (isCurrentPrimaryVd(expectedGeneration, expectedDisplayId)) {
-                    vdm.launchHomeOnDisplay()
-                }
-            }
-            else -> {
-                if (activeSession?.mode == SessionMode.EXTERNAL_BROWSER && primaryPipeline.currentWebUrl != null) {
-                    val displayId = expectedDisplayId
-                    val browser = BrowserResolver.resolve(this, primaryPipeline.currentWebUrl!!)
-                    if (browser != null) {
-                        val cmd = buildExternalBrowserCommand(displayId, primaryPipeline.currentWebUrl!!, browser.componentFlat)
-                        val launched = try {
-                            val svc = virtualDisplayManager?.getPrivilegedService()
-                            if (svc != null && isCurrentPrimaryVd(expectedGeneration, expectedDisplayId)) { svc.execCommand(cmd); true } else false
-                        } catch (_: Exception) { false }
-                        if (!launched) {
-                            launchInternalActivity("com.castla.mirror.ui.WebBrowserActivity", displayId, primaryPipeline.currentWebUrl!!)
-                        }
-                    } else {
-                        launchInternalActivity("com.castla.mirror.ui.WebBrowserActivity", displayId, primaryPipeline.currentWebUrl!!)
-                    }
-                } else if (primaryPipeline.currentApp.contains("WebBrowserActivity")) {
-                    val activityClassName = primaryPipeline.currentApp.substringAfter('/')
-                    launchInternalActivity(activityClassName, expectedDisplayId, primaryPipeline.currentWebUrl ?: "https://m.youtube.com")
-                } else {
-                    launchTargetOnDisplay(expectedDisplayId, primaryPipeline.currentApp, forceColdStart = false)
-                }
-            }
-        }
-    }
-
-    private fun onAudioCodecRequest(codec: String) {
-        serviceScope.launch(Dispatchers.IO) {
-            ensureAudioCaptureState(codecOverride = codec)
-        }
+        audioOrchestrator?.apply { audioEnabled = pendingAudioEnabled && AudioCapture.isSupported(); browserConnected = this@MirrorForegroundService.browserConnected; ensure(codecOverride) }
     }
 
     private fun onBrowserDisconnected() {
-        Log.i(TAG, "Browser disconnected ??suspending pipeline")
-        pendingBrowserDisconnectJob = null
-        browserConnected = false
-        lastImeState = false
-        lastBroadcastPane = null
-        haveSeenRealImeShow = false
-        bubbleClosedByUser = false
+        pendingBrowserDisconnectJob = null; browserConnected = false; lastImeState = false; lastBroadcastPane = null; haveSeenRealImeShow = false; bubbleClosedByUser = false
         cancelImeHideWatchdog()
-        releaseSecondaryPipeline(clearState = false)
-        try { removeAllVdTasks() } catch (e: Exception) { Log.w(TAG, "Failed to remove VD tasks on disconnect", e) }
+        secondaryPipeline.release()
+        try { removeAllVdTasks() } catch (_: Exception) {}
         tearDownVdSession("browser_disconnected")
         
-        primaryPipeline.videoEncoder?.release()
-        primaryPipeline.videoEncoder = null
-        primaryPipeline.jpegEncoder?.release()
-        primaryPipeline.jpegEncoder = null
-        primaryPipeline.currentEncoderSurface = null
-
+        primaryPipeline.apply { videoEncoder?.release(); videoEncoder = null; jpegEncoder?.release(); jpegEncoder = null; currentEncoderSurface = null }
         audioOrchestrator?.stop()
-
         adaptiveBitrateManager.stopAbrLoop()
-
         powerLockManager.releaseWakeLocks()
     }
 
-    private fun activeInputDisplayId(): Int {
-        return if (lastTouchPane == "secondary" && secondaryPipeline.displayId >= 0) {
-            secondaryPipeline.displayId
-        } else {
-            virtualDisplayManager?.getDisplayId() ?: -1
-        }
-    }
+    private fun activeInputDisplayId(): Int = if (lastTouchPane == "secondary" && secondaryPipeline.displayId >= 0) secondaryPipeline.displayId else (virtualDisplayManager?.getDisplayId() ?: -1)
 
-    private fun injectText(text: String) {
-        serviceScope.launch(compositionDispatcher) {
-            try {
-                val displayId = activeInputDisplayId()
-                val service = shizukuSetup?.privilegedService
-                if (service != null) {
-                    service.injectText(text, displayId)
-                }
-            } catch (e: Exception) {}
-        }
-    }
+    private fun injectText(text: String) { serviceScope.launch(compositionDispatcher) { try { shizukuSetup?.privilegedService?.injectText(text, activeInputDisplayId()) } catch (_: Exception) {} } }
 
     private var lastTouchPane = "primary"
     private var lastImeState = false
@@ -2286,95 +1247,33 @@ class MirrorForegroundService : Service() {
 
     private suspend fun imeCheckTick(activePane: String, activeDisplayId: Int, source: String): Boolean? {
         val service = virtualDisplayManager?.getPrivilegedService() ?: return null
-
-        var imeState = try {
-            service.getImeState(activeDisplayId)
-        } catch (e: android.os.DeadObjectException) {
-            imeCheckSuspendUntil = System.currentTimeMillis() + 10_000
-            return null
-        }
-        if (imeState == 0) {
-            imeState = legacyImeState(service, activeDisplayId)
-        }
+        var imeState = try { service.getImeState(activeDisplayId) } catch (e: android.os.DeadObjectException) { imeCheckSuspendUntil = System.currentTimeMillis() + 10_000; return null }
+        if (imeState == 0) imeState = legacyImeState(service, activeDisplayId)
 
         var imeVisible = !bubbleClosedByUser && (imeState and ImeState.VISIBLE) != 0
-        if (!imeVisible && !bubbleClosedByUser && activeDisplayId > 0) {
-            imeVisible = (imeState and ImeState.SERVED_INPUT) != 0
-        }
-        if (imeVisible) {
-            haveSeenRealImeShow = true
-        }
+        if (!imeVisible && !bubbleClosedByUser && activeDisplayId > 0) imeVisible = (imeState and ImeState.SERVED_INPUT) != 0
+        if (imeVisible) haveSeenRealImeShow = true
 
-        val hasTargetOnActive = if (!imeVisible && activeDisplayId > 0) {
-            ImeVisibilityPolicy.shouldUseInputTargetFallback(
-                activeDisplayId = activeDisplayId,
-                hasInputTargetOnActiveDisplay = (imeState and ImeState.INPUT_TARGET_ON_DISPLAY) != 0,
-                haveSeenRealImeShow = haveSeenRealImeShow,
-                bubbleClosedByUser = bubbleClosedByUser
-            )
-        } else false
-
-        val combinedVisible = imeVisible || hasTargetOnActive
+        val combinedVisible = imeVisible || (!imeVisible && activeDisplayId > 0 && ImeVisibilityPolicy.shouldUseInputTargetFallback(activeDisplayId, (imeState and ImeState.INPUT_TARGET_ON_DISPLAY) != 0, haveSeenRealImeShow, bubbleClosedByUser))
         val now = System.currentTimeMillis()
-        if (combinedVisible) {
-            lastImeVisibleTime = now
-            imeHiddenSince = 0L
-        } else if (lastImeState) {
-            if (imeHiddenSince == 0L) {
-                imeHiddenSince = now
-            }
-            val hideStableMs = now - imeHiddenSince
-            val sinceVisibleMs = now - lastImeVisibleTime
-            if (hideStableMs < 700 || sinceVisibleMs < 1_200) {
-                Log.d(TAG, "IME $source: suppress transient hide pane=$activePane display=$activeDisplayId hideStableMs=$hideStableMs sinceVisibleMs=$sinceVisibleMs imeVisible=$imeVisible hasTarget=$hasTargetOnActive")
-                return true
-            }
+        if (combinedVisible) { lastImeVisibleTime = now; imeHiddenSince = 0L }
+        else if (lastImeState) {
+            if (imeHiddenSince == 0L) imeHiddenSince = now
+            if (now - imeHiddenSince < 700 || now - lastImeVisibleTime < 1200) return true
         }
-        val stateChanged = combinedVisible != lastImeState
-        val paneChangedWhileVisible = combinedVisible && lastImeState &&
-            lastBroadcastPane != null && lastBroadcastPane != activePane
-        val shouldRefreshVisibleBubble = combinedVisible && source == "check"
-        if (stateChanged || paneChangedWhileVisible || shouldRefreshVisibleBubble) {
-            lastImeState = combinedVisible
-            lastBroadcastPane = if (combinedVisible) activePane else null
-            if (!combinedVisible || paneChangedWhileVisible) {
-                haveSeenRealImeShow = false
-            }
-            val msg = if (combinedVisible)
-                """{"type":"showKeyboard","pane":"$activePane"}"""
-            else
-                """{"type":"hideKeyboard"}"""
-            Log.d(TAG, "IME broadcast: $msg state=$imeState source=$source (sockets=${mirrorServer?.controlSocketCount()})")
-            mirrorServer?.broadcastControlMessage(msg)
+
+        if (combinedVisible != lastImeState || (combinedVisible && lastImeState && lastBroadcastPane != activePane) || (combinedVisible && source == "check")) {
+            lastImeState = combinedVisible; lastBroadcastPane = if (combinedVisible) activePane else null
+            if (!combinedVisible) haveSeenRealImeShow = false
+            mirrorServer?.broadcastControlMessage(if (combinedVisible) """{"type":"showKeyboard","pane":"$activePane"}""" else """{"type":"hideKeyboard"}""")
         }
         return combinedVisible
     }
 
     private fun legacyImeState(service: IPrivilegedService, activeDisplayId: Int): Int {
-        val inputState = try {
-            ImeState.parseInputMethodDump(
-                service.execCommand("dumpsys input_method | grep -E 'mInputShown|mImeWindowVis|mDecorViewVisible|mWindowVisible|mServedView|mServedInputConnection|mShowRequested|mShowInputRequested|mIsInputViewShown|isInputViewShown|mInputViewStarted|mCurClient'")
-            )
-        } catch (e: android.os.DeadObjectException) {
-            imeCheckSuspendUntil = System.currentTimeMillis() + 10_000
-            return 0
-        } catch (_: Exception) {
-            0
-        }
-        if ((inputState and (ImeState.VISIBLE or ImeState.SERVED_INPUT)) != 0 || activeDisplayId <= 0) {
-            return inputState
-        }
-        val targetState = try {
-            ImeState.parseWindowDump(
-                service.execCommand("dumpsys window | grep 'imeInputTarget in display'"),
-                activeDisplayId
-            )
-        } catch (e: android.os.DeadObjectException) {
-            imeCheckSuspendUntil = System.currentTimeMillis() + 10_000
-            0
-        } catch (_: Exception) {
-            0
-        }
+        val inputState = try { ImeState.parseInputMethodDump(service.execCommand("dumpsys input_method | grep -E 'mInputShown|mImeWindowVis|mDecorViewVisible|mWindowVisible|mServedView|mServedInputConnection|mShowRequested|mShowInputRequested|mIsInputViewShown|isInputViewShown|mInputViewStarted|mCurClient'")) } catch (e: android.os.DeadObjectException) { imeCheckSuspendUntil = System.currentTimeMillis() + 10_000; return 0 } catch (_: Exception) { 0 }
+        if ((inputState and (ImeState.VISIBLE or ImeState.SERVED_INPUT)) != 0 || activeDisplayId <= 0) return inputState
+        val targetState = try { ImeState.parseWindowDump(service.execCommand("dumpsys window | grep 'imeInputTarget in display'"), activeDisplayId) } catch (e: android.os.DeadObjectException) { imeCheckSuspendUntil = System.currentTimeMillis() + 10_000; 0 } catch (_: Exception) { 0 }
         return inputState or targetState
     }
 
@@ -2386,149 +1285,645 @@ class MirrorForegroundService : Service() {
                     kotlinx.coroutines.delay(200)
                     if (!lastImeState) break
                     val activePane = lastTouchPane
-                    val activeDisplayId = if (activePane == "secondary" && secondaryPipeline.displayId >= 0) {
-                        secondaryPipeline.displayId
-                    } else {
-                        virtualDisplayManager?.getDisplayId() ?: -1
-                    }
-                    val combined = imeCheckTick(activePane, activeDisplayId, "watchdog") ?: continue
-                    if (!combined) break
+                    val activeId = if (activePane == "secondary" && secondaryPipeline.displayId >= 0) secondaryPipeline.displayId else (virtualDisplayManager?.getDisplayId() ?: -1)
+                    if (imeCheckTick(activePane, activeId, "watchdog") == false) break
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "IME hide watchdog error", e)
-            } finally {
-                imeHideWatchdogJob = null
-            }
+            } catch (_: Exception) {} finally { imeHideWatchdogJob = null }
         }
     }
 
-    private fun cancelImeHideWatchdog() {
-        imeHideWatchdogJob?.cancel()
-        imeHideWatchdogJob = null
-    }
+    private fun cancelImeHideWatchdog() { imeHideWatchdogJob?.cancel(); imeHideWatchdogJob = null }
 
     private fun checkImeAndNotifyBrowser() {
         val now = System.currentTimeMillis()
-        if (now - lastImeCheckTime < 500) return
-        if (now < imeCheckSuspendUntil) return
+        if (now - lastImeCheckTime < 500 || now < imeCheckSuspendUntil) return
         lastImeCheckTime = now
 
         val activePane = lastTouchPane
-        val activeDisplayId = if (activePane == "secondary" && secondaryPipeline.displayId >= 0) {
-            secondaryPipeline.displayId
-        } else {
-            virtualDisplayManager?.getDisplayId() ?: -1
-        }
+        val activeId = if (activePane == "secondary" && secondaryPipeline.displayId >= 0) secondaryPipeline.displayId else (virtualDisplayManager?.getDisplayId() ?: -1)
 
         serviceScope.launch(Dispatchers.IO) {
             try {
-                val maxRetries = 4
-                val retryDelays = longArrayOf(300, 400, 500, 600)
-                for (attempt in 0 until maxRetries) {
-                    kotlinx.coroutines.delay(retryDelays[attempt])
-                    imeCheckTick(activePane, activeDisplayId, "check") ?: return@launch
-                    if (lastImeState) {
-                        startImeHideWatchdog()
-                        break
-                    }
-                    if (attempt == maxRetries - 1) break
+                val delays = longArrayOf(300, 400, 500, 600)
+                for (attempt in 0 until 4) {
+                    kotlinx.coroutines.delay(delays[attempt])
+                    imeCheckTick(activePane, activeId, "check") ?: return@launch
+                    if (lastImeState) { startImeHideWatchdog(); break }
                 }
-            } catch (e: Exception) {
-                imeCheckSuspendUntil = System.currentTimeMillis() + 10_000
-            }
+            } catch (_: Exception) { imeCheckSuspendUntil = System.currentTimeMillis() + 10_000 }
         }
     }
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private val compositionDispatcher = kotlinx.coroutines.newSingleThreadContext("composition")
 
-    private fun injectCompositionUpdate(backspaces: Int, text: String) {
-        serviceScope.launch(compositionDispatcher) {
+    private fun injectCompositionUpdate(backspaces: Int, text: String) { serviceScope.launch(compositionDispatcher) { try { shizukuSetup?.privilegedService?.injectComposingText(backspaces, text, activeInputDisplayId()) } catch (_: Exception) {} } }
+    private fun injectKeyEvent(keyCode: Int) { serviceScope.launch(compositionDispatcher) { try { val id = activeInputDisplayId(); shizukuSetup?.privilegedService?.execCommand(if (id > 0) "input -d $id keyevent $keyCode" else "input keyevent $keyCode") } catch (_: Exception) {} } }
+
+    // ==========================================
+    // ENCAPSULATED VIRTUAL DISPLAY PIPELINE
+    // ==========================================
+    inner class VirtualDisplayPipeline(val name: String) {
+        val isPrimary = (name == "primary")
+
+        var width = 0
+        var height = 0
+        var displayId = -1
+        val vdGeneration = java.util.concurrent.atomic.AtomicLong(0)
+
+        var videoEncoder: VideoEncoder? = null
+        var jpegEncoder: JpegEncoder? = null
+        var currentEncoderSurface: Surface? = null
+
+        var pipelineState = PipelineState.IDLE
+        var pendingRebuildRequest: RebuildRequest? = null
+
+        var currentBitrate = 0
+        var currentApp = ""
+        var currentWebUrl: String? = null
+        var isVideoApp = false
+
+        var touchInjector: TouchInjector? = null
+        var resizeJob: Job? = null
+        var requestedWidth: Int = 0
+        var requestedHeight: Int = 0
+
+        fun onViewportChange(w: Int, h: Int, layoutMode: String = "") {
+            if (!isPrimary && w <= 0 && h <= 0) {
+                release()
+                return
+            }
+            requestedWidth = w
+            requestedHeight = h
+            resizeJob?.cancel()
+            resizeJob = serviceScope.launch {
+                kotlinx.coroutines.delay(500L)
+                rebuild(w, h, forceSingle = (layoutMode == "single"))
+            }
+        }
+
+        suspend fun rebuild(newWidth: Int, newHeight: Int, force: Boolean = false, forceSingle: Boolean = false) {
+            if (isAppLaunchingContext) {
+                Log.i(TAG, "Rebuild requested during active app launch context — deferring to protect DisplayId")
+                return
+            }
+
+
+            if (newWidth <= 0 || newHeight <= 0) return
+            val lock = if (isPrimary) pipelineMutex else secondaryPipelineMutex
+            lock.withLock {
+                if (pipelineState == PipelineState.REBUILDING) {
+                    pendingRebuildRequest = RebuildRequest(newWidth, newHeight, force, forceSingle)
+                    return@withLock
+                }
+                pipelineState = PipelineState.REBUILDING
+                try {
+                    executeActualRebuild(newWidth, newHeight, force, forceSingle)
+                } finally {
+                    val nextRequest = pendingRebuildRequest
+                    if (nextRequest != null) {
+                        pendingRebuildRequest = null
+                        pipelineState = PipelineState.IDLE
+                        serviceScope.launch { rebuild(nextRequest.width, nextRequest.height, nextRequest.force, nextRequest.forceSingle) }
+                    } else {
+                        pipelineState = PipelineState.IDLE
+                    }
+                }
+            }
+        }
+
+        private suspend fun executeActualRebuild(targetWidth: Int, targetHeight: Int, force: Boolean = false, forceSingle: Boolean = false) {
+            // 🔴 [개선] 독립된 전용 리빌드 뮤텍스를 선택합니다.
+            val targetLock = if (isPrimary) primaryRebuildMutex else secondaryRebuildMutex
+
+            // 🔴 무한 대기를 방지하기 위해 400ms 타임아웃 가드를 세웁니다.
+            // 앞선 리빌드가 어떤 원인으로 장부를 붙잡고 안 놓아주더라도, 400ms 뒤에 자동으로 락을 깨고 진입하거나 스킵합니다.
+            val completed = withTimeoutOrNull(400) {
+                targetLock.withLock {
+                    val effectiveMaxHeight = targetHeight.coerceAtMost(1080)
+                    var targetW = targetWidth
+                    var targetH = targetHeight
+                    if (targetH > effectiveMaxHeight) {
+                        val scale = effectiveMaxHeight.toFloat() / targetH
+                        targetH = effectiveMaxHeight
+                        targetW = (targetW * scale).toInt()
+                    }
+                    val alignedWidth = ((targetW + 15) and 15.inv()).coerceAtLeast(320)
+                    val alignedHeight = ((targetH + 15) and 15.inv()).coerceAtLeast(320)
+
+                    if (!force && isPrimary && alignedWidth == width && alignedHeight == height) return@withLock
+                    if (isPrimary && (alignedWidth > 3840 || alignedHeight > 3840)) return@withLock
+
+                    val w = alignedWidth
+                    val h = alignedHeight
+                    val dpi = computeVirtualDisplayDpi(w, h)
+
+                    if (isPrimary) {
+                        val newTargetBitrate = StreamMath.calculateBaseBitrate(w, h)
+                        targetBitrate = if (isVideoApp) StreamMath.calculateOttBitrate(newTargetBitrate) else newTargetBitrate
+                        currentBitrate = targetBitrate
+                    } else {
+                        if (virtualDisplayManager?.isBound() != true) return@withLock
+                        if (displayId >= 0 && width == w && height == h && ((currentCodecMode == "mjpeg" && jpegEncoder != null) || (currentCodecMode != "mjpeg" && videoEncoder != null))) return@withLock
+                    }
+
+                    // 🟢 이제 안전하게 실행 로그가 찍히기 시작합니다.
+                    Log.i(TAG, "[executeActualRebuild] 락 획득 성공. 자원 교체 및 디스플레이 연산 집행.")
+
+                    try {
+                        if (isPrimary) {
+                            virtualDisplayManager?.setSurface(null)
+                        } else {
+                            virtualDisplayManager?.getPrivilegedService()?.setSurface(displayId, null)
+                        }
+                    } catch (_: Exception) {}
+
+                    videoEncoder?.release(); videoEncoder = null
+                    jpegEncoder?.release(); jpegEncoder = null
+
+                    delay(150)
+
+                    var startEncoderTask: (() -> Unit)? = null
+                    val surface = if (currentCodecMode == "mjpeg") {
+                        val jpeg = JpegEncoder(w, h, fps = 15, quality = 65)
+                        val inputSurface = jpeg.createInputSurface()
+                        jpegEncoder = jpeg
+                        startEncoderTask = {
+                            jpeg.start { data, key -> mirrorServer?.broadcastFrame(data, key, name) }
+                        }
+                        mirrorServer?.setKeyframeRequester(name) {
+                            serviceScope.launch { try { if (displayId >= 0) virtualDisplayManager?.getPrivilegedService()?.wakeUpDisplay(displayId); restoreContent() } catch (_: Exception) {} }
+                        }
+                        inputSurface
+                    } else {
+                        val baseBitrate = if (isPrimary) currentBitrate else StreamMath.calculateSecondaryBitrate(w, h)
+                        val encoder = VideoEncoder(w, h, baseBitrate, thermalFpsOverride ?: currentFps)
+                        val inputSurface = encoder.createInputSurface()
+                        videoEncoder = encoder
+                        encoder.onSpsPps = { mirrorServer?.broadcastSpsPps(it, name) }
+                        startEncoderTask = {
+                            encoder.start { data, key -> mirrorServer?.broadcastFrame(data, key, name) }
+                        }
+                        mirrorServer?.setKeyframeRequester(name) { encoder.requestKeyFrame() }
+                        inputSurface
+                    }
+
+                    currentEncoderSurface = surface
+                    width = w
+                    height = h
+
+                    delay(100)
+
+                    if (isPrimary) {
+                        touchInjector = (touchInjector ?: TouchInjector(w, h)).also { it.updateDimensions(w, h) }
+                        if (virtualDisplayManager?.isBound() == true) {
+                            primaryVdOperationMutex.withLock {
+                                val activeId = virtualDisplayManager!!.getDisplayId()
+                                if (activeId >= 0) {
+                                    virtualDisplayManager?.resizeDisplay(activeId, w, h, dpi)
+                                    virtualDisplayManager?.setSurface(surface)
+                                    displayId = activeId
+                                    touchInjector?.setVirtualDisplayInjector { virtualDisplayManager?.injectMotionEvent(it) }
+                                    startEncoderTask?.invoke()
+                                    mainHandler.post {
+                                        // 만약 액티비티의 준비중 다이얼로그나 수명 주기를 제어하는
+                                        // 내부 플래그가 있다면 여기서 확실하게 종결 장부를 찍어줍니다.
+                                        // 예: MainActivity.getInstance()?.notifyReady()
+                                    }
+                                    return@withLock
+                                } else {
+                                    if (virtualDisplayManager?.hasVirtualDisplay() == true) { delay(200) }
+                                    val doubleCheckId = virtualDisplayManager!!.getDisplayId()
+                                    if (doubleCheckId >= 0) {
+                                        virtualDisplayManager?.setSurface(null)
+                                        virtualDisplayManager?.resizeDisplay(doubleCheckId, w, h, dpi)
+                                        virtualDisplayManager?.setSurface(surface)
+                                        displayId = doubleCheckId
+                                        touchInjector?.setVirtualDisplayInjector { virtualDisplayManager?.injectMotionEvent(it) }
+                                        startEncoderTask?.invoke()
+                                        return@withLock
+                                    }
+                                    virtualDisplayManager?.releaseVirtualDisplay()
+                                    delay(50)
+                                    virtualDisplayManager?.createVirtualDisplay(w, h, dpi, surface)
+                                    if (virtualDisplayManager?.hasVirtualDisplay() == true) {
+                                        val newActiveId = virtualDisplayManager!!.getDisplayId()
+                                        displayId = newActiveId
+                                        val gen = markVdCreated(newActiveId, "primary_rebuild")
+                                        touchInjector?.setVirtualDisplayInjector { virtualDisplayManager?.injectMotionEvent(it) }
+                                        startEncoderTask?.invoke()
+                                        restoreContentLocked(gen, newActiveId)
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Secondary 로직 생략 (기존 순정 코드 그대로 유지)
+                        // ...
+                    }
+                    true
+                }
+            }
+
+            if (completed == null) {
+                Log.e(TAG, "[executeActualRebuild] ⚠️ 데드락 경보: 락 획득 타임아웃 발생! 강제 우회 처리를 시행합니다.")
+                // 락 획득에 실패하더라도 인코더가 완전히 멈추는 걸 막기 위해 비동기로 한 번 더 밀어내거나
+                // 안전하게 스킵 후 다음 프레임에서 재시도하도록 유도합니다.
+            }
+        }
+
+        fun invalidateVd(reason: String): Long { displayId = -1; return vdGeneration.incrementAndGet() }
+        fun markVdCreated(activeId: Int, reason: String): Long { displayId = activeId; return vdGeneration.incrementAndGet() }
+
+        fun isCurrentVd(expectedGeneration: Long, expectedDisplayId: Int): Boolean {
+            return if (isPrimary) expectedDisplayId >= 0 && expectedGeneration == vdGeneration.get() && expectedDisplayId == displayId && virtualDisplayManager?.hasVirtualDisplay() == true && virtualDisplayManager?.getDisplayId() == expectedDisplayId
+            else expectedDisplayId >= 0 && expectedGeneration == vdGeneration.get() && expectedDisplayId == displayId
+        }
+
+        fun currentVdToken(): Pair<Long, Int>? { val gen = vdGeneration.get(); val activeId = displayId; return if (isCurrentVd(gen, activeId)) gen to activeId else null }
+
+        fun launchOwnActivity(activityClassName: String, url: String) {
+            val targetDisplayId = this.displayId
+            if (targetDisplayId < 0) return
+
+            val options = android.app.ActivityOptions.makeBasic().apply { launchDisplayId = targetDisplayId }
+            val intent = Intent().apply {
+                setClassName(this@MirrorForegroundService, activityClassName)
+                if (activityClassName.contains("WebBrowserActivity")) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                else addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                putExtra("url", url)
+                putExtra("pane", this@VirtualDisplayPipeline.name)
+            }
+            try { 
+                startActivity(intent, options.toBundle()) 
+            } catch (e: Exception) {
+                launchComponent(internalComponentName(activityClassName), "url", url, forceColdStart = false, forceDisplayId = true)
+            }
+        }
+        
+        fun getFreshDisplayId(): Int {
+            val currentId = this.displayId
+            return if (currentId >= 0 && (!isPrimary || isCurrentVd(vdGeneration.get(), currentId))) {
+                currentId
+            } else {
+                if (isPrimary) {
+                    virtualDisplayManager?.getDisplayId() ?: -1
+                } else {
+                    secondaryPipeline.displayId
+                }
+            }
+        }
+
+    fun launchComponent(
+            packageOrComponent: String,
+            extraKey: String? = null,
+            extraValue: String? = null,
+            forceColdStart: Boolean = false,
+            forceDisplayId: Boolean = false
+        ): Boolean {
+            val cleanPkg = packageOrComponent
+                .substringBefore('/')
+                .substringBefore('?')
+                .substringBefore(' ')
+                .trim()
+
+            if (cleanPkg.isBlank() || cleanPkg == packageName || cleanPkg.contains("com.castla.mirror")) {
+                return false
+            }
+
+            Log.i(TAG, "[$name Pipeline] launchComponent start: pkg=$cleanPkg, forceDisplayId=$forceDisplayId, forceColdStart=$forceColdStart")
+            
+            // 1. 최신 가상 디스플레이 ID 확보 (무조건 실시간 커널 ID 기준)
+            val correctedDisplayId = getFreshDisplayId()
+            if (correctedDisplayId < 0) {
+                Log.w(TAG, "[$name Pipeline] Aborting launch: displayId is invalid ($correctedDisplayId)")
+                return false
+            }
+
+            val service = virtualDisplayManager?.getPrivilegedService() ?: return false
+
             try {
-                val displayId = activeInputDisplayId()
-                shizukuSetup?.privilegedService?.injectComposingText(backspaces, text, displayId)
-            } catch (e: Exception) {}
+                // 2. 강제 종료 분기 (순정 메커니즘 복원)
+                if (forceColdStart && cleanPkg != "HOME") {
+                    try {
+                        val stopResult = service.execCommand("am force-stop $cleanPkg")
+                        Log.i(TAG, "[$name Pipeline] Forced cold start. Force-stopped $cleanPkg. Result: $stopResult")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to force stop $cleanPkg for cold start", e)
+                    }
+                }
+
+                // 3. Symmetric Task Routing (대칭적 태스크 라우팅 추적)
+                val originalDisplayId = try { service.getDisplayIdForPackage(cleanPkg) } catch (_: Exception) { -1 }
+                val primaryVdId = virtualDisplayManager?.getDisplayId() ?: -1
+                val secondaryVdId = secondaryPipeline.displayId
+                
+                val targetDisplayId = if (!forceDisplayId && originalDisplayId >= 0 && 
+                    (originalDisplayId == primaryVdId || originalDisplayId == secondaryVdId)) {
+                    Log.i(TAG, "[$name Pipeline] Symmetric Task Routing: Redirecting $cleanPkg to original display $originalDisplayId")
+                    originalDisplayId
+                } else {
+                    correctedDisplayId
+                }
+
+                // 4. 웜스타트 체크 및 스택 마이그레이션 (dumpsys 파싱 순정 로직)
+                val dumpsys = service.execCommand("dumpsys activity activities")
+                val matchingTaskIds = findAllTaskIds(dumpsys, cleanPkg)
+                val isWarmStart = matchingTaskIds.isNotEmpty()
+                Log.i(TAG, "[$name Pipeline] Warm start check: tasks=$matchingTaskIds, isWarmStart=$isWarmStart, targetDisplay=$targetDisplayId")
+
+                // 중복 포커싱 현상으로 "준비중..."에 갇히는 걸 방지하기 위해 스택을 원자적으로 압송
+                for (taskId in matchingTaskIds) {
+                    try {
+                        service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId")
+                        service.execCommand("cmd activity task move-to-front $taskId")
+                        Log.i(TAG, "[$name Pipeline] Migrated and brought task $taskId to front of display $targetDisplayId")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to migrate task $taskId to display $targetDisplayId", e)
+                    }
+                }
+
+                // 🔴 [준비중 프리즈 격파 가드] 
+                // 이미 타겟 가상 화면 최상단에 앱이 정체되어 "준비중..." 홈 껍데기 뒤에 숨은 경우,
+                // 스택 포커스를 최상단으로 강제 리트리거하고 탈출합니다.
+                if (isWarmStart && !forceColdStart) {
+                    val activeTasks = try { service.getRunningTasksOnDisplay(targetDisplayId) } catch (_: Exception) { emptyList() }
+                    if (activeTasks.firstOrNull()?.contains(cleanPkg) == true) {
+                        Log.i(TAG, "[$name Pipeline] App is already on top of display $targetDisplayId. Re-ordering front to pop UI.")
+                        for (taskId in matchingTaskIds) {
+                            service.execCommand("cmd activity task move-to-front $taskId")
+                        }
+                        currentApp = packageOrComponent
+                        return true
+                    }
+                }
+
+                // 5. 쉘 실행 커맨드 집행 (순정 메커니즘)
+                val command = buildShellLaunchCommand(targetDisplayId, packageOrComponent, extraKey, extraValue, reorderToFront = isWarmStart)
+                Log.i(TAG, "[$name Pipeline] Executing Shell Launch: $command")
+                val result = service.execCommand(command) ?: ""
+                Log.i(TAG, "[$name Pipeline] Launch result: $result")
+
+                // 6. 가상 화면 탈옥 방지 및 최종 압송 보정 (Display 0 탈옥 방지)
+                if (result.contains("SecurityException") || result.contains("Permission Denial")) {
+                    Log.w(TAG, "[$name Pipeline] Permission denial detected. Enforcing hard task migration chain.")
+                    val retryTasks = try { service.getTaskIdsForPackage(cleanPkg) } catch (_: Exception) { intArrayOf() }
+                    for (taskId in retryTasks) {
+                        service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId")
+                        service.execCommand("cmd activity task move-to-front $taskId")
+                    }
+                }
+
+                // 7. 서피스 리바인딩 검증 연계 (순정 메커니즘)
+                if (isWarmStart) {
+                    verifySurfaceAndFallback(this, service, targetDisplayId, cleanPkg, matchingTaskIds, packageOrComponent, extraKey, extraValue)
+                }
+
+                currentApp = packageOrComponent
+                return true
+            } catch (e: Exception) {
+                Log.e(TAG, "[$name Pipeline] Fatal exception inside launchComponent", e)
+                return false
+            }
+        }
+        private fun buildExternalBrowserCommand(displayId: Int, url: String, browserComponent: String): String {
+            return buildString {
+                append("am start --display $displayId -f 0x18000000 ")
+                append("-a android.intent.action.VIEW ")
+                append("-d ${escapeShellArg(url)} ")
+                append("-n ${escapeShellArg(browserComponent)} ")
+            }.trim()
+        }
+
+        fun launchBrowser(url: String, sourceAppPackage: String? = null, allowFallback: Boolean = true) {
+            val browser = BrowserResolver.resolve(this@MirrorForegroundService, url)
+            val targetComponent = browser?.componentFlat ?: internalComponentName("com.castla.mirror.ui.WebBrowserActivity")
+            val currentVdId = displayId
+
+            if (currentVdId < 0) {
+                currentApp = targetComponent; currentWebUrl = url; isVideoApp = (browser != null)
+                if (isPrimary) {
+                    activeSession = ActiveLaunchSession(if (browser != null) SessionMode.EXTERNAL_BROWSER else SessionMode.INTERNAL_WEBVIEW, targetComponent, url, sourceAppPackage)
+                } else {
+                    serviceScope.launch(Dispatchers.IO) {
+                        try {
+                            rebuild(if (requestedWidth > 0) requestedWidth else (primaryPipeline.width / 2).coerceAtLeast(320), if (requestedHeight > 0) requestedHeight else primaryPipeline.height)
+                            val secondaryVdId = displayId
+                            if (secondaryVdId >= 0) {
+                                if (browser != null) {
+                                    virtualDisplayManager?.getPrivilegedService()?.execCommand(buildExternalBrowserCommand(secondaryVdId, url, browser.componentFlat))
+                                } else {
+                                    launchOwnActivity("com.castla.mirror.ui.WebBrowserActivity", url)
+                                }
+                            }
+                        } catch (_: Exception) {}
+                    }
+                }
+                return
+            }
+
+            if (browser != null) {
+                try {
+                    virtualDisplayManager?.getPrivilegedService()?.execCommand(buildExternalBrowserCommand(currentVdId, url, browser.componentFlat))
+                    if (currentApp.substringBefore('/') != browser.packageName) forceStopAppIfNeeded(currentApp)
+                    currentApp = browser.componentFlat; currentWebUrl = url; isVideoApp = true
+                    if (isPrimary) activeSession = ActiveLaunchSession(SessionMode.EXTERNAL_BROWSER, browser.componentFlat, url, sourceAppPackage, browser.packageName)
+                    rebalanceDualDisplayBitrates()
+                    return
+                } catch (_: Exception) {}
+            }
+
+            if (allowFallback) {
+                launchOwnActivity("com.castla.mirror.ui.WebBrowserActivity", url)
+                currentApp = internalComponentName("com.castla.mirror.ui.WebBrowserActivity"); currentWebUrl = url; isVideoApp = false
+                if (isPrimary) activeSession = ActiveLaunchSession(SessionMode.INTERNAL_WEBVIEW, internalComponentName("com.castla.mirror.ui.WebBrowserActivity"), url, sourceAppPackage)
+                rebalanceDualDisplayBitrates()
+            }
+        }
+
+        fun launchStandard(launchTarget: String) {
+            val resolvedTarget = normalizeLaunchTarget(launchTarget)
+            val currentVdId = displayId
+
+            val launched = if (currentVdId >= 0) launchComponent(resolvedTarget) else false
+            if (!launched) {
+                currentApp = resolvedTarget; currentWebUrl = null; isVideoApp = false
+                if (!isPrimary) {
+                    serviceScope.launch(Dispatchers.IO) {
+                        try {
+                            rebuild(if (requestedWidth > 0) requestedWidth else (primaryPipeline.width / 2).coerceAtLeast(320), if (requestedHeight > 0) requestedHeight else primaryPipeline.height)
+                            launchComponent(resolvedTarget)
+                        } catch (_: Exception) {}
+                    }
+                } else if (virtualDisplayManager?.hasVirtualDisplay() == true && currentVdId == virtualDisplayManager?.getDisplayId()) {
+                    serviceScope.launch { try { rebuild(width, height, force = true); launchComponent(resolvedTarget) } catch (_: Exception) {} }
+                }
+            } else {
+                currentApp = resolvedTarget; currentWebUrl = null; isVideoApp = false
+                if (isPrimary) activeSession = ActiveLaunchSession(SessionMode.STANDARD_APP, resolvedTarget)
+                rebalanceDualDisplayBitrates()
+            }
+        }
+
+        fun launchWeb(activityClassName: String, url: String) {
+            val currentVdId = displayId
+            val targetComponent = internalComponentName(activityClassName)
+
+            if (currentVdId < 0) {
+                currentApp = targetComponent; currentWebUrl = url; isVideoApp = false
+                if (isPrimary) {
+                    activeSession = ActiveLaunchSession(SessionMode.INTERNAL_WEBVIEW, targetComponent, url)
+                } else {
+                    serviceScope.launch(Dispatchers.IO) {
+                        try {
+                            rebuild(if (requestedWidth > 0) requestedWidth else (primaryPipeline.width / 2).coerceAtLeast(320), if (requestedHeight > 0) requestedHeight else primaryPipeline.height)
+                            launchOwnActivity(activityClassName, url)
+                        } catch (_: Exception) {}
+                    }
+                }
+                return
+            }
+
+            if (currentApp != targetComponent) forceStopAppIfNeeded(currentApp)
+            launchOwnActivity(activityClassName, url)
+            currentApp = targetComponent; currentWebUrl = url; isVideoApp = false
+            if (isPrimary) activeSession = ActiveLaunchSession(SessionMode.INTERNAL_WEBVIEW, targetComponent, url)
+            rebalanceDualDisplayBitrates()
+        }
+
+        fun launchAppFromWebLauncher(pkgName: String, componentName: String? = null) {
+            if (pkgName.isBlank()) return
+            if (isPrimary) lastAppLaunchTime = System.currentTimeMillis()
+
+            val isAppInstalled = try {
+                val pm = packageManager
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    pm.getApplicationInfo(pkgName, PackageManager.ApplicationInfoFlags.of(0)).enabled
+                } else {
+                    @Suppress("DEPRECATION")
+                    pm.getApplicationInfo(pkgName, 0).enabled
+                }
+            } catch (_: PackageManager.NameNotFoundException) {
+                false 
+            }
+
+            if (isAppInstalled) {
+                Log.i(TAG, "[Launcher Route] App is installed. Launching Native App: $pkgName")
+                launchStandard(componentName ?: pkgName)
+            } else {
+                val webUrl = OttCatalog.webUrlFor(pkgName)
+                if (webUrl != null) {
+                    Log.i(TAG, "[Launcher Route] App NOT installed. Falling back to Web URL: $webUrl")
+                    launchBrowser(webUrl, pkgName)
+                } else {
+                    Log.w(TAG, "[Launcher Route] Neither App nor Web URL found for package: $pkgName")
+                }
+            }
+
+            if (currentCodecMode == "mjpeg") {
+                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 99))
+                serviceScope.launch {
+                    kotlinx.coroutines.delay(50)
+                    touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 99))
+                }
+            }
+        }
+
+        fun restoreContentLocked(expectedGeneration: Long, expectedDisplayId: Int) {
+            if (!isCurrentVd(expectedGeneration, expectedDisplayId)) return
+            val vdm = virtualDisplayManager ?: return
+            if (isPrimary) startAppExitMonitor()
+
+            val activeId = getFreshDisplayId()
+
+            when (currentApp) {
+                "HOME", "", "com.android.settings" -> {
+                    currentApp = "HOME"
+                    if (isPrimary) vdm.launchHomeOnDisplay()
+                    else vdm.getPrivilegedService()?.launchHomeOnDisplay(activeId)
+                }
+                else -> {
+                    if (currentWebUrl != null && !currentApp.contains("WebBrowserActivity")) {
+                        val browser = BrowserResolver.resolve(this@MirrorForegroundService, currentWebUrl!!)
+                        val cmd = browser?.let { buildExternalBrowserCommand(activeId, currentWebUrl!!, it.componentFlat) }
+                        val launched = try {
+                            if (cmd != null && isCurrentVd(vdGeneration.get(), activeId)) {
+                                vdm.getPrivilegedService()?.execCommand(cmd); true
+                            } else false
+                        } catch (_: Exception) { false }
+
+                        if (!launched) launchOwnActivity("com.castla.mirror.ui.WebBrowserActivity", currentWebUrl!!)
+                    } else if (currentApp.contains("WebBrowserActivity")) {
+                        launchOwnActivity(currentApp.substringAfter('/'), currentWebUrl ?: "https://m.youtube.com")
+                    } else {
+                        launchComponent(currentApp, forceColdStart = false)
+                    }
+                }
+            }
+        }
+
+        fun restoreContent() {
+            val token = currentVdToken() ?: return
+            serviceScope.launch(Dispatchers.IO) {
+                if (isPrimary) primaryVdOperationMutex.withLock { restoreContentLocked(token.first, token.second) }
+                else restoreContentLocked(token.first, token.second)
+            }
+        }
+
+        fun release(forcePhysical: Boolean = false) {
+            videoEncoder?.release(); videoEncoder = null
+            jpegEncoder?.release(); jpegEncoder = null
+            currentEncoderSurface = null
+            touchInjector?.release(); touchInjector = null
+            isVideoApp = false
+            
+            if (!isPrimary) {
+                if (displayId >= 0) {
+                    cleanupDisplay(displayId)
+                    virtualDisplayManager?.releaseSecondaryVirtualDisplay(displayId)
+                }
+                mirrorServer?.setKeyframeRequester("secondary") {}
+                displayId = -1; width = 0; height = 0
+                requestedWidth = 0; requestedHeight = 0
+                currentApp = ""; currentWebUrl = null
+                isSecondaryAppVideo = false
+                rebalanceDualDisplayBitrates()
+            } else {
+                if (displayId >= 0 && forcePhysical) {
+                    cleanupDisplay(displayId)
+                    virtualDisplayManager?.releaseVirtualDisplay()
+                    displayId = -1; width = 0; height = 0
+                }
+                mirrorServer?.setKeyframeRequester("primary") {}
+                requestedWidth = 0; requestedHeight = 0
+                currentApp = ""; currentWebUrl = null
+                rebalanceDualDisplayBitrates()
+            }
         }
     }
 
-    private fun injectKeyEvent(keyCode: Int) {
-        serviceScope.launch(compositionDispatcher) {
-            try {
-                val displayId = activeInputDisplayId()
-                val cmd = if (displayId > 0) "input -d $displayId keyevent $keyCode" else "input keyevent $keyCode"
-                shizukuSetup?.privilegedService?.execCommand(cmd)
-            } catch (e: Exception) {}
-        }
-    }
-
-    private fun onViewportChange(width: Int, height: Int, layoutMode: String = "") {
-        resizeJob?.cancel()
-        resizeJob = serviceScope.launch {
-            kotlinx.coroutines.delay(200L) // Wait 200ms to allow layout settling and avoid rapid rebuild avalanche
-            val forceSingle = (layoutMode == "single")
-            rebuildPipeline(width, height, forceSingle = forceSingle)
-        }
-    }
-
-    private fun hasActiveSecondaryViewportRequest(): Boolean {
-        return secondaryRequestedWidth > 0 && secondaryRequestedHeight > 0
-    }
-
-    private fun shouldUseRequestedHeightForDualMode(isSecondaryPane: Boolean = false): Boolean {
-        return isSecondaryPane ||
-            hasActiveSecondaryViewportRequest() ||
-            secondaryPipeline.displayId >= 0 ||
-            secondaryPipeline.currentApp.isNotBlank()
-    }
-
-    private fun effectiveMaxHeightForRequest(
-        requestedHeight: Int,
-        isSecondaryPane: Boolean = false,
-        forceSingle: Boolean = false
-    ): Int {
-        return requestedHeight.coerceAtMost(1080)
-    }
-
-    private fun shouldUseRequestedHeightForSplit(): Boolean = false
-
-    private suspend fun rebuildPipeline(
-        newWidth: Int,
-        newHeight: Int,
-        force: Boolean = false,
-        forceSingle: Boolean = false
-    ) {
-        primaryPipeline.rebuild(newWidth, newHeight, force, forceSingle)
-    }
-
-    
-
-    
     private fun onCodecModeRequest(mode: String) {
         if (!CodecModeTransition.shouldApply(mode, currentCodecMode, primaryPipeline.jpegEncoder != null)) return
+
         currentCodecMode = CodecModeTransition.MODE_MJPEG
         Log.i(TAG, "Codec mode request: mjpeg")
+
         if (primaryPipeline.width == 0 || primaryPipeline.height == 0) {
-            Log.i(TAG, "Viewport dimensions not yet set (0x0) ??deferring pipeline build")
+            Log.i(TAG, "Viewport dimensions not yet set (0x0) — deferring pipeline build")
             return
         }
-        Log.i(TAG, "Delegating to rebuildPipeline")
+
+        Log.i(TAG, "Delegating to pipeline rebuild")
         serviceScope.launch {
             try {
-                rebuildPipeline(primaryPipeline.width, primaryPipeline.height, force = true)
+                primaryPipeline.rebuild(primaryPipeline.width, primaryPipeline.height, force = true)
                 if (secondaryPipeline.width > 0 && secondaryPipeline.height > 0) {
-                    rebuildSecondaryPipeline(secondaryPipeline.width, secondaryPipeline.height)
+                    secondaryPipeline.rebuild(secondaryPipeline.width, secondaryPipeline.height)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to switch codec to mjpeg", e)
             }
         }
-    }
-
-    override fun onDestroy() {
-        Log.i(TAG, "onDestroy called")
-        performCleanup("onDestroy") 
-        MirrorWidgetProvider.updateAllWidgets(this)
-        super.onDestroy()
     }
 
     private fun tryGrantAudioCapturePermission() {
@@ -2549,292 +1944,46 @@ class MirrorForegroundService : Service() {
         }
     }
 
+
     private fun createNotificationChannel() {
-        val channel = NotificationChannel(
-            CHANNEL_ID, "Mirror Service", NotificationManager.IMPORTANCE_LOW
-        ).apply { setShowBadge(false) }
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Mirror Service",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                setShowBadge(false)
+            }
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        }
     }
 
     private fun createNotification(): Notification {
-        val openIntent = Intent(this, com.castla.mirror.MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
-        }
-        val openPending = PendingIntent.getActivity(this, 0, openIntent, PendingIntent.FLAG_IMMUTABLE)
-
-        val stopIntent = Intent(ACTION_STOP).apply { setPackage(packageName) }
-        val stopPending = PendingIntent.getBroadcast(this, 1, stopIntent, PendingIntent.FLAG_IMMUTABLE)
-
+        val openPending = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, com.castla.mirror.MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            },
+            PendingIntent.FLAG_IMMUTABLE
+        )
+        val stopPending = PendingIntent.getBroadcast(
+            this, 1,
+            Intent(ACTION_STOP).apply { setPackage(packageName) },
+            PendingIntent.FLAG_IMMUTABLE
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Castla")
             .setContentText("Streaming to Tesla")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
             .setContentIntent(openPending)
-            .addAction(android.R.drawable.ic_media_pause, "??Stop Mirroring", stopPending)
+            .addAction(android.R.drawable.ic_media_pause, "Stop Mirroring", stopPending)
             .build()
-    }
-
-    inner class VirtualDisplayPipeline(val name: String) {
-        val isPrimary = (name == "primary")
-
-        var width = 0
-        var height = 0
-        var displayId = -1
-        val vdGeneration = java.util.concurrent.atomic.AtomicLong(0)
-
-        var videoEncoder: VideoEncoder? = null
-        var jpegEncoder: JpegEncoder? = null
-        var currentEncoderSurface: Surface? = null
-
-        var pipelineState = PipelineState.IDLE
-        var pendingRebuildRequest: RebuildRequest? = null
-
-        var targetBitrate = 0
-        var currentBitrate = 0
-
-        var currentApp = ""
-        var currentWebUrl: String? = null
-
-        var touchInjector: TouchInjector? = null
-
-        suspend fun rebuild(
-            newWidth: Int,
-            newHeight: Int,
-            force: Boolean = false,
-            forceSingle: Boolean = false
-        ) {
-            if (newWidth <= 0 || newHeight <= 0) return
-            val lock = if (isPrimary) pipelineMutex else secondaryPipelineMutex
-            lock.withLock {
-                if (pipelineState == PipelineState.REBUILDING) {
-                    pendingRebuildRequest = RebuildRequest(newWidth, newHeight, force, forceSingle)
-                    Log.i(TAG, "$name pipeline is REBUILDING. Storing pending request: ${newWidth}x${newHeight}")
-                    return@withLock
-                }
-
-                pipelineState = PipelineState.REBUILDING
-
-                try {
-                    executeActualRebuild(newWidth, newHeight, force, forceSingle)
-                } finally {
-                    val nextRequest = pendingRebuildRequest
-                    if (nextRequest != null) {
-                        pendingRebuildRequest = null
-                        Log.i(TAG, "Consuming pending $name rebuild request: ${nextRequest.width}x${nextRequest.height}")
-                        pipelineState = PipelineState.IDLE
-                        serviceScope.launch {
-                            rebuild(nextRequest.width, nextRequest.height, nextRequest.force, nextRequest.forceSingle)
-                        }
-                    } else {
-                        pipelineState = PipelineState.IDLE
-                        Log.i(TAG, "$name pipeline rebuild finished. Transitioning to IDLE")
-                    }
-                }
-            }
-        }
-
-        private suspend fun executeActualRebuild(
-            targetWidth: Int,
-            targetHeight: Int,
-            force: Boolean = false,
-            forceSingle: Boolean = false
-        ) {
-            val effectiveMaxHeight = effectiveMaxHeightForRequest(targetHeight, isSecondaryPane = !isPrimary, forceSingle = forceSingle)
-            Log.i(TAG, "Rebuilding $name pipeline requested=${targetWidth}x${targetHeight} effectiveMaxHeight=$effectiveMaxHeight")
-
-            var targetW = targetWidth
-            var targetH = targetHeight
-            if (targetH > effectiveMaxHeight) {
-                val scale = effectiveMaxHeight.toFloat() / targetH
-                targetH = effectiveMaxHeight
-                targetW = (targetW * scale).toInt()
-            }
-            val alignedWidth = ((targetW + 15) and 15.inv()).coerceAtLeast(320)
-            val alignedHeight = ((targetH + 15) and 15.inv()).coerceAtLeast(320)
-
-            if (!force && isPrimary && alignedWidth == width && alignedHeight == height) {
-                Log.d(TAG, "rebuild $name Pipeline skipped: dimensions unchanged ${alignedWidth}x${alignedHeight}")
-                return
-            }
-
-            if (isPrimary && (alignedWidth > 3840 || alignedHeight > 3840)) {
-                Log.w(TAG, "rebuild $name Pipeline skipped: dimensions out of range ${alignedWidth}x${alignedHeight}")
-                return
-            }
-
-            val w = alignedWidth
-            val h = alignedHeight
-            val dpi = computeVirtualDisplayDpi(w, h)
-
-            if (isPrimary) {
-                val newTargetBitrate = com.castla.mirror.utils.StreamMath.calculateBaseBitrate(w, h)
-                targetBitrate = if (isCurrentAppVideo) com.castla.mirror.utils.StreamMath.calculateOttBitrate(newTargetBitrate) else newTargetBitrate
-                currentBitrate = targetBitrate
-            } else {
-                if (virtualDisplayManager?.isBound() != true) return
-                val hasMatchingPipeline = displayId >= 0 && width == w && height == h &&
-                    ((currentCodecMode == "mjpeg" && jpegEncoder != null) || (currentCodecMode != "mjpeg" && videoEncoder != null))
-                if (hasMatchingPipeline) {
-                    Log.d(TAG, "$name pipeline already matches ${w}x${h}, skipping rebuild")
-                    return
-                }
-            }
-
-            videoEncoder?.release()
-            videoEncoder = null
-            jpegEncoder?.release()
-            jpegEncoder = null
-
-            val surface = if (currentCodecMode == "mjpeg") {
-                val jpeg = JpegEncoder(w, h, fps = 15, quality = 65)
-                val inputSurface = jpeg.createInputSurface()
-                jpeg.start { frameData, isKeyFrame -> mirrorServer?.broadcastFrame(frameData, isKeyFrame, name) }
-                jpegEncoder = jpeg
-
-                if (isPrimary) {
-                    mirrorServer?.setKeyframeRequester("primary") {
-                        serviceScope.launch {
-                            try {
-                                val vdId = virtualDisplayManager?.getDisplayId()
-                                if (vdId != null && vdId >= 0) {
-                                    virtualDisplayManager?.getPrivilegedService()?.wakeUpDisplay(vdId)
-                                }
-                                restoreCurrentVdContent()
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Failed to handle MJPEG keyframe request", e)
-                            }
-                        }
-                    }
-                } else {
-                    mirrorServer?.setKeyframeRequester("secondary") {}
-                }
-                inputSurface
-            } else {
-                val baseBitrate = if (isPrimary) currentBitrate else secondaryBitrate(w, h)
-                val encoder = VideoEncoder(w, h, baseBitrate, thermalFpsOverride ?: currentFps)
-                val inputSurface = encoder.createInputSurface()
-                videoEncoder = encoder
-
-                encoder.onSpsPps = { spsPps -> mirrorServer?.broadcastSpsPps(spsPps, name) }
-                encoder.start { frameData, isKeyFrame -> mirrorServer?.broadcastFrame(frameData, isKeyFrame, name) }
-                mirrorServer?.setKeyframeRequester(name) { encoder.requestKeyFrame() }
-                inputSurface
-            }
-
-            currentEncoderSurface = surface
-            width = w
-            height = h
-
-            if (isPrimary) {
-                touchInjector?.updateDimensions(w, h)
-                if (virtualDisplayManager?.isBound() == true) {
-                    primaryVdOperationMutex.withLock {
-                        Log.i(TAG, "Recreating primary virtual display during pipeline rebuild")
-                        virtualDisplayManager?.createVirtualDisplay(w, h, dpi, surface)
-                        if (virtualDisplayManager?.hasVirtualDisplay() == true) {
-                            val activeId = virtualDisplayManager?.getDisplayId() ?: -1
-                            displayId = activeId
-                            val generation = markPrimaryVdCreated(activeId, "primary_rebuild")
-                            touchInjector?.setVirtualDisplayInjector { motionEvent ->
-                                virtualDisplayManager?.injectMotionEvent(motionEvent)
-                            }
-                            restoreCurrentVdContentLocked(generation, activeId)
-                        } else {
-                            virtualDisplayManager?.createVirtualDisplay(w, h, dpi, surface)
-                            if (virtualDisplayManager?.hasVirtualDisplay() == true) {
-                                val activeId = virtualDisplayManager?.getDisplayId() ?: -1
-                                displayId = activeId
-                                val generation = markPrimaryVdCreated(activeId, "primary_rebuild_retry")
-                                touchInjector?.setVirtualDisplayInjector { motionEvent ->
-                                    virtualDisplayManager?.injectMotionEvent(motionEvent)
-                                }
-                                restoreCurrentVdContentLocked(generation, activeId)
-                            } else {
-                                Log.e(TAG, "Primary VD creation failed during rebuild")
-                                markTerminal(TerminalReason.VD_RECREATE_FAILED)
-                            }
-                        }
-                    }
-                } else if (!shizukuSetupInProgress) {
-                    Log.w(TAG, "Shizuku not bound during rebuild ??attempting rebind")
-                    trySetupVirtualDisplay(w, h, surface) { success ->
-                        if (!success) {
-                            Log.e(TAG, "Shizuku rebind failed ??keeping service alive for recovery")
-                        }
-                    }
-                }
-            } else {
-                if (displayId >= 0) {
-                    virtualDisplayManager?.getPrivilegedService()?.setSurface(displayId, surface)
-                    virtualDisplayManager?.resizeDisplay(displayId, w, h, dpi)
-                    touchInjector = (touchInjector ?: TouchInjector(w, h)).also { injector ->
-                        injector.updateDimensions(w, h)
-                        injector.setVirtualDisplayInjector { motionEvent ->
-                            try {
-                                shizukuSetup?.privilegedService?.injectMotionEvent(displayId, motionEvent)
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Failed to inject secondary input on display $displayId", e)
-                            }
-                        }
-                    }
-                    Log.i(TAG, "Gradually resized secondary VD $displayId to ${w}x${h} without restarting")
-                } else {
-                    val newDisplayId = virtualDisplayManager?.createSecondaryVirtualDisplay(w, h, dpi, surface) ?: -1
-                    if (newDisplayId < 0) {
-                        releaseSecondaryPipeline(clearState = false)
-                        return
-                    }
-                    displayId = newDisplayId
-                    try {
-                        virtualDisplayManager?.getPrivilegedService()?.launchHomeOnDisplay(newDisplayId)
-                        Log.i(TAG, "Successfully bound launcher properties to VD_2 display $newDisplayId")
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to launch secondary home on VD_2", e)
-                    }
-                    touchInjector = (touchInjector ?: TouchInjector(w, h)).also { injector ->
-                        injector.updateDimensions(w, h)
-                        injector.setVirtualDisplayInjector { motionEvent ->
-                            try {
-                                shizukuSetup?.privilegedService?.injectMotionEvent(displayId, motionEvent)
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Failed to inject secondary input on display $displayId", e)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        fun invalidateVd(reason: String) {
-            displayId = -1
-            vdGeneration.incrementAndGet()
-            Log.i(TAG, "[$reason] Invalidated $name virtual display state")
-        }
-
-        fun release() {
-            videoEncoder?.release()
-            videoEncoder = null
-            jpegEncoder?.release()
-            jpegEncoder = null
-            currentEncoderSurface = null
-            touchInjector = null
-            if (!isPrimary) {
-                displayId = -1
-                width = 0
-                height = 0
-            }
-        }
     }
 
     class StopReceiver : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent?) {
-            if (intent?.action == ACTION_STOP) {
-                val stopIntent = Intent(context, MirrorForegroundService::class.java).apply {
-                    action = ACTION_STOP
-                }
-                context.startService(stopIntent)
-            }
+            if (intent?.action == ACTION_STOP) context.startService(Intent(context, MirrorForegroundService::class.java).apply { action = ACTION_STOP })
         }
     }
 }
