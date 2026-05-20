@@ -112,6 +112,10 @@ class ShizukuSetup {
     var privilegedService: IPrivilegedService? = null
         private set
 
+    val isBindingInProgress: Boolean
+        get() = bindingInProgress
+
+
     private val serviceArgs = Shizuku.UserServiceArgs(
         ComponentName(
             com.castla.mirror.BuildConfig.APPLICATION_ID,

@@ -123,6 +123,12 @@ class H264Decoder {
 
         const isKeyFrame = flags === 0x01;
 
+        // [SAFEGUARD 1] If this is a valid keyframe and we were waiting for it, smoothly unlock the waiting state immediately
+        if (isKeyFrame && this._waitingForKeyframe) {
+            console.log(`[Decoder] Re-anchoring sequence tracking smoothly to keyframe #${seqNum}`);
+            this._waitingForKeyframe = false;
+        }
+
         // If waiting for a keyframe after a gap, discard all delta frames
         if (this._waitingForKeyframe) {
             if (!isKeyFrame) {
@@ -130,7 +136,6 @@ class H264Decoder {
                 this._lastSeqNum = seqNum;
                 return; // Discard delta frame silently to prevent hardware decoder crash
             }
-            // Keyframe will be handled below and will automatically re-anchor the sequence tracking
         }
 
         const nalData = data.slice(8); // Remove 8-byte header
@@ -138,11 +143,6 @@ class H264Decoder {
         // Detect frame drops via sequence gap
         if (this._lastSeqNum !== undefined) {
             const expected = (this._lastSeqNum + 1) & 0xFFFF;
-            // [SAFEGUARD 1] If this is a valid keyframe and we were waiting for it, smoothly unlock the waiting state immediately
-            if (isKeyFrame && this._waitingForKeyframe) {
-                console.log(`[Decoder] Re-anchoring sequence tracking smoothly to keyframe #${seqNum}`);
-                this._waitingForKeyframe = false;
-            }
             
             // [SAFEGUARD 2] Independently evaluate sequence continuity to catch genuine gaps
             if (seqNum !== expected) {

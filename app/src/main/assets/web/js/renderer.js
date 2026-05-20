@@ -16,6 +16,20 @@ class CanvasRenderer {
         this.frameCount = 0;
         this.lastFpsTime = performance.now();
         this.currentFps = 0;
+        
+        // ### 수정 시작 ###
+        // Obsoleted temporary stretch properties to prevent stretch afterimages.
+        this.tempFillPending = false;
+        this.tempFillTargetMode = null;
+        this.tempFillTargetAspect = null;
+        // ### 수정 끝 ###
+    }
+
+    enableTemporaryFill(targetMode = 'single', targetAspect = null) {
+        // ### 수정 시작 ###
+        // Completely disabled the temporary fill mechanism to support clean contain-based transition.
+        // This ensures the video maintains its original aspect ratio inside the expanded canvas.
+        // ### 수정 끝 ###
     }
 
     setFitMode(mode) {
@@ -38,6 +52,53 @@ class CanvasRenderer {
         if (sourceWidth !== this.videoWidth || sourceHeight !== this.videoHeight) {
             this.videoWidth = sourceWidth;
             this.videoHeight = sourceHeight;
+            
+            // ### 수정 시작 ###
+            // Invoke callback to notify the main thread of the frame resolution change instantly.
+            if (typeof this.onFrameResolutionChange === 'function') {
+                this.onFrameResolutionChange(sourceWidth, sourceHeight);
+            }
+            // ### 수정 끝 ###
+            
+            // New stream resolution received from the server — evaluate Aspect Ratio protection
+            if (this.tempFillPending) {
+                let shouldRelease = true;
+                const aspect = sourceWidth / sourceHeight;
+                
+                // Get the physical aspect ratio of the canvas element dynamically
+                const canvasWidth = this.canvas.clientWidth || window.innerWidth || 1;
+                const canvasHeight = this.canvas.clientHeight || window.innerHeight || 1;
+                let canvasAspect = canvasWidth / canvasHeight;
+
+                // [CRITICAL TIMING SAFEGUARD] Prioritize explicit target aspect ratio to completely
+                // bypass asynchronous browser reflow and layout synchronization delays.
+                if (this.tempFillTargetAspect && Number.isFinite(this.tempFillTargetAspect) && this.tempFillTargetAspect > 0) {
+                    canvasAspect = this.tempFillTargetAspect;
+                }
+
+                if (this.tempFillTargetMode === 'single') {
+                    // Hold stretch mode (fill) until the incoming video stream aspect ratio settled close to the physical canvas aspect ratio
+                    // Single fullscreen mode expects a landscape aspect ratio matching the fullscreen canvas.
+                    if (aspect < canvasAspect - 0.08) {
+                        console.log(`[Renderer] Aspect guard: received frame aspect ${aspect.toFixed(2)} while expecting fullscreen aspect >= ${(canvasAspect - 0.08).toFixed(2)} (${sourceWidth}x${sourceHeight}), holding fill mode.`);
+                        shouldRelease = false;
+                    }
+                } else if (this.tempFillTargetMode === 'browser_split') {
+                    // Hold stretch mode (fill) until the incoming video stream aspect ratio settled close to or narrower than the split canvas aspect ratio
+                    if (aspect > canvasAspect + 0.08) {
+                        console.log(`[Renderer] Aspect guard: received frame aspect ${aspect.toFixed(2)} while expecting split aspect <= ${(canvasAspect + 0.08).toFixed(2)} (${sourceWidth}x${sourceHeight}), holding fill mode.`);
+                        shouldRelease = false;
+                    }
+                }
+
+                if (shouldRelease) {
+                    console.log(`[Renderer] Settled aspect/resolution ${sourceWidth}x${sourceHeight} (aspect: ${aspect.toFixed(2)}) received matching target aspect, clearing tempFillPending.`);
+                    this.tempFillPending = false;
+                    this.tempFillTargetMode = null;
+                    this.tempFillTargetAspect = null;
+                }
+            }
+            
             this.updateLayout();
         } else if (this.canvas.width !== this.canvas.clientWidth || this.canvas.height !== this.canvas.clientHeight) {
             this.updateLayout();
@@ -66,12 +127,17 @@ class CanvasRenderer {
         const videoAspect = this.videoWidth / this.videoHeight;
         const canvasAspect = canvasWidth / canvasHeight;
 
-        if (this.fitMode === 'fill') {
+        // ### 수정 시작 ###
+        // Fit mode is strictly preserved according to user config to prevent visual stretch distortion.
+        const effectiveFitMode = this.fitMode;
+        // ### 수정 끝 ###
+
+        if (effectiveFitMode === 'fill') {
             this.renderWidth = canvasWidth;
             this.renderHeight = canvasHeight;
             this.renderX = 0;
             this.renderY = 0;
-        } else if (this.fitMode === 'cover') {
+        } else if (effectiveFitMode === 'cover') {
             if (videoAspect > canvasAspect) {
                 this.renderHeight = canvasHeight;
                 this.renderWidth = canvasHeight * videoAspect;

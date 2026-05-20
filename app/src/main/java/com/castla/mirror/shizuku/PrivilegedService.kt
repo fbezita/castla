@@ -17,7 +17,6 @@ import android.view.InputDevice
 import android.view.InputEvent
 import android.view.MotionEvent
 import android.view.Surface
-import com.castla.mirror.utils.ImeState
 import java.lang.reflect.Method
 
 /**
@@ -246,9 +245,10 @@ class PrivilegedService : IPrivilegedService.Stub() {
             val builderClass = Class.forName("android.hardware.display.VirtualDisplayConfig\$Builder")
 
             // Critical fix for screen off issue:
-            var flags = DISPLAY_FLAG_PUBLIC or DISPLAY_FLAG_OWN_CONTENT_ONLY or DISPLAY_FLAG_PRESENTATION or DISPLAY_FLAG_DESTROY_CONTENT
+            // Added DISPLAY_FLAG_OWN_DISPLAY_GROUP to isolate virtual display power context from the default group
+            var flags = DISPLAY_FLAG_PUBLIC or DISPLAY_FLAG_OWN_CONTENT_ONLY or DISPLAY_FLAG_PRESENTATION or DISPLAY_FLAG_DESTROY_CONTENT or DISPLAY_FLAG_OWN_DISPLAY_GROUP
             if (android.os.Build.VERSION.SDK_INT >= 33) {
-                flags = flags or DISPLAY_FLAG_ALWAYS_UNLOCKED or DISPLAY_FLAG_TRUSTED or DISPLAY_FLAG_OWN_DISPLAY_GROUP
+                flags = flags or DISPLAY_FLAG_ALWAYS_UNLOCKED or DISPLAY_FLAG_TRUSTED
             }
 
             val builderCtor = builderClass.getConstructor(
@@ -285,8 +285,21 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 virtualDisplayNames[displayId] = name
                 Log.i(TAG, "Virtual display created: id=$displayId, ${width}x${height}, flags=$flags")
                 
-                // Keep the display explicitly powered on
-                execCommand("dumpsys power set-display-state $displayId ON")
+                // Keep the display explicitly powered on with multiple delayed triggers to secure power state
+                val delays = longArrayOf(0L, 200L, 500L, 1000L)
+                for (delay in delays) {
+                    tetheringExecutor.execute {
+                        if (delay > 0) {
+                            try { Thread.sleep(delay) } catch (_: InterruptedException) {}
+                        }
+                        try {
+                            execCommand("dumpsys power set-display-state $displayId ON")
+                            Log.i(TAG, "Wedge power injected for displayId=$displayId at delay=$delay ms")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to inject wedge power for displayId=$displayId at delay=$delay ms", e)
+                        }
+                    }
+                }
 
                 displayId
             } else {
@@ -307,6 +320,17 @@ class PrivilegedService : IPrivilegedService.Stub() {
         }
         display.surface = surface
         Log.i(TAG, "Surface attached to virtual display $displayId")
+        if (surface != null) {
+            tetheringExecutor.execute {
+                try {
+                    execCommand("dumpsys power set-display-state $displayId ON")
+                    wakeUpDisplay(displayId)
+                    Log.i(TAG, "Wedge power and wakeup injected during setSurface for displayId=$displayId")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to apply setSurface power activation for displayId=$displayId", e)
+                }
+            }
+        }
     }
 
     override fun releaseVirtualDisplay(displayId: Int) {
@@ -366,86 +390,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
         } catch (e: Exception) {
             Log.e(TAG, "Input event injection failed on display $displayId", e)
         }
-    }
-
-    override fun getImeState(displayId: Int): Int {
-        return try {
-            var inputMethodDump = dumpSystemService("input_method")
-            if (inputMethodDump.isBlank()) {
-                inputMethodDump = execCommand("dumpsys input_method")
-            }
-            var state = ImeState.parseInputMethodDump(inputMethodDump)
-            if (state == 0 && inputMethodDump.isNotBlank()) {
-                val shellInputMethodDump = execCommand("dumpsys input_method")
-                val shellState = ImeState.parseInputMethodDump(shellInputMethodDump)
-                if (shellState != 0) {
-                    state = shellState
-                } else {
-                    state = ImeState.parseInputMethodDump(
-                        execCommand("dumpsys input_method | grep -E 'mInputShown|mImeWindowVis|mDecorViewVisible|mWindowVisible|mServedView|mServedInputConnection|mShowRequested|mShowInputRequested|mIsInputViewShown|isInputViewShown|mInputViewStarted|mCurClient'")
-                    )
-                }
-            }
-            val alreadyVisibleEnough = (state and (ImeState.VISIBLE or ImeState.SERVED_INPUT)) != 0
-            if (displayId > 0 && !alreadyVisibleEnough) {
-                var windowDump = dumpSystemService("window")
-                if (windowDump.isBlank()) {
-                    windowDump = execCommand("dumpsys window")
-                }
-                state = state or ImeState.parseWindowDump(windowDump, displayId)
-                if ((state and ImeState.INPUT_TARGET_ON_DISPLAY) == 0 && windowDump.isNotBlank()) {
-                    val shellWindowState = ImeState.parseWindowDump(execCommand("dumpsys window"), displayId)
-                    state = state or if (shellWindowState != 0) {
-                        shellWindowState
-                    } else {
-                        ImeState.parseWindowDump(
-                            execCommand("dumpsys window | grep 'imeInputTarget in display'"),
-                            displayId
-                        )
-                    }
-                }
-            }
-            state
-        } catch (e: Exception) {
-            Log.w(TAG, "getImeState($displayId) failed", e)
-            0
-        }
-    }
-
-    private fun dumpSystemService(name: String): String {
-        val binder = try {
-            val smClass = Class.forName("android.os.ServiceManager")
-            val getService = smClass.getMethod("getService", String::class.java)
-            getService.invoke(null, name) as? android.os.IBinder
-        } catch (e: Exception) {
-            Log.w(TAG, "ServiceManager.getService($name) failed", e)
-            null
-        } ?: return ""
-
-        val pipe = ParcelFileDescriptor.createPipe()
-        val output = StringBuilder()
-        val reader = Thread({
-            try {
-                ParcelFileDescriptor.AutoCloseInputStream(pipe[0]).bufferedReader().use { input ->
-                    output.append(input.readText())
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "dumpSystemService($name) read failed", e)
-            }
-        }, "Dump-$name")
-
-        reader.start()
-        try {
-            binder.dump(pipe[1].fileDescriptor, emptyArray())
-        } finally {
-            try { pipe[1].close() } catch (_: Exception) {}
-        }
-        try {
-            reader.join(1_500)
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-        }
-        return output.toString()
     }
 
     private fun doStartWifiTethering(): String {
@@ -1217,40 +1161,11 @@ class PrivilegedService : IPrivilegedService.Stub() {
     override fun wakeUpDisplay(displayId: Int) {
         Log.i(TAG, "[BUILD:screen-off-v2] wakeUpDisplay($displayId) ENTRY")
         try {
-            // Do NOT use PowerManager.wakeUp() — it wakes the physical screen too.
-            // Instead, use display-targeted methods that only affect the VD.
-
-            // 1. WAKEUP keyevent 224 is omitted here because it overrides and wakes up the physical screen globally.
-            // We rely on targeted userActivity and targeted touch injection below which do not wake the physical screen.
-
-            // 2. Inject user activity on the VD via PowerManager to prevent doze/dream
-            try {
-                val smClass = Class.forName("android.os.ServiceManager")
-                val getService = smClass.getMethod("getService", String::class.java)
-                val powerBinder = getService.invoke(null, "power") as android.os.IBinder
-                val ipmStub = Class.forName("android.os.IPowerManager\$Stub")
-                val pm = ipmStub.getMethod("asInterface", android.os.IBinder::class.java)
-                    .invoke(null, powerBinder)
-                val now = SystemClock.uptimeMillis()
-                val userActivityMethods = pm.javaClass.methods.filter { it.name == "userActivity" }
-                for (m in userActivityMethods) {
-                    try {
-                        when (m.parameterTypes.size) {
-                            4 -> { m.invoke(pm, displayId.toLong(), now, 0, 0); break }
-                            3 -> { m.invoke(pm, now, 0, 0); break }
-                            2 -> { m.invoke(pm, now, 0); break }
-                        }
-                    } catch (_: Exception) {}
-                }
-            } catch (_: Exception) {}
-
-            // 3. Inject a no-op touch (down+up at 1,1) to generate user activity on the VD
-            try {
-                injectInput(displayId, MotionEvent.ACTION_DOWN, 1f, 1f, 0)
-                injectInput(displayId, MotionEvent.ACTION_UP, 1f, 1f, 0)
-            } catch (_: Exception) {}
-
-            Log.i(TAG, "wakeUpDisplay($displayId): keyevent+userActivity+touch (no PowerManager.wakeUp)")
+            // Waking display power state explicitly via shell command.
+            // We removed userActivity and injectInput because they invoke global power manager triggers
+            // which result in power state conflicts and 200ms infinite vibration (flickering) of DisplayPowerController.
+            execCommand("dumpsys power set-display-state $displayId ON")
+            Log.i(TAG, "wakeUpDisplay($displayId): powered ON via shell command")
         } catch (e: Exception) {
             Log.w(TAG, "wakeUpDisplay($displayId) failed", e)
         }
@@ -1264,6 +1179,14 @@ class PrivilegedService : IPrivilegedService.Stub() {
         }
         vd.resize(width, height, densityDpi)
         Log.i(TAG, "Resized virtual display $displayId to ${width}x${height} @ ${densityDpi}dpi")
+        try {
+            // Synchronize WindowManager size and density with the updated virtual display dimensions
+            execCommand("wm size ${width}x${height} -d $displayId")
+            execCommand("wm density $densityDpi -d $displayId")
+            Log.i(TAG, "Synchronized WindowManager size and density for display $displayId")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to synchronize WindowManager size/density for display $displayId", e)
+        }
     }
 
     override fun registerDeathToken(token: android.os.IBinder) {
@@ -1672,6 +1595,12 @@ class PrivilegedService : IPrivilegedService.Stub() {
     override fun execCommand(command: String): String {
         if (command == "__HOTSPOT_ON__") return doStartWifiTethering()
         if (command == "__HOTSPOT_OFF__") return doStopWifiTethering()
+
+        // 🔴 [미러링 앱 자살 방지 가드]
+        if (command.startsWith("am force-stop ") && command.contains("com.castla.mirror")) {
+            Log.w(TAG, "Aborted am force-stop command targeting self application to prevent suicide: $command")
+            return "Ignored self-destruction command"
+        }
 
         return try {
             val process = Runtime.getRuntime().exec(arrayOf("sh", "-c", command))

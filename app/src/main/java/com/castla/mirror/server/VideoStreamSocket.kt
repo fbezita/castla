@@ -113,9 +113,15 @@ class VideoStreamSocket(
         }
 
         if (isKeyFrame) {
-            // Keyframe arriving: clear all queued delta frames to make room
-            // Keyframes are precious — never drop them
-            sendQueue.clear()
+            // Keyframe arriving: clear all queued delta frames to make room,
+            // but PRESERVE precious SPS/PPS config messages!
+            val iterator = sendQueue.iterator()
+            while (iterator.hasNext()) {
+                val item = iterator.next()
+                if (item.isNotEmpty() && item[0] != 0x02.toByte()) {
+                    iterator.remove()
+                }
+            }
             sendQueue.offer(data)
         } else {
             // Delta frame: graduated drop policy
@@ -127,9 +133,14 @@ class VideoStreamSocket(
 
                 if (!sendQueue.offer(data)) {
                     // Still can't fit — network is severely bottlenecked.
-                    // Clear queue and request a fresh keyframe, but rate-limit
-                    // the request to avoid encoder thrashing.
-                    sendQueue.clear()
+                    // Clear queue but preserve SPS/PPS config messages to prevent decoder initialization failure
+                    val iterator = sendQueue.iterator()
+                    while (iterator.hasNext()) {
+                        val item = iterator.next()
+                        if (item.isNotEmpty() && item[0] != 0x02.toByte()) {
+                            iterator.remove()
+                        }
+                    }
                     queueFlushCount++
 
                     val now = System.currentTimeMillis()

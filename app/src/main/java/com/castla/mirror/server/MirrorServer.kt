@@ -25,6 +25,27 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     val instanceId: String = java.util.UUID.randomUUID().toString()
 
     init {
+        // Configure logging filter to silence harmless socket closed exceptions from NanoHTTPD
+        try {
+            val nanoLogger = java.util.logging.Logger.getLogger("fi.iki.elonen.NanoHTTPD")
+            nanoLogger.filter = object : java.util.logging.Filter {
+                override fun isLoggable(record: java.util.logging.LogRecord): Boolean {
+                    val thrown = record.thrown
+                    val msg = record.message ?: ""
+
+                    // Suppress "Could not send response to the client" and generic Socket is closed errors
+                    val isTargetError = msg.contains("Could not send response to the client") ||
+                            thrown is java.net.SocketException ||
+                            thrown?.message?.contains("Socket is closed") == true ||
+                            thrown?.cause is java.net.SocketException
+
+                    return !isTargetError
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to configure NanoHTTPD log filter", e)
+        }
+
         try {
             val keystoreStream = context.assets.open("castla.p12")
             val keyStore = KeyStore.getInstance("PKCS12")

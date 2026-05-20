@@ -104,15 +104,6 @@ interface IPrivilegedService {
     void injectComposingText(int backspaces, String text, int displayId) = 14;
 
     /**
-     * Return lightweight IME state for a display.
-     * Bitmask:
-     *   1 = IME visible
-     *   2 = served input/client exists
-     *   4 = imeInputTarget is on the requested display
-     */
-    int getImeState(int displayId) = 25;
-
-    /**
      * Register a binder token to monitor the client's lifecycle.
      * If the client process dies, the service will clean up and exit.
      */

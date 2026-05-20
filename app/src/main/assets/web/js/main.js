@@ -21,6 +21,7 @@ let lastLaunchedInstanceId = null; // Prevent duplicate auto-run launches in the
 let launchGuardUntil = 0; // block accidental launches after splash dismiss
 let lastLaunchTime = 0; // track last app launch time to prevent transient stream-stop redirection
 let codecMode = 'h264'; // Default to h264, switch to mjpeg if needed
+let isPromotingSecondary = false; // Flag to trace seamless secondary-to-primary promotion transition
 
 // Playback profile system:
 //   userPreferredProfile — what the user manually chose (persisted in localStorage)
@@ -450,6 +451,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         const wsUrl = `${wsProtocol}//${host}/ws/video?channel=secondary`;
         secondaryVideoSocket = new WebSocket(wsUrl);
         secondaryVideoSocket.binaryType = 'arraybuffer';
+        secondaryVideoSocket.onopen = () => {
+            console.log('[Main] Secondary video socket connected successfully');
+            if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
+                if (codecMode === 'h264') {
+                    console.log('[Main] Requesting H264 secondary keyframe via control socket on secondary video open');
+                    controlSocket.send(JSON.stringify({ type: 'requestKeyframe', pane: 'secondary' }));
+                }
+            }
+        };
         secondaryVideoSocket.onmessage = async (event) => {
             if (event.data instanceof ArrayBuffer && secondaryDecoder) {
                 secondaryDecoder.decode(event.data);
@@ -473,9 +483,28 @@ document.addEventListener('DOMContentLoaded', async () => {
         };
         if (app.componentName) message.componentName = app.componentName;
         controlSocket.send(JSON.stringify(message));
+
+        // Request keyframes for secondary display to prevent black screen when restarting standard launch
+        if (codecMode === 'h264') {
+            console.log('[Main] Requesting H264 secondary keyframe immediately on secondary app launch');
+            controlSocket.send(JSON.stringify({ type: 'requestKeyframe', pane: 'secondary' }));
+
+            setTimeout(() => {
+                if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
+                    console.log('[Main] Requesting H264 secondary keyframe with 800ms delay on secondary app launch');
+                    controlSocket.send(JSON.stringify({ type: 'requestKeyframe', pane: 'secondary' }));
+                }
+            }, 800);
+        }
     }
 
     async function updateLayoutUI() {
+        // [PROMOTION SAFEGUARD] Avoid layout reflow shifts during active secondary-to-primary promotion
+        if (isPromotingSecondary) {
+            console.log('[Layout] Layout update bypassed due to active secondary-to-primary promotion.');
+            return;
+        }
+
         const hasLeft = !!state.left;
         const hasRight = !!state.right;
 
@@ -487,13 +516,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             // ==========================================
             destroySecondaryTransport();
             
-            leftLockedViewport = null;
-            rightLockedViewport = null;
-            
             streamPolicy.layoutMode = 'browser_split';
             document.body.dataset.layoutMode = streamPolicy.layoutMode;
 
-            const initialRatio = splitRatio || splitRatio || DEFAULT_SPLIT_RATIO;
+            const initialRatio = splitRatio || DEFAULT_SPLIT_RATIO;
             setBrowserSplitRatio(initialRatio);
 
             // Highlight the closest ratio button
@@ -506,6 +532,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             playerShell?.classList.add('browser-split');
             updateSplitToolbarVisibility();
             applyActiveFitModes();
+
+            // Synchronously lock viewports BEFORE any await to prevent intermediate fullscreen sends
+            lockBrowserSplitViewports(state.right);
 
             await new Promise((resolve) => requestAnimationFrame(() => resolve()));
             lockBrowserSplitViewports(state.right);
@@ -524,9 +553,6 @@ document.addEventListener('DOMContentLoaded', async () => {
             // ==========================================
             destroySecondaryTransport();
             
-            leftLockedViewport = null;
-            rightLockedViewport = null;
-            
             streamPolicy.layoutMode = 'browser_split';
             document.body.dataset.layoutMode = streamPolicy.layoutMode;
 
@@ -544,6 +570,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             updateSplitToolbarVisibility();
             applyActiveFitModes();
 
+            // Synchronously lock viewports BEFORE any await to prevent intermediate fullscreen sends
+            lockBrowserSplitViewports(state.right);
+
             await new Promise((resolve) => requestAnimationFrame(() => resolve()));
             lockBrowserSplitViewports(state.right);
             await initSecondaryDecoder();
@@ -555,9 +584,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             connectSecondaryVideo();
             requestAnimationFrame(() => sendViewportSize(true));
 
-        } else if (hasLeft) {
+        } else if (hasLeft || !isLauncherMode) {
+            // Keep single display stream view active even when there is no user app active (i.e. system home launcher) as long as mirroring is active
             // ==========================================
-            // 🔴 상황 3: state.left(왼쪽)만 단독 실행된 상태 -> 1개용 left 단독 풀 UI 구성!
+            // 🔴 상황 3: state.left(왼쪽)만 단독 실행된 상태 또는 스트리밍 중인 홈 화면 상태 -> 1개용 left 단독 풀 UI 구성!
             // ==========================================
             destroySecondaryTransport();
             updateSplitToolbarVisibility();
@@ -570,7 +600,15 @@ document.addEventListener('DOMContentLoaded', async () => {
             splitDrawer.style.display = 'flex';
             homeBtn.style.display = 'block';
             
-            clearCanvas();
+            // Clear locked viewports since we are in single display mode
+            leftLockedViewport = null;
+            rightLockedViewport = null;
+
+            // Keep primary canvas visible during seamless hot-refresh resize
+            canvas.style.opacity = '1';
+            const mseVideo = document.getElementById('mse-video');
+            if (mseVideo) mseVideo.style.opacity = '0';
+
             applyActiveFitModes();
             sendViewportSize();
 
@@ -595,13 +633,44 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     }
 
+// ### 수정 시작 ###
+    let pendingLayoutSwitch = null;
+
+    function handleRendererResolutionChange(width, height) {
+        if (pendingLayoutSwitch === 'single') {
+            const aspect = width / height;
+            // Fullscreen expects a landscape layout (typically >= 1.0)
+            if (aspect >= 1.0) {
+                console.log(`[LayoutSmoothing] Target fullscreen frame received: ${width}x${height} (aspect: ${aspect.toFixed(2)}). Smoothly expanding layout.`);
+                executeVisualFullscreenLayout();
+            }
+        }
+    }
+
+    function executeVisualFullscreenLayout() {
+        pendingLayoutSwitch = null;
+        playerShell?.classList.remove('browser-split');
+        playerShell?.classList.remove('secondary-fullscreen');
+        playerShell?.style.removeProperty('--split-left-width');
+
+        // Force synchronous browser layout reflow immediately after removing layout classes
+        if (playerShell) {
+            const _reflow = playerShell.offsetWidth;
+        }
+
+        applyActiveFitModes();
+
+        // Instantly fit and redraw the primary canvas layout to cover 100% fullscreen
+        getActiveRenderer()?.updateLayout?.();
+    }
+
     function disableBrowserSplit(options = {}) {
-        const { notifyServer = true } = options;
-        const wasActive = (!!state.right);
+        const { notifyServer = true, delayVisual = false } = options;
+        const wasActive = (!!state.right) || isPromotingSecondary;
+
         state.right = null;
         updateSplitToolbarVisibility();
         isResizing = false;
-        state.right = null;
         browserSplitState.url = null;
         
         leftLockedViewport = null;
@@ -611,58 +680,101 @@ document.addEventListener('DOMContentLoaded', async () => {
         playerShell?.classList.remove('swapped');
         streamPolicy.layoutMode = 'single';
         document.body.dataset.layoutMode = streamPolicy.layoutMode;
-        playerShell?.classList.remove('browser-split');
-        playerShell?.classList.remove('secondary-fullscreen');
-        playerShell?.style.removeProperty('--split-left-width');
 
         destroySecondaryTransport();
         if (notifyServer && wasActive && controlSocket && controlSocket.readyState === WebSocket.OPEN) {
             controlSocket.send(JSON.stringify({ type: 'closeSecondary' }));
         }
 
-        applyActiveFitModes();
-        
-        // Force send full viewport immediately (don't rely on CSS transition timing)
+        // Send full settled viewport size synchronously and instantly to the server
         if (wasActive && controlSocket && controlSocket.readyState === WebSocket.OPEN) {
-            const canvasEl = document.getElementById('display') || canvas;
-            // 1. Immediate window-dimension fallback to quickly steer backend back to landscape aspect ratio
-            const initWidth = Math.round(window.innerWidth || 1920);
-            const initHeight = Math.round(window.innerHeight || 1080);
-            console.log(`[Main] Split closed — forcing fallback viewport ${initWidth}x${initHeight}`);
+            console.log('[Main] Split closed — sending full viewport size immediately');
+            sendViewportSize(true);
+        }
+
+        if (delayVisual && wasActive) {
+            console.log('[Main] Delaying visual layout smoothing until fullscreen frame arrives.');
+            pendingLayoutSwitch = 'single';
+        } else {
+            executeVisualFullscreenLayout();
+        }
+
+        // Light backup trigger to guard against edge cases or late socket arrivals
+        setTimeout(() => {
+            if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
+                sendViewportSize(true);
+            }
+        }, 100);
+    }
+// ### 수정 끝 ###
+
+    function promoteSecondaryToPrimary(secondaryApp) {
+        if (!secondaryApp) return;
+        
+        console.log('[Promotion] Seamlessly promoting Secondary to Primary display.');
+        
+        // 1. Mark promotion state globally
+        isPromotingSecondary = true;
+        
+        // 2. Instantly stretch the secondary pane/renderer to 100% fullscreen via CSS
+        playerShell?.classList.add('secondary-fullscreen');
+        
+
+        
+        // 4. Update core state variables to reflect the transition
+        state.left = secondaryApp;
+        state.right = null;
+        browserSplitState.url = null;
+        browserSplitState.preset = null;
+        browserSplitState.swapped = false;
+        
+        leftLockedViewport = null;
+        rightLockedViewport = null;
+        
+        // 5. Send backend request to launch this app on the primary display pane
+        if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
+            // Eagerly flag firstFrameReceived as false to await the new stream frame
+            firstFrameReceived = false;
+            
+            const message = {
+                type: 'launchApp',
+                pkg: secondaryApp.packageName,
+                pane: 'primary'
+            };
+            if (secondaryApp.componentName) message.componentName = secondaryApp.componentName;
+            controlSocket.send(JSON.stringify(message));
+
+            // Eagerly notify the server that the primary pane is now covering 100% fullscreen
+            const shellWidth = Math.round(playerShell?.clientWidth || window.innerWidth || 1920);
+            const shellHeight = Math.round(playerShell?.clientHeight || window.innerHeight || 1080);
+            
+            console.log(`[Promotion] Sending immediate primary fullscreen viewport: ${shellWidth}x${shellHeight}`);
+            
+            lastSentPrimary = {
+                width: shellWidth,
+                height: shellHeight,
+                fitMode: streamPolicy.fitMode,
+                layoutMode: 'single'
+            };
+            
             controlSocket.send(JSON.stringify({
                 type: 'viewport',
                 pane: 'primary',
-                width: initWidth,
-                height: initHeight,
-                fitMode: getEffectivePrimaryFitMode(),
+                width: shellWidth,
+                height: shellHeight,
+                fitMode: streamPolicy.fitMode,
                 layoutMode: 'single'
             }));
 
-            // 2. Delayed precise refits to capture settled client dimensions after DOM/CSS settle down
-            for (const delayMs of [100, 300]) {
-                setTimeout(() => {
-                    if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
-                        const finalWidth = Math.round(canvasEl?.clientWidth || window.innerWidth || 1920);
-                        const finalHeight = Math.round(canvasEl?.clientHeight || window.innerHeight || 1080);
-                        console.log(`[Main] Split closed (reflow ${delayMs}ms) — updates precise viewport ${finalWidth}x${finalHeight}`);
-                        controlSocket.send(JSON.stringify({
-                            type: 'viewport',
-                            pane: 'primary',
-                            width: finalWidth,
-                            height: finalHeight,
-                            fitMode: getEffectivePrimaryFitMode(),
-                            layoutMode: 'single'
-                        }));
-                    }
-                }, delayMs);
-            }
-        }
-
-        // Trigger refit bursts during and after DOM reflow/CSS transition to avoid black bars
-        for (const delayMs of [50, 150, 300, 500]) {
+            // Force immediate keyframe request to trigger fast stream startup
+            controlSocket.send(JSON.stringify({ type: 'requestKeyframe', pane: 'primary' }));
+            
+            // Set backup keyframe request
             setTimeout(() => {
-                getActiveRenderer()?.updateLayout?.();
-            }, delayMs);
+                if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
+                    controlSocket.send(JSON.stringify({ type: 'requestKeyframe', pane: 'primary' }));
+                }
+            }, 800);
         }
     }
 
@@ -989,6 +1101,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             console.log('[Main] Using WebCodecs Decoder');
             const renderer = new CanvasRenderer(canvas);
             renderer.setFitMode(getEffectivePrimaryFitMode());
+            // ### 수정 시작 ###
+            // Hook the smooth layout resolution change callback
+            renderer.onFrameResolutionChange = handleRendererResolutionChange;
+            // ### 수정 끝 ###
 
             // Create frame pacer between decoder and renderer
             if (framePacer) framePacer.destroy();
@@ -1038,6 +1154,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                 (error) => console.error('[Main] Fallback error:', error)
             );
             await decoder.init(canvas);
+            // ### 수정 시작 ###
+            // Hook the smooth layout resolution change callback on fallback decoder renderer
+            if (decoder.renderer) {
+                decoder.renderer.onFrameResolutionChange = handleRendererResolutionChange;
+            }
+            // ### 수정 끝 ###
             decoder.renderer?.setFitMode?.(getEffectivePrimaryFitMode());
             codecMode = 'mjpeg';
             applyActiveFitModes();
@@ -1096,9 +1218,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         videoSocket.onopen = () => {
             console.log(`[Main] Video socket connected!`);
             if (!isLauncherMode) setStatus('Loading...', '');
-            if (codecMode === 'mjpeg' && controlSocket && controlSocket.readyState === WebSocket.OPEN) {
-                console.log(`[Main] Sending codec preference: mjpeg via control socket`);
-                controlSocket.send(JSON.stringify({ type: 'codec', mode: 'mjpeg' }));
+            if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
+                if (codecMode === 'mjpeg') {
+                    console.log(`[Main] Sending codec preference: mjpeg via control socket`);
+                    controlSocket.send(JSON.stringify({ type: 'codec', mode: 'mjpeg' }));
+                } else if (codecMode === 'h264') {
+                    console.log(`[Main] Requesting H264 keyframe via control socket on video open`);
+                    controlSocket.send(JSON.stringify({ type: 'requestKeyframe', pane: 'primary' }));
+                }
             }
         };
 
@@ -1149,6 +1276,19 @@ document.addEventListener('DOMContentLoaded', async () => {
             hideOverlay();
             if (decoder && decoder.play) {
                 decoder.play();
+            }
+
+            // Seamless Promotion Transition Cleanup:
+            // If we were waiting for the promoted secondary app to land on primary stream, complete the transition now!
+            if (isPromotingSecondary) {
+                console.log('[Promotion] First primary frame of promoted app received! Completing transition.');
+                
+                // First call disableBrowserSplit while isPromotingSecondary is still true
+                // to trigger proper full-screen transition and primary temporary fill shield!
+                disableBrowserSplit({ notifyServer: false });
+                
+                isPromotingSecondary = false;
+                playerShell?.classList.remove('secondary-fullscreen');
             }
         }
     }
@@ -1242,8 +1382,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 console.log('[Main] Reconnecting secondary video socket...');
                 connectSecondaryVideo();
             }
-            // Force reconnect control socket if video socket is reconnecting OR control socket is closed
-            if (videoNeedsReconnect || controlNeedsReconnect) {
+            // Reconnect control socket only when the control socket itself is disconnected
+            if (controlNeedsReconnect) {
                 console.log('[Main] Reconnecting control socket...');
                 connectControl();
             }
@@ -1256,6 +1396,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     let resizeTimer = null;
+    let lastSentPrimary = { width: 0, height: 0, fitMode: null, layoutMode: null };
+    let lastSentSecondary = { width: 0, height: 0, fitMode: null, layoutMode: null };
+
     function describeViewport(viewport) {
         return viewport && viewport.width > 0 && viewport.height > 0
             ? `${viewport.width}x${viewport.height}`
@@ -1266,8 +1409,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!controlSocket || controlSocket.readyState !== WebSocket.OPEN) return;
         if (codecMode === 'mjpeg' && !streamPolicy.autoFit) return;
 
-        const livePrimaryWidth = Math.round(streamPane?.clientWidth || canvas.clientWidth || window.innerWidth);
-        const livePrimaryHeight = Math.round(streamPane?.clientHeight || canvas.clientHeight || window.innerHeight);
+        const livePrimaryWidth = Math.round(
+            (!(!!state.right))
+                ? (playerShell?.clientWidth || streamPane?.clientWidth || canvas.clientWidth || window.innerWidth)
+                : (streamPane?.clientWidth || canvas.clientWidth || window.innerWidth)
+        );
+        const livePrimaryHeight = Math.round(
+            (!(!!state.right))
+                ? (playerShell?.clientHeight || streamPane?.clientHeight || canvas.clientHeight || window.innerHeight)
+                : (streamPane?.clientHeight || canvas.clientHeight || window.innerHeight)
+        );
         if (livePrimaryWidth <= 0 || livePrimaryHeight <= 0) return;
 
         clearTimeout(resizeTimer);
@@ -1277,33 +1428,63 @@ document.addEventListener('DOMContentLoaded', async () => {
                 : { width: livePrimaryWidth, height: livePrimaryHeight };
 
             // Only send secondary viewport in legacy dual-stream mode
-            console.log(`[ViewportSendDebug] SPLIT_STRATEGY=${SPLIT_STRATEGY} active=${(!!state.right)} browserSplitPane=${!!browserSplitPane}`);
             if (SPLIT_STRATEGY === 'dual_stream' && (!!state.right) && browserSplitPane) {
                 const secondaryViewport = rightLockedViewport;
-                console.log(`[ViewportSendDebug] secondaryViewport=${JSON.stringify(secondaryViewport)}`);
                 if (secondaryViewport && secondaryViewport.width > 0 && secondaryViewport.height > 0) {
-                    console.log(`[Main] Sending viewport pane=secondary requested=${secondaryViewport.width}x${secondaryViewport.height} fitMode=${getEffectiveSecondaryFitMode()} locked=${describeViewport(secondaryViewport)} split=${(!!state.right)}`);
-                    controlSocket.send(JSON.stringify({
-                        type: 'viewport',
-                        pane: 'secondary',
-                        width: secondaryViewport.width,
-                        height: secondaryViewport.height,
-                        fitMode: getEffectiveSecondaryFitMode(),
-                        layoutMode: streamPolicy.layoutMode
-                    }));
+                    const secFitMode = getEffectiveSecondaryFitMode();
+                    const secLayoutMode = streamPolicy.layoutMode;
+
+                    if (lastSentSecondary.width !== secondaryViewport.width ||
+                        lastSentSecondary.height !== secondaryViewport.height ||
+                        lastSentSecondary.fitMode !== secFitMode ||
+                        lastSentSecondary.layoutMode !== secLayoutMode) {
+
+                        lastSentSecondary = {
+                            width: secondaryViewport.width,
+                            height: secondaryViewport.height,
+                            fitMode: secFitMode,
+                            layoutMode: secLayoutMode
+                        };
+
+                        console.log(`[Main] Sending viewport pane=secondary requested=${secondaryViewport.width}x${secondaryViewport.height} fitMode=${secFitMode} locked=${describeViewport(secondaryViewport)} split=${(!!state.right)}`);
+                        controlSocket.send(JSON.stringify({
+                            type: 'viewport',
+                            pane: 'secondary',
+                            width: secondaryViewport.width,
+                            height: secondaryViewport.height,
+                            fitMode: secFitMode,
+                            layoutMode: secLayoutMode
+                        }));
+                    }
                 }
             }
 
-            console.log(`[Main] Sending viewport pane=primary requested=${primaryViewport.width}x${primaryViewport.height} fitMode=${getEffectivePrimaryFitMode()} locked=${describeViewport(leftLockedViewport)} split=${(!!state.right)}`);
+            const primFitMode = getEffectivePrimaryFitMode();
+            const primLayoutMode = streamPolicy.layoutMode;
 
-            controlSocket.send(JSON.stringify({
-                type: 'viewport',
-                pane: 'primary',
-                width: primaryViewport.width,
-                height: primaryViewport.height,
-                fitMode: getEffectivePrimaryFitMode(),
-                layoutMode: streamPolicy.layoutMode
-            }));
+            if (lastSentPrimary.width !== primaryViewport.width ||
+                lastSentPrimary.height !== primaryViewport.height ||
+                lastSentPrimary.fitMode !== primFitMode ||
+                lastSentPrimary.layoutMode !== primLayoutMode) {
+
+                lastSentPrimary = {
+                    width: primaryViewport.width,
+                    height: primaryViewport.height,
+                    fitMode: primFitMode,
+                    layoutMode: primLayoutMode
+                };
+
+                console.log(`[Main] Sending viewport pane=primary requested=${primaryViewport.width}x${primaryViewport.height} fitMode=${primFitMode} locked=${describeViewport(leftLockedViewport)} split=${(!!state.right)}`);
+
+                controlSocket.send(JSON.stringify({
+                    type: 'viewport',
+                    pane: 'primary',
+                    width: primaryViewport.width,
+                    height: primaryViewport.height,
+                    fitMode: primFitMode,
+                    layoutMode: primLayoutMode
+                }));
+            }
         };
         if (immediate) doSend();
         else resizeTimer = setTimeout(doSend, 500);
@@ -1338,6 +1519,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         controlSocket.onopen = () => {
             console.log(`[Main] Control socket connected!`);
+            
+            // Reset last sent viewports so the initial size is always sent
+            lastSentPrimary = { width: 0, height: 0, fitMode: null, layoutMode: null };
+            lastSentSecondary = { width: 0, height: 0, fitMode: null, layoutMode: null };
+
+            // Reset active apps state to prevent launch evaluation mismatches on reconnect
+            state.left = null;
+            state.right = null;
+
             closeInputBubble(true);
             if (touchHandler) touchHandler.destroy();
             const renderer = (decoder && decoder.renderer) ? decoder.renderer : null;
@@ -1364,6 +1554,15 @@ document.addEventListener('DOMContentLoaded', async () => {
                 controlSocket.send(JSON.stringify({ type: 'codec', mode: 'mjpeg' }));
                 console.log(`[Main] Requesting MJPEG keyframe immediately on open to force server wakeUp`);
                 controlSocket.send(JSON.stringify({ type: 'requestKeyframe' }));
+            } else if (codecMode === 'h264') {
+                if (videoSocket && videoSocket.readyState === WebSocket.OPEN) {
+                    console.log(`[Main] Requesting H264 keyframe via control socket on control open (video is already open)`);
+                    controlSocket.send(JSON.stringify({ type: 'requestKeyframe', pane: 'primary' }));
+                }
+                if (secondaryVideoSocket && secondaryVideoSocket.readyState === WebSocket.OPEN) {
+                    console.log('[Main] Requesting H264 secondary keyframe via control socket on control open (secondary video is already open)');
+                    controlSocket.send(JSON.stringify({ type: 'requestKeyframe', pane: 'secondary' }));
+                }
             }
 
             if (controlSocket.readyState === WebSocket.OPEN) {
@@ -1456,7 +1655,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         if ((!!state.right)) {
                             console.log('[Main] Performing hot-refresh on secondary decoder to prevent rainbow artifacts');
                             initSecondaryDecoder(false).then(() => { // Clear old resolution cache
-                                connectSecondaryVideo(false); // Reset sequence/cache for new resolution stream
+                                // Zero-restart hot-refresh: Reuse existing active websocket connection and immediately request new keyframe
                                 setTimeout(() => {
                                     if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
                                         controlSocket.send(JSON.stringify({ type: 'requestKeyframe', pane: 'secondary' }));
@@ -1467,7 +1666,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     } else {
                         console.log('[Main] Performing hot-refresh on primary decoder to prevent rainbow artifacts');
                         initDecoder(false).then(() => { // Clear old resolution cache
-                            connectVideo(false); // Reset sequence/cache for new resolution stream
+                            // Zero-restart hot-refresh: Reuse existing active websocket connection and immediately request new keyframe
                             setTimeout(() => {
                                 if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
                                     controlSocket.send(JSON.stringify({ type: 'requestKeyframe', pane: 'primary' }));
@@ -2798,13 +2997,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         state.right = secondaryApp;
         
-        leftLockedViewport = null;
-        rightLockedViewport = null;
+        lockBrowserSplitViewports(secondaryApp);
         browserSplitState.preset = resolveSplitPreset(primaryApp, secondaryApp);
         streamPolicy.layoutMode = 'browser_split';
         document.body.dataset.layoutMode = streamPolicy.layoutMode;
 
-        const initialRatio = splitRatio || splitRatio || DEFAULT_SPLIT_RATIO;
+        const initialRatio = splitRatio || DEFAULT_SPLIT_RATIO;
         setBrowserSplitRatio(initialRatio);
 
         // Highlight the closest ratio button
@@ -2868,25 +3066,85 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 
     function launchAppPair(leftPkg, rightPkg) {
-        console.log(`[Launcher] Launching App Pair: left=${leftPkg}, right=${rightPkg}`);
+        console.log(`[Launcher] Smart Launching App Pair: left=${leftPkg}, right=${rightPkg}`);
         if (Date.now() < launchGuardUntil) return;
         lastLaunchTime = Date.now(); // Record launch timestamp
 
         const targetLeftApp = allApps.find(a => a.packageName === leftPkg);
         const targetRightApp = allApps.find(a => a.packageName === rightPkg);
 
-        if (targetLeftApp && targetRightApp) {
-            // 앱 페어 실행 시에는 실행 정보가 둘 다 보존되어 채워지도록 순차 호출!
-            launchApp(targetLeftApp, false);
-            setTimeout(() => {
-                launchApp(targetRightApp, true);
-            }, 300);
-        } else {
+        if (!targetLeftApp || !targetRightApp) {
             console.warn(`[Launcher] Failed to launch App Pair: one or both apps are missing.`);
+            return;
         }
+
+        // Get current running package names (if any)
+        const currentLeftPkg = state.left ? state.left.packageName : null;
+        const currentRightPkg = state.right ? state.right.packageName : null;
+
+        // Check if either of the target apps is already running in either slot
+        const leftRunningMatch = (currentLeftPkg === leftPkg) ? 'left' : ((currentRightPkg === leftPkg) ? 'right' : null);
+        const rightRunningMatch = (currentLeftPkg === rightPkg) ? 'left' : ((currentRightPkg === rightPkg) ? 'right' : null);
+
+        console.log(`[Launcher] AppPair Smart Evaluation: X(${leftPkg}) runningSlot=${leftRunningMatch}, Y(${rightPkg}) runningSlot=${rightRunningMatch}`);
+
+        if (leftRunningMatch && rightRunningMatch) {
+            // Case 1: Both apps are already running on the screen (regardless of swap)
+            console.log(`[Launcher] Both apps ${leftPkg} and ${rightPkg} are already running. Skipping.`);
+            return;
+        }
+
+        if (leftRunningMatch && !rightRunningMatch) {
+            // Case 2: Only the requested left app (X) is running.
+            // Keep X where it is running, and launch Y (rightPkg) in the other slot!
+            if (leftRunningMatch === 'left') {
+                console.log(`[Launcher] ${leftPkg} is running on Left. Launching ${rightPkg} on Right.`);
+                _leftApp = targetLeftApp;
+                _rightApp = targetRightApp;
+                updateLayoutUI();
+                launchApp(targetRightApp, true, true);
+            } else {
+                console.log(`[Launcher] ${leftPkg} is running on Right. Keeping it, launching ${rightPkg} on Left.`);
+                _leftApp = targetRightApp; // the missing app goes to the Left
+                _rightApp = targetLeftApp;  // the existing app stays on the Right
+                updateLayoutUI();
+                launchApp(targetRightApp, false, true);
+            }
+            return;
+        }
+
+        if (!leftRunningMatch && rightRunningMatch) {
+            // Case 3: Only the requested right app (Y) is running.
+            // Keep Y where it is running, and launch X (leftPkg) in the other slot!
+            if (rightRunningMatch === 'right') {
+                console.log(`[Launcher] ${rightPkg} is running on Right. Launching ${leftPkg} on Left.`);
+                _leftApp = targetLeftApp;
+                _rightApp = targetRightApp;
+                updateLayoutUI();
+                launchApp(targetLeftApp, false, true);
+            } else {
+                console.log(`[Launcher] ${rightPkg} is running on Left. Keeping it, launching ${leftPkg} on Right.`);
+                _leftApp = targetRightApp; // the existing app stays on the Left
+                _rightApp = targetLeftApp;  // the missing app goes to the Right
+                updateLayoutUI();
+                launchApp(targetLeftApp, true, true);
+            }
+            return;
+        }
+
+        // Case 4: Neither app is running anywhere. Launch both!
+        console.log(`[Launcher] Neither app in pair is running. Launching both: X(${leftPkg}) and Y(${rightPkg})`);
+        _leftApp = targetLeftApp;
+        _rightApp = targetRightApp;
+        updateLayoutUI();
+
+        launchApp(targetLeftApp, false, true);
+        setTimeout(() => {
+            launchApp(targetRightApp, true, true);
+        }, 300);
     }
 
-    function launchApp(app, isRight = false) {
+    function launchApp(app, isRight = false, forceLaunch = false) {
         if (app.isPair) {
             launchAppPair(app.left, app.right);
             return;
@@ -2895,27 +3153,29 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Strict Duplication Safeguard:
         // Prevent running the exact same app on both VD_1 (left) and VD_2 (right) simultaneously.
         const pkgName = app.packageName;
-        if (isRight) {
-            // 1. 이미 동일한 오른쪽(right) 화면에 실행 중이라면, 에러 공지 없이 조용히 리턴!
-            if (state.right && state.right.packageName === pkgName) {
-                console.log(`[Launcher] ${pkgName} is already running on Right. Skipping redundant launch without Notice.`);
-                return;
-            }
-            // 2. 반대쪽인 왼쪽(left) 화면에 이미 실행 중인 경우에만 고급 알림을 주고 차단!
-            if (state.left && state.left.packageName === pkgName) {
-                showLauncherNotice('이미 왼쪽 화면(Primary)에서 실행 중인 앱입니다.');
-                return;
-            }
-        } else {
-            // 3. 이미 동일한 왼쪽(left) 화면에 실행 중이라면, 에러 공지 없이 조용히 리턴!
-            if (state.left && state.left.packageName === pkgName) {
-                console.log(`[Launcher] ${pkgName} is already running on Left. Skipping redundant launch without Notice.`);
-                return;
-            }
-            // 4. 반대쪽인 오른쪽(right) 화면에 이미 실행 중인 경우에만 고급 알림을 주고 차단!
-            if (state.right && state.right.packageName === pkgName) {
-                showLauncherNotice('이미 오른쪽 화면(Secondary)에서 실행 중인 앱입니다.');
-                return;
+        if (!forceLaunch) {
+            if (isRight) {
+                // 1. 이미 동일한 오른쪽(right) 화면에 실행 중이라면, 에러 공지 없이 조용히 리턴!
+                if (state.right && state.right.packageName === pkgName) {
+                    console.log(`[Launcher] ${pkgName} is already running on Right. Skipping redundant launch without Notice.`);
+                    return;
+                }
+                // 2. 반대쪽인 왼쪽(left) 화면에 이미 실행 중인 경우에만 고급 알림을 주고 차단!
+                if (state.left && state.left.packageName === pkgName) {
+                    showLauncherNotice('이미 왼쪽 화면(Primary)에서 실행 중인 앱입니다.');
+                    return;
+                }
+            } else {
+                // 3. 이미 동일한 왼쪽(left) 화면에 실행 중이라면, 에러 공지 없이 조용히 리턴!
+                if (state.left && state.left.packageName === pkgName) {
+                    console.log(`[Launcher] ${pkgName} is already running on Left. Skipping redundant launch without Notice.`);
+                    return;
+                }
+                // 4. 반대쪽인 오른쪽(right) 화면에 이미 실행 중인 경우에만 고급 알림을 주고 차단!
+                if (state.right && state.right.packageName === pkgName) {
+                    showLauncherNotice('이미 오른쪽 화면(Secondary)에서 실행 중인 앱입니다.');
+                    return;
+                }
             }
         }
 
@@ -2946,6 +3206,22 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (componentName) message.componentName = componentName;
 
                 controlSocket.send(JSON.stringify(message));
+
+                // Force an immediate keyframe request to set firstFrameReceived=true and dismiss loading overlay instantly
+                controlSocket.send(JSON.stringify({
+                    type: 'requestKeyframe',
+                    pane: isRight ? 'secondary' : 'primary'
+                }));
+                
+                // Delayed keyframe request to ensure perfect image sync when the launched app renders its UI
+                setTimeout(() => {
+                    if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
+                        controlSocket.send(JSON.stringify({
+                            type: 'requestKeyframe',
+                            pane: isRight ? 'secondary' : 'primary'
+                        }));
+                    }
+                }, 800);
 
                 if (codecMode === 'mjpeg') {
                     controlSocket.send(JSON.stringify({ type: 'codec', mode: 'mjpeg' }));
@@ -2987,6 +3263,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         clearFrameWatchdog();
         closeInputBubble(true);
         blurKeyboardProxy();
+        // Reset active display apps cleanly to match the server's home/launcher state
+        state.left = null;
+        state.right = null;
         disableBrowserSplit();
 
         // Toggle the unified side drawer launcher!
@@ -3112,14 +3391,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (!browserSplitState.swapped) {
                     // Left is Primary. Maximize Left means maximizing Primary.
                     console.log('[ExpandLeft] Maximizing Left (Primary).');
-                    disableBrowserSplit();
+                    disableBrowserSplit({ delayVisual: true });
                 } else {
                     // Left is Secondary. Maximize Left means promoting Secondary to Primary and maximizing.
                     console.log('[ExpandLeft] Promoting and maximizing Left (Secondary).');
                     const secondaryApp = state.right;
                     if (secondaryApp) {
-                        disableBrowserSplit({ notifyServer: false });
-                        launchApp(secondaryApp, false);
+                        promoteSecondaryToPrimary(secondaryApp);
                     }
                 }
             });
@@ -3155,14 +3433,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (browserSplitState.swapped) {
                     // Right is Primary. Maximize Right means maximizing Primary.
                     console.log('[ExpandRight] Maximizing Right (Primary).');
-                    disableBrowserSplit();
+                    disableBrowserSplit({ delayVisual: true });
                 } else {
                     // Right is Secondary. Maximize Right means promoting Secondary to Primary and maximizing.
                     console.log('[ExpandRight] Promoting and maximizing Right (Secondary).');
                     const secondaryApp = state.right;
                     if (secondaryApp) {
-                        disableBrowserSplit({ notifyServer: false });
-                        launchApp(secondaryApp, false);
+                        promoteSecondaryToPrimary(secondaryApp);
                     }
                 }
             });
@@ -3203,14 +3480,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (currentRatio >= 0.85) {
                 // Extreme drag right: Maximize Left (Primary) app to 100%
                 console.log('[SplitDivider] Dragged extreme right. Maximizing Primary app to 100%.');
-                disableBrowserSplit();
+                disableBrowserSplit({ delayVisual: true });
                 return;
             } else if (currentRatio <= 0.15) {
                 // Extreme drag left: Maximize Right (Secondary) app to 100% (Promote it to primary)
                 console.log('[SplitDivider] Dragged extreme left. Promoting and maximizing Secondary app.');
                 const secondaryApp = state.right;
                 if (secondaryApp) {
-                    disableBrowserSplit({ notifyServer: false });
+                    disableBrowserSplit({ notifyServer: false, delayVisual: true });
                     launchApp(secondaryApp, false);
                 }
                 return;
@@ -3233,7 +3510,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (splitCloseBtn) {
         splitCloseBtn.addEventListener('click', () => {
-            disableBrowserSplit();
+            disableBrowserSplit({ delayVisual: true });
         });
     }
 
@@ -3316,24 +3593,28 @@ document.addEventListener('DOMContentLoaded', async () => {
         sendViewportSize();
     });
 
-    try {
-        await initDecoder();
-        if (codecMode === 'mjpeg') {
-            // Open the control socket first so the `codec: mjpeg` preference
-            // reaches the server before the video socket starts streaming.
-            // Otherwise the server ships H.264 until it processes the switch,
-            // which an MJPEG decoder can't render.
-            connectControl();
-            await waitForControlSocketOpen(2000);
-            connectVideo();
-        } else {
-            connectVideo();
-            connectControl();
+    // Initialize decoder and stream sockets asynchronously to prevent blocking DOMContentLoaded / launcher-ready listeners
+    (async () => {
+        try {
+            await initDecoder();
+            if (codecMode === 'mjpeg') {
+                // Open the control socket first so the `codec: mjpeg` preference
+                // reaches the server before the video socket starts streaming.
+                // Otherwise the server ships H.264 until it processes the switch,
+                // which an MJPEG decoder can't render.
+                connectControl();
+                await waitForControlSocketOpen(2000);
+                connectVideo();
+            } else {
+                connectVideo();
+                connectControl();
+            }
+        } catch (e) {
+            console.error('[Main] Stream initialization failed:', e);
+            setStatus(e.message, 'error');
+            showOverlay();
         }
-    } catch (e) {
-        setStatus(e.message, 'error');
-        showOverlay();
-    }
+    })();
 
     audioPlayer = new AudioPlayer();
     const splashScreen = document.getElementById('splash-screen');
