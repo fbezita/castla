@@ -735,28 +735,53 @@ class MirrorForegroundService : Service() {
         try { mirrorServer?.stop() } catch (_: Exception) {}
         mirrorServer = null
 
+// ### 수정 시작 ###
         // 3. Clean up virtual displays, release hardware layers and associated tasks sequentially
         kotlinx.coroutines.runBlocking {
-            try { secondaryPipeline.release(forcePhysical = true) } catch (_: Exception) {}
-            try { removeAllVdTasks() } catch (_: Exception) {}
-            try { primaryPipeline.release(forcePhysical = true) } catch (_: Exception) {}
+            try {
+                kotlinx.coroutines.withTimeoutOrNull(1500L) {
+                    try { secondaryPipeline.release(forcePhysical = true) } catch (_: Exception) {}
+                }
+            } catch (_: Exception) {}
+
+            try {
+                kotlinx.coroutines.withTimeoutOrNull(1500L) {
+                    try { primaryPipeline.release(forcePhysical = true) } catch (_: Exception) {}
+                }
+            } catch (_: Exception) {}
+
+            // 4. Safely restore stay-awake properties, release virtual display controllers and unbind Shizuku
+            try {
+                kotlinx.coroutines.withTimeoutOrNull(1000L) {
+                    virtualDisplayManager?.getPrivilegedService()?.restoreStayAwakeMode()
+                }
+            } catch (_: Exception) {}
+
+            try {
+                kotlinx.coroutines.withTimeoutOrNull(1000L) {
+                    virtualDisplayManager?.release()
+                }
+            } catch (_: Exception) {}
+
+            try {
+                kotlinx.coroutines.withTimeoutOrNull(1000L) {
+                    shizukuSetup?.release()
+                }
+            } catch (_: Exception) {}
+
+            virtualDisplayManager = null
+            shizukuSetup = null
+
+            // 5. Finally close local dispatcher threads and cancel the service coroutine scope
+            try { serviceScope.cancel() } catch (_: Exception) {}
+            try { compositionDispatcher.close() } catch (_: Exception) {}
+            try { vdDispatcher.close() } catch (_: Exception) {}
+
+            instance = null
+            isCleanupInProgress = false
+            isServiceRunning = false
         }
-
-        // 4. Safely restore stay-awake properties, release virtual display controllers and unbind Shizuku
-        try { virtualDisplayManager?.getPrivilegedService()?.restoreStayAwakeMode() } catch (_: Exception) {}
-        try { virtualDisplayManager?.release() } catch (_: Exception) {}
-        try { shizukuSetup?.release() } catch (_: Exception) {}
-        virtualDisplayManager = null
-        shizukuSetup = null
-
-        // 5. Finally close local dispatcher threads and cancel the service coroutine scope
-        try { serviceScope.cancel() } catch (_: Exception) {}
-        try { compositionDispatcher.close() } catch (_: Exception) {}
-        try { vdDispatcher.close() } catch (_: Exception) {}
-
-        instance = null
-        isCleanupInProgress = false
-        isServiceRunning = false
+// ### 수정 끝 ###
     }
 
     private fun startPipeline(fps: Int, audioEnabled: Boolean) {
@@ -1745,6 +1770,7 @@ class MirrorForegroundService : Service() {
             }.trim()
         }
 
+// ### 수정 시작 ###
         suspend fun launchBrowser(url: String, sourceAppPackage: String? = null, allowFallback: Boolean = true) {
             val browser = BrowserResolver.resolve(this@MirrorForegroundService, url)
             val targetComponent = browser?.componentFlat ?: internalComponentName("com.castla.mirror.ui.WebBrowserActivity")
@@ -1754,6 +1780,27 @@ class MirrorForegroundService : Service() {
                 currentApp = targetComponent; currentWebUrl = url; isVideoApp = (browser != null)
                 if (isPrimary) {
                     activeSession = ActiveLaunchSession(if (browser != null) SessionMode.EXTERNAL_BROWSER else SessionMode.INTERNAL_WEBVIEW, targetComponent, url, sourceAppPackage)
+                    serviceScope.launch(Dispatchers.IO) {
+                        try {
+                            val oldId = displayId
+                            val w = if (requestedWidth > 0) requestedWidth else (if (width > 0) width else 1920)
+                            val h = if (requestedHeight > 0) requestedHeight else (if (height > 0) height else 1080)
+                            rebuild(w, h, force = true)
+                            val primaryVdId = displayId
+                            if (primaryVdId >= 0) {
+                                // Prevent redundant launch if restored content inside rebuild already launched the browser
+                                if (oldId < 0) {
+                                    Log.i(TAG, "[$name Pipeline] Skip redundant browser launch because virtual display was newly created and restored.")
+                                } else {
+                                    if (browser != null) {
+                                        virtualDisplayManager?.getPrivilegedService()?.execCommand(buildExternalBrowserCommand(primaryVdId, url, browser.componentFlat))
+                                    } else {
+                                        launchOwnActivity("com.castla.mirror.ui.WebBrowserActivity", url)
+                                    }
+                                }
+                            }
+                        } catch (_: Exception) {}
+                    }
                 } else {
                     serviceScope.launch(Dispatchers.IO) {
                         try {
@@ -1819,8 +1866,22 @@ class MirrorForegroundService : Service() {
                             }
                         } catch (_: Exception) {}
                     }
-                } else if (virtualDisplayManager?.hasVirtualDisplay() == true && currentVdId == virtualDisplayManager?.getDisplayId()) {
-                    serviceScope.launch { try { rebuild(width, height, force = true); launchComponent(resolvedTarget) } catch (_: Exception) {} }
+                } else {
+                    serviceScope.launch(Dispatchers.IO) {
+                        try {
+                            val oldId = displayId
+                            val w = if (requestedWidth > 0) requestedWidth else (if (width > 0) width else 1920)
+                            val h = if (requestedHeight > 0) requestedHeight else (if (height > 0) height else 1080)
+                            rebuild(w, h, force = true)
+                            // Prevent redundant launch: if the display was newly created,
+                            // restoreContentLocked inside rebuild already launched the app.
+                            if (oldId < 0 && displayId >= 0) {
+                                Log.i(TAG, "[$name Pipeline] Skip redundant launchComponent because virtual display was newly created and restored.")
+                            } else {
+                                launchComponent(resolvedTarget)
+                            }
+                        } catch (_: Exception) {}
+                    }
                 }
             } else {
                 currentApp = resolvedTarget; currentWebUrl = null; isVideoApp = false
@@ -1837,6 +1898,21 @@ class MirrorForegroundService : Service() {
                 currentApp = targetComponent; currentWebUrl = url; isVideoApp = false
                 if (isPrimary) {
                     activeSession = ActiveLaunchSession(SessionMode.INTERNAL_WEBVIEW, targetComponent, url)
+                    serviceScope.launch(Dispatchers.IO) {
+                        try {
+                            val oldId = displayId
+                            val w = if (requestedWidth > 0) requestedWidth else (if (width > 0) width else 1920)
+                            val h = if (requestedHeight > 0) requestedHeight else (if (height > 0) height else 1080)
+                            rebuild(w, h, force = true)
+                            // Prevent redundant launch: if the display was newly created,
+                            // restoreContentLocked inside rebuild already launched the activity.
+                            if (oldId < 0 && displayId >= 0) {
+                                Log.i(TAG, "[$name Pipeline] Skip redundant launchOwnActivity because virtual display was newly created and restored.")
+                            } else {
+                                launchOwnActivity(activityClassName, url)
+                            }
+                        } catch (_: Exception) {}
+                    }
                 } else {
                     serviceScope.launch(Dispatchers.IO) {
                         try {
@@ -1861,6 +1937,7 @@ class MirrorForegroundService : Service() {
             if (isPrimary) activeSession = ActiveLaunchSession(SessionMode.INTERNAL_WEBVIEW, targetComponent, url)
             rebalanceDualDisplayBitrates()
         }
+// ### 수정 끝 ###
 
         suspend fun launchAppFromWebLauncher(pkgName: String, componentName: String? = null) {
             if (pkgName.isBlank()) return
