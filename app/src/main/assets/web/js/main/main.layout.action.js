@@ -27,7 +27,7 @@ function lockBrowserSplitViewports(app = state.right) {
     leftLockedViewport = null;
   }
 
-  // ### 수정 시작 ###
+  
   // Automatically build secondary locked viewport since system is dual stream only.
   const secondaryHeight = shellHeight;
   if (secondaryWidth > 0 && secondaryHeight > 0) {
@@ -44,7 +44,7 @@ function lockBrowserSplitViewports(app = state.right) {
     //   `[ViewportLockDebug] Secondary lock skipped because secondaryWidth=${secondaryWidth} or secondaryHeight=${secondaryHeight}`,
     // );
   }
-  // ### 수정 끝 ###
+  
 }
 
 function updateSplitFitButton() {
@@ -88,11 +88,11 @@ function getDesiredSplitWidths(ratio = splitRatio) {
     };
   }
 
-  // ### 수정 시작 ###
+  
   // Relax minimum width constraints from 320px to 160px for extremely flexible resizing
   const minPrimaryWidth = 160;
   const minSecondaryWidth = 160;
-  // ### 수정 끝 ###
+  
   const desiredPrimaryWidth = Math.round(shellWidth * ratio);
   const maxPrimaryWidth = Math.max(
     minPrimaryWidth,
@@ -110,12 +110,12 @@ function getDesiredSplitWidths(ratio = splitRatio) {
 }
 
 function updateSplitToolbarVisibility() {
-  // ### 수정 시작 ###
+  
   // Reference splitToolbar and state from window scope to prevent ReferenceError under strict ESM modules
   const tb = window.splitToolbar;
   if (!tb) return;
   tb.style.display = !!window.state?.right ? "flex" : "none";
-  // ### 수정 끝 ###
+  
 }
 
 function setBrowserSplitRatio(nextRatio) {
@@ -206,7 +206,7 @@ async function updateLayoutUI() {
     if (window.secondaryTouchHandler) {
       window.secondaryTouchHandler.destroy();
     }
-    // ### 수정 시작 ###
+    
     // Guard: bind TouchHandler only if the secondary canvas element exists
     if (secondaryCanvas) {
       window.secondaryTouchHandler = new TouchHandler(
@@ -218,7 +218,7 @@ async function updateLayoutUI() {
     } else {
       console.warn("[Layout] secondaryCanvas element is missing. TouchHandler skipped.");
     }
-    // ### 수정 끝 ###
+    
     applyActiveFitModes();
     connectSecondaryVideo();
     requestAnimationFrame(() => sendViewportSize(true));
@@ -250,7 +250,7 @@ async function updateLayoutUI() {
     if (window.secondaryTouchHandler) {
       window.secondaryTouchHandler.destroy();
     }
-    // ### 수정 시작 ###
+    
     // Guard: bind TouchHandler only if the secondary canvas element exists
     if (secondaryCanvas) {
       window.secondaryTouchHandler = new TouchHandler(
@@ -262,7 +262,7 @@ async function updateLayoutUI() {
     } else {
       console.warn("[Layout] secondaryCanvas element is missing. TouchHandler skipped.");
     }
-    // ### 수정 끝 ###
+    
     applyActiveFitModes();
     connectSecondaryVideo();
     requestAnimationFrame(() => sendViewportSize(true));
@@ -320,14 +320,14 @@ function handleRendererResolutionChange(width, height) {
 }
 
 function executeVisualFullscreenLayout() {
-  // ### 수정 시작 ###
+  
   // Clear layout promotion lock and reset secondary app states
   window.pendingLayoutSwitch = null;
   window.isPromotingSecondary = false;
   if (window.state) {
     window.state.right = null;
   }
-  // ### 수정 끝 ###
+  
   window.playerShell?.classList.remove("browser-split");
   window.playerShell?.classList.remove("secondary-fullscreen");
   window.playerShell?.style.removeProperty("--split-left-width");
@@ -357,10 +357,10 @@ function disableBrowserSplit(options = {}) {
   const { notifyServer = true } = options;
   const wasActive = !!window.state?.right;
   
-  // ### 수정 시작 ###
+  
   // Clear any active promotion locks on browser split closure
   window.isPromotingSecondary = false;
-  // ### 수정 끝 ###
+  
   if (window.state) {
     window.state.right = null;
   }
@@ -406,7 +406,7 @@ function disableBrowserSplit(options = {}) {
   }
 }
 
-// ### 수정 시작 ###
+
 // Restore and optimize the stream quality and layout policy applicator
 function applyStreamPolicy(config = {}) {
   window.streamPolicy = {
@@ -428,7 +428,7 @@ function applyStreamPolicy(config = {}) {
     requestAnimationFrame(() => window.sendViewportSize());
   }
 }
-// ### 수정 끝 ###
+
 
 // Bind methods globally to window scope for seamless multi-module integration
 Object.assign(window, {
@@ -444,8 +444,8 @@ Object.assign(window, {
   handleRendererResolutionChange,
   executeVisualFullscreenLayout,
   disableBrowserSplit,
-  // ### 수정 시작 ###
+  
   // Globally expose applyStreamPolicy for launcher loader dispatcher
   applyStreamPolicy
-  // ### 수정 끝 ###
+  
 });

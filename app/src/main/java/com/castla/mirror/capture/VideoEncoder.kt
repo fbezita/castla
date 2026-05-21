@@ -196,7 +196,7 @@ class VideoEncoder(
         }
     }
 
-    // ### 수정 시작 ###
+    
     fun requestKeyFrame() {
         try {
             val params = Bundle().apply {
@@ -207,7 +207,7 @@ class VideoEncoder(
             Log.w(TAG, "Failed to request keyframe", e)
         }
     }
-    // ### 수정 끝 ###
+    
 
     fun setBitrate(bps: Int) {
         try {

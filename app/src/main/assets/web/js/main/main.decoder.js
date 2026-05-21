@@ -2,19 +2,16 @@
 // Strictly preserves 100% of the original logic, comments, and error handlers within the 300-line limit.
 
 async function initDecoder(preserveCache = false) {
-  console.log(
-    "[Main] Initializing decoders... preserveCache=",
-    preserveCache,
-  );
+  console.log("[Main] Initializing decoders... preserveCache=", preserveCache);
 
   if (typeof WebCodecs !== "undefined" || window.VideoDecoder) {
     console.log("[Main] Using WebCodecs Decoder");
     const renderer = new CanvasRenderer(canvas);
     renderer.setFitMode(getEffectivePrimaryFitMode());
-    // ### 수정 시작 ###
+
     // Hook the smooth layout resolution change callback
     renderer.onFrameResolutionChange = window.handleRendererResolutionChange;
-    // ### 수정 끝 ###
+    
 
     // Create frame pacer between decoder and renderer
     if (framePacer) framePacer.destroy();
@@ -22,17 +19,16 @@ async function initDecoder(preserveCache = false) {
     framePacer.setProfile(playbackProfile);
 
     // [SPS/PPS MIGRATION SAFEGUARD] Always migrate H.264 SPS/PPS parameters across decoder instances to prevent waiting deadlock
-    // ### 수정 시작 ###
-    const prevSpsPps = decoder ? decoder._cachedSpsPps : null;
-    // ### 수정 끝 ###
 
-    // ### 수정 시작 ###
+    const prevSpsPps = decoder ? decoder._cachedSpsPps : null;
+    
+
     // Destroy existing primary decoder cleanly to prevent GPU resource conflict & screen freezes
     if (decoder) {
       decoder.destroy?.();
       decoder = null;
     }
-    // ### 수정 끝 ###
+    
 
     decoder = new H264Decoder(
       (frame) => framePacer.push(frame),
@@ -45,7 +41,6 @@ async function initDecoder(preserveCache = false) {
     framePacer.setDecoder(decoder);
     decoder.renderer = renderer;
 
-    // ### 수정 시작 ###
     // Restore/migrate previous SPS/PPS cache only if appropriate
     if (prevSpsPps) {
       decoder._cachedSpsPps = prevSpsPps;
@@ -62,7 +57,7 @@ async function initDecoder(preserveCache = false) {
         "[Decoder] SPS/PPS cache cleared/reset for new resolution stream",
       );
     }
-    // ### 수정 끝 ###
+    
 
     await decoder.init(canvas);
     codecMode = "h264";
@@ -83,13 +78,13 @@ async function initDecoder(preserveCache = false) {
       (error) => console.error("[Main] Fallback error:", error),
     );
     await decoder.init(canvas);
-    // ### 수정 시작 ###
+
     // Hook the smooth layout resolution change callback on fallback decoder renderer
     if (decoder.renderer) {
       decoder.renderer.onFrameResolutionChange =
         window.handleRendererResolutionChange;
     }
-    // ### 수정 끝 ###
+    
     decoder.renderer?.setFitMode?.(getEffectivePrimaryFitMode());
     codecMode = "mjpeg";
     applyActiveFitModes();
@@ -108,9 +103,9 @@ async function initSecondaryDecoder(preserveCache = false) {
   if (!secondaryCanvas) return null;
 
   // [SPS/PPS MIGRATION SAFEGUARD] Always migrate H.264 SPS/PPS parameters across decoder instances to prevent waiting deadlock
-  // ### 수정 시작 ###
+
   const prevSpsPps = secondaryDecoder ? secondaryDecoder._cachedSpsPps : null;
-  // ### 수정 끝 ###
+  
 
   if (secondaryDecoder) {
     secondaryDecoder.destroy?.();
@@ -139,7 +134,6 @@ async function initSecondaryDecoder(preserveCache = false) {
     secondaryFramePacer.setDecoder(secondaryDecoder);
     secondaryDecoder.renderer = renderer;
 
-    // ### 수정 시작 ###
     // Restore/migrate previous SPS/PPS cache only if appropriate
     if (prevSpsPps) {
       secondaryDecoder._cachedSpsPps = prevSpsPps;
@@ -156,7 +150,7 @@ async function initSecondaryDecoder(preserveCache = false) {
         "[Decoder] Secondary SPS/PPS cache cleared/reset for new resolution stream",
       );
     }
-    // ### 수정 끝 ###
+    
 
     await secondaryDecoder.init(secondaryCanvas);
   } else if (typeof createImageBitmap !== "undefined") {
@@ -178,7 +172,6 @@ function connectSecondaryVideo(isHotRefresh = false) {
     } catch (_) {}
   }
 
-  // ### 수정 시작 ###
   // Reset sequence tracking but preserve the precious SPS/PPS cache if in hot-refresh mode
   if (!isHotRefresh) {
     window._lastSecondarySpsPps = null;
@@ -189,7 +182,7 @@ function connectSecondaryVideo(isHotRefresh = false) {
       secondaryDecoder._cachedSpsPps = null;
     }
   }
-  // ### 수정 끝 ###
+  
 
   const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const wsUrl = `${wsProtocol}//${host}/ws/video?channel=secondary`;
@@ -204,7 +197,6 @@ function connectSecondaryVideo(isHotRefresh = false) {
   };
   secondaryVideoSocket.onmessage = async (event) => {
     if (event.data instanceof ArrayBuffer) {
-      // ### 수정 시작 ###
       // Intercept H.264 Secondary SPS/PPS (flags=2) to safeguard against race conditions during decoder re-init
       if (event.data.byteLength >= 9) {
         const view = new DataView(event.data);
@@ -212,13 +204,16 @@ function connectSecondaryVideo(isHotRefresh = false) {
         if (flags === 0x02) {
           const spsPpsData = event.data.slice(8);
           window._lastSecondarySpsPps = spsPpsData;
-          console.log("[VideoSocket] Intercepted H.264 Secondary SPS/PPS packet. Size:", spsPpsData.byteLength);
+          console.log(
+            "[VideoSocket] Intercepted H.264 Secondary SPS/PPS packet. Size:",
+            spsPpsData.byteLength,
+          );
           if (secondaryDecoder) {
             secondaryDecoder._cachedSpsPps = spsPpsData;
           }
         }
       }
-      // ### 수정 끝 ###
+      
 
       if (secondaryDecoder) {
         secondaryDecoder.decode(event.data);
@@ -263,5 +258,5 @@ Object.assign(window, {
   initDecoder,
   initSecondaryDecoder,
   connectSecondaryVideo,
-  sendSecondaryLaunchRequest
+  sendSecondaryLaunchRequest,
 });

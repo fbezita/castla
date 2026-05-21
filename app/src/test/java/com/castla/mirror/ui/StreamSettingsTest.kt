@@ -22,21 +22,21 @@ class StreamSettingsTest {
     }
 
     @Test
-    fun `default settings are Auto`() {
+    fun `default settings are RES_720`() {
         val settings = StreamSettings()
-        assertEquals(StreamSettings.Resolution.AUTO, settings.maxResolution)
+        assertEquals(StreamSettings.Resolution.RES_720, settings.maxResolution)
         assertEquals(StreamSettings.FPS_AUTO, settings.fps)
-        assertTrue(settings.isAutoResolution)
+        assertFalse(settings.isAutoResolution)
         assertTrue(settings.isAutoFps)
         assertFalse(settings.audioEnabled)
     }
 
     @Test
-    fun `load returns Auto defaults when no saved settings`() {
+    fun `load returns RES_720 defaults when no saved settings`() {
         val settings = StreamSettings.load(context)
-        assertEquals(StreamSettings.Resolution.AUTO, settings.maxResolution)
+        assertEquals(StreamSettings.Resolution.RES_720, settings.maxResolution)
         assertEquals(StreamSettings.FPS_AUTO, settings.fps)
-        assertTrue(settings.isAutoResolution)
+        assertFalse(settings.isAutoResolution)
         assertTrue(settings.isAutoFps)
         assertFalse(settings.audioEnabled)
     }
@@ -72,7 +72,7 @@ class StreamSettingsTest {
         context.getSharedPreferences("castla_settings", Context.MODE_PRIVATE)
             .edit().putString("max_resolution", "INVALID_RES").commit()
         val loaded = StreamSettings.load(context)
-        assertEquals(StreamSettings.Resolution.AUTO, loaded.maxResolution)
+        assertEquals(StreamSettings.Resolution.RES_720, loaded.maxResolution)
     }
 
     @Test

@@ -13,7 +13,7 @@ function handleDragEnd(x, y) {
     checkHoveredZone,
     allApps,
     createAppPair,
-    triggerDropZoneAction
+    triggerDropZoneAction,
   } = window;
 
   if (!activeDragApp) return;
@@ -32,12 +32,12 @@ function handleDragEnd(x, y) {
   window.isFromSidebarDrag = false;
   window.shouldDeferDragOverlay = false;
   dragOverlay.classList.remove("active");
-  // ### 수정 시작 ###
+
   // Clean up Ghosting UI class on drag end to restore opacity
   if (splitDrawer) {
     splitDrawer.classList.remove("dragging-active");
   }
-  // ### 수정 끝 ###
+  
   if (dragGhost) {
     dragGhost.remove();
     window.dragGhost = null;
@@ -93,13 +93,8 @@ function handleDragEnd(x, y) {
 }
 
 function cancelDrag() {
-  const {
-    document,
-    activeDragApp,
-    dragOverlay,
-    dragGhost,
-    splitDrawer
-  } = window;
+  const { document, activeDragApp, dragOverlay, dragGhost, splitDrawer } =
+    window;
 
   if (!activeDragApp) return;
 
@@ -117,12 +112,12 @@ function cancelDrag() {
   window.isFromSidebarDrag = false;
   window.shouldDeferDragOverlay = false;
   dragOverlay.classList.remove("active");
-  // ### 수정 시작 ###
+
   // Clean up Ghosting UI class on drag cancel to restore opacity
   if (splitDrawer) {
     splitDrawer.classList.remove("dragging-active");
   }
-  // ### 수정 끝 ###
+  
   if (dragGhost) {
     dragGhost.remove();
     window.dragGhost = null;
@@ -164,7 +159,7 @@ function triggerDropZoneAction(zone, app, cell) {
     refreshLauncherUI,
     getFavorites,
     state,
-    launchApp
+    launchApp,
   } = window;
 
   if (app.isPair) {
@@ -199,9 +194,7 @@ function triggerDropZoneAction(zone, app, cell) {
     }
     // 2. 반대쪽인 오른쪽 화면에 이미 실행 중인 경우에만 경고 알림 후 리턴 차단!
     if (!!state.right && state.right && state.right.packageName === pkg) {
-      showLauncherNotice(
-        "이미 오른쪽 화면(Secondary)에서 실행 중인 앱입니다.",
-      );
+      showLauncherNotice("이미 오른쪽 화면(Secondary)에서 실행 중인 앱입니다.");
       return;
     }
     launchApp(app, false); // 반대쪽 실행 정보가 이미 채워져 있으므로 그대로 런칭!
@@ -235,8 +228,7 @@ function triggerDropZoneAction(zone, app, cell) {
       const leftPkg = localStorage.getItem("castla_autorun_primary");
       const rightPkg = localStorage.getItem("castla_autorun_secondary");
       if (leftPkg === pkg) localStorage.removeItem("castla_autorun_primary");
-      if (rightPkg === pkg)
-        localStorage.removeItem("castla_autorun_secondary");
+      if (rightPkg === pkg) localStorage.removeItem("castla_autorun_secondary");
       showLauncherNotice(`${app.label} removed from Auto-run.`);
     }
   }
@@ -246,5 +238,5 @@ function triggerDropZoneAction(zone, app, cell) {
 Object.assign(window, {
   handleDragEnd,
   cancelDrag,
-  triggerDropZoneAction
+  triggerDropZoneAction,
 });

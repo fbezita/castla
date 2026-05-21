@@ -36,7 +36,7 @@ function sendViewportSize(immediate = false) {
         ? leftLockedViewport
         : { width: livePrimaryWidth, height: livePrimaryHeight };
 
-    // ### 수정 시작 ###
+    
     // Send secondary viewport if dual display is active, otherwise reset secondary cache
     if (!!state.right && browserSplitPane) {
       const secondaryViewport = rightLockedViewport;
@@ -85,7 +85,7 @@ function sendViewportSize(immediate = false) {
         layoutMode: null,
       };
     }
-    // ### 수정 끝 ###
+    
 
     const primFitMode = getEffectivePrimaryFitMode();
     const primLayoutMode = streamPolicy.layoutMode;

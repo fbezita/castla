@@ -24,7 +24,7 @@ function scheduleReconnect() {
       console.log("[Main] Reconnecting video socket...");
       connectVideo();
     }
-    // ### 수정 시작 ###
+    
     // Reconnect secondary video socket when right app is active in dual mode
     if (
       !!state.right &&
@@ -35,7 +35,7 @@ function scheduleReconnect() {
       console.log("[Main] Reconnecting secondary video socket...");
       connectSecondaryVideo();
     }
-    // ### 수정 끝 ###
+    
     // Reconnect control socket only when the control socket itself is disconnected
     if (controlNeedsReconnect) {
       console.log("[Main] Reconnecting control socket...");
@@ -97,14 +97,14 @@ function handleControlMessage(msg) {
         `[Main] Server resolution changed pane=${pane} server=${msg.width}x${msg.height} fitMode=${fitMode} locked=${describeViewport(lockedViewport)} split=${!!state.right}`,
       );
 
-      // ### 수정 시작 ###
+      
       // Do NOT clear cached SPS/PPS to prevent WAITING_SPS_PPS waiting deadlock during resolution changes.
       // Since video streams are persistent, the server won't resend the configuration packet.
       // Keeping the old configuration parameters allows the newly initialized decoder to transition
       // to WAITING_KEYFRAME and DECODING immediately when the recovery keyframe arrives.
-      // ### 수정 끝 ###
+      
 
-      // ### 수정 시작 ###
+      
       // Safely hot-refresh the active decoder and instantly request a keyframe (0ms) to ensure zero freeze
       if (pane === "secondary") {
         if (!!state.right) {
@@ -167,7 +167,7 @@ function handleControlMessage(msg) {
           }, 150);
         });
       }
-      // ### 수정 끝 ###
+      
     } else if (msg.type === "showKeyboard") {
       console.log(
         "[IME] showKeyboard received pane=",
@@ -264,7 +264,7 @@ function connectControl() {
       controlSocket,
       "primary",
     );
-    // ### 수정 시작 ###
+    
     // Initialize touch handler for secondary display since system is dual stream only
     if (!!state.right && secondaryCanvas) {
       if (secondaryTouchHandler) secondaryTouchHandler.destroy();
@@ -275,14 +275,14 @@ function connectControl() {
         "secondary",
       );
     }
-    // ### 수정 끝 ###
+    
 
     // Send viewport IMMEDIATELY and BEFORE displayDensity so the
     // server knows the correct dimensions before density triggers a
     // force rebuild (which otherwise uses stale full-screen size).
     sendViewportSize(true);
 
-    // ### 수정 시작 ###
+    
     // Initialize secondary video and trigger launch since system is dual stream only
     if (!!state.right) {
       if (
@@ -293,7 +293,7 @@ function connectControl() {
       }
       setTimeout(() => sendSecondaryLaunchRequest(), 150);
     }
-    // ### 수정 끝 ###
+    
 
     if (codecMode === "mjpeg") {
       console.log(

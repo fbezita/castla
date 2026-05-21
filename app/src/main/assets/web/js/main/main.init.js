@@ -30,14 +30,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   window.splitDivider = document.getElementById("split-divider");
   window.splitCloseBtn = document.getElementById("split-close-btn");
   window.splitSwapBtn = document.getElementById("split-swap-btn");
-  // ### 수정 시작 ###
+  
   // Fetch correct secondary canvas element from index.html using the display-secondary ID
   window.secondaryCanvas = document.getElementById("display-secondary");
-  // ### 수정 끝 ###
-  // ### 수정 시작 ###
+  
+  
   // Bind splitToolbar to window scope for strict ESM module visibility
   window.splitToolbar = document.getElementById("split-pane-toolbar");
-  // ### 수정 끝 ###
+  
 
   // Destructure state references from window
   const {
@@ -89,10 +89,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     loadLauncherApps,
     updateSplitToolbarVisibility,
     applyActiveFitModes,
-    // ### 수정 시작 ###
+    
     // Destructure splitToolbar for local event handlers reference
     splitToolbar
-    // ### 수정 끝 ###
+    
   } = window;
 
   if (homeBtn) {
@@ -149,7 +149,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       { passive: true },
     );
 
-    // ### 수정 시작 ###
+    
     // Close split drawer when clicking or touching outside of the drawer area
     const handleOutsideTouchOrClick = (e) => {
       if (!splitDrawer.classList.contains("open")) return;
@@ -160,7 +160,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     document.addEventListener("click", handleOutsideTouchOrClick);
     document.addEventListener("touchstart", handleOutsideTouchOrClick, { passive: true });
-    // ### 수정 끝 ###
+    
   }
 
   // Split toolbar ratio selector bindings

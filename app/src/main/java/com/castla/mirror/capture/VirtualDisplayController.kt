@@ -168,12 +168,12 @@ class VirtualDisplayController(private val displayName: String) {
             return
         }
         try {
-            // ### 수정 시작 ###
+            
             // Wake up display instantly upon touch down to prevent black screens during drag-and-drop without ACTION_MOVE overhead.
             if (action == android.view.MotionEvent.ACTION_DOWN) {
                 svc.wakeUpDisplay(id)
             }
-            // ### 수정 끝 ###
+            
             svc.injectInput(id, action, x, y, pointerId)
         } catch (e: Exception) {
             Log.e(TAG, "[$displayName] Failed to inject input on display $id", e)
@@ -193,20 +193,20 @@ class VirtualDisplayController(private val displayName: String) {
             return
         }
         try {
-            // ### 수정 시작 ###
+            
             // Wake up display instantly upon touch down to strictly guarantee wake state while preventing ACTION_MOVE bottleneck.
             val action = event.actionMasked
             if (action == android.view.MotionEvent.ACTION_DOWN || 
                 action == android.view.MotionEvent.ACTION_POINTER_DOWN) {
                 svc.wakeUpDisplay(id)
             }
-            // ### 수정 끝 ###
+            
             svc.injectMotionEvent(id, event)
         } catch (e: Exception) {
             Log.e(TAG, "[$displayName] Failed to inject motion event on display $id", e)
         }
     }
-// ### 수정 끝 ###
+
 
     /** Launch the home screen on this managed virtual display. */
     fun launchHomeOnDisplay(): Boolean {

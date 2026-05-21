@@ -220,10 +220,10 @@
             background: rgba(20, 20, 30, 0.95);
             backdrop-filter: blur(10px);
             z-index: 600; /* Raised higher than dragOverlay (500) to allow unobstructed dragging & app pairing */
-            /* ### 수정 시작 ### */
+            
             /* Add opacity transition to smoothly fade in and out during drag actions */
             transition: right 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.3s ease;
-            /* ### 수정 끝 ### */
+            
             box-shadow: -4px 0 15px rgba(0,0,0,0.5);
             display: flex; /* keep as flex always, controlled by right slide */
             flex-direction: column;
@@ -233,14 +233,14 @@
         #split-drawer.open {
             right: 0;
         }
-        /* ### 수정 시작 ### */
+        
         /* Ghosting Style UX: When dragging active, make the drawer highly transparent and ignore pointer events */
         #split-drawer.dragging-active {
             opacity: 0.15 !important;
             pointer-events: none !important;
             box-shadow: none !important;
         }
-        /* ### 수정 끝 ### */
+        
 
         #split-handle {
             position: absolute;
@@ -1245,10 +1245,10 @@
                 <canvas id="display"></canvas>
                 <video id="mse-video" muted autoplay playsinline></video>
             </div>
-            <!-- ### 수정 시작 ### -->
+            
             <!-- Remove destructive aria-hidden to prevent focus blockade on descendant interactive buttons -->
             <div id="split-divider">
-            <!-- ### 수정 끝 ### -->
+            
                 <div class="split-control-pill">
                     <!-- Left Fullscreen -->
                     <button id="split-expand-left-btn" class="split-control-btn" title="Left Fullscreen">

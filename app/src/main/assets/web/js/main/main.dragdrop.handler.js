@@ -131,7 +131,7 @@ function updateDropZonePreviews() {
 }
 
 function handleDragMove(x, y) {
-  // ### 수정 시작 ###
+  
   // Fix TDZ ReferenceError by removing window from window destructuring assignment
   const {
     document,
@@ -150,7 +150,7 @@ function handleDragMove(x, y) {
     updateGhostPosition,
     splitDrawer
   } = window;
-  // ### 수정 끝 ###
+  
 
   if (!activeDragApp) return;
   updateGhostPosition(x, y);
@@ -163,10 +163,10 @@ function handleDragMove(x, y) {
         // 드로어 밖으로 이탈
         if (!dragOverlay.classList.contains("active")) {
           dragOverlay.classList.add("active");
-          // ### 수정 시작 ###
+          
           // Apply Ghosting UI by adding dragging-active class to the drawer
           drawerEl?.classList.add("dragging-active");
-          // ### 수정 끝 ###
+          
           const bottomWrap = document.getElementById("drag-row-bottom-wrap");
           if (bottomWrap) {
             bottomWrap.style.display = activeDragIsExisting ? "flex" : "none";
@@ -182,10 +182,10 @@ function handleDragMove(x, y) {
         // 드로어 안으로 진입/복귀
         if (dragOverlay.classList.contains("active")) {
           dragOverlay.classList.remove("active");
-          // ### 수정 시작 ###
+          
           // Remove Ghosting UI when cursor goes back into the drawer
           drawerEl?.classList.remove("dragging-active");
-          // ### 수정 끝 ###
+          
           console.log(
             "[DragAndDrop] Entered split drawer. Deactivated drag overlay.",
           );

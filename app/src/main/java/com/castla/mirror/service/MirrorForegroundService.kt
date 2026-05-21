@@ -177,7 +177,7 @@ class MirrorForegroundService : Service() {
     private val virtualDisplayHardwareMutex = Mutex()
     private val vdOperationGlobalMutex = Mutex()
 
-    // ### 수정 시작 ###
+    
     // Hardware request envelope to sequentialize all VirtualDisplay operations
     sealed class VdHardwareRequest {
         data class Rebuild(
@@ -191,7 +191,7 @@ class MirrorForegroundService : Service() {
 
     private val vdRequestChannel = kotlinx.coroutines.channels.Channel<VdHardwareRequest>(kotlinx.coroutines.channels.Channel.UNLIMITED)
     private var vdWorkerJob: Job? = null
-    // ### 수정 끝 ###
+    
 
     enum class PipelineState { IDLE, REBUILDING }
     data class RebuildRequest(val width: Int, val height: Int, val force: Boolean, val forceSingle: Boolean)
@@ -218,7 +218,7 @@ class MirrorForegroundService : Service() {
     val isRunning: Boolean get() = mirrorServer != null
     val isPanelOffSupported: Boolean get() = screenOffPolicy.isPanelOffSupported
 
-    // ### 수정 시작 ###
+    
     // Start sequential background worker loop to process all virtual display operations FIFO
     private fun startVdHardwareWorker() {
         vdWorkerJob?.cancel()
@@ -245,7 +245,7 @@ class MirrorForegroundService : Service() {
             }
         }
     }
-    // ### 수정 끝 ###
+    
 
     private fun logScreenState(event: String) {
         val keyguardLocked = keyguardManager.isKeyguardLocked
@@ -287,10 +287,10 @@ class MirrorForegroundService : Service() {
         super.onCreate()
         Log.i(TAG, "onCreate() - Initializing Symmetrical Pipeline Context Map Pool")
         
-        // ### 수정 시작 ###
+        
         // Start the sequential hardware worker to handle rebuild tasks sequentially
         startVdHardwareWorker()
-        // ### 수정 끝 ###
+        
         
         pipelines["primary"] = MirroringPipeline("primary", "Castla")
         pipelines["secondary"] = MirroringPipeline("secondary", "Castla_Sec")
@@ -357,11 +357,11 @@ class MirrorForegroundService : Service() {
     override fun onDestroy() {
         Log.i(TAG, "onDestroy() - Service is being destroyed by stopService() or system.")
         
-        // ### 수정 시작 ###
+        
         // Terminate the sequential virtual display hardware worker loop
         vdWorkerJob?.cancel()
         vdWorkerJob = null
-        // ### 수정 끝 ###
+        
         
         screenOffReceiver?.let { receiver ->
             try {
@@ -914,7 +914,7 @@ class MirrorForegroundService : Service() {
     private fun handleShizukuReconnect(setup: ShizukuSetup) {
         if (!browserConnected) return
         val svc = setup.privilegedService ?: return
-        // ### 수정 시작 ###
+        
         // Re-register Binder Death Token upon reconnection to prevent virtual display leaks if the app is forcefully killed afterward
         try {
             svc.registerDeathToken(binder)
@@ -922,7 +922,7 @@ class MirrorForegroundService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "[Shizuku Safeguard] Failed to re-register Binder Death Token during reconnect", e)
         }
-        // ### 수정 끝 ###
+        
         Log.i(TAG, "[Shizuku] Privileged core reconnected. Restoring context mappings symmetrically.")
         pipelines.values.forEach { it.controller.attachPrivilegedService(svc) }
         
@@ -1215,13 +1215,13 @@ class MirrorForegroundService : Service() {
 
         var width = 0; var height = 0; var displayId = -1
         val vdGeneration = java.util.concurrent.atomic.AtomicLong(0)
-        // ### 수정 시작 ###
+        
         // Timestamp of the last processed keyframe request to prevent coroutine and binder flood
         @Volatile var lastKeyframeRequestTime = 0L
         // Backup fields to remember the last valid viewport dimensions for self-healing recovery
         @Volatile var lastValidWidth: Int = 384
         @Volatile var lastValidHeight: Int = 672
-        // ### 수정 끝 ###
+        
 
         var videoEncoder: VideoEncoder? = null; var jpegEncoder: JpegEncoder? = null; var currentEncoderSurface: Surface? = null
         var pipelineState = PipelineState.IDLE; var pendingRebuildRequest: RebuildRequest? = null
@@ -1244,17 +1244,17 @@ class MirrorForegroundService : Service() {
                 Log.w(TAG, "[$name Pipeline] Viewport parameters shrunk below zero boundary -> Destroying graphics surface context.")
                 resizeJob?.cancel(); serviceScope.launch { release() }; return 
             }
-            // ### 수정 시작 ###
+            
             // Cache the latest valid viewport sizes for runtime self-healing recovery
             lastValidWidth = w
             lastValidHeight = h
-            // ### 수정 끝 ###
+            
             requestedWidth = w; requestedHeight = h
             resizeJob?.cancel()
             resizeJob = serviceScope.launch { kotlinx.coroutines.delay(500L); rebuild(w, h, forceSingle = (layoutMode == "single")) }
         }
 
-        // ### 수정 시작 ###
+        
         // Rebuild is now non-blocking and queues the request to the sequential hardware worker
         suspend fun rebuild(newWidth: Int, newHeight: Int, force: Boolean = false, forceSingle: Boolean = false) {
             if (isAppLaunchingContext || newWidth <= 0 || newHeight <= 0) return
@@ -1283,7 +1283,7 @@ class MirrorForegroundService : Service() {
             val surface = if (currentCodecMode == "mjpeg") {
                 val jpeg = JpegEncoder(w, h, fps = 15, quality = 65); val inputSurface = jpeg.createInputSurface(); jpegEncoder = jpeg
                 startEncoderTask = { jpeg.start { data, key -> mirrorServer?.broadcastFrame(data, key, name) } }
-                // ### 수정 시작 ###
+                
                 // Throttle keyframe requests to once per 1000ms to prevent duplicate wakeup calls and binder bottlenecks
                 mirrorServer?.setKeyframeRequester(name) {
                     val now = System.currentTimeMillis()
@@ -1296,13 +1296,13 @@ class MirrorForegroundService : Service() {
                         } catch (_: Exception) {}
                     }
                 }
-                // ### 수정 끝 ###
+                
                 inputSurface
             } else {
                 val encoder = VideoEncoder(w, h, calculatedBitrate, thermalFpsOverride ?: targetFps); val inputSurface = encoder.createInputSurface(); videoEncoder = encoder
                 encoder.onSpsPps = { mirrorServer?.broadcastSpsPps(it, name) }
                 startEncoderTask = { encoder.start { data, key -> mirrorServer?.broadcastFrame(data, key, name) } }
-                // ### 수정 시작 ###
+                
                 // Throttle keyframe requests to once per 1000ms to prevent duplicate wakeup/touch injector coroutine flood and binder bottlenecks
                 mirrorServer?.setKeyframeRequester(name) {
                     val now = System.currentTimeMillis()
@@ -1326,7 +1326,7 @@ class MirrorForegroundService : Service() {
                         }
                     }
                 }
-                // ### 수정 끝 ###
+                
                 inputSurface
             }
 
@@ -1385,7 +1385,7 @@ class MirrorForegroundService : Service() {
                                 delay(100)
                                 runBinderSafe { controller.keepDisplayAwake() }
 
-                                // ### 수정 시작 ###
+                                
                                 // Symmetrical wakeup guard on initial VirtualDisplay mount to clear early STATE_OFF
                                 try {
                                     controller.getPrivilegedService()?.wakeUpDisplay(newActiveId)
@@ -1395,7 +1395,7 @@ class MirrorForegroundService : Service() {
                                 } catch (e: Exception) {
                                     Log.w(TAG, "[$name Pipeline] Failed to trigger early wakeup guard", e)
                                 }
-                                // ### 수정 끝 ###
+                                
 
                                 if (currentApp.isBlank()) {
                                     currentApp = "HOME"
@@ -1443,7 +1443,7 @@ class MirrorForegroundService : Service() {
             val cleanPkg = packageOrComponent.substringBefore('/').substringBefore('?').substringBefore(' ').trim()
             if (cleanPkg.isBlank() || cleanPkg == packageName || cleanPkg.contains("com.castla.mirror")) return@withContext false
             
-            // ### 수정 시작 ###
+            
             // Self-healing: restore released graphics pipelines before shifting app focus
             if (videoEncoder == null || width <= 1) {
                 val targetW = if (lastValidWidth > 0) lastValidWidth else 384
@@ -1452,7 +1452,7 @@ class MirrorForegroundService : Service() {
                 rebuild(targetW, targetH)
                 delay(400) // Yield control briefly for the sequential worker to initialize surfaces
             }
-            // ### 수정 끝 ###
+            
 
             val correctedDisplayId = if (displayId >= 0) displayId else controller.getDisplayId()
             if (correctedDisplayId < 0) return@withContext false

@@ -31,7 +31,7 @@ async function launchDualAppsDirectly(primaryApp, secondaryApp) {
     connectSecondaryVideo,
     sendViewportSize,
     sendControlMessage,
-    setTimeout
+    setTimeout,
   } = window;
 
   console.log(
@@ -119,7 +119,7 @@ function launchAppPair(leftPkg, rightPkg) {
     state,
     updateLayoutUI,
     launchApp,
-    setTimeout
+    setTimeout,
   } = window;
 
   console.log(
@@ -243,7 +243,7 @@ function launchApp(app, isRight = false, forceLaunch = false) {
     hideOverlay,
     showOverlay,
     setStatus,
-    setTimeout
+    setTimeout,
   } = window;
 
   if (app.isPair) {
@@ -377,7 +377,7 @@ function goHome() {
     splitDrawer,
     homeBtn,
     hideOverlay,
-    sendControlMessage
+    sendControlMessage,
   } = window;
 
   collapseOverlayMenu();
@@ -400,19 +400,34 @@ function goHome() {
   sendControlMessage({ type: "goHome" });
 }
 
-// ### 수정 시작 ###
-// Promote secondary app to primary stream and transition to fullscreen primary layout
-function promoteSecondaryToPrimary(secondaryApp) {
-  const { console, playerShell, sendControlMessage } = window;
+// Promote secondary app to primary stream and transition to fullscreen primary layout cleanly
+async function promoteSecondaryToPrimary(secondaryApp) {
+  const { console, playerShell, sendControlMessage, initDecoder, canvas } =
+    window;
   if (!secondaryApp) return;
   console.log(
     `[Promotion] Promoting secondary app to primary: ${secondaryApp.packageName}`,
   );
-  // ### 수정 시작 ###
-  // Set layout transition expectations and lock immediate updates
+
+  // Instantly migrate SPS/PPS parameter cache to avoid WAITING_SPS_PPS deadlocks
+  if (window.secondaryDecoder && window.secondaryDecoder._cachedSpsPps) {
+    window._lastSpsPps = window.secondaryDecoder._cachedSpsPps;
+  } else if (window._lastSecondarySpsPps) {
+    window._lastSpsPps = window._lastSecondarySpsPps;
+  }
+
+  // Set transition expectations, backup target app, and trigger UI Transition Shield
   window.pendingLayoutSwitch = "single";
   window.isPromotingSecondary = true;
-  // ### 수정 끝 ###
+  window._promotedApp = secondaryApp;
+  window.firstFrameReceived = false;
+  if (canvas) canvas.style.opacity = "0";
+
+  // Hot-reboot the primary decoder and frame pacer to wipe out obsolete sequences and timings
+  if (typeof initDecoder === "function") {
+    await initDecoder(true);
+  }
+
   playerShell?.classList.add("secondary-fullscreen");
 
   // Send launchApp request on primary pane to trigger server-side transition
@@ -428,7 +443,7 @@ function promoteSecondaryToPrimary(secondaryApp) {
     pane: "primary",
   });
 }
-// ### 수정 끝 ###
+
 
 // Bind methods globally to window scope for seamless multi-module integration
 Object.assign(window, {
@@ -437,8 +452,8 @@ Object.assign(window, {
   launchApp,
   clearCanvas,
   goHome,
-  // ### 수정 시작 ###
+
   // Expose promoteSecondaryToPrimary globally
-  promoteSecondaryToPrimary
-  // ### 수정 끝 ###
+  promoteSecondaryToPrimary,
+  
 });

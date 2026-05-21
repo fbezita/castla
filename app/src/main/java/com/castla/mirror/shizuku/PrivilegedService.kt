@@ -48,10 +48,22 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
     private val virtualDisplays = mutableMapOf<Int, VirtualDisplay>()
     private val virtualDisplayNames = mutableMapOf<Int, String>()
-    // ### 수정 시작 ###
+    
     // Cache map to throttle heavy dumpsys shell commands for each displayId
     private val lastWakeUpTimeMap = ConcurrentHashMap<Int, Long>()
-    // ### 수정 끝 ###
+
+    // Fields for Direct Binder API reflection caching
+    private var activityManagerInstance: Any? = null
+    private var windowManagerInstance: Any? = null
+    private var forceStopPackageMethod: Method? = null
+    private var setForcedDisplaySizeMethod: Method? = null
+    private var setForcedDisplayDensityForUserMethod: Method? = null
+    private var clearForcedDisplaySizeMethod: Method? = null
+    private var clearForcedDisplayDensityForUserMethod: Method? = null
+    
+    private var activityTaskManagerInstance: Any? = null
+    private var startActivityMethod: Method? = null
+    
     private var inputManagerInstance: Any? = null
     private var injectMethod: Method? = null
     private var shellContext: android.content.Context? = null
@@ -64,10 +76,17 @@ class PrivilegedService : IPrivilegedService.Stub() {
         MotionEvent.PointerCoords().apply { pressure = 1.0f; size = 1.0f }
     )
     private var setDisplayIdMethod: Method? = null
+    
+    private var setKeyEventDisplayIdMethod: Method? = null
+    
 
     init {
         tryInitInputManager()
         tryInitShellContext()
+        
+        // Pre-initialize system binders for activity manager and window manager
+        tryInitSystemServices()
+        
         // Must run AFTER shell context init so ActivityThread state is prepared. This makes
         // any subsequent AudioRecord/AudioTrack use packageName="com.android.shell"
         // matching our shell uid 2000 — required for AudioFlinger's attribution validator.
@@ -185,8 +204,18 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 null
             }
 
+            
+            // Create a proper package context for "com.android.shell" to align our identity
+            // with shell UID 2000, resolving SecurityException when starting activities.
+            val rawShellContext = try {
+                systemContext.createPackageContext("com.android.shell", 0)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to create package context for com.android.shell, falling back to systemContext", e)
+                systemContext
+            }
+
             // Wrap with "com.android.shell" package name to match Shizuku uid 2000
-            shellContext = object : android.content.ContextWrapper(systemContext) {
+            shellContext = object : android.content.ContextWrapper(rawShellContext) {
                 override fun getPackageName(): String = "com.android.shell"
                 override fun getOpPackageName(): String = "com.android.shell"
                 override fun getAttributionTag(): String? = null
@@ -195,6 +224,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     return super.getAttributionSource()
                 }
             }
+            
             Log.i(TAG, "Shell context initialized: pkg=${shellContext?.packageName}, attr=${shellAttribution != null}")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to init shell context", e)
@@ -216,6 +246,150 @@ class PrivilegedService : IPrivilegedService.Stub() {
             Log.e(TAG, "Failed to init InputManager", e)
         }
     }
+
+    
+    // Initialize standard system services natively via reflection to bypass shell
+    private fun tryInitSystemServices() {
+        try {
+            val smClass = Class.forName("android.os.ServiceManager")
+            val getService = smClass.getMethod("getService", String::class.java)
+
+            // Cache ActivityManager binder interface
+            try {
+                val amBinder = getService.invoke(null, "activity") as? android.os.IBinder
+                if (amBinder != null) {
+                    val amClass = Class.forName("android.app.IActivityManager\$Stub")
+                    val asInterface = amClass.getMethod("asInterface", android.os.IBinder::class.java)
+                    activityManagerInstance = asInterface.invoke(null, amBinder)
+                    forceStopPackageMethod = activityManagerInstance?.javaClass?.getMethod(
+                        "forceStopPackage",
+                        String::class.java,
+                        Int::class.javaPrimitiveType
+                    )
+                    Log.i(TAG, "IActivityManager reflection binder successfully prepared")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to prepare IActivityManager binder interface", e)
+            }
+
+            
+            // Cache ActivityTaskManager binder interface
+            try {
+                val atmBinder = getService.invoke(null, "activity_task") as? android.os.IBinder
+                if (atmBinder != null) {
+                    val atmClass = Class.forName("android.app.IActivityTaskManager\$Stub")
+                    val asInterface = atmClass.getMethod("asInterface", android.os.IBinder::class.java)
+                    activityTaskManagerInstance = asInterface.invoke(null, atmBinder)
+                    
+                    val atmInterface = activityTaskManagerInstance?.javaClass
+                    startActivityMethod = atmInterface?.methods?.find { m ->
+                        m.name == "startActivity" && m.parameterTypes.size in 10..12
+                    }
+                    if (startActivityMethod != null) {
+                        Log.i(TAG, "IActivityTaskManager reflection binder successfully prepared (params=${startActivityMethod?.parameterTypes?.size})")
+                    } else {
+                        Log.w(TAG, "IActivityTaskManager.startActivity method not found")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to prepare IActivityTaskManager binder interface", e)
+            }
+            
+
+            // Cache WindowManager binder interface
+            try {
+                val wmBinder = getService.invoke(null, "window") as? android.os.IBinder
+                if (wmBinder != null) {
+                    val wmClass = Class.forName("android.view.IWindowManager\$Stub")
+                    val asInterface = wmClass.getMethod("asInterface", android.os.IBinder::class.java)
+                    windowManagerInstance = asInterface.invoke(null, wmBinder)
+                    
+                    val wmInterface = windowManagerInstance?.javaClass
+                    setForcedDisplaySizeMethod = wmInterface?.getMethod(
+                        "setForcedDisplaySize",
+                        Int::class.javaPrimitiveType,
+                        Int::class.javaPrimitiveType,
+                        Int::class.javaPrimitiveType
+                    )
+                    setForcedDisplayDensityForUserMethod = wmInterface?.getMethod(
+                        "setForcedDisplayDensityForUser",
+                        Int::class.javaPrimitiveType,
+                        Int::class.javaPrimitiveType,
+                        Int::class.javaPrimitiveType
+                    )
+                    clearForcedDisplaySizeMethod = wmInterface?.getMethod(
+                        "clearForcedDisplaySize",
+                        Int::class.javaPrimitiveType
+                    )
+                    clearForcedDisplayDensityForUserMethod = wmInterface?.getMethod(
+                        "clearForcedDisplayDensityForUser",
+                        Int::class.javaPrimitiveType,
+                        Int::class.javaPrimitiveType
+                    )
+                    Log.i(TAG, "IWindowManager reflection binder successfully prepared")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to prepare IWindowManager binder interface", e)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to initialize system services reflection cache", e)
+        }
+    }
+
+    // Force stop package natively using IActivityManager to achieve 0ms latency
+    private fun nativeForceStop(pkg: String) {
+        if (pkg.isEmpty() || pkg == "com.castla.mirror" || pkg == "com.castla.mirror.debug" || pkg.startsWith("com.castla.mirror")) {
+            return
+        }
+        try {
+            if (activityManagerInstance != null && forceStopPackageMethod != null) {
+                forceStopPackageMethod?.invoke(activityManagerInstance, pkg, 0)
+                Log.i(TAG, "Natively force-stopped package $pkg via binder")
+            } else {
+                execCommand("am force-stop $pkg")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Native forceStopPackage failed, falling back to shell command", e)
+            try { execCommand("am force-stop $pkg") } catch (_: Exception) {}
+        }
+    }
+
+    
+    // Start activity natively via IActivityTaskManager to bypass OS package matching restrictions
+    private fun nativeStartActivity(intent: Intent, options: android.os.Bundle?): Boolean {
+        val atm = activityTaskManagerInstance ?: return false
+        val method = startActivityMethod ?: return false
+        return try {
+            val resolvedType = shellContext?.contentResolver?.let { intent.resolveTypeIfNeeded(it) }
+            val paramTypes = method.parameterTypes
+            val args = arrayOfNulls<Any>(paramTypes.size)
+            for (i in paramTypes.indices) {
+                val type = paramTypes[i]
+                when {
+                    type == android.content.Intent::class.java -> args[i] = intent
+                    type == android.os.Bundle::class.java -> args[i] = options
+                    type == String::class.java -> {
+                        args[i] = null
+                    }
+                    type == Int::class.javaPrimitiveType -> args[i] = 0
+                }
+            }
+            if (paramTypes.size == 10) {
+                args[1] = "com.android.shell"
+                args[3] = resolvedType
+            } else if (paramTypes.size >= 11) {
+                args[1] = "com.android.shell"
+                args[4] = resolvedType
+            }
+            method.invoke(atm, *args)
+            Log.i(TAG, "Natively started activity via IActivityTaskManager with com.android.shell")
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to start activity natively", e)
+            false
+        }
+    }
+    
 
     override fun createVirtualDisplay(width: Int, height: Int, dpi: Int, name: String): Int {
         val existingDisplayIds = virtualDisplayNames
@@ -613,16 +787,46 @@ class PrivilegedService : IPrivilegedService.Stub() {
         }.trim()
     }
 
+    
     override fun launchAppOnDisplay(displayId: Int, packageName: String) {
         try {
             val pkg = if (packageName.contains("/")) packageName.substringBefore("/") else packageName
-            if (pkg.isNotEmpty() && pkg != "com.castla.mirror" && pkg != "com.castla.mirror.debug" && !pkg.startsWith("com.castla.mirror")) {
-                Log.i(TAG, "Force-stopping $pkg before launching on display $displayId to prevent task duplication")
-                execCommand("am force-stop $pkg")
+            nativeForceStop(pkg)
+
+            val resolvedComponent = resolveLaunchComponent(packageName)
+            val intent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_LAUNCHER)
+                if (resolvedComponent != null) {
+                    component = ComponentName.unflattenFromString(resolvedComponent)
+                } else {
+                    `package` = packageName
+                }
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
             }
-            val cmd = buildLaunchCommand(displayId, packageName)
-            execCommand(cmd)
-            Log.i(TAG, "Launched $packageName on display $displayId")
+
+            val options = android.app.ActivityOptions.makeBasic()
+            try {
+                val setLaunchDisplayId = options.javaClass.getMethod("setLaunchDisplayId", Int::class.javaPrimitiveType)
+                setLaunchDisplayId.invoke(options, displayId)
+            } catch (e: Exception) {
+                Log.w(TAG, "setLaunchDisplayId option failed to apply", e)
+            }
+
+            
+            val started = nativeStartActivity(intent, options.toBundle())
+            if (started) {
+                Log.i(TAG, "Natively launched app $packageName on display $displayId via IActivityTaskManager")
+            } else {
+                try {
+                    shellContext?.startActivity(intent, options.toBundle())
+                    Log.i(TAG, "Natively launched app $packageName on display $displayId with 0ms delay")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Native launchAppOnDisplay failed, falling back to shell executor", e)
+                    val cmd = buildLaunchCommand(displayId, packageName)
+                    execCommand(cmd)
+                }
+            }
+            
         } catch (e: SecurityException) {
             Log.e(TAG, "Failed to launch $packageName on display $displayId (display not found?)", e)
             throw e
@@ -634,13 +838,43 @@ class PrivilegedService : IPrivilegedService.Stub() {
     override fun launchAppWithExtraOnDisplay(displayId: Int, packageName: String, extraKey: String, extraValue: String) {
         try {
             val pkg = if (packageName.contains("/")) packageName.substringBefore("/") else packageName
-            if (pkg.isNotEmpty() && pkg != "com.castla.mirror" && pkg != "com.castla.mirror.debug" && !pkg.startsWith("com.castla.mirror")) {
-                Log.i(TAG, "Force-stopping $pkg before launching on display $displayId to prevent task duplication")
-                execCommand("am force-stop $pkg")
+            nativeForceStop(pkg)
+
+            val resolvedComponent = resolveLaunchComponent(packageName)
+            val intent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_LAUNCHER)
+                if (resolvedComponent != null) {
+                    component = ComponentName.unflattenFromString(resolvedComponent)
+                } else {
+                    `package` = packageName
+                }
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+                putExtra(extraKey, extraValue)
             }
-            val cmd = buildLaunchCommand(displayId, packageName, extraKey, extraValue)
-            execCommand(cmd)
-            Log.i(TAG, "Launched $packageName with extra on display $displayId")
+
+            val options = android.app.ActivityOptions.makeBasic()
+            try {
+                val setLaunchDisplayId = options.javaClass.getMethod("setLaunchDisplayId", Int::class.javaPrimitiveType)
+                setLaunchDisplayId.invoke(options, displayId)
+            } catch (e: Exception) {
+                Log.w(TAG, "setLaunchDisplayId option failed to apply", e)
+            }
+
+            
+            val started = nativeStartActivity(intent, options.toBundle())
+            if (started) {
+                Log.i(TAG, "Natively launched app $packageName with extras on display $displayId via IActivityTaskManager")
+            } else {
+                try {
+                    shellContext?.startActivity(intent, options.toBundle())
+                    Log.i(TAG, "Natively launched app $packageName with extras on display $displayId with 0ms delay")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Native launchAppWithExtraOnDisplay failed, falling back to shell executor", e)
+                    val cmd = buildLaunchCommand(displayId, packageName, extraKey, extraValue)
+                    execCommand(cmd)
+                }
+            }
+            
         } catch (e: SecurityException) {
             Log.e(TAG, "Failed to launch $packageName with extra on display $displayId (display not found?)", e)
             throw e
@@ -651,32 +885,87 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
     override fun launchHomeOnDisplay(displayId: Int) {
         try {
-            // Instead of just sending HOME keyevent (which causes apps to be reparented
-            // to display 0 if no launcher exists on the VD), we explicitly start
-            // our own Secondary Home activity on the target display.
-            val cmd = "am start --display $displayId -n com.castla.mirror/.ui.VirtualDisplayHomeActivity"
-            execCommand(cmd)
-            Log.i(TAG, "Launched custom HOME on display $displayId: $cmd")
+            val intent = Intent().apply {
+                component = ComponentName("com.castla.mirror", "com.castla.mirror.ui.VirtualDisplayHomeActivity")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+            }
+            val options = android.app.ActivityOptions.makeBasic()
+            try {
+                options.javaClass.getMethod("setLaunchDisplayId", Int::class.javaPrimitiveType).invoke(options, displayId)
+            } catch (_: Exception) {}
+
+            
+            val started = nativeStartActivity(intent, options.toBundle())
+            if (started) {
+                Log.i(TAG, "Natively launched VirtualDisplayHomeActivity on display $displayId via IActivityTaskManager")
+            } else {
+                try {
+                    shellContext?.startActivity(intent, options.toBundle())
+                    Log.i(TAG, "Natively launched VirtualDisplayHomeActivity on display $displayId with 0ms delay")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Native launch home failed, falling back to shell am start", e)
+                    val cmd = "am start --display $displayId -n com.castla.mirror/.ui.VirtualDisplayHomeActivity"
+                    execCommand(cmd)
+                }
+            }
+            
         } catch (e: Exception) {
             Log.e(TAG, "Failed to launch custom HOME on display $displayId", e)
-            // Fallback to keyevent 3
-            try { execCommand("input -d $displayId keyevent 3") } catch (_: Exception) {}
+            
+            // Inject KEYCODE_HOME (3) directly into the virtual display to bypass shell fork
+            try {
+                val now = SystemClock.uptimeMillis()
+                val downEvent = android.view.KeyEvent(now, now, android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_HOME, 0, 0, android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD)
+                val upEvent = android.view.KeyEvent(now, now, android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_HOME, 0, 0, android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD)
+
+                if (setKeyEventDisplayIdMethod == null) {
+                    setKeyEventDisplayIdMethod = android.view.KeyEvent::class.java.getMethod(
+                        "setDisplayId", Int::class.javaPrimitiveType
+                    )
+                }
+                setKeyEventDisplayIdMethod?.invoke(downEvent, displayId)
+                injectMethod?.invoke(inputManagerInstance, downEvent, 0)
+
+                setKeyEventDisplayIdMethod?.invoke(upEvent, displayId)
+                injectMethod?.invoke(inputManagerInstance, upEvent, 0)
+                Log.i(TAG, "Injected KEYCODE_HOME (3) natively on display $displayId")
+            } catch (ex: Exception) {
+                Log.w(TAG, "Direct KEYCODE_HOME injection failed, falling back to legacy shell", ex)
+                try { execCommand("input -d $displayId keyevent 3") } catch (_: Exception) {}
+            }
+            
         }
     }
+    
 
+    
     override fun injectText(text: String, displayId: Int) {
         if (text.isEmpty()) return
         val isAsciiOnly = text.all { it.code < 128 }
         if (isAsciiOnly) {
             try {
-                val escaped = text.replace("%", "%%").replace("'", "'\\''").replace(" ", "%s")
-                val cmd = if (displayId > 0) "input -d $displayId text '$escaped'" else "input text '$escaped'"
-                execCommand(cmd)
+                val charMap = android.view.KeyCharacterMap.load(android.view.KeyCharacterMap.VIRTUAL_KEYBOARD)
+                val events = charMap.getEvents(text.toCharArray())
+                
+                if (events != null) {
+                    if (setKeyEventDisplayIdMethod == null) {
+                        setKeyEventDisplayIdMethod = android.view.KeyEvent::class.java.getMethod(
+                            "setDisplayId", Int::class.javaPrimitiveType
+                        )
+                    }
+                    for (event in events) {
+                        setKeyEventDisplayIdMethod?.invoke(event, displayId)
+                        injectMethod?.invoke(inputManagerInstance, event, 0)
+                    }
+                    return
+                }
+                
             } catch (e: Exception) {
-                Log.e(TAG, "Shell text injection failed", e)
+                Log.w(TAG, "KeyCharacterMap conversion failed, falling back to clipboard", e)
             }
-            return
         }
+
+        // Native Clipboard + 0ms paste key event injection without shell interaction
         try {
             val smClass = Class.forName("android.os.ServiceManager")
             val getService = smClass.getMethod("getService", String::class.java)
@@ -698,29 +987,83 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 setPrimary.invoke(clipService, *args)
             }
             Thread.sleep(50)
-            val pasteCmd = if (displayId > 0) {
-                "input -d $displayId keyevent ${android.view.KeyEvent.KEYCODE_PASTE}"
-            } else {
-                "input keyevent ${android.view.KeyEvent.KEYCODE_PASTE}"
+
+            
+            // Inject KEYCODE_PASTE (279) directly to skip expensive shell execution
+            try {
+                val now = SystemClock.uptimeMillis()
+                val downEvent = android.view.KeyEvent(now, now, android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_PASTE, 0, 0, android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD)
+                val upEvent = android.view.KeyEvent(now, now, android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_PASTE, 0, 0, android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD)
+
+                if (setKeyEventDisplayIdMethod == null) {
+                    setKeyEventDisplayIdMethod = android.view.KeyEvent::class.java.getMethod(
+                        "setDisplayId", Int::class.javaPrimitiveType
+                    )
+                }
+                setKeyEventDisplayIdMethod?.invoke(downEvent, displayId)
+                injectMethod?.invoke(inputManagerInstance, downEvent, 0)
+
+                setKeyEventDisplayIdMethod?.invoke(upEvent, displayId)
+                injectMethod?.invoke(inputManagerInstance, upEvent, 0)
+                Log.i(TAG, "Injected KEYCODE_PASTE natively on display $displayId")
+            } catch (ex: Exception) {
+            
+                Log.w(TAG, "Direct KEYCODE_PASTE injection failed, falling back to shell", ex)
+                val pasteCmd = if (displayId > 0) {
+                    "input -d $displayId keyevent ${android.view.KeyEvent.KEYCODE_PASTE}"
+                } else {
+                    "input keyevent ${android.view.KeyEvent.KEYCODE_PASTE}"
+                }
+                execCommand(pasteCmd)
             }
-            execCommand(pasteCmd)
         } catch (e: Exception) {
             Log.e(TAG, "Clipboard+paste injection failed", e)
+            try {
+                val escaped = text.replace("%", "%%").replace("'", "'\\''").replace(" ", "%s")
+                val cmd = if (displayId > 0) "input -d $displayId text '$escaped'" else "input text '$escaped'"
+                execCommand(cmd)
+            } catch (ex: Exception) {
+                Log.e(TAG, "Ultimate text fallback failed", ex)
+            }
         }
     }
 
     override fun injectComposingText(backspaces: Int, text: String, displayId: Int) {
         try {
             if (backspaces > 0) {
-                val bsKeys = (1..backspaces).joinToString(" ") { "67" }
-                val cmd = if (displayId > 0) "input -d $displayId keyevent $bsKeys" else "input keyevent $bsKeys"
-                execCommand(cmd)
+                try {
+                    for (i in 0 until backspaces) {
+                        val now = SystemClock.uptimeMillis()
+                        val downEvent = android.view.KeyEvent(now, now, android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_DEL, 0, 0, android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD)
+                        val upEvent = android.view.KeyEvent(now, now, android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_DEL, 0, 0, android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD)
+
+                        
+                        if (setKeyEventDisplayIdMethod == null) {
+                            setKeyEventDisplayIdMethod = android.view.KeyEvent::class.java.getMethod(
+                                "setDisplayId", Int::class.javaPrimitiveType
+                            )
+                        }
+                        setKeyEventDisplayIdMethod?.invoke(downEvent, displayId)
+                        injectMethod?.invoke(inputManagerInstance, downEvent, 0)
+
+                        setKeyEventDisplayIdMethod?.invoke(upEvent, displayId)
+                        injectMethod?.invoke(inputManagerInstance, upEvent, 0)
+                    }
+                    Log.i(TAG, "Injected $backspaces KEYCODE_DEL natively on display $displayId")
+                    
+                } catch (ex: Exception) {
+                    Log.w(TAG, "Direct KEYCODE_DEL injection failed, falling back to shell", ex)
+                    val bsKeys = (1..backspaces).joinToString(" ") { "67" }
+                    val cmd = if (displayId > 0) "input -d $displayId keyevent $bsKeys" else "input keyevent $bsKeys"
+                    execCommand(cmd)
+                }
             }
             if (text.isNotEmpty()) injectText(text, displayId)
         } catch (e: Exception) {
             Log.e(TAG, "injectComposingText failed", e)
         }
     }
+    
 
     override fun addInterfaceAddress(ifName: String, address: String, prefixLength: Int): Boolean { return true }
     override fun removeInterfaceAddress(ifName: String, address: String, prefixLength: Int): Boolean { return true }
@@ -1163,9 +1506,9 @@ class PrivilegedService : IPrivilegedService.Stub() {
         }
         virtualDisplays.clear()
         virtualDisplayNames.clear()
-        Log.i(TAG, "PrivilegedService destroyed")
     }
 
+    
     private fun cleanupVirtualDisplayResources(displayId: Int, vd: android.hardware.display.VirtualDisplay) {
         tetheringExecutor.execute {
             try {
@@ -1175,7 +1518,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 apps.forEach { app ->
                     if (app.isNotEmpty() && !app.contains("/") && app != "com.castla.mirror" && app != "com.castla.mirror.debug") {
                         try {
-                            execCommand("am force-stop $app")
+                            nativeForceStop(app)
                             Log.i(TAG, "Successfully force-stopped app $app on display $displayId")
                         } catch (e: Exception) {
                             Log.w(TAG, "Failed to force-stop app $app on display $displayId", e)
@@ -1184,17 +1527,27 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 }
                 
                 try {
-                    execCommand("wm size reset -d $displayId")
-                    Log.i(TAG, "WindowManager size reset for display $displayId")
+                    if (windowManagerInstance != null && clearForcedDisplaySizeMethod != null) {
+                        clearForcedDisplaySizeMethod?.invoke(windowManagerInstance, displayId)
+                        Log.i(TAG, "Natively reset WindowManager size for display $displayId")
+                    } else {
+                        execCommand("wm size reset -d $displayId")
+                    }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Failed to reset WindowManager size for display $displayId", e)
+                    Log.w(TAG, "Native WindowManager size reset failed, falling back to shell", e)
+                    try { execCommand("wm size reset -d $displayId") } catch (_: Exception) {}
                 }
 
                 try {
-                    execCommand("wm density reset -d $displayId")
-                    Log.i(TAG, "WindowManager density reset for display $displayId")
+                    if (windowManagerInstance != null && clearForcedDisplayDensityForUserMethod != null) {
+                        clearForcedDisplayDensityForUserMethod?.invoke(windowManagerInstance, displayId, 0)
+                        Log.i(TAG, "Natively reset WindowManager density for display $displayId")
+                    } else {
+                        execCommand("wm density reset -d $displayId")
+                    }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Failed to reset WindowManager density for display $displayId", e)
+                    Log.w(TAG, "Native WindowManager density reset failed, falling back to shell", e)
+                    try { execCommand("wm density reset -d $displayId") } catch (_: Exception) {}
                 }
                 
             } catch (e: Exception) {
@@ -1209,30 +1562,61 @@ class PrivilegedService : IPrivilegedService.Stub() {
             }
         }
     }
+    
 
+    
     override fun wakeUpDisplay(displayId: Int) {
-        // ### 수정 시작 ###
         val now = System.currentTimeMillis()
         val lastTime = lastWakeUpTimeMap[displayId] ?: 0L
         if (now - lastTime < 3000L) {
-            // Throttling: Skip command to prevent IPC and shell fork bottleneck
             return
         }
         lastWakeUpTimeMap[displayId] = now
-        // ### 수정 끝 ###
 
-        // Log.i(TAG, "[BUILD:screen-off-v2] wakeUpDisplay($displayId) ENTRY")
-        try {
-            // Waking display power state explicitly via shell command.
-            // We removed userActivity and injectInput because they invoke global power manager triggers
-            // which result in power state conflicts and 200ms infinite vibration (flickering) of DisplayPowerController.
-            execCommand("dumpsys power set-display-state $displayId ON")
-            // Log.i(TAG, "wakeUpDisplay($displayId): powered ON via shell command")
-        } catch (e: Exception) {
-            Log.w(TAG, "wakeUpDisplay($displayId) failed", e)
+        // Completely asynchronous execution to eliminate 1-2ms blocking latency from high frequency calls
+        tetheringExecutor.execute {
+            try {
+                // Try direct input manager injection using KEYCODE_WAKEUP (224) to bypass heavy shell fork
+                val uptime = SystemClock.uptimeMillis()
+                val downEvent = android.view.KeyEvent(
+                    uptime, uptime, android.view.KeyEvent.ACTION_DOWN,
+                    android.view.KeyEvent.KEYCODE_WAKEUP, 0, 0,
+                    android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0,
+                    InputDevice.SOURCE_KEYBOARD
+                )
+                val upEvent = android.view.KeyEvent(
+                    uptime, uptime, android.view.KeyEvent.ACTION_UP,
+                    android.view.KeyEvent.KEYCODE_WAKEUP, 0, 0,
+                    android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0,
+                    InputDevice.SOURCE_KEYBOARD
+                )
+
+                
+                if (setKeyEventDisplayIdMethod == null) {
+                    setKeyEventDisplayIdMethod = android.view.KeyEvent::class.java.getMethod(
+                        "setDisplayId", Int::class.javaPrimitiveType
+                    )
+                }
+                setKeyEventDisplayIdMethod?.invoke(downEvent, displayId)
+                injectMethod?.invoke(inputManagerInstance, downEvent, 0)
+
+                setKeyEventDisplayIdMethod?.invoke(upEvent, displayId)
+                injectMethod?.invoke(inputManagerInstance, upEvent, 0)
+                // Log.i(TAG, "Injected KEYCODE_WAKEUP (224) natively on display $displayId")
+                
+            } catch (e: Exception) {
+                Log.w(TAG, "Direct KEYCODE_WAKEUP injection failed, falling back to shell dumpsys power", e)
+                try {
+                    execCommand("dumpsys power set-display-state $displayId ON")
+                } catch (ex: Exception) {
+                    Log.e(TAG, "wakeUpDisplay shell fallback failed for display $displayId", ex)
+                }
+            }
         }
     }
+    
 
+    
     override fun resizeVirtualDisplay(displayId: Int, width: Int, height: Int, densityDpi: Int) {
         val vd = virtualDisplays[displayId]
         if (vd == null) {
@@ -1242,24 +1626,33 @@ class PrivilegedService : IPrivilegedService.Stub() {
         vd.resize(width, height, densityDpi)
         Log.i(TAG, "Resized virtual display $displayId to ${width}x${height} @ ${densityDpi}dpi")
         try {
-            // Synchronize WindowManager size and density with the updated virtual display dimensions
-            execCommand("wm size ${width}x${height} -d $displayId")
-            execCommand("wm density $densityDpi -d $displayId")
-            Log.i(TAG, "Synchronized WindowManager size and density for display $displayId")
+            if (windowManagerInstance != null && setForcedDisplaySizeMethod != null && setForcedDisplayDensityForUserMethod != null) {
+                setForcedDisplaySizeMethod?.invoke(windowManagerInstance, displayId, width, height)
+                setForcedDisplayDensityForUserMethod?.invoke(windowManagerInstance, displayId, densityDpi, 0)
+                Log.i(TAG, "Natively synchronized WindowManager size and density for display $displayId")
+            } else {
+                execCommand("wm size ${width}x${height} -d $displayId")
+                execCommand("wm density $densityDpi -d $displayId")
+            }
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to synchronize WindowManager size/density for display $displayId", e)
+            Log.w(TAG, "Native WindowManager sync failed, falling back to shell", e)
+            try {
+                execCommand("wm size ${width}x${height} -d $displayId")
+                execCommand("wm density $densityDpi -d $displayId")
+            } catch (_: Exception) {}
         }
     }
+    
 
     override fun registerDeathToken(token: android.os.IBinder) {
         try {
             token.linkToDeath({
                 Log.w(TAG, "Client died! Cleaning up PrivilegedService and killing VDs.")
                 destroy()
-                // ### 수정 시작 ###
+                
                 // REMOVED System.exit(0) to prevent the privileged shell process from exploding immediately,
                 // which was causing a race condition interrupting the asynchronous Binder release IPC transactions of VirtualDisplays.
-                // ### 수정 끝 ###
+                
             }, 0)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to link to death", e)

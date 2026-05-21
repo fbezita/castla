@@ -20,7 +20,7 @@ function connectVideo(isHotRefresh = false) {
   // Reset firstFrameReceived so that the reconnected stream's first frame triggers checkReady() and hides the overlay!
   window.firstFrameReceived = false;
 
-  // ### 수정 시작 ###
+  
   // Reset decoder sequence tracking and SPS/PPS cache only when NOT in a hot-refresh transition
   if (!isHotRefresh) {
     window._lastSpsPps = null;
@@ -39,7 +39,7 @@ function connectVideo(isHotRefresh = false) {
     }
     if (window.secondaryDecoder.resetStats) window.secondaryDecoder.resetStats();
   }
-  // ### 수정 끝 ###
+  
 
   console.log(`[Main] Connecting video socket to: ${wsUrl}`);
   window.videoSocket = new WebSocket(wsUrl);
@@ -65,7 +65,7 @@ function connectVideo(isHotRefresh = false) {
     if (event.data instanceof ArrayBuffer) {
       window.armFrameWatchdog(window.videoSocket);
 
-      // ### 수정 시작 ###
+      
       // Intercept H.264 SPS/PPS (flags=2) to safeguard against race conditions during decoder re-init
       if (event.data.byteLength >= 9) {
         const view = new DataView(event.data);
@@ -79,12 +79,12 @@ function connectVideo(isHotRefresh = false) {
           }
         }
       }
-      // ### 수정 끝 ###
+      
 
       if (!window.decoder) return;
       if (window.codecMode === "h264") {
         const v = new Uint8Array(event.data);
-        // ### 수정 시작 ###
+        
         if (v.length > 0) {
           const flags = v[0];
           const seqNum = v.length >= 3 ? (v[1] | (v[2] << 8)) : -1;
@@ -97,7 +97,7 @@ function connectVideo(isHotRefresh = false) {
             window.checkReady();
           }
         }
-        // ### 수정 끝 ###
+        
       }
       window.decoder.decode(event.data);
     }
@@ -117,7 +117,7 @@ function connectVideo(isHotRefresh = false) {
 }
 
 function checkReady() {
-  // ### 수정 시작 ###
+  
   // console.log(`[VideoSocketTelemetry] checkReady() invoked. firstFrameReceived=${window.firstFrameReceived}, isLauncherMode=${window.isLauncherMode}`);
   if (window.firstFrameReceived) {
     if (typeof window.clearLaunchTimeout === "function") {
@@ -143,7 +143,6 @@ function checkReady() {
     if (window.decoder && window.decoder.play) {
       window.decoder.play();
     }
-  // ### 수정 끝 ###
 
     // Seamless Promotion Transition Cleanup:
     // If we were waiting for the promoted secondary app to land on primary stream, complete the transition now!
@@ -156,10 +155,22 @@ function checkReady() {
       // to trigger proper full-screen transition and primary temporary fill shield!
       window.disableBrowserSplit({ notifyServer: false });
 
+      // Apply the SSOT UI State changes to cleanly integrate with the reactive layout system
+      if (window.state && window._promotedApp) {
+        window.state.left = window._promotedApp;
+        window.state.right = null;
+      }
+
       window.isPromotingSecondary = false;
       window.playerShell?.classList.remove("secondary-fullscreen");
+      window._promotedApp = null;
+
+      if (window.canvas) {
+        window.canvas.style.opacity = "1"; // Dismiss transition shield
+      }
     }
   }
+  
 }
 
 // Frame-arrival watchdog: first try to recover an open but quiet stream by
@@ -169,7 +180,7 @@ const FRAME_SOFT_TIMEOUT_MS = 4000;
 const FRAME_HARD_TIMEOUT_MS = 10000;
 
 function armFrameWatchdog(socket) {
-  // ### 수정 시작 ###
+  
   // Always clear any existing timer to prevent async callback leaks and false-positive stall recovery requests
   if (window.frameWatchdogTimer !== null) {
     clearTimeout(window.frameWatchdogTimer);
@@ -177,7 +188,7 @@ function armFrameWatchdog(socket) {
   }
   if (window.isLauncherMode || !socket) return;
   if (socket !== window.videoSocket) return;
-  // ### 수정 끝 ###
+  
   window.frameWatchdogTimer = setTimeout(() => {
     // Socket stall watchdog check
     window.onFrameSoftStalled(socket);
