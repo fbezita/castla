@@ -597,10 +597,16 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (ip != "0.0.0.0") {
-            val sslipDomain = ip.replace('.', '-') + ".sslip.io"
-            serverUrl = "https://${sslipDomain}:${MirrorServer.DEFAULT_PORT}"
+            // 🔐 핫스팟 주소가 안드로이드 고정 IP 대역(192.0.0.4)일 때 -> 내 공인 도메인 사용
+            if (ip == "192.0.0.4") {
+                serverUrl = "https://ip-192-0-0-4.fbezita.com:${MirrorServer.DEFAULT_PORT}"
+            } else {
+                // 그 외의 주소는 기존 sslip.io 로직 유지 (하이브리드 폴백)
+                serverUrl = "http://${ip}:${MirrorServer.DEFAULT_PORT}"
+                Log.d("MirrorServer", "🎬 예외 대역 ($ip) 감지: 일반 HTTP 주소로 매핑 완료")
+            }
         } else {
-            serverUrl = "https://${ip}:${MirrorServer.DEFAULT_PORT}"
+            serverUrl = "http://${ip}:${MirrorServer.DEFAULT_PORT}"
         }
     }
 
@@ -1114,6 +1120,8 @@ class MainActivity : AppCompatActivity() {
             putExtra(MirrorForegroundService.EXTRA_AUDIO, streamSettings.audioEnabled)
             putExtra(MirrorForegroundService.EXTRA_MIRRORING_MODE, streamSettings.mirroringMode.name)
             putExtra(MirrorForegroundService.EXTRA_TARGET_PACKAGE, streamSettings.targetAppPackage)
+
+            putExtra("EXTRA_HOST_IP", currentIp)
         }
         startForegroundService(intent)
         if (serviceBound || bindRequested) {

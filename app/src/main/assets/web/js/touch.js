@@ -45,66 +45,69 @@ class TouchHandler {
       this._handlers.push({ target, type, fn, opts });
     };
 
+    /* ### 수정 시작 ### */
+    // Bind events strictly onto the overlay canvas element (which intercepts all touches)
+    const target = this.canvas;
+    target.style.touchAction = "none";
+
     // Prefer Pointer Events (better coalescing, pressure support)
     if (window.PointerEvent) {
-      addEvent(this.canvas, "pointerdown", (e) => {
+      addEvent(target, "pointerdown", (e) => {
         e.preventDefault();
         try {
-          this.canvas.setPointerCapture(e.pointerId);
+          target.setPointerCapture(e.pointerId);
         } catch (err) {}
         this._onPointer(e, TouchHandler.ACTION_DOWN);
       });
-      addEvent(this.canvas, "pointermove", (e) => {
+      addEvent(target, "pointermove", (e) => {
         e.preventDefault();
         this._onPointer(e, TouchHandler.ACTION_MOVE);
       });
-      addEvent(this.canvas, "pointerup", (e) => {
+      addEvent(target, "pointerup", (e) => {
         e.preventDefault();
         try {
-          this.canvas.releasePointerCapture(e.pointerId);
+          target.releasePointerCapture(e.pointerId);
         } catch (err) {}
         this._onPointer(e, TouchHandler.ACTION_UP);
       });
-      addEvent(this.canvas, "pointercancel", (e) => {
+      addEvent(target, "pointercancel", (e) => {
         e.preventDefault();
         try {
-          this.canvas.releasePointerCapture(e.pointerId);
+          target.releasePointerCapture(e.pointerId);
         } catch (err) {}
         this._onPointer(e, TouchHandler.ACTION_UP);
       });
-      // Prevent default touch behavior (scrolling, zooming)
-      this.canvas.style.touchAction = "none";
     } else {
       // Fallback: Touch events
       addEvent(
-        this.canvas,
+        target,
         "touchstart",
         (e) => this._onTouch(e, TouchHandler.ACTION_DOWN),
         { passive: false },
       );
       addEvent(
-        this.canvas,
+        target,
         "touchmove",
         (e) => this._onTouch(e, TouchHandler.ACTION_MOVE),
         { passive: false },
       );
       addEvent(
-        this.canvas,
+        target,
         "touchend",
         (e) => this._onTouch(e, TouchHandler.ACTION_UP),
         { passive: false },
       );
       addEvent(
-        this.canvas,
+        target,
         "touchcancel",
         (e) => this._onTouch(e, TouchHandler.ACTION_UP),
         { passive: false },
       );
     }
 
-    // Mouse fallback for desktop testing (bind move/up to window so we don't lose drag outside canvas)
+    // Mouse fallback for desktop testing
     if (!window.PointerEvent) {
-      addEvent(this.canvas, "mousedown", (e) => {
+      addEvent(target, "mousedown", (e) => {
         this.mouseDown = true;
         this._sendMouse(e, TouchHandler.ACTION_DOWN);
       });
@@ -118,6 +121,7 @@ class TouchHandler {
         }
       });
     }
+    /* ### 수정 끝 ### */
   }
 
   /** Schedule a single rAF flush — only runs when there are pending moves */
@@ -146,9 +150,11 @@ class TouchHandler {
     return mapped;
   }
 
+  /* ### 수정 시작 ### */
   _onPointer(event, actionCode) {
-    const rect = this.canvas.getBoundingClientRect();
-    const coords = this._toNormalized(event.clientX, event.clientY, rect);
+    const currentTarget = event.currentTarget || this.canvas;
+    const rect = currentTarget.getBoundingClientRect();
+    const coords = this._toNormalized(event.clientX, event.clientY, rect, currentTarget);
     const pid = this._mapPointerId(event.pointerId, actionCode);
 
     if (actionCode === TouchHandler.ACTION_UP && coords.inBounds) {
@@ -184,11 +190,12 @@ class TouchHandler {
 
   _onTouch(event, actionCode) {
     event.preventDefault();
-    const rect = this.canvas.getBoundingClientRect();
+    const currentTarget = event.currentTarget || this.canvas;
+    const rect = currentTarget.getBoundingClientRect();
 
     for (let i = 0; i < event.changedTouches.length; i++) {
       const touch = event.changedTouches[i];
-      const coords = this._toNormalized(touch.clientX, touch.clientY, rect);
+      const coords = this._toNormalized(touch.clientX, touch.clientY, rect, currentTarget);
 
       if (actionCode === TouchHandler.ACTION_UP && coords.inBounds) {
         this.lastTap = {
@@ -222,8 +229,9 @@ class TouchHandler {
   }
 
   _sendMouse(event, actionCode) {
-    const rect = this.canvas.getBoundingClientRect();
-    const coords = this._toNormalized(event.clientX, event.clientY, rect);
+    const currentTarget = event.currentTarget || this.canvas;
+    const rect = currentTarget.getBoundingClientRect();
+    const coords = this._toNormalized(event.clientX, event.clientY, rect, currentTarget);
 
     if (actionCode === TouchHandler.ACTION_UP && coords.inBounds) {
       this.lastTap = {
@@ -253,9 +261,10 @@ class TouchHandler {
       }
     }
   }
+  /* ### 수정 끝 ### */
 
   /** Convert client coordinates to normalized 0-1 video coordinates */
-  _toNormalized(clientX, clientY, rect) {
+  _toNormalized(clientX, clientY, rect, targetEl) {
     // Apply a generous margin of 5% (0.05) to bounds checks to prevent touch event drops near edges
     const touchMargin = 0.05;
 
@@ -281,9 +290,27 @@ class TouchHandler {
       );
     }
 
-    // MSE mode: <video> uses object-fit:contain — account for letterboxing
-    const el = this.canvas;
+    /* ### 수정 시작 ### */
+    // MSE mode: <video> uses object-fit:contain/fill/cover — account for letterboxing
+    const el = targetEl || this.canvas;
     if (el.tagName === "VIDEO" && el.videoWidth > 0 && el.videoHeight > 0) {
+      const fitMode = el.style.objectFit || "contain";
+      if (fitMode === "fill") {
+        // Direct mapping since the video stretches to fill the entire element area
+        const x = (clientX - rect.left) / rect.width;
+        const y = (clientY - rect.top) / rect.height;
+        return {
+          x: Math.max(0, Math.min(1, x)),
+          y: Math.max(0, Math.min(1, y)),
+          inBounds:
+            x >= -touchMargin &&
+            x <= 1 + touchMargin &&
+            y >= -touchMargin &&
+            y <= 1 + touchMargin,
+        };
+      }
+
+      // Default: contain (letterbox handling)
       const videoAspect = el.videoWidth / el.videoHeight;
       const elemAspect = rect.width / rect.height;
       let renderX, renderY, renderW, renderH;
@@ -314,6 +341,7 @@ class TouchHandler {
           y <= 1 + touchMargin,
       };
     }
+    /* ### 수정 끝 ### */
 
     // Fallback: direct element mapping
     const x = (clientX - rect.left) / rect.width;

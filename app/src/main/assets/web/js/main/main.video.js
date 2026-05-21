@@ -11,8 +11,11 @@ function connectVideo(isHotRefresh = false) {
       window.videoSocket.close();
     } catch (_) {}
   }
+  /* ### 수정 시작 ### */
   const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  // H264 Wasm software decoder is fully bypassed. Connect H.264 stream using direct URL without profile query negotiation.
   const wsUrl = `${wsProtocol}//${window.host}/ws/video`;
+  /* ### 수정 끝 ### */
   if (!window.isLauncherMode) window.setStatus("Connecting...", "");
 
   window.clearFrameWatchdog();
@@ -124,21 +127,36 @@ function checkReady() {
       window.clearLaunchTimeout();
     }
     const mseVideo = document.getElementById("mse-video");
+    /* ### 수정 시작 ### */
+    // If MseDecoder is actively driving H.264 stream, skip canvas promotion and route rendering opacity to video element
+    const isMseActive = window.decoder && window.decoder.constructor.name === "MseDecoder";
     if (window.isLauncherMode) {
-      // console.log(`[VideoSocketTelemetry] checkReady: isLauncherMode=true. Setting canvas opacity to 0.`);
       window.canvas.style.opacity = "0";
       if (mseVideo) {
         mseVideo.style.opacity = "0";
         mseVideo.style.display = "none";
       }
     } else {
-      // console.log(`[VideoSocketTelemetry] checkReady: isLauncherMode=false. Setting canvas opacity to 1.`);
-      window.canvas.style.opacity = "1";
-      if (mseVideo) {
-        mseVideo.style.opacity = "0";
-        mseVideo.style.display = "none";
+      if (isMseActive) {
+        window.canvas.style.opacity = "0";
+        /* ### 수정 시작 ### */
+        // Keep canvas displayed but transparent to fully capture remote pointer events
+        window.canvas.style.display = "block";
+        /* ### 수정 끝 ### */
+        if (mseVideo) {
+          mseVideo.style.opacity = "1";
+          mseVideo.style.display = "block";
+        }
+      } else {
+        window.canvas.style.opacity = "1";
+        window.canvas.style.display = "block";
+        if (mseVideo) {
+          mseVideo.style.opacity = "0";
+          mseVideo.style.display = "none";
+        }
       }
     }
+    /* ### 수정 끝 ### */
     window.hideOverlay();
     if (window.decoder && window.decoder.play) {
       window.decoder.play();

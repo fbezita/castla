@@ -224,18 +224,39 @@ class VirtualDisplayController(private val displayName: String) {
 
     /** Launch an app on this managed virtual display. */
     fun launchAppOnDisplay(packageName: String): Boolean {
+        return launchAppOnDisplayV2(packageName, forceStop = true)
+    }
+
+    /** Launch an app on this managed virtual display with explicit cold start/forceStop control. */
+    fun launchAppOnDisplayV2(packageName: String, forceStop: Boolean): Boolean {
         val id = displayId
         if (id < 0 || packageName.isEmpty()) return false
         return try {
-            privilegedService?.launchAppOnDisplay(id, packageName)
-            Log.i(TAG, "[$displayName] Launched $packageName on virtual display $id")
+            privilegedService?.launchAppOnDisplayV2(id, packageName, forceStop)
+            Log.i(TAG, "[$displayName] Launched $packageName on virtual display $id via launchAppOnDisplayV2 (forceStop=$forceStop)")
             true
         } catch (e: SecurityException) {
-            Log.e(TAG, "[$displayName] Failed to launch $packageName on display $id (display not found?)", e)
+            Log.e(TAG, "[$displayName] Failed to launch $packageName on display $id via launchAppOnDisplayV2 (display not found?)", e)
             displayId = -1
             false
         } catch (e: Exception) {
-            Log.e(TAG, "[$displayName] Failed to launch $packageName on display $id", e)
+            Log.e(TAG, "[$displayName] Failed to launch $packageName on display $id via launchAppOnDisplayV2", e)
+            false
+        }
+    }
+
+    /** Move an active task to this managed virtual display natively via system activity task manager binder. */
+    fun moveTaskToDisplayNative(taskId: Int): Boolean {
+        val id = displayId
+        if (id < 0 || taskId < 0) return false
+        return try {
+            val success = privilegedService?.moveTaskToDisplayNative(taskId, id) ?: false
+            if (success) {
+                Log.i(TAG, "[$displayName] Natively moved task $taskId to virtual display $id")
+            }
+            success
+        } catch (e: Exception) {
+            Log.w(TAG, "[$displayName] Failed to natively move task $taskId to virtual display $id", e)
             false
         }
     }

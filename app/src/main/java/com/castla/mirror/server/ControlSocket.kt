@@ -53,10 +53,14 @@ class ControlSocket(
                     val pane = json.optString("pane", "primary")
                     server.onKeyframeRequest(pane)
                 }
+                /* ### 수정 시작 ### */
                 "codec" -> {
                     val mode = json.optString("mode", "h264")
-                    server.onCodecModeRequest(mode)
+                    val profile = json.optString("profile", "High")
+                    val pane = json.optString("pane", "primary")
+                    server.onCodecModeRequest(mode, profile, pane)
                 }
+                /* ### 수정 끝 ### */
                 "viewport" -> {
                     val width = json.optInt("width", 0)
                     val height = json.optInt("height", 0)

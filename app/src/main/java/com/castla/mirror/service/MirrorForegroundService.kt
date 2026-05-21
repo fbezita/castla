@@ -185,7 +185,8 @@ class MirrorForegroundService : Service() {
             val targetWidth: Int,
             val targetHeight: Int,
             val force: Boolean,
-            val forceSingle: Boolean
+            val forceSingle: Boolean,
+            val onComplete: kotlinx.coroutines.CompletableDeferred<Unit>? = null
         ) : VdHardwareRequest()
     }
 
@@ -228,14 +229,18 @@ class MirrorForegroundService : Service() {
                 try {
                     when (request) {
                         is VdHardwareRequest.Rebuild -> {
-                            val pipeline = pipelines[request.pipelineName]
-                            if (pipeline != null) {
-                                pipeline.executeActualRebuild(
-                                    request.targetWidth,
-                                    request.targetHeight,
-                                    request.force,
-                                    request.forceSingle
-                                )
+                            try {
+                                val pipeline = pipelines[request.pipelineName]
+                                if (pipeline != null) {
+                                    pipeline.executeActualRebuild(
+                                        request.targetWidth,
+                                        request.targetHeight,
+                                        request.force,
+                                        request.forceSingle
+                                    )
+                                }
+                            } finally {
+                                request.onComplete?.complete(Unit)
                             }
                         }
                     }
@@ -454,6 +459,8 @@ class MirrorForegroundService : Service() {
 
         ServiceCompat.startForeground(this, NOTIFICATION_ID, createNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         
+        val hostIp = intent?.getStringExtra("EXTRA_HOST_IP") ?: "0.0.0.0"
+
         val rawMaxHeight = intent!!.getIntExtra(EXTRA_MAX_RESOLUTION, 0)
         val rawFps = intent.getIntExtra(EXTRA_FPS, 0)
         pendingAudioEnabled = intent.getBooleanExtra(EXTRA_AUDIO, false)
@@ -468,6 +475,11 @@ class MirrorForegroundService : Service() {
             pipeline.autoFps = (rawFps == 0)
             pipeline.targetFps = if (pipeline.autoFps) 30 else rawFps
         }
+
+        // if (mirrorServer == null) {
+        //     mirrorServer = MirrorServer(applicationContext)
+        // }
+        mirrorServer?.updateServerUrl(hostIp)        
 
         serviceScope.launch(Dispatchers.Default) { startPipeline(pendingAudioEnabled) }
         return START_NOT_STICKY
@@ -1050,10 +1062,32 @@ class MirrorForegroundService : Service() {
 
     private fun onCodecModeRequest(mode: String) {
         val anyJpegEncoderActive = pipelines.values.any { it.jpegEncoder != null }
-        if (!CodecModeTransition.shouldApply(mode, currentCodecMode, anyJpegEncoderActive)) return
 
-        currentCodecMode = CodecModeTransition.MODE_MJPEG
-        Log.i(TAG, "Codec transmission mode switched to MJPEG dynamically. Recalibrating pipelines.")
+        /* ### 수정 시작 ### */
+        // Check for encoder profile mismatch between active VideoEncoder and cached preferredProfile.
+        // We evaluate profile mismatches regardless of video socket existence since the profile
+        // preference is now cached persistently via control channel messages.
+        val mismatchedPipelines = pipelines.values.filter { pipeline ->
+            val encoder = pipeline.videoEncoder
+            if (encoder == null) {
+                false
+            } else {
+                val preferred = mirrorServer?.getPreferredProfile(pipeline.name) ?: "High"
+                val actual = encoder.preferredProfile
+                !preferred.equals(actual, ignoreCase = true)
+            }
+        }
+
+        val hasProfileMismatch = mismatchedPipelines.isNotEmpty()
+
+        if (!CodecModeTransition.shouldApply(mode, currentCodecMode, anyJpegEncoderActive) && !hasProfileMismatch) {
+            return
+        }
+
+        val isCodecSwitch = CodecModeTransition.shouldApply(mode, currentCodecMode, anyJpegEncoderActive)
+        currentCodecMode = mode
+        Log.i(TAG, "Codec transmission mode request processed. mode=$mode, isCodecSwitch=$isCodecSwitch, hasProfileMismatch=$hasProfileMismatch")
+        /* ### 수정 끝 ### */
 
         val allDimensionsUnset = pipelines.values.all { it.width == 0 || it.height == 0 }
         if (allDimensionsUnset) {
@@ -1064,9 +1098,15 @@ class MirrorForegroundService : Service() {
         Log.i(TAG, "Delegating to dynamic pipeline rebuild loop chain")
         serviceScope.launch {
             pipelines.values.forEach { pipeline ->
-                if (pipeline.width > 0 && pipeline.height > 0) {
+                /* ### 수정 시작 ### */
+                // We rebuild a pipeline if:
+                // 1. It is a global codec switch (which affects all pipelines)
+                // 2. OR this specific pipeline has a profile mismatch
+                val needsRebuild = isCodecSwitch || mismatchedPipelines.contains(pipeline)
+                if (needsRebuild && pipeline.width > 0 && pipeline.height > 0) {
                     triggerPipelineRebuildWithPolicy(pipeline.name, pipeline.width, pipeline.height, force = true)
                 }
+                /* ### 수정 끝 ### */
             }
         }
     }
@@ -1193,19 +1233,47 @@ class MirrorForegroundService : Service() {
         }.trim()
     }
 
+    /* ### 수정 시작 ### */
     private fun verifySurfaceAndFallback(pipeline: MirroringPipeline, service: IPrivilegedService, displayId: Int, pkg: String, taskIds: List<Int>, packageOrComponent: String, extraKey: String?, extraValue: String?) {
-        if (pkg.contains("com.castla.mirror")) return
-        serviceScope.launch(Dispatchers.IO) {
-            kotlinx.coroutines.delay(1000L)
+        if (pkg.contains("com.castla.mirror") || pkg == "HOME" || pkg.isBlank()) return
+        
+        // Cancel the previous active fallback watchdog job to refresh the 1200ms grace period.
+        // This prevents race condition and false positives where a subsequent fast layout rebuild
+        // or concurrent launch request incorrectly triggers cold-start force stop.
+        pipeline.activeFallbackJob?.cancel()
+        
+        pipeline.activeFallbackJob = serviceScope.launch(Dispatchers.IO) {
+            // Wait for activity manager to settle down task placement
+            kotlinx.coroutines.delay(1200L)
             try {
-                if (service.getRunningTasksOnDisplay(displayId).none { it.contains(pkg) }) {
-                    for (taskId in taskIds) { try { service.removeTask(taskId) } catch (_: Exception) {} }
-                    service.execCommand("am force-stop $pkg")
-                    service.execCommand(buildShellLaunchCommand(displayId, packageOrComponent, extraKey, extraValue, reorderToFront = false))
+                val runningTasks = try { service.getRunningTasksOnDisplay(displayId) } catch (e: Exception) {
+                    Log.w(TAG, "[Fallback] Failed to retrieve running tasks on Display $displayId: ${e.message}")
+                    null
                 }
-            } catch (_: Exception) {}
+                val isNotPresent = runningTasks == null || runningTasks.none { it.contains(pkg) }
+                if (isNotPresent) {
+                    Log.w(TAG, "[Fallback] Self-healing recovery triggered for app: $pkg on Display $displayId. Executing cold launch.")
+                    for (taskId in taskIds) { 
+                        try { service.removeTask(taskId) } catch (e: Exception) {
+                            Log.w(TAG, "[Fallback] Failed to remove task $taskId: ${e.message}")
+                        } 
+                    }
+                    try { service.execCommand("am force-stop $pkg") } catch (_: Exception) {}
+                    val command = buildShellLaunchCommand(displayId, packageOrComponent, extraKey, extraValue, reorderToFront = false)
+                    val result = try { service.execCommand(command) } catch (e: Exception) { e.message ?: "Exception" }
+                    Log.i(TAG, "[Fallback] Self-healing cold start command executed. Result: $result")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "[Fallback] Critical error occurred inside surface verification coroutine: ${e.message}", e)
+            } finally {
+                // Safely clear the active fallback job reference if this job finished executing normally
+                if (pipeline.activeFallbackJob == coroutineContext[kotlinx.coroutines.Job]) {
+                    pipeline.activeFallbackJob = null
+                }
+            }
         }
     }
+    /* ### 수정 끝 ### */
 
     // ==========================================
     // ENCAPSULATED VIRTUAL DISPLAY PIPELINE
@@ -1221,6 +1289,15 @@ class MirrorForegroundService : Service() {
         // Backup fields to remember the last valid viewport dimensions for self-healing recovery
         @Volatile var lastValidWidth: Int = 384
         @Volatile var lastValidHeight: Int = 672
+        
+        /* ### 수정 시작 ### */
+        // Chained deferred object to sequence and share active rebuild tasks, preventing hardware/encoder setup duplicate loops
+        @Volatile private var activeRebuildDeferred: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+        private val rebuildMutex = Mutex()
+        // State guards to prevent concurrent self-healing re-entry which triggers duplicate am start shell command floods
+        @Volatile var isSelfHealingInProgress = false
+        @Volatile var activeFallbackJob: kotlinx.coroutines.Job? = null
+        /* ### 수정 끝 ### */
         
 
         var videoEncoder: VideoEncoder? = null; var jpegEncoder: JpegEncoder? = null; var currentEncoderSurface: Surface? = null
@@ -1255,11 +1332,72 @@ class MirrorForegroundService : Service() {
         }
 
         
-        // Rebuild is now non-blocking and queues the request to the sequential hardware worker
-        suspend fun rebuild(newWidth: Int, newHeight: Int, force: Boolean = false, forceSingle: Boolean = false) {
-            if (isAppLaunchingContext || newWidth <= 0 || newHeight <= 0) return
-            vdRequestChannel.trySend(VdHardwareRequest.Rebuild(name, newWidth, newHeight, force, forceSingle))
+        /* ### 수정 시작 ### */
+        // Rebuild is now non-blocking and queues the request to the sequential hardware worker.
+        // It aggregates multiple concurrent rebuild triggers to share a single execution cycle.
+        suspend fun rebuild(
+            newWidth: Int,
+            newHeight: Int,
+            force: Boolean = false,
+            forceSingle: Boolean = false,
+            onComplete: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+        ) {
+            if (isAppLaunchingContext || newWidth <= 0 || newHeight <= 0) {
+                onComplete?.complete(Unit)
+                return
+            }
+            rebuildMutex.withLock {
+                val currentDeferred = activeRebuildDeferred
+                if (currentDeferred != null) {
+                    // Chaining current onComplete (if present) to the active rebuild deferred.
+                    // This prevents injecting duplicate rebuild requests to the sequential channel buffer.
+                    if (onComplete != null) {
+                        serviceScope.launch {
+                            try {
+                                currentDeferred.await()
+                                onComplete.complete(Unit)
+                            } catch (e: Exception) {
+                                onComplete.completeExceptionally(e)
+                            }
+                        }
+                    }
+                    return
+                }
+
+                val newDeferred = kotlinx.coroutines.CompletableDeferred<Unit>()
+                activeRebuildDeferred = newDeferred
+
+                val wrapperComplete = kotlinx.coroutines.CompletableDeferred<Unit>()
+                serviceScope.launch {
+                    try {
+                        wrapperComplete.await()
+                        newDeferred.complete(Unit)
+                    } catch (e: Exception) {
+                        newDeferred.completeExceptionally(e)
+                    } finally {
+                        rebuildMutex.withLock {
+                            if (activeRebuildDeferred == newDeferred) {
+                                activeRebuildDeferred = null
+                            }
+                        }
+                    }
+                }
+
+                if (onComplete != null) {
+                    serviceScope.launch {
+                        try {
+                            newDeferred.await()
+                            onComplete.complete(Unit)
+                        } catch (e: Exception) {
+                            onComplete.completeExceptionally(e)
+                        }
+                    }
+                }
+
+                vdRequestChannel.trySend(VdHardwareRequest.Rebuild(name, newWidth, newHeight, force, forceSingle, wrapperComplete))
+            }
         }
+        /* ### 수정 끝 ### */
 
         suspend fun executeActualRebuild(targetWidth: Int, targetHeight: Int, force: Boolean = false, forceSingle: Boolean = false) {
             val effectiveMaxHeight = targetHeight.coerceAtMost(currentMaxHeight)
@@ -1281,25 +1419,44 @@ class MirrorForegroundService : Service() {
 
             var startEncoderTask: (() -> Unit)? = null
             val surface = if (currentCodecMode == "mjpeg") {
+                /* ### 수정 시작 ### */
+                // Clear cached H.264 SPS/PPS packet to prevent leaking obsolete configurations to the new client socket.
+                mirrorServer?.clearCachedSpsPps(name)
                 val jpeg = JpegEncoder(w, h, fps = 15, quality = 65); val inputSurface = jpeg.createInputSurface(); jpegEncoder = jpeg
                 startEncoderTask = { jpeg.start { data, key -> mirrorServer?.broadcastFrame(data, key, name) } }
                 
-                // Throttle keyframe requests to once per 1000ms to prevent duplicate wakeup calls and binder bottlenecks
+                // Throttle keyframe requests to once per 1000ms and inject a gentle touch event to trigger graphics pipeline rendering.
                 mirrorServer?.setKeyframeRequester(name) {
                     val now = System.currentTimeMillis()
                     if (now - lastKeyframeRequestTime < 1000L) return@setKeyframeRequester
                     lastKeyframeRequestTime = now
                     serviceScope.launch {
                         try {
-                            if (displayId >= 0) controller.getPrivilegedService()?.wakeUpDisplay(displayId)
+                            if (displayId >= 0) {
+                                // 1. Wakeup virtual display power state
+                                controller.getPrivilegedService()?.wakeUpDisplay(displayId)
+
+                                // 2. Inject a gentle down & up touch event to force Graphics Pipeline refresh
+                                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 99, name))
+                                delay(50)
+                                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 99, name))
+                            }
                             restoreContent()
-                        } catch (_: Exception) {}
+                        } catch (e: Exception) {
+                            Log.w(TAG, "[$name Pipeline] Failed to force graphics wakeup on MJPEG keyframe request", e)
+                        }
                     }
                 }
+                /* ### 수정 끝 ### */
                 
                 inputSurface
             } else {
-                val encoder = VideoEncoder(w, h, calculatedBitrate, thermalFpsOverride ?: targetFps); val inputSurface = encoder.createInputSurface(); videoEncoder = encoder
+                /* ### 수정 시작 ### */
+                val preferredProfile = mirrorServer?.getPreferredProfile(name) ?: "High"
+                val encoder = VideoEncoder(w, h, calculatedBitrate, thermalFpsOverride ?: targetFps, preferredProfile)
+                val inputSurface = encoder.createInputSurface()
+                videoEncoder = encoder
+                /* ### 수정 끝 ### */
                 encoder.onSpsPps = { mirrorServer?.broadcastSpsPps(it, name) }
                 startEncoderTask = { encoder.start { data, key -> mirrorServer?.broadcastFrame(data, key, name) } }
                 
@@ -1414,6 +1571,23 @@ class MirrorForegroundService : Service() {
             }
             if (displayId >= 0) {
                 try { mirrorServer?.broadcastControlMessage(org.json.JSONObject().apply { put("type", "resolutionChanged"); put("pane", name); put("width", w); put("height", h) }.toString()) } catch (_: Exception) {}
+                /* ### 수정 시작 ### */
+                // Force a gentle touch sequence down & up immediately after rebuild to trigger the graphics pipeline update.
+                // This guarantees the first frame is generated and sent out instantly without stalling.
+                if (currentCodecMode == "mjpeg") {
+                    serviceScope.launch {
+                        try {
+                            delay(100)
+                            touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 99, name))
+                            delay(50)
+                            touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 99, name))
+                            Log.i(TAG, "[$name Pipeline] Injected early graphics wakeup touch sequence after MJPEG rebuild")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "[$name Pipeline] Failed to force graphics wakeup post MJPEG rebuild", e)
+                        }
+                    }
+                }
+                /* ### 수정 끝 ### */
             }
         }
 
@@ -1445,13 +1619,34 @@ class MirrorForegroundService : Service() {
             
             
             // Self-healing: restore released graphics pipelines before shifting app focus
-            if (videoEncoder == null || width <= 1) {
-                val targetW = if (lastValidWidth > 0) lastValidWidth else 384
-                val targetH = if (lastValidHeight > 0) lastValidHeight else 672
-                Log.i(TAG, "[$name Pipeline] Self-healing activated on launchComponent. Restoring layout state to ${targetW}x${targetH}")
-                rebuild(targetW, targetH)
-                delay(400) // Yield control briefly for the sequential worker to initialize surfaces
+            /* ### 수정 시작 ### */
+            // Account for active JpegEncoder in MJPEG mode to prevent redundant self-healing loops.
+            // Also enforce isSelfHealingInProgress state lock to prevent recursive rebuild requests.
+            val isEncoderReleased = if (currentCodecMode == "mjpeg") jpegEncoder == null else videoEncoder == null
+            if ((isEncoderReleased || width <= 1) && !isSelfHealingInProgress) {
+                isSelfHealingInProgress = true
+                try {
+                    val targetW = if (lastValidWidth > 0) lastValidWidth else 384
+                    val targetH = if (lastValidHeight > 0) lastValidHeight else 672
+                    Log.i(TAG, "[$name Pipeline] Self-healing activated on launchComponent. Restoring layout state to ${targetW}x${targetH}")
+                    // Eliminate fragile hardcoded delays via event-driven coroutine completion tokens.
+                    // Awaiting the CompletableDeferred guarantees the virtual display surfaces are fully bound 
+                    // natively by the sequential worker before moving forward to launch components.
+                    val rebuildDeferred = kotlinx.coroutines.CompletableDeferred<Unit>()
+                    rebuild(targetW, targetH, onComplete = rebuildDeferred)
+                    try {
+                        rebuildDeferred.await()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "[$name Pipeline] Self-healing await deferred failed, fallback to grace period", e)
+                        delay(300)
+                    }
+                } finally {
+                    isSelfHealingInProgress = false
+                }
+            } else if (isSelfHealingInProgress) {
+                Log.d(TAG, "[$name Pipeline] Self-healing is already in progress. Skipping redundant trigger.")
             }
+            /* ### 수정 끝 ### */
             
 
             val correctedDisplayId = if (displayId >= 0) displayId else controller.getDisplayId()
@@ -1469,26 +1664,74 @@ class MirrorForegroundService : Service() {
                 val matchingTaskIds = try { runBinderSafe(1000L) { service.getTaskIdsForPackage(cleanPkg).toList() } ?: emptyList() } catch (_: Exception) { emptyList() }
                 val isWarmStart = matchingTaskIds.isNotEmpty()
 
+                /* ### 수정 시작 ### */
                 for (taskId in matchingTaskIds) {
-                    try { runBinderSafe { service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId"); service.execCommand("cmd activity task move-to-front $taskId") } } catch (_: Exception) {}
-                }
-
-                if (isWarmStart && !forceColdStart) {
-                    val activeTasks = try { runBinderSafe { service.getRunningTasksOnDisplay(targetDisplayId) } ?: emptyList() } catch (_: Exception) { emptyList() }
-                    if (activeTasks.firstOrNull()?.contains(cleanPkg) == true) {
-                        for (taskId in matchingTaskIds) { runBinderSafe { service.execCommand("cmd activity task move-to-front $taskId") } }
-                        currentApp = packageOrComponent; return@withContext true
+                    try {
+                        val nativeMoved = runBinderSafe { controller.moveTaskToDisplayNative(taskId) } ?: false
+                        if (nativeMoved) {
+                            runBinderSafe { service.execCommand("cmd activity task move-to-front $taskId") }
+                        } else {
+                            Log.w(TAG, "[$name Pipeline] Native task migration failed, falling back to shell executor")
+                            runBinderSafe {
+                                service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId")
+                                service.execCommand("cmd activity task move-to-front $taskId")
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "[$name Pipeline] Native moveTaskToDisplay error, executing shell fallback", e)
+                        try {
+                            runBinderSafe {
+                                service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId")
+                                service.execCommand("cmd activity task move-to-front $taskId")
+                            }
+                        } catch (_: Exception) {}
                     }
                 }
 
-                val command = buildShellLaunchCommand(targetDisplayId, packageOrComponent, extraKey, extraValue, reorderToFront = isWarmStart)
-                val result = runBinderSafe { service.execCommand(command) } ?: ""
-                if (result.contains("SecurityException") || result.contains("Permission Denial")) {
-                    val retryTasks = try { runBinderSafe { service.getTaskIdsForPackage(cleanPkg) } ?: intArrayOf() } catch (_: Exception) { intArrayOf() }
-                    for (taskId in retryTasks) { runBinderSafe { service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId"); service.execCommand("cmd activity task move-to-front $taskId") } }
+                // Prevent redundant 'am start' shell command execution immediately following async task migration command.
+                // Re-launching via 'am start' in parallel with active task displacement commands causes Android OS task stack conflict,
+                // frequently forcing the primary Display 0 (MainActivity) to recede to the background Recents view.
+                if (isWarmStart && !forceColdStart) {
+                    if (isWarmStart) {
+                        verifySurfaceAndFallback(this@MirroringPipeline, service, targetDisplayId, cleanPkg, matchingTaskIds, packageOrComponent, extraKey, extraValue)
+                    }
+                    currentApp = packageOrComponent
+                    return@withContext true
                 }
+
+                // 1. Try native binder launchAppOnDisplayV2 first (only for Standard package without complex query strings)
+                var nativeStarted = false
+                val isStandardAppLaunch = extraKey.isNullOrEmpty() && extraValue == null && !packageOrComponent.contains("/")
+                if (isStandardAppLaunch) {
+                    try {
+                        nativeStarted = runBinderSafe { controller.launchAppOnDisplayV2(cleanPkg, forceStop = false) } ?: false
+                    } catch (e: Exception) {
+                        Log.w(TAG, "[$name Pipeline] Native launchAppOnDisplayV2 failed, preparing shell fallback", e)
+                    }
+                }
+
+                // 2. Fallback to buildShellLaunchCommand if native launch is inapplicable or failed
+                if (!nativeStarted) {
+                    Log.i(TAG, "[$name Pipeline] Executing fallback shell launch command for $packageOrComponent")
+                    val command = buildShellLaunchCommand(targetDisplayId, packageOrComponent, extraKey, extraValue, reorderToFront = isWarmStart)
+                    val result = runBinderSafe { service.execCommand(command) } ?: ""
+                    if (result.contains("SecurityException") || result.contains("Permission Denial")) {
+                        val retryTasks = try { runBinderSafe { service.getTaskIdsForPackage(cleanPkg) } ?: intArrayOf() } catch (_: Exception) { intArrayOf() }
+                        for (taskId in retryTasks) {
+                            try {
+                                val retryNativeMoved = runBinderSafe { controller.moveTaskToDisplayNative(taskId) } ?: false
+                                if (!retryNativeMoved) {
+                                    service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId")
+                                    service.execCommand("cmd activity task move-to-front $taskId")
+                                }
+                            } catch (_: Exception) {}
+                        }
+                    }
+                }
+                
                 if (isWarmStart) verifySurfaceAndFallback(this@MirroringPipeline, service, targetDisplayId, cleanPkg, matchingTaskIds, packageOrComponent, extraKey, extraValue)
                 currentApp = packageOrComponent; return@withContext true
+                /* ### 수정 끝 ### */
             } catch (e: Exception) { Log.e(TAG, "[$name Pipeline] Component push crashed inside system shell launcher layer.", e); return@withContext false }
         }
 

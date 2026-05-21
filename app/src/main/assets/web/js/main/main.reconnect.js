@@ -1,6 +1,14 @@
 // English comment: Reconnection scheduler, Control Socket Connection, and Quality Telemetry Reports for Castla Web Client.
 // Strictly preserves 100% of the original logic, comments, and error handlers within the 300-line limit.
 
+/* ### 수정 시작 ### */
+// Track the last processed resolutions to prevent infinite hot-refresh/resize loops.
+let lastPrimaryServerWidth = 0;
+let lastPrimaryServerHeight = 0;
+let lastSecondaryServerWidth = 0;
+let lastSecondaryServerHeight = 0;
+/* ### 수정 끝 ### */
+
 function scheduleReconnect() {
   if (isReconnecting) return;
   isReconnecting = true;
@@ -96,6 +104,31 @@ function handleControlMessage(msg) {
       console.log(
         `[Main] Server resolution changed pane=${pane} server=${msg.width}x${msg.height} fitMode=${fitMode} locked=${describeViewport(lockedViewport)} split=${!!state.right}`,
       );
+
+      /* ### 수정 시작 ### */
+      // Avoid duplicate hot-refresh loops in MJPEG mode, as JPEG streams do not suffer from rainbow artifacts.
+      if (codecMode === "mjpeg") {
+        console.log(`[Main] Skipped hot-refresh for ${pane} in MJPEG mode.`);
+        return;
+      }
+
+      // Safeguard against redundant hot-refresh loops when the resolution is identical to the current active stream.
+      if (pane === "secondary") {
+        if (lastSecondaryServerWidth === msg.width && lastSecondaryServerHeight === msg.height) {
+          console.log(`[Main] Skipped redundant hot-refresh for secondary pane (resolution unchanged: ${msg.width}x${msg.height})`);
+          return;
+        }
+        lastSecondaryServerWidth = msg.width;
+        lastSecondaryServerHeight = msg.height;
+      } else {
+        if (lastPrimaryServerWidth === msg.width && lastPrimaryServerHeight === msg.height) {
+          console.log(`[Main] Skipped redundant hot-refresh for primary pane (resolution unchanged: ${msg.width}x${msg.height})`);
+          return;
+        }
+        lastPrimaryServerWidth = msg.width;
+        lastPrimaryServerHeight = msg.height;
+      }
+      /* ### 수정 끝 ### */
 
       
       // Do NOT clear cached SPS/PPS to prevent WAITING_SPS_PPS waiting deadlock during resolution changes.

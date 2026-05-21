@@ -63,6 +63,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
     
     private var activityTaskManagerInstance: Any? = null
     private var startActivityMethod: Method? = null
+    private var moveTaskToDisplayMethod: Method? = null
     
     private var inputManagerInstance: Any? = null
     private var injectMethod: Method? = null
@@ -81,6 +82,10 @@ class PrivilegedService : IPrivilegedService.Stub() {
     
 
     init {
+        /* ### 수정 시작 ### */
+        // Bypass Hidden API limits immediately before initializing any system service binders
+        bypassHiddenApiRestrictions()
+        /* ### 수정 끝 ### */
         tryInitInputManager()
         tryInitShellContext()
         
@@ -103,6 +108,24 @@ class PrivilegedService : IPrivilegedService.Stub() {
      *
      * Reference: genymobile/scrcpy server/src/.../Workarounds.java#fillAppInfo
      */
+    /* ### 수정 시작 ### */
+    // Bypass Android Hidden API constraints to allow stable system binder reflections
+    private fun bypassHiddenApiRestrictions() {
+        try {
+            val getRuntime = Class.forName("dalvik.system.VMRuntime").getDeclaredMethod("getRuntime")
+            getRuntime.isAccessible = true
+            val vmRuntime = getRuntime.invoke(null)
+            val setHiddenApiExemptions = Class.forName("dalvik.system.VMRuntime")
+                .getDeclaredMethod("setHiddenApiExemptions", Array<String>::class.java)
+            setHiddenApiExemptions.isAccessible = true
+            setHiddenApiExemptions.invoke(vmRuntime, arrayOf("L"))
+            Log.i(TAG, "Successfully bypassed Android Hidden API restrictions via VMRuntime exemption")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to bypass Android Hidden API restrictions", e)
+        }
+    }
+    /* ### 수정 끝 ### */
+
     private fun fillShellAppInfo() {
         try {
             val atClass = Class.forName("android.app.ActivityThread")
@@ -789,9 +812,15 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
     
     override fun launchAppOnDisplay(displayId: Int, packageName: String) {
+        launchAppOnDisplayV2(displayId, packageName, true)
+    }
+
+    override fun launchAppOnDisplayV2(displayId: Int, packageName: String, forceStop: Boolean) {
         try {
             val pkg = if (packageName.contains("/")) packageName.substringBefore("/") else packageName
-            nativeForceStop(pkg)
+            if (forceStop) {
+                nativeForceStop(pkg)
+            }
 
             val resolvedComponent = resolveLaunchComponent(packageName)
             val intent = Intent(Intent.ACTION_MAIN).apply {
@@ -812,7 +841,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 Log.w(TAG, "setLaunchDisplayId option failed to apply", e)
             }
 
-            
             val started = nativeStartActivity(intent, options.toBundle())
             if (started) {
                 Log.i(TAG, "Natively launched app $packageName on display $displayId via IActivityTaskManager")
@@ -826,12 +854,21 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     execCommand(cmd)
                 }
             }
-            
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Failed to launch $packageName on display $displayId (display not found?)", e)
-            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to launch $packageName on display $displayId", e)
+            Log.e(TAG, "Failed to launch app $packageName on display $displayId", e)
+        }
+    }
+
+    override fun moveTaskToDisplayNative(taskId: Int, displayId: Int): Boolean {
+        val atm = activityTaskManagerInstance ?: return false
+        val method = moveTaskToDisplayMethod ?: return false
+        return try {
+            method.invoke(atm, taskId, displayId)
+            Log.i(TAG, "Natively moved task $taskId to display $displayId via IActivityTaskManager")
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to move task natively via IActivityTaskManager", e)
+            false
         }
     }
 

@@ -2,13 +2,15 @@ package com.castla.mirror.server
 
 import android.content.Context
 import android.util.Log
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.InputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.security.KeyStore
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
-import javax.net.ssl.SSLSocketFactory
-import javax.net.ssl.SSLServerSocketFactory
-import fi.iki.elonen.NanoHTTPD
 import fi.iki.elonen.NanoWSD
 import fi.iki.elonen.NanoWSD.WebSocket
 import org.json.JSONObject
@@ -21,24 +23,20 @@ data class TouchEvent(val action: String, val x: Float, val y: Float, val pointe
 
 class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
 
-    // Unique instance ID for detecting server restarts
     val instanceId: String = java.util.UUID.randomUUID().toString()
 
     init {
-        // Configure logging filter to silence harmless socket closed exceptions from NanoHTTPD
+        // [기존 코드] NanoHTTPD 소켓 닫힘 예외 로그 필터링
         try {
             val nanoLogger = java.util.logging.Logger.getLogger("fi.iki.elonen.NanoHTTPD")
             nanoLogger.filter = object : java.util.logging.Filter {
                 override fun isLoggable(record: java.util.logging.LogRecord): Boolean {
                     val thrown = record.thrown
                     val msg = record.message ?: ""
-
-                    // Suppress "Could not send response to the client" and generic Socket is closed errors
                     val isTargetError = msg.contains("Could not send response to the client") ||
                             thrown is java.net.SocketException ||
                             thrown?.message?.contains("Socket is closed") == true ||
                             thrown?.cause is java.net.SocketException
-
                     return !isTargetError
                 }
             }
@@ -46,23 +44,90 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
             Log.w(TAG, "Failed to configure NanoHTTPD log filter", e)
         }
 
-        try {
-            val keystoreStream = context.assets.open("castla.p12")
-            val keyStore = KeyStore.getInstance("PKCS12")
-            val password = "castla123".toCharArray()
-            keyStore.load(keystoreStream, password)
+        // 🔐 [개선된 100% 자동화 SSL 로드 로직]
+        // 주서버(NAS 등)에서 인증서를 받아오는 비동기 작업 선행 후 SSL 컨텍스트 구성
+        configureSecureContext()
+    }
 
-            val keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
-            keyManagerFactory.init(keyStore, password)
+    private var serverIp: String = "0.0.0.0"
 
-            val sslContext = SSLContext.getInstance("TLS")
-            sslContext.init(keyManagerFactory.keyManagers, null, null)
+    /**
+     * 동적 인증서 파일 검증 및 SSL 설정 적용
+     */
+    private fun configureSecureContext() {
+        // 1단계에서 구축한 오라클 백엔드 다운로드 트리거
+        triggerCertDownloadInBackground()
 
-            makeSecure(sslContext.serverSocketFactory, null)
-            Log.i(TAG, "Local HTTPS (SSL) successfully enabled on port $DEFAULT_PORT")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to load SSL Keystore, falling back to HTTP", e)
+        // 🚨 현재 폰의 핫스팟/셀룰러 IP 체크
+        val currentIp = serverIp 
+
+        if (currentIp == "192.0.0.4") {
+            try {
+                val password = "castla123".toCharArray() 
+                val keyStore = KeyStore.getInstance("PKCS12")
+                val dynamicKeyStoreFile = File(context.filesDir, "dynamic_castla.p12")
+                
+                val keystoreStream: InputStream = if (dynamicKeyStoreFile.exists() && dynamicKeyStoreFile.length() > 0) {
+                    Log.i(TAG, "🔓 [성공] 192.0.0.4 일치: 공인 인증서 로드")
+                    FileInputStream(dynamicKeyStoreFile)
+                } else {
+                    context.assets.open("castla.p12")
+                }
+
+                keystoreStream.use { stream -> keyStore.load(stream, password) }
+                val keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
+                keyManagerFactory.init(keyStore, password)
+
+                val sslContext = SSLContext.getInstance("TLS")
+                sslContext.init(keyManagerFactory.keyManagers, null, null)
+
+                // ✅ 192.0.0.4 일 때만 SSL 소켓 바인딩 (HTTPS)
+                makeSecure(sslContext.serverSocketFactory, null)
+                Log.i(TAG, "🚀 [🚀 HTTPS 모드] Let's Encrypt 공인 SSL 서버 가동")
+                return
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ SSL 로드 실패, HTTP 모드로 폴백합니다.", e)
+            }
         }
+
+        // 🌐 192.0.0.4가 아니면 makeSecure()를 호출하지 않으므로 자동으로 [순수 HTTP 모드]로 동작합니다.
+        Log.w(TAG, "⚠️ [🌐 HTTP 모드] IP가 $currentIp 이므로 일반 HTTP 서버로 구동합니다.")
+    }
+    /**
+     * 외부 내 개인 서버(NAS/클라우드)에서 최신 .p12 인증서를 다운로드하는 함수
+     */
+    fun triggerCertDownloadInBackground() {
+        Thread {
+            try {
+                val certUrl = "https://tesla.fbezita.com/certs/castla.p12"
+                val url = URL(certUrl)
+                val connection = url.openConnection() as HttpURLConnection
+                connection.connectTimeout = 5000
+                connection.readTimeout = 5000
+                connection.requestMethod = "GET"
+
+                if (connection.responseCode == HttpURLConnection.HTTP_OK) {
+                    val targetFile = File(context.filesDir, "dynamic_castla.p12")
+                    
+                    // 다운로드 받아서 내부 저장소에 덮어쓰기
+                    connection.inputStream.use { input ->
+                        FileOutputStream(targetFile).use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                    Log.i(TAG, "✨ [인증서 동기화 완료] 서버로부터 최신 SSL 인증서를 다운로드했습니다.")
+                } else {
+                    Log.w(TAG, "서버 연결 실패 (HTTP 코드: ${connection.responseCode}). 기존 파일 유지.")
+                }
+                connection.disconnect()
+            } catch (e: Exception) {
+                Log.w(TAG, "인증서 다운로드 중 네트워크 예외 발생 (인터넷 미연결 등): ${e.message}")
+            }
+        }.start()
+    }
+
+    fun updateServerUrl(detectedIp: String) {
+        serverIp = if (detectedIp.isNotEmpty()) detectedIp else "0.0.0.0"
     }
 
     companion object {
@@ -101,6 +166,11 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     // Cached thermal status JSON — sent immediately to new control sockets
     // to prevent race where browser connects before thermal broadcast arrives.
     @Volatile private var cachedThermalJson: String? = null
+
+    /* ### 수정 시작 ### */
+    @Volatile private var primaryCodecMode: String = "h264"
+    @Volatile private var secondaryCodecMode: String = "h264"
+    /* ### 수정 끝 ### */
 
     private var cachedSpsPps: ByteArray? = null
 
@@ -194,11 +264,19 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         sockets.add(socket)
         Log.i(TAG, "$channel video client connected (total: ${sockets.size})")
 
-        val cached = if (channel == "secondary") cachedSecondarySpsPps else cachedPrimarySpsPps
-        cached?.let {
-            socket.sendBinary(it)
-            Log.i(TAG, "Sent cached SPS/PPS to new $channel video client")
+        /* ### 수정 시작 ### */
+        // Playback cached H.264 SPS/PPS parameters ONLY if the display channel is not configured for MJPEG fallback mode.
+        val codecMode = if (channel == "secondary") secondaryCodecMode else primaryCodecMode
+        if (!codecMode.equals("mjpeg", ignoreCase = true)) {
+            val cached = if (channel == "secondary") cachedSecondarySpsPps else cachedPrimarySpsPps
+            cached?.let {
+                socket.sendBinary(it)
+                Log.i(TAG, "Sent cached SPS/PPS to new $channel video client")
+            }
+        } else {
+            Log.i(TAG, "Skipped playback of cached H.264 SPS/PPS for $channel channel due to active MJPEG mode")
         }
+        /* ### 수정 끝 ### */
 
         updateConnectionState()
         onKeyframeRequest(channel)
@@ -302,6 +380,18 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         deadSockets.forEach { unregisterVideoSocket(channel, it) }
     }
 
+    /* ### 수정 시작 ### */
+    // Explicitly clear cached SPS/PPS buffers during codec mode switches to prevent stale H.264 packets leaking.
+    fun clearCachedSpsPps(channel: String = "primary") {
+        if (channel == "secondary") {
+            cachedSecondarySpsPps = null
+        } else {
+            cachedPrimarySpsPps = null
+        }
+        Log.i(TAG, "Cleared cached SPS/PPS for $channel channel")
+    }
+    /* ### 수정 끝 ### */
+
     fun broadcastFrame(data: ByteArray, isKeyFrame: Boolean, channel: String = "primary") {
         val seq = if (channel == "secondary") ++secondaryFrameSeqNum else ++primaryFrameSeqNum
         val flags: Byte = if (isKeyFrame) 0x01 else 0x00
@@ -351,6 +441,24 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         deadSockets.forEach { unregisterAudioSocket(it) }
     }
 
+    /* ### 수정 시작 ### */
+    @Volatile private var preferredPrimaryProfile: String = "High"
+    @Volatile private var preferredSecondaryProfile: String = "High"
+
+    fun getPreferredProfile(channel: String): String {
+        val sockets = if (channel == "secondary") secondaryVideoSockets else primaryVideoSockets
+        val socketProfile = sockets.firstOrNull()?.profile
+        if (socketProfile != null) return socketProfile
+        
+        return if (channel == "secondary") preferredSecondaryProfile else preferredPrimaryProfile
+    }
+
+    fun hasVideoSocket(channel: String): Boolean {
+        val sockets = if (channel == "secondary") secondaryVideoSockets else primaryVideoSockets
+        return sockets.isNotEmpty()
+    }
+    /* ### 수정 끝 ### */
+
     fun controlSocketCount(): Int = controlSockets.size
 
     fun broadcastControlMessage(json: String) {
@@ -382,9 +490,26 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         networkCongestionListener?.invoke()
     }
     
-    fun onCodecModeRequest(mode: String) {
+    /* ### 수정 시작 ### */
+    fun onCodecModeRequest(mode: String, profile: String = "High", pane: String = "primary") {
+        /* ### 수정 시작 ### */
+        if (pane.equals("secondary", ignoreCase = true)) {
+            preferredSecondaryProfile = profile
+            secondaryCodecMode = mode
+            if (mode.equals("mjpeg", ignoreCase = true)) {
+                clearCachedSpsPps("secondary")
+            }
+        } else {
+            preferredPrimaryProfile = profile
+            primaryCodecMode = mode
+            if (mode.equals("mjpeg", ignoreCase = true)) {
+                clearCachedSpsPps("primary")
+            }
+        }
+        /* ### 수정 끝 ### */
         onCodecModeListener?.invoke(mode)
     }
+    /* ### 수정 끝 ### */
     
     fun onViewportChange(pane: String, width: Int, height: Int, layoutMode: String = "") {
         onViewportChangeListener?.invoke(pane, width, height, layoutMode)

@@ -183,4 +183,15 @@ interface IPrivilegedService {
      * Native ATM query (under 1ms).
      */
     int getDisplayIdForPackage(String packageName) = 31;
+
+    /**
+     * Launch an app on a specific virtual display natively, 
+     * optionally preserving the warm start task stack.
+     */
+    void launchAppOnDisplayV2(int displayId, String packageName, boolean forceStop) = 32;
+
+    /**
+     * Move an active task to the target virtual display natively via IActivityTaskManager.
+     */
+    boolean moveTaskToDisplayNative(int taskId, int displayId) = 33;
 }

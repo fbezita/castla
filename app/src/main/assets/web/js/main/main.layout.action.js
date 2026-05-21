@@ -282,9 +282,30 @@ async function updateLayoutUI() {
     window.leftLockedViewport = null;
     window.rightLockedViewport = null;
 
-    canvas.style.opacity = "1";
-    const mseVideo = document.getElementById("mse-video");
-    if (mseVideo) mseVideo.style.opacity = "0";
+    /* ### 수정 시작 ### */
+    // Ensure primary video element visibility is correctly routed to MseVideo when MseDecoder is active on layout update
+    const isMseActive = window.decoder && window.decoder.constructor.name === "MseDecoder";
+    if (isMseActive) {
+      canvas.style.opacity = "0";
+      /* ### 수정 시작 ### */
+      // Keep canvas displayed but transparent to fully capture remote pointer events on layout update
+      canvas.style.display = "block";
+      /* ### 수정 끝 ### */
+      const mseVideo = document.getElementById("mse-video");
+      if (mseVideo) {
+        mseVideo.style.opacity = "1";
+        mseVideo.style.display = "block";
+      }
+    } else {
+      canvas.style.opacity = "1";
+      canvas.style.display = "block";
+      const mseVideo = document.getElementById("mse-video");
+      if (mseVideo) {
+        mseVideo.style.opacity = "0";
+        mseVideo.style.display = "none";
+      }
+    }
+    /* ### 수정 끝 ### */
 
     applyActiveFitModes();
     sendViewportSize();

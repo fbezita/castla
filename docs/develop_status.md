@@ -2,7 +2,7 @@
 
 > **상태**: 🟢 완벽 수렴 (Convergence Complete)  
 > **아키텍처 패러다임**: 100% 대칭형 리액티브 상태 지향 아키텍처 (Symmetrical Reactive State Architecture)  
-> **마지막 갱신 일자**: 2026-05-20
+> **마지막 갱신 일자**: 2026-05-21
 
 ---
 
@@ -137,6 +137,7 @@ graph TD
 2. **셧다운 락 바이패스**: `release(forcePhysical = true)` 호출 시 코루틴 락 및 단일 스레드 컨텍스트 점유를 완전히 우회(Bypass)하여 즉시 하드웨어 자원을 수거.
 3. **4초 타임아웃 격리**: 모든 해상도 변경 락 대기를 `withTimeoutOrNull(4000L)`로 제어하여 무한 홀딩 차단.
 4. **Shizuku 바인더 안전 가드**: 모든 AIDL 호출부를 백그라운드 스레드에 귀속시키고 최대 3초의 타임아웃을 지닌 `runBinderSafe`로 래핑하여 Binder Crash 격벽 완성.
+5. **Shizuku SecurityException 완벽 완치**: Shizuku 셸 권한 직접 바인딩 시 안드로이드 14+ 대응을 위해 `com.android.shell` 패키지명과 올바른 AttributionTag를 리플렉션으로 주입하여, `IWindowManager` 및 `IActivityTaskManager` AIDL 인터페이스 리플렉션 호출 시의 권한 에러를 완벽 영구 차단.
 
 ---
 
@@ -192,3 +193,7 @@ graph TD
      * **[디코더 해제]**: 디코더 생성 직후 도착하는 최초의 키프레임 수신 시, 시퀀스 tracking 정의 여부와 무관하게 최우선적으로 `this._waitingForKeyframe = false` 상태를 즉시 해제해 주어야 최초 기동 시의 찌꺼기 델타 드롭으로 인한 초기 검은 화면(Black Screen) 락이 걸리지 않습니다.
      * **[캔버스 노출]**: 듀얼 스플릿에서 단일 화면 모드로 전환 시(`updateLayoutUI`의 `hasLeft` 분기), 습관적인 `clearCanvas()` 호출로 인해 `canvas.style.opacity = '0'`으로 숨겨지는 일이 없도록 강력히 가드하십시오. 반드시 `canvas.style.opacity = '1'` 상태를 항시 유지해 주어야 무중단 리사이즈 중에도 화면이 투명해지거나 검게 타지 않고 부드러운 전환을 수행할 수 있습니다.
    - **스마트 앱 페어**: 이미 실행 중인 패키지를 절대 중복 기동하거나 성급히 죽이지 마십시오. 현재 실행 중인 왼쪽/오른쪽 슬롯과 비교해 기존 앱은 그대로 보존하고, 누락된 파트너 앱만 맞춤형으로 런칭하는 일반화 수식을 준수하십시오.
+6. **우측 보조화면의 단독 주화면 승격(Promotion) 시 디코더/페이서 강제 리부트와 UI SSOT 동기화를 준수하십시오**:
+   - **물리적 리부트 지침**: 보조화면(Secondary) 비디오 스트림을 메인(Primary)으로 승격시킬 때는, 단순히 뷰포트 해상도만 변경해서는 안 됩니다. 반드시 `promoteSecondaryToPrimary` 비동기 흐름 내에서 `initDecoder(true)`를 강제 기동하여 기존 Primary의 낡은 프레임 페이서 시간축과 시퀀스 트래커를 물리적으로 완전히 파괴한 후 새로 리부트해야 `dropped` 드롭 지옥과 `RECOVERING` 갭 고착 에러를 막을 수 있습니다.
+   - **SPS/PPS 캐시 이식**: 디코더를 리부트할 때, 우측 보조화면의 `window.secondaryDecoder` 및 `window._lastSecondarySpsPps` 캐시 바이트를 신형 Primary 디코더로 즉각 수동 이식해주어 `WAITING_SPS_PPS` 데드락 상태를 우회해야 합니다.
+   - **투명도 쉴드 및 SSOT 정밀 정렬**: 승격 과도기(200~500ms) 동안 이전 앱의 잔상이 남지 않도록 승격과 동시에 `canvas.style.opacity = '0'` 쉴드를 장착하십시오. 그 후 첫 프레임 수신 감지 시점(`checkReady`)에 `state.left = window._promotedApp; state.right = null;` 반응형 상태를 일치 대입하고, 캔버스를 `opacity = '1'`로 우아하게 복원하십시오. 이 수명 주기를 깨뜨리면 UI 상태 엔진과 실제 비디오 디코더 캔버스가 어긋나 전체 시스템이 오작동하게 됩니다.

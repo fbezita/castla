@@ -9,7 +9,10 @@ function describeViewport(viewport) {
 
 function sendViewportSize(immediate = false) {
   if (!controlSocket || controlSocket.readyState !== WebSocket.OPEN) return;
-  if (codecMode === "mjpeg" && !streamPolicy.autoFit) return;
+  /* ### 수정 시작 ### */
+  // Allow viewport transmission in MJPEG mode so that the native virtual display pipeline
+  // receives valid initial dimensions to initialize the JpegEncoder.
+  /* ### 수정 끝 ### */
 
   const livePrimaryWidth = Math.round(
     !!!state.right

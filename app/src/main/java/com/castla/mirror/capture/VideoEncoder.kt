@@ -11,12 +11,15 @@ import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
 
+/* ### 수정 시작 ### */
 class VideoEncoder(
     private val width: Int,
     private val height: Int,
     private val bitrate: Int = 4_000_000,
-    private val fps: Int = 30
+    private val fps: Int = 30,
+    val preferredProfile: String = "High"
 ) {
+/* ### 수정 끝 ### */
     companion object {
         private const val TAG = "VideoEncoder"
         private const val MIME_TYPE = "video/avc"
@@ -60,7 +63,16 @@ class VideoEncoder(
         }
     }
 
+    /* ### 수정 시작 ### */
     fun createInputSurface(): Surface {
+        if (preferredProfile.equals("Baseline", ignoreCase = true)) {
+            Log.i(TAG, "Enforcing Baseline H.264 profile for software decoder compatibility.")
+            return createEncoderWithProfile(
+                MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline,
+                MediaCodecInfo.CodecProfileLevel.AVCLevel31,
+                "Baseline"
+            )
+        }
         return try {
             createEncoderWithProfile(
                 MediaCodecInfo.CodecProfileLevel.AVCProfileHigh,
@@ -76,7 +88,9 @@ class VideoEncoder(
             )
         }
     }
+    /* ### 수정 끝 ### */
 
+    /* ### 수정 시작 ### */
     private fun createEncoderWithProfile(profile: Int, level: Int, profileName: String): Surface {
         val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
@@ -96,6 +110,13 @@ class VideoEncoder(
             setInteger("android.media.playback-params.low-latency", 1)
             setInteger(MediaFormat.KEY_PRIORITY, 1)
             setInteger("max-bframes", 0)
+            
+            // Explicitly disable CABAC on hardware encoders when Baseline is requested to guarantee Wasm Broadway decoder compatibility
+            if (profile == MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline) {
+                setInteger("cabac", 0)
+                setInteger("cabac-mode", 0)
+            }
+            
             setInteger("vendor.rtc-ext-dec-low-latency.enable", 1)
         }
 
@@ -107,6 +128,7 @@ class VideoEncoder(
         Log.i(TAG, "Encoder created ($profileName): ${width}x${height} @ ${bitrate / 1000}kbps, ${fps}fps")
         return surface
     }
+    /* ### 수정 끝 ### */
 
     var onSpsPps: ((ByteArray) -> Unit)? = null
 

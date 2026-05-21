@@ -68,4 +68,32 @@
 
 ---
 
+## 💡 JMuxer + MSE 기술 도입 심층 검토 리포트
+
+테슬라 MCU 및 구형 모바일 웹 환경에서 WebCodecs 미지원 시 발생하는 고비용 MJPEG Fallback 문제를 완벽히 타개하기 위해, **JMuxer + MSE(Media Source Extensions)** 조합에 대한 면밀한 연동 타당성 검토를 마쳤습니다.
+
+### 1. 상황 분석 (Situation Analysis)
+* **현상**: WebCodecs(VideoDecoder)가 지원되지 않는 구형 브라우저나 테슬라 MCU V1/V2 웹 뷰 환경에서는 H.264 하드웨어 가속을 쓰지 못하고 MJPEG fallback 모드로 진입합니다.
+* **문제점**: MJPEG fallback은 매 프레임을 개별 이미지로 인코딩/송출하므로, 대역폭 소모가 무겁고 안드로이드 백엔드의 CPU 사용량을 급증시킵니다. CPU 기반 Broadway.js(Wasm SW 디코더)는 프레임 드롭과 심각한 발열을 동반합니다.
+* **대안**: MSE는 구형 기기 및 테슬라 브라우저에서도 **H.264 하드웨어 가속 디코딩**을 네이티브 지원합니다. 단, MSE는 raw H.264 Annex-B 바이너리를 수용하지 못하므로, 실시간 Transmuxing 라이브러리인 **JMuxer**를 사용하여 웹 클라이언트 단에서 raw H.264를 fMP4(Fragmented MP4) 컨테이너로 실시간 패키징하여 주입해야 합니다.
+
+### 2. 설계 가이드 (Design Guide)
+* **데이터 흐름**: 
+  - Android (MediaCodec raw H.264) ➔ WebSocket ➔ Web Client (바이너리 수신) ➔ JMuxer JS Engine (fMP4 래핑) ➔ MSE SourceBuffer ➔ `<video id="mse-video">` 재생 (GPU 가속).
+* **초저지연 디버퍼링 (Debuffering) 스키마 (핵심)**:
+  - MSE의 자체적인 대용량 버퍼링 경향(200ms~500ms 딜레이)을 극복하기 위해, 프론트엔드에서 주기적으로(100ms 간격) `video.buffered`를 감시합니다.
+  - 지연이 150ms ~ 300ms 사이일 경우 `video.playbackRate = 1.3` 수준으로 재생 속도를 미세하게 끌어올려 버퍼를 소비합니다.
+  - 지연이 400ms 이상 벌어지면 `video.currentTime = bufferedEnd - 0.05`로 강제 점프(Seek)하여 초저지연 성능(50ms 내외)을 복구합니다.
+
+### 3. 인터페이스 정의 (Interface Definition)
+* 기존 `H264Decoder` 및 `FallbackDecoder`와 완벽히 대칭되는 명세를 갖춘 `JmuxerDecoder` 클래스를 구현하여, 기존 디코더 팩토리 구조 변경 없이 손쉽게 플러그인 결합을 이뤄냅니다. (자세한 의사코드는 최종 답변 내용 및 개발 로드맵 참조)
+
+### 4. 단계별 로드맵 (Step-by-step Roadmap)
+* **Phase 1**: `jmuxer.min.js` 경량 라이브러리 연동 및 HTML5 `<video>` 엘리먼트 레이아웃 안정화.
+* **Phase 2**: `main.decoder.js` 내에 WebCodecs ➔ JMuxer+MSE ➔ MJPEG 3중 레이어 하이브리드 폴백 매트릭스 구현.
+* **Phase 3**: 테슬라 실기기 내장 브라우저 환경에서 초저지연 프레임 드롭(Debuffering) 디버깅 및 프로덕션 안정화.
+
+---
+
 다중 가상 디스플레이 동시 구동 및 완벽한 분배 스트리밍이라는 최종 목표를 향한 견고한 교두보가 완성되었습니다. 빌드 후 극적으로 향상된 멀티 태스킹의 연출을 체감해 보십시오! 🟢
+

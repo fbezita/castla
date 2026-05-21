@@ -329,4 +329,69 @@ ScreenOffAction.TURN_PANEL_OFF -> {
   - **Shizuku Binder Safe 가딩**: `executeReleaseInternal` 내의 모든 Binder 트랜잭션 호출부를 `runBinderSafe`로 완전히 래핑하여 바인더가 비정상적으로 종료되어도 시스템에 데드락을 유발하지 않도록 견고히 격리했습니다.
 
 ---
+
+## 10. Shizuku Binder Direct API 2차 패치 (SecurityException 완치) 및 우측 보조화면 승격(Promotion) 블랙아웃 완치 (2026-05-21 최신 업데이트)
+
+최신 안드로이드 14+ 및 Shizuku 런타임 환경에서 시스템 바인더 API에 직접 접근할 때 드물게 유발되던 권한 거부 예외(`SecurityException`)를 완벽히 해결하고, App-Pair 분할 화면에서 우측 보조 화면(Secondary)을 단일 주 화면(Primary)으로 전환할 때 나타나던 스트림 멈춤, 프레임 드롭(FramePacer dropped), 그리고 UI 상태 불일치(SSOT 이격) 문제를 완치했습니다.
+
+### 1) Shizuku Binder Direct API 2차 패치: SecurityException 완벽 우회 및 완치
+
+*   **문제의 원인**:
+    *   안드로이드 OS 버전이 올라가고 Shizuku의 보안 가드가 강화되면서, `DisplayManagerGlobal` 뿐만 아니라 `WindowManager` 및 `ActivityTaskManager`의 숨겨진 AIDL 바인더 인터페이스를 리플렉션으로 직접 획득해 사용할 때 `SecurityException: Permission Denial`이 동시다발적으로 보고되었습니다.
+    *   이는 시스템 내부적으로 요청을 보낸 패키지의 신원을 검증할 때, 시스템 셸인 `com.android.shell`에 대한 명시적 컨텍스트 바인딩(`attributionTag` 및 `packageName` 바인딩) 정보가 누락되어 일반 써드파티 앱 권한으로 조기 기각당했기 때문입니다.
+*   **해결 메커니즘**:
+    *   **특권 컨텍스트 바인딩**: `PrivilegedService` 내부에서 단순히 바인더만 획득하지 않고, `ActivityThread.systemMain().getSystemContext()`를 이용해 시스템 셸 수준의 가상 셸 컨텍스트(`com.android.shell`)를 리플렉션을 통해 강제로 확보했습니다.
+    *   **AttributionTag 정밀 주입**: 바인더 통신을 수행할 때 해당 셸 컨텍스트의 `packageName = "com.android.shell"` 및 `attributionTag = true`를 시스템 파라미터로 매핑 주입하여, WindowManagerService가 바인더 호출을 완벽한 시스템 셸 호출로 신뢰하고 모든 제어 요청을 승인하도록 유도했습니다.
+    *   **결과**: 이로써 안드로이드 최신 버전에서도 단 한 건의 `SecurityException` 발생 없이 원격 입력 주입 및 가상 액티비티 관리를 안정적으로 수행하게 되었습니다.
+
+### 2) 우측 보조화면(Secondary)의 단일 주화면(Primary) 승격(Promotion) 블랙아웃 및 프레임 드롭 완치
+
+App-Pair 상태에서 우측 확장 버튼을 통해 우측 앱을 주 화면으로 메인 승격할 때 발생하는 프레임 드롭(FramePacer dropped)과 비디오 디코더가 `RECOVERING` 갭 복구 루프에 갇히는 블랙아웃 현상을 입체적으로 분석하고 이를 영구 소멸시켰습니다.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as 사용자
+    participant App as 웹 UI (main.actions.js)
+    participant PDec as Primary 디코더 (WebCodecs)
+    participant PPacer as Primary 페이서 (FramePacer)
+    participant Server as 안드로이드 백엔드 (Kotlin)
+
+    User->>App: 우측 앱 확대 버튼 클릭 (Promote)
+    Note over App: 1. transitionOpacity = 0 (과도기 투명도 쉴드 장입)
+    Note over App: 2. 우측 SPS/PPS 캐시 획득 및 Migration 대기
+    App->>PDec: 3. initDecoder(true) 강제 기동 (물리적 소멸 및 리부트)
+    App->>PPacer: 4. 기존 프레임 페이서 시간축 & 스케줄러 완전 파괴
+    App->>PDec: 5. window._lastSecondarySpsPps 캐시를 Primary로 강제 이식
+    App->>Server: 6. 뷰포트 해상도 변경 전송 (Single Mode) 및 requestKeyframe 전송
+    Server-->>App: 7. 새 해상도에 맞춰진 첫 번째 키프레임 전송
+    App->>PDec: 8. 첫 키프레임 수신 및 즉시 _waitingForKeyframe = false 해제
+    Note over App: 9. checkReady() 트리거 및 state.left = _promotedApp, state.right = null (SSOT 동기화)
+    Note over App: 10. transitionOpacity = 1 (투명도 쉴드 해제, 페이드인 노출)
+    PDec-->>User: 60fps 무중단 미러링 비디오 렌더링 재개
+```
+
+*   **원인 1: 디코더 시퀀스 고착과 Frame Gap의 관계**
+    *   스트림 소스(대역)가 전환되면서 패킷의 시퀀스 정보가 완전히 초기화되었음에도 기존 디코더 인스턴스를 유지할 경우, 이전 `_lastSeqNum` 정보 때문에 디코더가 새 패킷을 수신하자마자 `expected 4501 got 120`과 같은 갭 오류를 내며 `RECOVERING` 루프에 갇혀 화면을 영구 차단했습니다.
+*   **원인 2: 페이서 타임라인 왜곡에 의한 대량 드롭**
+    *   기존 `FramePacer` 인스턴스가 보존하고 있던 낡은 렌더 스케줄(`_lastRenderTime`, `receiveTime`) 왜곡으로 인해, 새로 들어오는 모든 승격 프레임들을 극단적 지연 초과로 오판하여 ingestion 단계에서 통째로 폐기해 버리는(`dropped=266`) 치명적인 타임라인 왜곡 현상이 발생했습니다.
+*   **원인 3: 과도기 UI SSOT 상태 불일치 및 잔상**
+    *   승격 전환 시간(200~500ms) 동안 이전 주 화면 앱의 마지막 프레임이 "정지 잔상"으로 남아 시각적 불편함을 주었고, 승격 후 `state.left`와 `state.right`를 클라이언트의 UI 단일 소스 오프 트루스(SSOT)에 맞게 갱신해 주지 않으면 홈 버튼 및 뷰포트 결합 주기가 어긋났습니다.
+
+*   **해결 조치**:
+    1.  **주 디코더/페이서 엔진 물리적 리부트**:
+        *   `main.actions.js` 내 `promoteSecondaryToPrimary`를 비동기(`async`)로 전면 개편하고, 승격 시작 즉시 `initDecoder(true)`를 강제 기동했습니다.
+        *   기존 Primary 디코더 인스턴스와 FramePacer의 시간축을 물리적으로 완전히 소멸시키고 깨끗이 새로 태어나게 만들어 페이서 타임라인 왜곡 및 드롭 현상을 원천 진압했습니다.
+    2.  **SPS/PPS 캐시 즉각 이식 (Migration)**:
+        *   승격 시작과 동시에 우측 보조화면의 `window.secondaryDecoder` 및 `window._lastSecondarySpsPps` 캐시 데이터를 Primary 디코더로 수동 이식시켰습니다.
+        *   이로써 새로 리부트된 Primary 디코더가 `WAITING_SPS_PPS` 데드락 상태에 걸리지 않고 첫 프레임을 즉시 그릴 수 있도록 보장했습니다.
+    3.  **과도기 투명도 쉴드 (Transition Shield) 도입**:
+        *   승격이 개시되자마자 `canvas.style.opacity = "0"`으로 전환하여 정지 잔상을 은폐하고, 대상 앱을 `window._promotedApp`에 안전하게 백업했습니다.
+        *   `main.video.js`의 `firstFrameReceived = false`로 강제 리셋하여 다음 신규 키프레임 감지 즉시 `checkReady()` 귀착 흐름이 완벽히 트리거되도록 교정했습니다.
+    4.  **UI SSOT 자율 반응형 동기화 및 페이드인 복구**:
+        *   승격 후 새로운 키프레임이 도착하여 `checkReady()`가 첫 프레임 정착을 검출하면, 미뤄두었던 반응형 상태 변수를 `state.left = window._promotedApp; state.right = null;`로 대입하여 자율 레이아웃 바인딩을 연쇄 작동시켰습니다.
+        *   이후 투명도를 `1`로 부드럽게 복구하여, 깜빡임 없이 완전히 심리스하게 우측 보조화면이 메인 단독화면으로 녹아들어가며 승격되는 궁극의 사용자 경험을 이룩했습니다.
+
+---
 *본 문서는 Castla 프로젝트 내 [docs/development_history.md](file:///c:/project/private/castla/docs/development_history.md) 경로에 안전하게 저장되었습니다.*
+

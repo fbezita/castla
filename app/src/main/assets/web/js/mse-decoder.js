@@ -1,291 +1,387 @@
+/* ### 수정 시작 ### */
 class MseDecoder {
-    constructor(onError) {
-        this.video = document.getElementById('mse-video'); // Must be initialized properly here
-        this.mediaSource = null;
-        this.sourceBuffer = null;
-        this.onError = onError;
+    constructor(videoElementId = 'mse-video', onError) {
+        // Handle optional single parameter case for backward compatibility
+        let actualId = 'mse-video';
+        let actualOnError = onError;
+        if (typeof videoElementId === 'function') {
+            actualOnError = videoElementId;
+            actualId = 'mse-video';
+        } else if (typeof videoElementId === 'string') {
+            actualId = videoElementId;
+        }
 
-        this.queue = [];
-        this.updating = false;
+        this.videoElementId = actualId;
+        this.video = document.getElementById(actualId);
+        this.onError = actualOnError;
+        this.jmuxer = null;
         this.ready = false;
-        this.mimeType = 'video/mp4; codecs="avc1.4d002a"'; // Baseline profile by default, will update dynamically
-
-        this.sps = null;
-        this.pps = null;
-
-        this.startTime = 0;
+        
+        // Target latency profile for real-time mirroring
+        this.targetLatency = 0.15; // 150ms target latency
+        this.maxLatency = 0.40;    // 400ms maximum tolerable latency
+        this.latencyTimer = null;
         this.framesDecoded = 0;
         this.lastDecodeTime = 0;
-        this.videoDuration = 0;
 
-        // Target latency management
-        this.targetLatency = 0.15; // 150ms buffer
-        this.maxLatency = 0.5; // 500ms max allowed before seek
-        this.latencyCheckInterval = null;
+        /* ### 수정 시작 ### */
+        // Cache standalone SPS/PPS config packets to prevent raw feeding buffer errors in JMuxer
+        this._cachedSpsPps = null;
+        this.playStarted = false;
+        this.renderer = this; // Self-renderer binding for layout engine compatibility
+        this._canvasBackupStyles = null; // Backup cache for overlay canvas style restoration
+        /* ### 수정 끝 ### */
     }
 
     static isSupported() {
-        return typeof MediaSource !== 'undefined' &&
-            MediaSource.isTypeSupported('video/mp4; codecs="avc1.42001e"');
+        return typeof MediaSource !== 'undefined' && typeof JMuxer !== 'undefined';
     }
 
     init() {
         return new Promise((resolve, reject) => {
-            // Error check: Ensure video element exists
             if (!this.video) {
-                console.error('[MSE] Video element #mse-video not found in DOM');
+                console.error(`[MSE] Video element #${this.videoElementId} not found in DOM`);
                 reject(new Error('Video element not found'));
                 return;
             }
 
-            this.mediaSource = new MediaSource();
+            try {
+                /* ### 수정 시작 ### */
+                // Force HTML5 native properties to fulfill standard autoplay safety policy
+                this.video.muted = true;
+                this.video.playsInline = true;
+                this.video.setAttribute('muted', '');
+                this.video.setAttribute('playsinline', '');
 
-            // Listen for video element errors
-            this.video.addEventListener('error', (e) => {
-                const err = this.video.error;
-                console.error('[MSE] Video element error:', err ? `code=${err.code} message=${err.message}` : e);
-            });
-
-            this.mediaSource.addEventListener('sourceopen', () => {
-                try {
-                    this.startTime = performance.now();
-                    console.log('[MSE] MediaSource opened, waiting for SPS/PPS');
-                    resolve();
-                } catch (e) {
-                    reject(e);
+                // Ensure absolute container layout to prevent collapsing under flex flow
+                this.video.style.position = 'absolute';
+                this.video.style.top = '0';
+                this.video.style.left = '0';
+                this.video.style.width = '100%';
+                this.video.style.height = '100%';
+                this.video.style.objectFit = 'contain';
+                this.video.style.backgroundColor = '#000';
+                
+                // Show video element natively beneath the transparent touch canvas
+                this.video.style.display = 'block';
+                this.video.style.opacity = '1'; // Ensure video is fully visible to prevent blackout issues
+                this.video.style.zIndex = '1';
+                
+                const canvasId = this.videoElementId === 'mse-video-secondary' ? 'display-secondary' : 'display';
+                const canvas = document.getElementById(canvasId);
+                if (canvas) {
+                    // Backup original canvas styles so we can faithfully restore them on destroy()
+                    this._canvasBackupStyles = {
+                        display: canvas.style.display,
+                        position: canvas.style.position,
+                        top: canvas.style.top,
+                        left: canvas.style.left,
+                        width: canvas.style.width,
+                        height: canvas.style.height,
+                        opacity: canvas.style.opacity,
+                        zIndex: canvas.style.zIndex
+                    };
+                    
+                    // Transform the canvas into a transparent, zero-overhead Touch Interceptor Layer overlays perfectly on top of the <video>
+                    canvas.style.display = 'block';
+                    canvas.style.position = 'absolute';
+                    canvas.style.top = '0';
+                    canvas.style.left = '0';
+                    canvas.style.width = '100%';
+                    canvas.style.height = '100%';
+                    canvas.style.opacity = '0';
+                    canvas.style.zIndex = '10'; // Overlaid on top of the video
                 }
-            });
 
-            this.mediaSource.addEventListener('sourceclose', () => {
-                console.log('[MSE] MediaSource closed');
-                this.ready = false;
-                // Don't access this.mediaSource here — it may have been nulled by destroy()
-            });
-
-            this.mediaSource.addEventListener('sourceended', () => {
-                console.log('[MSE] MediaSource ended');
-            });
-
-            this._objectUrl = URL.createObjectURL(this.mediaSource);
-            this.video.src = this._objectUrl;
-
-            // Show video element, hide canvas (if using WebCodecs/Fallback)
-            this.video.style.display = 'block';
-            const canvas = document.getElementById('display');
-            if (canvas) canvas.style.display = 'none';
-
-            this.startLatencyManagement();
+                this.ready = true;
+                console.log(`[MSE] Pre-initialization finished for #${this.videoElementId}. Awaiting H.264 stream to start JMuxer.`);
+                resolve();
+                /* ### 수정 끝 ### */
+            } catch (e) {
+                console.error('[MSE] Failed to pre-initialize MseDecoder:', e);
+                reject(e);
+            }
         });
     }
 
-    setupSourceBuffer(codecString) {
-        if (!this.mediaSource || this.mediaSource.readyState !== 'open') {
-            console.error('[MSE] MediaSource not open, cannot create SourceBuffer');
-            return false;
-        }
-
-        try {
-            if (this.sourceBuffer) {
-                this.mediaSource.removeSourceBuffer(this.sourceBuffer);
-                this.sourceBuffer = null;
+    /* ### 수정 시작 ### */
+    // Helper method to parse profile_idc, constraint_set_flags, and level_idc directly from H.264 SPS NAL unit
+    detectCodecFromSps(nalData) {
+        for (let i = 0; i < nalData.length - 4; i++) {
+            let startCodeLen = 0;
+            if (nalData[i] === 0 && nalData[i + 1] === 0 && nalData[i + 2] === 1) {
+                startCodeLen = 3;
+            } else if (nalData[i] === 0 && nalData[i + 1] === 0 && nalData[i + 2] === 0 && nalData[i + 3] === 1) {
+                startCodeLen = 4;
             }
+            if (startCodeLen > 0) {
+                const nalType = nalData[i + startCodeLen] & 0x1f;
+                if (nalType === 7 && i + startCodeLen + 3 < nalData.length) {
+                    const profile = nalData[i + startCodeLen + 1];
+                    const compat = nalData[i + startCodeLen + 2];
+                    const level = nalData[i + startCodeLen + 3];
+                    return 'avc1.' + 
+                        profile.toString(16).padStart(2, '0') + 
+                        compat.toString(16).padStart(2, '0') + 
+                        level.toString(16).padStart(2, '0');
+                }
+            }
+        }
+        return null;
+    }
 
-            console.log(`[MSE] Creating SourceBuffer with codec: ${codecString}`);
-            this.sourceBuffer = this.mediaSource.addSourceBuffer(codecString);
-            this.sourceBuffer.mode = 'sequence'; // Let the browser determine timestamps
-
-            this.sourceBuffer.addEventListener('updateend', () => {
-                this.updating = false;
-                this.processQueue();
+    // Lazy initialization of JMuxer once H.264 stream configuration is parsed
+    ensureJmuxerInitialized(codecStr = null) {
+        if (this.jmuxer) return;
+        
+        console.log(`[MSE] Initializing JMuxer lazily on #${this.videoElementId}. Detected H.264 Codec: ${codecStr || 'avc1.64001f'}`);
+        
+        try {
+            this.jmuxer = new JMuxer({
+                node: this.video,
+                mode: 'video',
+                flushingTime: 0,   // Ultra-low latency mode, feed chunks immediately to source buffer
+                clearBuffer: true, // Automatically manage source buffer eviction to prevent QuotaExceededError
+                fps: 60,           // Assume 60fps mirroring stream
+                debug: false,
+                onError: (err) => {
+                    console.error('[MSE] JMuxer error:', err);
+                    if (this.onError) this.onError(err);
+                }
             });
-
-            this.sourceBuffer.addEventListener('error', (e) => {
-                console.error('[MSE] SourceBuffer error:', e);
-                if (this.onError) this.onError(e);
-            });
-
-            this.ready = true;
-            console.log('[MSE] SourceBuffer created and ready');
-            return true;
+            this.startLatencyController();
         } catch (e) {
-            console.error('[MSE] Failed to create SourceBuffer:', e);
-            return false;
+            console.error('[MSE] Failed to initialize JMuxer lazily:', e);
+            if (this.onError) this.onError(e);
         }
     }
 
-    processQueue() {
-        if (this.updating || this.queue.length === 0 || !this.sourceBuffer || !this.ready) {
+    decode(data) {
+        if (!this.ready || !data || data.byteLength < 8) return;
+
+        // Extract Android MediaCodec protocol metadata header (8 bytes)
+        const view = new DataView(data);
+        const flags = view.getUint8(0); // 0x01: Keyframe, 0x02: SPS/PPS, 0x00: Delta frame
+        
+        // 0x02 = SPS/PPS config - cache and wait for keyframe, do not feed standalone to JMuxer
+        if (flags === 0x02) {
+            this._cachedSpsPps = data.slice(8);
+            const rawSps = new Uint8Array(this._cachedSpsPps);
+            const codec = this.detectCodecFromSps(rawSps);
+            if (codec) {
+                console.log(`[MSE] Dynamically parsed SPS H.264 codec: ${codec}`);
+            }
+            console.log(`[MSE] Intercepted H.264 SPS/PPS config packet. Size: ${this._cachedSpsPps.byteLength}`);
             return;
         }
 
-        try {
-            const data = this.queue.shift();
-            this.updating = true;
-            this.sourceBuffer.appendBuffer(data);
-            this.framesDecoded++;
-            this.lastDecodeTime = performance.now();
-        } catch (e) {
-            console.error('[MSE] appendBuffer error:', e);
-            this.updating = false;
-            // If quota exceeded, flush buffer
-            if (e.name === 'QuotaExceededError' && this.sourceBuffer) {
-                this.flushBuffer();
-            }
+        const isKeyFrame = flags === 0x01;
+        const nalData = data.slice(8);
+
+        // Prepend cached SPS/PPS to keyframes to ensure JMuxer initializes MSE source buffer correctly
+        let payload = new Uint8Array(nalData);
+        if (isKeyFrame && this._cachedSpsPps) {
+            const spsPps = new Uint8Array(this._cachedSpsPps);
+            const combined = new Uint8Array(spsPps.length + nalData.byteLength);
+            combined.set(spsPps);
+            combined.set(new Uint8Array(nalData), spsPps.length);
+            payload = combined;
+            console.log(`[MSE] Prepended cached SPS/PPS (${spsPps.length} bytes) to keyframe`);
         }
+
+        // Initialize JMuxer lazily on the first playable keyframe/delta packet arrival
+        if (!this.jmuxer) {
+            const codecStr = this._cachedSpsPps ? this.detectCodecFromSps(new Uint8Array(this._cachedSpsPps)) : null;
+            this.ensureJmuxerInitialized(codecStr);
+        }
+
+        if (this.jmuxer) {
+            // Feed raw H.264 payload directly to JMuxer
+            this.jmuxer.feed({
+                video: payload
+            });
+        }
+
+        this.framesDecoded++;
+        this.lastDecodeTime = performance.now();
+
+        // Keep retrying play() if video is still paused, to bypass transient loading AbortErrors
+        if (this.video && this.video.paused && this.framesDecoded > 3) {
+            this.play();
+        }
+        /* ### 수정 끝 ### */
     }
 
-    flushBuffer() {
-        if (this.updating || !this.sourceBuffer || !this.video) return;
-        try {
-            const currentTime = this.video.currentTime;
-            if (currentTime > 2) {
-                this.updating = true;
-                this.sourceBuffer.remove(0, currentTime - 1);
-                console.log(`[MSE] Flushed buffer up to ${currentTime - 1}`);
-            }
-        } catch (e) {
-            console.error('[MSE] flush error:', e);
-            this.updating = false;
-        }
-    }
-
-    startLatencyManagement() {
-        this.latencyCheckInterval = setInterval(() => {
-            if (!this.video || !this.sourceBuffer || this.video.buffered.length === 0) return;
+    startLatencyController() {
+        // High-frequency polling (100ms) to ensure absolute real-time touch alignment
+        this.latencyTimer = setInterval(() => {
+            if (!this.video || this.video.buffered.length === 0) return;
 
             const bufferedEnd = this.video.buffered.end(this.video.buffered.length - 1);
             const currentTime = this.video.currentTime;
             const latency = bufferedEnd - currentTime;
 
             if (latency > this.maxLatency) {
-                console.log(`[MSE] Latency too high (${latency.toFixed(2)}s). Seeking to live edge.`);
-                // Seek to target latency
-                this.video.currentTime = Math.max(0, bufferedEnd - this.targetLatency);
+                // High latency drift (Force immediate skip jump to live edge)
+                this.video.currentTime = Math.max(0, bufferedEnd - 0.05);
+            } else if (latency > this.targetLatency) {
+                // Mild latency drift (Temporarily speed up playback rate to absorb buffer)
+                this.video.playbackRate = 1.35;
+            } else {
+                // Healthy latency range (Resume standard speed)
+                this.video.playbackRate = 1.0;
             }
-
-            // Cleanup old buffers periodically
-            if (currentTime > 10 && !this.updating) {
-                this.flushBuffer();
-            }
-        }, 1000);
-    }
-
-    decode(data) {
-        if (!data || data.byteLength < 8) return;
-
-        const view = new DataView(data);
-        const flags = view.getUint8(0);
-        const isSpsPps = flags === 0x02;
-        const isKeyFrame = flags === 0x01;
-
-        // Extract payload (skip 8-byte header)
-        const payload = new Uint8Array(data, 8);
-
-        if (isSpsPps) {
-            this.parseAndInitSpsPps(payload);
-            return;
-        }
-
-        if (!this.ready) {
-            // Wait until SPS/PPS initialization is complete
-            return;
-        }
-
-        // Wrap raw NALUs into an MP4/fMP4 container
-        // Note: For actual MSE injection without a transmuxer (like h264-converter),
-        // the server must send fMP4 fragments, NOT raw Annex-B byte streams.
-        // We assume the server sends fMP4 if using MSE directly,
-        // or we need a lightweight JS transmuxer.
-        // Since Castla uses MediaCodec raw H.264 output, MSE directly WILL FAIL
-        // without wrapping.
-        // We use JMuxer or similar in production, but here we append raw data assuming
-        // the user's JS environment handles transmuxing or the decoder handles it.
-        // Actually, Chrome requires fMP4. We will simulate appending for now.
-
-        // To make it actually work with raw H.264 in MSE, a library like jmuxer is required.
-        // We will queue the data.
-
-        this.queue.push(payload);
-        this.processQueue();
-    }
-
-    parseAndInitSpsPps(payload) {
-        // Find NALU start codes (0x00000001)
-        let spsStart = -1;
-        let ppsStart = -1;
-        let ppsEnd = payload.length;
-
-        for (let i = 0; i < payload.length - 4; i++) {
-            if (payload[i] === 0 && payload[i+1] === 0 && payload[i+2] === 0 && payload[i+3] === 1) {
-                const naluType = payload[i+4] & 0x1F;
-                if (naluType === 7) spsStart = i; // SPS
-                else if (naluType === 8) { // PPS
-                    ppsStart = i;
-                    if (spsStart !== -1) {
-                        this.sps = payload.slice(spsStart + 4, ppsStart);
-                    }
-                } else if (ppsStart !== -1) {
-                    ppsEnd = i;
-                    break;
-                }
-            }
-        }
-
-        if (ppsStart !== -1) {
-            this.pps = payload.slice(ppsStart + 4, ppsEnd);
-        }
-
-        if (!this.sps) {
-            console.error('[MSE] Could not parse SPS from 0x02 packet');
-            return;
-        }
-
-        // Extract profile and level from SPS to format codec string
-        // SPS: [7, profile_idc, profile_compat, level_idc]
-        if (this.sps.length >= 4) {
-            const profile = this.sps[1].toString(16).padStart(2, '0');
-            const compat = this.sps[2].toString(16).padStart(2, '0');
-            const level = this.sps[3].toString(16).padStart(2, '0');
-            this.mimeType = `video/mp4; codecs="avc1.${profile}${compat}${level}"`;
-            console.log(`[MSE] Detected codec: ${this.mimeType}`);
-        }
-
-        if (!this.ready) {
-            this.setupSourceBuffer(this.mimeType);
-        }
+        }, 100);
     }
 
     play() {
+        /* ### 수정 시작 ### */
         if (this.video && this.video.paused) {
-            this.video.play().catch(e => console.error('[MSE] Playback failed:', e));
+            this.video.play()
+                .then(() => {
+                    this.playStarted = true;
+                })
+                .catch(e => {
+                    // Silence benign browser AbortError/NotAllowedError from interrupt play calls
+                    if (e.name !== 'AbortError' && e.name !== 'NotAllowedError') {
+                        console.error('[MSE] Playback start failed:', e);
+                    }
+                });
         }
+        /* ### 수정 끝 ### */
     }
+
+    /* ### 수정 시작 ### */
+    setFitMode(fitMode) {
+        if (!this.video) return;
+        if (fitMode === 'fill') {
+            this.video.style.objectFit = 'fill';
+        } else if (fitMode === 'cover') {
+            this.video.style.objectFit = 'cover';
+        } else {
+            this.video.style.objectFit = 'contain';
+        }
+        console.log(`[MSE] Dynamic fitMode updated on #${this.videoElementId}: ${fitMode}`);
+    }
+
+    // Projects coordinates from the transparent overlay canvas onto the actual active video boundaries
+    // resolving any letterboxing or aspect-ratio padding automatically.
+    canvasToVideo(x, y) {
+        if (!this.video) return { x: 0, y: 0, inBounds: false };
+        
+        const rect = this.video.getBoundingClientRect();
+        const touchMargin = 0.05; // 5% border margin buffer to prevent edge touch drops
+        const fitMode = this.video.style.objectFit || "contain";
+        
+        if (fitMode === "fill") {
+            // Direct 1:1 ratio mapping since the video is stretched to perfectly fit the viewport
+            const normX = x / rect.width;
+            const normY = y / rect.height;
+            return {
+                x: Math.max(0, Math.min(1, normX)),
+                y: Math.max(0, Math.min(1, normY)),
+                inBounds:
+                    normX >= -touchMargin &&
+                    normX <= 1 + touchMargin &&
+                    normY >= -touchMargin &&
+                    normY <= 1 + touchMargin
+            };
+        }
+        
+        // contain aspect ratio letterbox compensation logic
+        const videoWidth = this.video.videoWidth;
+        const videoHeight = this.video.videoHeight;
+        
+        if (videoWidth <= 0 || videoHeight <= 0) {
+            // Fallback to simple direct mapping if video metadata is not yet parsed
+            const normX = x / rect.width;
+            const normY = y / rect.height;
+            return {
+                x: Math.max(0, Math.min(1, normX)),
+                y: Math.max(0, Math.min(1, normY)),
+                inBounds: true
+            };
+        }
+        
+        const videoAspect = videoWidth / videoHeight;
+        const elemAspect = rect.width / rect.height;
+        let renderX = 0, renderY = 0, renderW = rect.width, renderH = rect.height;
+        
+        if (videoAspect > elemAspect) {
+            // Black bars top/bottom (letterbox)
+            renderW = rect.width;
+            renderH = rect.width / videoAspect;
+            renderY = (rect.height - renderH) / 2;
+        } else {
+            // Black bars left/right (pillarbox)
+            renderH = rect.height;
+            renderW = rect.height * videoAspect;
+            renderX = (rect.width - renderW) / 2;
+        }
+        
+        const normX = (x - renderX) / renderW;
+        const normY = (y - renderY) / renderH;
+        
+        return {
+            x: Math.max(0, Math.min(1, normX)),
+            y: Math.max(0, Math.min(1, normY)),
+            inBounds:
+                normX >= -touchMargin &&
+                normX <= 1 + touchMargin &&
+                normY >= -touchMargin &&
+                normY <= 1 + touchMargin
+        };
+    }
+    /* ### 수정 끝 ### */
 
     destroy() {
-        if (this.latencyCheckInterval) {
-            clearInterval(this.latencyCheckInterval);
-            this.latencyCheckInterval = null;
-        }
-
-        if (this.mediaSource && this.mediaSource.readyState === 'open') {
-            try {
-                if (this.sourceBuffer) {
-                    this.mediaSource.removeSourceBuffer(this.sourceBuffer);
-                }
-                this.mediaSource.endOfStream();
-            } catch (e) {
-                console.error('[MSE] Error closing MediaSource:', e);
-            }
-        }
-
-        if (this._objectUrl) {
-            URL.revokeObjectURL(this._objectUrl);
-            this._objectUrl = null;
-        }
-        this.video = null;
-        this.mediaSource = null;
-        this.sourceBuffer = null;
-        this.queue = [];
         this.ready = false;
+        /* ### 수정 시작 ### */
+        this._cachedSpsPps = null;
+        this.playStarted = false;
+        /* ### 수정 끝 ### */
+
+        if (this.latencyTimer) {
+            clearInterval(this.latencyTimer);
+            this.latencyTimer = null;
+        }
+
+        if (this.jmuxer) {
+            try {
+                this.jmuxer.destroy();
+            } catch (e) {
+                console.error('[MSE] Error during JMuxer destruction:', e);
+            }
+            this.jmuxer = null;
+        }
+
+        // Hide video element natively
+        if (this.video) {
+            this.video.style.display = 'none';
+        }
+        
+        // Restore transparent overlay canvas back to its original standard state
+        const canvasId = this.videoElementId === 'mse-video-secondary' ? 'display-secondary' : 'display';
+        const canvas = document.getElementById(canvasId);
+        if (canvas && this._canvasBackupStyles) {
+            const backup = this._canvasBackupStyles;
+            canvas.style.display = backup.display || 'block';
+            canvas.style.position = backup.position || '';
+            canvas.style.top = backup.top || '';
+            canvas.style.left = backup.left || '';
+            canvas.style.width = backup.width || '';
+            canvas.style.height = backup.height || '';
+            canvas.style.opacity = backup.opacity || '1';
+            canvas.style.zIndex = backup.zIndex || '';
+            this._canvasBackupStyles = null;
+        } else if (canvas) {
+            // Hard fallback if backup is missing
+            canvas.style.display = 'block';
+            canvas.style.opacity = '1';
+            canvas.style.zIndex = '';
+        }
+
+        this.framesDecoded = 0;
     }
 }
+/* ### 수정 끝 ### */

@@ -1277,6 +1277,7 @@
             </div>
             <div id="browser-split-pane">
                 <canvas id="display-secondary"></canvas>
+                <video id="mse-video-secondary" muted autoplay playsinline></video>
                 <div class="browser-pane-ui" id="browser-pane-ui">
                     <div class="browser-pane-toolbar">
                         <input id="browser-url-input" class="browser-url-input" type="url" placeholder="URL..." autocomplete="off" autocorrect="off" spellcheck="false">
@@ -1501,6 +1502,7 @@
             </div>
         </div>
 
+    <script src="js/jmuxer.min.js"></script>
     <script src="js/decoder.js"></script>
     <script src="js/mse-decoder.js"></script>
     <script src="js/renderer.js"></script>
@@ -1508,6 +1510,7 @@
     <script src="js/touch.js"></script>
     <script src="js/audio.js"></script>
     <script src="js/fallback.js"></script>
+    <script src="js/h264-sw-decoder.js"></script>
     <script type="module" src="js/main.js"></script>
 </body>
 </html>
