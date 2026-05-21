@@ -18,6 +18,7 @@ import android.view.InputEvent
 import android.view.MotionEvent
 import android.view.Surface
 import java.lang.reflect.Method
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Runs in Shizuku's elevated process — has system-level access.
@@ -47,6 +48,10 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
     private val virtualDisplays = mutableMapOf<Int, VirtualDisplay>()
     private val virtualDisplayNames = mutableMapOf<Int, String>()
+    // ### 수정 시작 ###
+    // Cache map to throttle heavy dumpsys shell commands for each displayId
+    private val lastWakeUpTimeMap = ConcurrentHashMap<Int, Long>()
+    // ### 수정 끝 ###
     private var inputManagerInstance: Any? = null
     private var injectMethod: Method? = null
     private var shellContext: android.content.Context? = null
@@ -217,14 +222,14 @@ class PrivilegedService : IPrivilegedService.Stub() {
             .filterValues { it == name }
             .keys
             .toList()
-            
+
         if (existingDisplayIds.isNotEmpty()) {
             // 요약 로그에도 대상 ID 목록을 한눈에 볼 수 있게 추가
             Log.i(TAG, "Releasing ${existingDisplayIds.size} existing VD(s) $existingDisplayIds for name=$name before recreating")
-            
+
             existingDisplayIds.forEach { displayId ->
                 Log.i(TAG, "-> Releasing individual displayId=$displayId (name=$name)")
-                
+
                 virtualDisplays.remove(displayId)?.let { vd ->
                     try { vd.release() } catch (e: Exception) {
                         Log.w(TAG, "Failed to release displayId=$displayId", e)
@@ -284,7 +289,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 virtualDisplays[displayId] = display
                 virtualDisplayNames[displayId] = name
                 Log.i(TAG, "Virtual display created: id=$displayId, ${width}x${height}, flags=$flags")
-                
+
                 // Keep the display explicitly powered on with multiple delayed triggers to secure power state
                 val delays = longArrayOf(0L, 200L, 500L, 1000L)
                 for (delay in delays) {
@@ -294,7 +299,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                         }
                         try {
                             execCommand("dumpsys power set-display-state $displayId ON")
-                            Log.i(TAG, "Wedge power injected for displayId=$displayId at delay=$delay ms")
+                            // Log.i(TAG, "Wedge power injected for displayId=$displayId at delay=$delay ms")
                         } catch (e: Exception) {
                             Log.w(TAG, "Failed to inject wedge power for displayId=$displayId at delay=$delay ms", e)
                         }
@@ -319,13 +324,13 @@ class PrivilegedService : IPrivilegedService.Stub() {
             return
         }
         display.surface = surface
-        Log.i(TAG, "Surface attached to virtual display $displayId")
+//        Log.i(TAG, "Surface attached to virtual display $displayId")
         if (surface != null) {
             tetheringExecutor.execute {
                 try {
                     execCommand("dumpsys power set-display-state $displayId ON")
                     wakeUpDisplay(displayId)
-                    Log.i(TAG, "Wedge power and wakeup injected during setSurface for displayId=$displayId")
+//                    Log.i(TAG, "Wedge power and wakeup injected during setSurface for displayId=$displayId")
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to apply setSurface power activation for displayId=$displayId", e)
                 }
@@ -1159,13 +1164,23 @@ class PrivilegedService : IPrivilegedService.Stub() {
     }
 
     override fun wakeUpDisplay(displayId: Int) {
-        Log.i(TAG, "[BUILD:screen-off-v2] wakeUpDisplay($displayId) ENTRY")
+        // ### 수정 시작 ###
+        val now = System.currentTimeMillis()
+        val lastTime = lastWakeUpTimeMap[displayId] ?: 0L
+        if (now - lastTime < 3000L) {
+            // Throttling: Skip command to prevent IPC and shell fork bottleneck
+            return
+        }
+        lastWakeUpTimeMap[displayId] = now
+        // ### 수정 끝 ###
+
+        // Log.i(TAG, "[BUILD:screen-off-v2] wakeUpDisplay($displayId) ENTRY")
         try {
             // Waking display power state explicitly via shell command.
             // We removed userActivity and injectInput because they invoke global power manager triggers
             // which result in power state conflicts and 200ms infinite vibration (flickering) of DisplayPowerController.
             execCommand("dumpsys power set-display-state $displayId ON")
-            Log.i(TAG, "wakeUpDisplay($displayId): powered ON via shell command")
+            // Log.i(TAG, "wakeUpDisplay($displayId): powered ON via shell command")
         } catch (e: Exception) {
             Log.w(TAG, "wakeUpDisplay($displayId) failed", e)
         }
@@ -1207,7 +1222,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
     private val POWER_MODE_NORMAL = 2
 
     override fun setPhysicalDisplayPower(on: Boolean) {
-        Log.i(TAG, "[BUILD:screen-off-v2] setPhysicalDisplayPower($on) ENTRY")
+        // Log.i(TAG, "[BUILD:screen-off-v2] setPhysicalDisplayPower($on) ENTRY")
         val mode = if (on) POWER_MODE_NORMAL else POWER_MODE_OFF
         try {
             val scClass = Class.forName("android.view.SurfaceControl")
@@ -1368,7 +1383,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
             val atmClass = Class.forName("android.app.ActivityTaskManager")
             val getService = atmClass.getMethod("getService")
             val service = getService.invoke(null)
-            
+
             val getTasksMethod = service.javaClass.methods.firstOrNull { it.name == "getTasks" }
                 ?: throw NoSuchMethodException("No getTasks method found on ATM")
 
@@ -1388,7 +1403,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
             for (task in tasks) {
                 if (task == null) continue
                 val taskClass = task.javaClass
-                
+
                 val displayIdField = try {
                     taskClass.getField("displayId")
                 } catch (_: Exception) {
@@ -1443,7 +1458,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
             val atmClass = Class.forName("android.app.ActivityTaskManager")
             val getService = atmClass.getMethod("getService")
             val service = getService.invoke(null)
-            
+
             val getTasksMethod = service.javaClass.methods.firstOrNull { it.name == "getTasks" }
                 ?: throw NoSuchMethodException("No getTasks method found on ATM")
 
@@ -1465,7 +1480,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
             for (task in tasks) {
                 if (task == null) continue
                 val taskClass = task.javaClass
-                
+
                 val topActField = try { taskClass.getField("topActivity") } catch (_: Exception) { null }
                 val baseActField = try { taskClass.getField("baseActivity") } catch (_: Exception) { null }
                 val realActField = try { taskClass.getField("realActivity") } catch (_: Exception) { null }
@@ -1523,7 +1538,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
             val atmClass = Class.forName("android.app.ActivityTaskManager")
             val getService = atmClass.getMethod("getService")
             val service = getService.invoke(null)
-            
+
             val getTasksMethod = service.javaClass.methods.firstOrNull { it.name == "getTasks" }
                 ?: throw NoSuchMethodException("No getTasks method found on ATM")
 
@@ -1543,7 +1558,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
             for (task in tasks) {
                 if (task == null) continue
                 val taskClass = task.javaClass
-                
+
                 val topActField = try { taskClass.getField("topActivity") } catch (_: Exception) { null }
                 val baseActField = try { taskClass.getField("baseActivity") } catch (_: Exception) { null }
                 val realActField = try { taskClass.getField("realActivity") } catch (_: Exception) { null }

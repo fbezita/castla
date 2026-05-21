@@ -11,28 +11,18 @@ import com.castla.mirror.server.MirrorServer
 import com.castla.mirror.policy.AutoScaleDecision
 import com.castla.mirror.policy.AutoScaleInput
 import com.castla.mirror.policy.AutoScalePolicy
-import com.castla.mirror.service.MirrorForegroundService
 
 class AdaptiveBitrateManager(
     private val context: Context,
     private val serviceScope: CoroutineScope,
-    private val primaryPipeline: MirrorForegroundService.VirtualDisplayPipeline,
-    private val secondaryPipeline: MirrorForegroundService.VirtualDisplayPipeline,
+    // 특정 개별 변수 대신 전체 파이프라인 풀을 조회하는 람다 하나만 수용
+    private val getPipelines: () -> Map<String, MirrorForegroundService.MirroringPipeline>,
     private val getBrowserConnected: () -> Boolean,
     private val getIsServiceRunning: () -> Boolean,
-    private val getIsCurrentAppVideo: () -> Boolean,
-    private val getIsSecondaryAppVideo: () -> Boolean,
-    private val getHasSplit: () -> Boolean,
     private val getThermalActive: () -> Boolean,
     private val getThermalFpsOverride: () -> Int?,
     private val getThermalMaxHeight: () -> Int?,
-    private val getMirrorServer: () -> MirrorServer?,
-    private val getCurrentFps: () -> Int,
-    private val setCurrentFps: (Int) -> Unit,
-    private val getCurrentMaxHeight: () -> Int,
-    private val setCurrentMaxHeight: (Int) -> Unit,
-    private val rebuildPipeline: suspend (Int, Int, Boolean, Boolean) -> Unit,
-    private val rebuildSecondaryPipeline: suspend (Int, Int) -> Unit
+    private val getMirrorServer: () -> MirrorServer?
 ) {
     private val TAG = "AdaptiveBitrateManager"
 
@@ -40,219 +30,196 @@ class AdaptiveBitrateManager(
     
     companion object {
         val AUTO_TIERS = listOf(
-            // 720p Profiling Group (Static resolution, stepping up frame performance)
-            AutoTier(720, 15, 1_200_000, "720p15"),  // Critical network congestion recovery tier
-            AutoTier(720, 30, 2_500_000, "720p30"),  // Baseline mid-quality tier
-            AutoTier(720, 60, 4_000_000, "720p60"),  // High-performance smooth fluid tier
-
-            // 1080p Profiling Group (Static resolution, stepping up frame performance)
-            AutoTier(1080, 15, 2_500_000, "1080p15"), // Critical bandwidth saving tier for full HD
-            AutoTier(1080, 30, 4_500_000, "1080p30"), // Standard crisp operational tier
-            AutoTier(1080, 60, 7_500_000, "1080p60")  // Ultra-smooth full-fidelity premium tier
+            AutoTier(720, 15, 1_200_000, "720p15"),
+            AutoTier(720, 30, 2_500_000, "720p30"),
+            AutoTier(720, 60, 4_000_000, "720p60"),
+            AutoTier(1080, 15, 2_500_000, "1080p15"),
+            AutoTier(1080, 30, 4_500_000, "1080p30"),
+            AutoTier(1080, 60, 7_500_000, "1080p60")
         )
-        
         private const val AUTO_SCALE_INTERVAL_MS = 10_000L
         private const val AUTO_SCALE_INITIAL_DELAY_MS = 5_000L
     }
 
-    var targetBitrate: Int = 4_000_000
+    // 기본 네트워크 보장 대역폭 버젯
+    var globalBitrateBudget: Int = 5_000_000
     var abrJob: Job? = null
     var lastCongestionTimeMs: Long = 0L
-
-    var autoTierIndex: Int = 0
-    var autoStableCount: Int = 0
     var autoScaleJob: Job? = null
+
+    // 각 독립 파이프라인별 오토스케일 제어 상태 인덱스를 격리 관리하기 위한 매핑 컨텍스트
+    private val pipelineScaleTiers = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private val pipelineStableCounts = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
     @Volatile var lastQualityDroppedFrames: Int = 0
     @Volatile var lastQualityAvgDelayMs: Double = 0.0
     @Volatile var lastQualityBacklogDrops: Int = 0
 
-    fun startAbrLoop() {
-        abrJob?.cancel()
+    fun updateQualityMetrics(dropped: Int, delay: Double, backlog: Int) {
+        lastQualityDroppedFrames = dropped
+        lastQualityAvgDelayMs = delay
+        lastQualityBacklogDrops = backlog
+    }
+
+    fun startAllLoops() {
+        stopAllLoops()
+        
+        // ABR 대역폭 복구 루프 시작
         abrJob = serviceScope.launch {
             while (getIsServiceRunning() && getBrowserConnected()) {
                 kotlinx.coroutines.delay(2000)
                 val now = android.os.SystemClock.elapsedRealtime()
-                if (now - lastCongestionTimeMs >= 2000 && primaryPipeline.currentBitrate < targetBitrate) {
-                    primaryPipeline.currentBitrate = (primaryPipeline.currentBitrate * 1.1).toInt().coerceAtMost(targetBitrate)
-                    primaryPipeline.videoEncoder?.setBitrate(primaryPipeline.currentBitrate)
-                    Log.i(TAG, "ABR: Network stable. Increasing bitrate to ${primaryPipeline.currentBitrate / 1000}kbps")
+                if (now - lastCongestionTimeMs >= 2000) {
+                    var incrementalApplied = false
+                    getPipelines().values.filter { it.width > 0 && it.height > 0 }.forEach { pipeline ->
+                        val target = getSharedBitrateForPipeline(pipeline)
+                        if (pipeline.currentBitrate < target) {
+                            pipeline.currentBitrate = (pipeline.currentBitrate * 1.1).toInt().coerceAtMost(target)
+                            pipeline.videoEncoder?.setBitrate(pipeline.currentBitrate)
+                            incrementalApplied = true
+                        }
+                    }
+                    if (incrementalApplied) Log.i(TAG, "ABR: Network stable. Step-increasing shared allocation.")
                 }
             }
         }
-    }
 
-    fun stopAbrLoop() {
-        abrJob?.cancel()
-        abrJob = null
-        lastQualityDroppedFrames = 0
-        lastQualityAvgDelayMs = 0.0
-        lastQualityBacklogDrops = 0
-    }
-
-    fun startAutoScaleLoop(autoResolution: Boolean, autoFps: Boolean) {
-        if (!autoResolution && !autoFps) return
-        autoScaleJob?.cancel()
-        
-        val activeTiers = AUTO_TIERS.filter { it.maxHeight == getCurrentMaxHeight() }
-        autoTierIndex = activeTiers.indexOfFirst { it.fps == 30 }.coerceAtLeast(0)
-        autoStableCount = 0
-
+        // 오토스케일 루프 시작
         autoScaleJob = serviceScope.launch {
             kotlinx.coroutines.delay(AUTO_SCALE_INITIAL_DELAY_MS)
             while (getIsServiceRunning() && getBrowserConnected()) {
-                evaluateAutoScale(autoResolution, autoFps)
+                getPipelines().values.filter { it.width > 0 && it.height > 0 }.forEach { pipeline ->
+                    evaluateSinglePipelineScale(pipeline)
+                }
                 kotlinx.coroutines.delay(AUTO_SCALE_INTERVAL_MS)
             }
         }
     }
 
-    fun stopAutoScaleLoop() {
-        autoScaleJob?.cancel()
-        autoScaleJob = null
+    fun stopAllLoops() {
+        abrJob?.cancel(); abrJob = null
+        autoScaleJob?.cancel(); autoScaleJob = null
+        lastQualityDroppedFrames = 0; lastQualityAvgDelayMs = 0.0; lastQualityBacklogDrops = 0
+        pipelineScaleTiers.clear(); pipelineStableCounts.clear()
     }
 
     fun resetTiers() {
-        autoTierIndex = 0
-        autoStableCount = 0
+        pipelineScaleTiers.clear()
+        pipelineStableCounts.clear()
     }
 
     fun onNetworkCongestion() {
         val now = android.os.SystemClock.elapsedRealtime()
         if (now - lastCongestionTimeMs > 500) { 
             lastCongestionTimeMs = now
-            val minBitrate = 500_000
-            primaryPipeline.currentBitrate = (primaryPipeline.currentBitrate * 0.8).toInt().coerceAtLeast(minBitrate)
-            primaryPipeline.videoEncoder?.setBitrate(primaryPipeline.currentBitrate)
-            Log.w(TAG, "ABR: Network congestion detected! Dropping bitrate to ${primaryPipeline.currentBitrate / 1000}kbps")
+            getPipelines().values.filter { it.width > 0 && it.height > 0 }.forEach { pipeline ->
+                pipeline.currentBitrate = (pipeline.currentBitrate * 0.8).toInt().coerceAtLeast(400_000)
+                pipeline.videoEncoder?.setBitrate(pipeline.currentBitrate)
+            }
+            Log.w(TAG, "ABR: Network congestion -> Symmetrically dropping bitrates across all active loops.")
         }
     }
 
-    private fun evaluateAutoScale(autoResolution: Boolean, autoFps: Boolean) {
-        val activeTiers = AUTO_TIERS.filter { it.maxHeight == getCurrentMaxHeight() }
+    // [독립화 핵심] 가상화면에 주어질 대역폭을 독립 파이프라인의 해상도 및 비디오 여부 상태에 맞춰 순수 계산식으로 도출
+    fun getSharedBitrateForPipeline(pipeline: MirrorForegroundService.MirroringPipeline): Int {
+        val allActivePipelines = getPipelines().values.filter { it.displayId >= 0 && it.width > 0 }
+        val activeCount = allActivePipelines.size.coerceAtLeast(1)
+
+        val baseBitrate = if (activeCount > 1) {
+            // 다중 결합 화면 구동 시 비디오 여부 파이를 수식으로 도출 (Symmetric Fair Share)
+            if (pipeline.isVideoApp) StreamMath.calculateSplitVideoBitrate(pipeline.width, pipeline.height)
+            else StreamMath.calculateSplitCompanionBitrate(pipeline.width, pipeline.height)
+        } else {
+            val tierIdx = pipelineScaleTiers[pipeline.name] ?: 1
+            val activeTiers = AUTO_TIERS.filter { it.maxHeight == pipeline.currentMaxHeight }
+            val tierBitrate = if (activeTiers.isNotEmpty()) activeTiers[tierIdx.coerceIn(0, activeTiers.size - 1)].bitrate else 3_000_000
+            if (pipeline.isVideoApp && !getThermalActive()) StreamMath.calculateOttBitrate(tierBitrate) else tierBitrate
+        }
+        return baseBitrate
+    }
+
+    fun rebalanceBitrates() {
+        getPipelines().values.filter { it.width > 0 && it.height > 0 }.forEach { pipeline ->
+            val budget = getSharedBitrateForPipeline(pipeline)
+            pipeline.currentBitrate = budget
+            pipeline.videoEncoder?.setBitrate(budget)
+        }
+    }
+
+    fun evaluateSinglePipelineScale(pipeline: MirrorForegroundService.MirroringPipeline) {
+        val activeTiers = AUTO_TIERS.filter { it.maxHeight == pipeline.currentMaxHeight }
         if (activeTiers.isEmpty()) return
+
+        val tierIdx = pipelineScaleTiers[pipeline.name] ?: activeTiers.indexOfFirst { it.fps == 30 }.coerceAtLeast(0)
+        val stableCount = pipelineStableCounts[pipeline.name] ?: 0
 
         val now = android.os.SystemClock.elapsedRealtime()
         val input = AutoScaleInput(
             thermalStatus = _getThermalStatusValue(),
             networkStable = now - lastCongestionTimeMs >= AUTO_SCALE_INTERVAL_MS,
-            browserHealthy = AutoScalePolicy.isBrowserHealthy(
-                lastQualityDroppedFrames, lastQualityBacklogDrops, lastQualityAvgDelayMs
-            ),
-            currentTierIndex = autoTierIndex.coerceIn(0, activeTiers.size - 1),
-            stableCount = autoStableCount,
+            browserHealthy = AutoScalePolicy.isBrowserHealthy(lastQualityDroppedFrames, lastQualityBacklogDrops, lastQualityAvgDelayMs),
+            currentTierIndex = tierIdx.coerceIn(0, activeTiers.size - 1),
+            stableCount = stableCount,
             tierCount = activeTiers.size
         )
 
         when (val decision = AutoScalePolicy.evaluate(input)) {
             is AutoScaleDecision.DropToTier -> {
-                autoTierIndex = decision.tierIndex.coerceIn(0, activeTiers.size - 1)
-                autoStableCount = 0
-                applyAutoTier(autoResolution, autoFps)
-                notifyAutoTierChange(decision.reason)
-                Log.i(TAG, "AutoScale: ${decision.reason} ??dropped to ${activeTiers[autoTierIndex].label}")
+                pipelineScaleTiers[pipeline.name] = decision.tierIndex.coerceIn(0, activeTiers.size - 1)
+                pipelineStableCounts[pipeline.name] = 0
+                applyPipelineScale(pipeline)
+                notifyAutoTierChange(pipeline, activeTiers, decision.reason)
             }
             is AutoScaleDecision.StepDown -> {
-                autoTierIndex = decision.newTierIndex.coerceIn(0, activeTiers.size - 1)
-                autoStableCount = 0
-                applyAutoTier(autoResolution, autoFps)
-                notifyAutoTierChange(decision.reason)
-                Log.i(TAG, "AutoScale: ${decision.reason} ??stepped down to ${activeTiers[autoTierIndex].label}")
+                pipelineScaleTiers[pipeline.name] = decision.newTierIndex.coerceIn(0, activeTiers.size - 1)
+                pipelineStableCounts[pipeline.name] = 0
+                applyPipelineScale(pipeline)
+                notifyAutoTierChange(pipeline, activeTiers, decision.reason)
             }
             is AutoScaleDecision.StepUp -> {
-                autoTierIndex = decision.newTierIndex.coerceIn(0, activeTiers.size - 1)
-                autoStableCount = 0
-                applyAutoTier(autoResolution, autoFps)
-                notifyAutoTierChange("stable")
-                Log.i(TAG, "AutoScale: stable ??stepped up to ${activeTiers[autoTierIndex].label}")
+                pipelineScaleTiers[pipeline.name] = decision.newTierIndex.coerceIn(0, activeTiers.size - 1)
+                pipelineStableCounts[pipeline.name] = 0
+                applyPipelineScale(pipeline)
+                notifyAutoTierChange(pipeline, activeTiers, "stable")
             }
-            is AutoScaleDecision.Hold -> {
-                autoStableCount = decision.newStableCount
-            }
-            AutoScaleDecision.Block -> {
-                autoStableCount = 0
-            }
+            is AutoScaleDecision.Hold -> { pipelineStableCounts[pipeline.name] = decision.newStableCount }
+            AutoScaleDecision.Block -> { pipelineStableCounts[pipeline.name] = 0 }
         }
     }
 
-    fun notifyAutoTierChange(reason: String) {
-        val activeTiers = AUTO_TIERS.filter { it.maxHeight == getCurrentMaxHeight() }
+    private fun applyPipelineScale(pipeline: MirrorForegroundService.MirroringPipeline) {
+        val activeTiers = AUTO_TIERS.filter { it.maxHeight == pipeline.currentMaxHeight }
         if (activeTiers.isEmpty()) return
-        val tier = activeTiers[autoTierIndex.coerceIn(0, activeTiers.size - 1)]
+        val tierIdx = pipelineScaleTiers[pipeline.name] ?: 0
+        val tier = activeTiers[tierIdx.coerceIn(0, activeTiers.size - 1)]
+
+        val isResolutionChanging = pipeline.autoResolution && (pipeline.currentMaxHeight != tier.maxHeight)
+        if (pipeline.autoResolution) pipeline.currentMaxHeight = tier.maxHeight
+        if (pipeline.autoFps) pipeline.targetFps = tier.fps
+
+        val targetBudget = getSharedBitrateForPipeline(pipeline)
+        pipeline.currentBitrate = targetBudget
+        pipeline.videoEncoder?.setBitrate(targetBudget)
+
+        if (isResolutionChanging && getBrowserConnected()) {
+            serviceScope.launch { pipeline.rebuild(pipeline.width, pipeline.height, force = true) }
+        }
+    }
+
+    private fun notifyAutoTierChange(pipeline: MirrorForegroundService.MirroringPipeline, activeTiers: List<AutoTier>, reason: String) {
+        val tierIdx = pipelineScaleTiers[pipeline.name] ?: 0
+        val label = activeTiers[tierIdx.coerceIn(0, activeTiers.size - 1)].label
         val json = JSONObject().apply {
-            put("type", "autoTierChange")
-            put("tier", tier.label)
+            put("type", "autoScaleChange")
+            put("pane", pipeline.name)
+            put("tier", label)
             put("reason", reason)
         }.toString()
         getMirrorServer()?.broadcastControlMessage(json)
     }
 
-    fun applyAutoTier(autoResolution: Boolean, autoFps: Boolean) {
-        val activeTiers = AUTO_TIERS.filter { it.maxHeight == getCurrentMaxHeight() }
-        if (activeTiers.isEmpty()) return
-        val tier = activeTiers[autoTierIndex.coerceIn(0, activeTiers.size - 1)]
-        
-        val isResolutionChanging = autoResolution && (getCurrentMaxHeight() != tier.maxHeight)
-        
-        if (autoResolution) setCurrentMaxHeight(tier.maxHeight)
-        if (autoFps) setCurrentFps(tier.fps)
-
-        targetBitrate = tier.bitrate
-
-        val now = android.os.SystemClock.elapsedRealtime()
-        val canApply = now - lastCongestionTimeMs > 2000
-
-        val thermalActive = getThermalActive()
-        val isCurrentAppVideo = getIsCurrentAppVideo()
-        val isSecondaryAppVideo = getIsSecondaryAppVideo()
-        val hasSplit = getHasSplit()
-
-        if (hasSplit && (isCurrentAppVideo || isSecondaryAppVideo) && !thermalActive) {
-            val primaryBps = if (isCurrentAppVideo)
-                StreamMath.calculateSplitVideoBitrate(primaryPipeline.width, primaryPipeline.height)
-            else
-                StreamMath.calculateSplitCompanionBitrate(primaryPipeline.width, primaryPipeline.height)
-
-            val secondaryBps = if (isSecondaryAppVideo)
-                StreamMath.calculateSplitVideoBitrate(secondaryPipeline.width, secondaryPipeline.height)
-            else
-                StreamMath.calculateSplitCompanionBitrate(secondaryPipeline.width, secondaryPipeline.height)
-
-            primaryPipeline.currentBitrate = primaryBps
-            primaryPipeline.videoEncoder?.setBitrate(primaryPipeline.currentBitrate)
-
-            secondaryPipeline.currentBitrate = secondaryBps
-            secondaryPipeline.videoEncoder?.setBitrate(secondaryPipeline.currentBitrate)
-
-            Log.i(TAG, "AutoScale: splits active ??forcing strict split bitrates (Primary: ${primaryBps/1000}kbps, Secondary: ${secondaryBps/1000}kbps)")
-        } else {
-            val baseBitrate = if (canApply) targetBitrate else primaryPipeline.currentBitrate
-            val effectiveTarget = if (isCurrentAppVideo && !thermalActive)
-                StreamMath.calculateOttBitrate(baseBitrate)
-            else
-                baseBitrate
-
-            primaryPipeline.currentBitrate = effectiveTarget
-            primaryPipeline.videoEncoder?.setBitrate(primaryPipeline.currentBitrate)
-            Log.i(TAG, "AutoScale: applied ${tier.label} ??bitrate: ${primaryPipeline.currentBitrate/1000}kbps, fps: ${getCurrentFps()} (targetBitrate: ${targetBitrate/1000}kbps)")
-        }
-
-        if (isResolutionChanging && getBrowserConnected()) {
-            serviceScope.launch {
-                rebuildPipeline(primaryPipeline.width, primaryPipeline.height, true, false)
-                if (secondaryPipeline.width > 0 && secondaryPipeline.height > 0) {
-                    rebuildSecondaryPipeline(secondaryPipeline.width, secondaryPipeline.height)
-                }
-            }
-        }
-    }
-
     private fun _getThermalStatusValue(): Int {
         val pm = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
-        return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-            pm.currentThermalStatus
-        } else {
-            0
-        }
+        return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) pm.currentThermalStatus else 0
     }
 }

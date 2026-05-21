@@ -9,15 +9,17 @@ import org.junit.Assert.*
 import org.junit.Before
 import org.junit.After
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
 /**
- * Tests for stale display detection in VirtualDisplayManager.
- * When the PrivilegedService throws SecurityException (stale display ID),
- * VDM should catch it, invalidate the displayId, and return false.
+ * Advanced unit tests for VirtualDisplayController validating stale display detection,
+ * state changes, exceptions, and launch app behaviors.
  */
-class VirtualDisplayManagerStaleDisplayTest {
+@RunWith(RobolectricTestRunner::class)
+class VirtualDisplayControllerTest {
 
-    private lateinit var manager: VirtualDisplayManager
+    private lateinit var controller: VirtualDisplayController
     private lateinit var mockService: IPrivilegedService
 
     @Before
@@ -43,7 +45,7 @@ class VirtualDisplayManagerStaleDisplayTest {
             true
         }
 
-        manager = VirtualDisplayManager()
+        controller = VirtualDisplayController("Castla_Test")
         mockService = mockk(relaxed = true)
 
         // Inject mock service and a valid displayId via reflection
@@ -58,50 +60,50 @@ class VirtualDisplayManagerStaleDisplayTest {
     }
 
     private fun setField(name: String, value: Any?) {
-        val field = VirtualDisplayManager::class.java.getDeclaredField(name)
+        val field = VirtualDisplayController::class.java.getDeclaredField(name)
         field.isAccessible = true
-        field.set(manager, value)
+        field.set(controller, value)
     }
 
     // ── launchAppOnDisplay ──
 
     @Test
     fun `launchAppOnDisplay succeeds normally`() {
-        val result = manager.launchAppOnDisplay("com.example.app")
+        val result = controller.launchAppOnDisplay("com.example.app")
         assertTrue(result)
-        assertEquals(42, manager.getDisplayId())
+        assertEquals(42, controller.getDisplayId())
     }
 
     @Test
     fun `launchAppOnDisplay returns false and invalidates on SecurityException`() {
         every { mockService.launchAppOnDisplay(42, "com.example.app") } throws SecurityException("Permission Denial")
 
-        val result = manager.launchAppOnDisplay("com.example.app")
+        val result = controller.launchAppOnDisplay("com.example.app")
         assertFalse(result)
-        assertEquals(-1, manager.getDisplayId())
-        assertFalse(manager.hasVirtualDisplay())
+        assertEquals(-1, controller.getDisplayId())
+        assertFalse(controller.hasVirtualDisplay())
     }
 
     @Test
     fun `launchAppOnDisplay returns false on generic exception without invalidating`() {
         every { mockService.launchAppOnDisplay(42, "com.example.app") } throws RuntimeException("some error")
 
-        val result = manager.launchAppOnDisplay("com.example.app")
+        val result = controller.launchAppOnDisplay("com.example.app")
         assertFalse(result)
         // Generic exceptions should NOT invalidate displayId
-        assertEquals(42, manager.getDisplayId())
+        assertEquals(42, controller.getDisplayId())
     }
 
     @Test
     fun `launchAppOnDisplay returns false when displayId is negative`() {
         setField("displayId", -1)
-        val result = manager.launchAppOnDisplay("com.example.app")
+        val result = controller.launchAppOnDisplay("com.example.app")
         assertFalse(result)
     }
 
     @Test
     fun `launchAppOnDisplay returns false when packageName is empty`() {
-        val result = manager.launchAppOnDisplay("")
+        val result = controller.launchAppOnDisplay("")
         assertFalse(result)
     }
 
@@ -109,9 +111,9 @@ class VirtualDisplayManagerStaleDisplayTest {
 
     @Test
     fun `launchAppWithExtraOnDisplay succeeds normally`() {
-        val result = manager.launchAppWithExtraOnDisplay("com.example.app", "key", "value")
+        val result = controller.launchAppWithExtraOnDisplay("com.example.app", "key", "value")
         assertTrue(result)
-        assertEquals(42, manager.getDisplayId())
+        assertEquals(42, controller.getDisplayId())
     }
 
     @Test
@@ -120,9 +122,9 @@ class VirtualDisplayManagerStaleDisplayTest {
             mockService.launchAppWithExtraOnDisplay(42, "com.example.app", "key", "value")
         } throws SecurityException("Permission Denial")
 
-        val result = manager.launchAppWithExtraOnDisplay("com.example.app", "key", "value")
+        val result = controller.launchAppWithExtraOnDisplay("com.example.app", "key", "value")
         assertFalse(result)
-        assertEquals(-1, manager.getDisplayId())
+        assertEquals(-1, controller.getDisplayId())
     }
 
     @Test
@@ -131,16 +133,16 @@ class VirtualDisplayManagerStaleDisplayTest {
             mockService.launchAppWithExtraOnDisplay(42, "com.example.app", "key", "value")
         } throws RuntimeException("error")
 
-        val result = manager.launchAppWithExtraOnDisplay("com.example.app", "key", "value")
+        val result = controller.launchAppWithExtraOnDisplay("com.example.app", "key", "value")
         assertFalse(result)
-        assertEquals(42, manager.getDisplayId())
+        assertEquals(42, controller.getDisplayId())
     }
 
     // ── resizeDisplay ──
 
     @Test
     fun `resizeDisplay succeeds normally`() {
-        val result = manager.resizeDisplay(42, 1280, 720, 160)
+        val result = controller.resizeDisplay(1280, 720, 160)
         assertTrue(result)
     }
 
@@ -150,13 +152,14 @@ class VirtualDisplayManagerStaleDisplayTest {
             mockService.resizeVirtualDisplay(42, 1280, 720, 160)
         } throws IllegalStateException("Virtual display 42 not found")
 
-        val result = manager.resizeDisplay(42, 1280, 720, 160)
+        val result = controller.resizeDisplay(1280, 720, 160)
         assertFalse(result)
     }
 
     @Test
     fun `resizeDisplay returns false when displayId is negative`() {
-        val result = manager.resizeDisplay(-1, 1280, 720, 160)
+        setField("displayId", -1)
+        val result = controller.resizeDisplay(1280, 720, 160)
         assertFalse(result)
     }
 
@@ -164,14 +167,14 @@ class VirtualDisplayManagerStaleDisplayTest {
 
     @Test
     fun `launchHomeOnDisplay succeeds normally`() {
-        val result = manager.launchHomeOnDisplay()
+        val result = controller.launchHomeOnDisplay()
         assertTrue(result)
     }
 
     @Test
     fun `launchHomeOnDisplay returns false when displayId is negative`() {
         setField("displayId", -1)
-        val result = manager.launchHomeOnDisplay()
+        val result = controller.launchHomeOnDisplay()
         assertFalse(result)
     }
 
@@ -179,7 +182,7 @@ class VirtualDisplayManagerStaleDisplayTest {
     fun `launchHomeOnDisplay returns false on exception`() {
         every { mockService.launchHomeOnDisplay(42) } throws RuntimeException("error")
 
-        val result = manager.launchHomeOnDisplay()
+        val result = controller.launchHomeOnDisplay()
         assertFalse(result)
     }
 
@@ -187,21 +190,21 @@ class VirtualDisplayManagerStaleDisplayTest {
 
     @Test
     fun `hasVirtualDisplay returns true when displayId is valid and service bound`() {
-        assertTrue(manager.hasVirtualDisplay())
+        assertTrue(controller.hasVirtualDisplay())
     }
 
     @Test
     fun `hasVirtualDisplay returns false after SecurityException invalidates display`() {
         every { mockService.launchAppOnDisplay(42, "com.example.app") } throws SecurityException("stale")
 
-        assertTrue(manager.hasVirtualDisplay())
-        manager.launchAppOnDisplay("com.example.app")
-        assertFalse(manager.hasVirtualDisplay())
+        assertTrue(controller.hasVirtualDisplay())
+        controller.launchAppOnDisplay("com.example.app")
+        assertFalse(controller.hasVirtualDisplay())
     }
 
     @Test
     fun `hasVirtualDisplay returns false when service is null`() {
         setField("privilegedService", null)
-        assertFalse(manager.hasVirtualDisplay())
+        assertFalse(controller.hasVirtualDisplay())
     }
 }

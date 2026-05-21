@@ -8,8 +8,9 @@ let secondaryVideoSocket = null;
 let secondaryTouchHandler = null;
 let secondaryDecoder = null;
 
-// Split strategy: 'dual_stream' = two VDs with separate video streams
-const SPLIT_STRATEGY = 'dual_stream';
+// ### 수정 시작 ###
+// Removed SPLIT_STRATEGY constant as the system has converged to dual_stream architecture.
+// ### 수정 끝 ###
 
 let decoder = null;
 let framePacer = null;
@@ -281,19 +282,20 @@ document.addEventListener('DOMContentLoaded', async () => {
             leftLockedViewport = null;
         }
 
-        if (SPLIT_STRATEGY === 'dual_stream') {
-            const secondaryHeight = shellHeight;
-            if (secondaryWidth > 0 && secondaryHeight > 0) {
-                rightLockedViewport = buildLockedViewport(
-                    secondaryWidth,
-                    secondaryHeight,
-                    preset.secondaryAspectRatio
-                );
-                console.log(`[ViewportLockDebug] lockedSecondaryViewport locked! width=${rightLockedViewport.width} height=${rightLockedViewport.height}`);
-            } else {
-                console.warn(`[ViewportLockDebug] Secondary lock skipped because secondaryWidth=${secondaryWidth} or secondaryHeight=${secondaryHeight}`);
-            }
+        // ### 수정 시작 ###
+        // Automatically build secondary locked viewport since system is dual stream only.
+        const secondaryHeight = shellHeight;
+        if (secondaryWidth > 0 && secondaryHeight > 0) {
+            rightLockedViewport = buildLockedViewport(
+                secondaryWidth,
+                secondaryHeight,
+                preset.secondaryAspectRatio
+            );
+            console.log(`[ViewportLockDebug] lockedSecondaryViewport locked! width=${rightLockedViewport.width} height=${rightLockedViewport.height}`);
+        } else {
+            console.warn(`[ViewportLockDebug] Secondary lock skipped because secondaryWidth=${secondaryWidth} or secondaryHeight=${secondaryHeight}`);
         }
+        // ### 수정 끝 ###
     }
 
     function updateSplitFitButton() {
@@ -326,8 +328,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             return { primaryWidth: 0, secondaryWidth: shellWidth, shellWidth, shellHeight };
         }
 
-        const minPrimaryWidth = 320;
-        const minSecondaryWidth = 320;
+        // ### 수정 시작 ###
+        // Relax minimum width constraints from 320px to 160px for extremely flexible resizing
+        const minPrimaryWidth = 160;
+        const minSecondaryWidth = 160;
+        // ### 수정 끝 ###
         const desiredPrimaryWidth = Math.round(shellWidth * ratio);
         const maxPrimaryWidth = Math.max(minPrimaryWidth, shellWidth - minSecondaryWidth);
         const primaryWidth = Math.max(minPrimaryWidth, Math.min(maxPrimaryWidth, desiredPrimaryWidth));
@@ -1114,6 +1119,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             // [SPS/PPS MIGRATION SAFEGUARD] Backup SPS/PPS cache only when preserveCache is true (not a resolution change)
             const prevSpsPps = (preserveCache && decoder) ? decoder._cachedSpsPps : null;
 
+            // ### 수정 시작 ###
+            // Destroy existing primary decoder cleanly to prevent GPU resource conflict & screen freezes
+            if (decoder) {
+                decoder.destroy?.();
+                decoder = null;
+            }
+            // ### 수정 끝 ###
+
             decoder = new H264Decoder(
                 (frame) => framePacer.push(frame),
                 (error) => console.error('[Main] Decoder error:', error)
@@ -1378,10 +1391,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                 console.log('[Main] Reconnecting video socket...');
                 connectVideo();
             }
-            if (SPLIT_STRATEGY === 'dual_stream' && (!!state.right) && (!secondaryVideoSocket || secondaryVideoSocket.readyState === WebSocket.CLOSED || secondaryVideoSocket.readyState === WebSocket.CLOSING)) {
+            // ### 수정 시작 ###
+            // Reconnect secondary video socket when right app is active in dual mode
+            if ((!!state.right) && (!secondaryVideoSocket || secondaryVideoSocket.readyState === WebSocket.CLOSED || secondaryVideoSocket.readyState === WebSocket.CLOSING)) {
                 console.log('[Main] Reconnecting secondary video socket...');
                 connectSecondaryVideo();
             }
+            // ### 수정 끝 ###
             // Reconnect control socket only when the control socket itself is disconnected
             if (controlNeedsReconnect) {
                 console.log('[Main] Reconnecting control socket...');
@@ -1427,8 +1443,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 ? leftLockedViewport
                 : { width: livePrimaryWidth, height: livePrimaryHeight };
 
-            // Only send secondary viewport in legacy dual-stream mode
-            if (SPLIT_STRATEGY === 'dual_stream' && (!!state.right) && browserSplitPane) {
+            // ### 수정 시작 ###
+            // Send secondary viewport if dual display is active, otherwise reset secondary cache
+            if ((!!state.right) && browserSplitPane) {
                 const secondaryViewport = rightLockedViewport;
                 if (secondaryViewport && secondaryViewport.width > 0 && secondaryViewport.height > 0) {
                     const secFitMode = getEffectiveSecondaryFitMode();
@@ -1457,7 +1474,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                         }));
                     }
                 }
+            } else {
+                // Secondary is not active (single screen mode). Reset the cache to guarantee the next dual transition triggers viewport packet.
+                lastSentSecondary = { width: 0, height: 0, fitMode: null, layoutMode: null };
             }
+            // ### 수정 끝 ###
 
             const primFitMode = getEffectivePrimaryFitMode();
             const primLayoutMode = streamPolicy.layoutMode;
@@ -1532,22 +1553,28 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (touchHandler) touchHandler.destroy();
             const renderer = (decoder && decoder.renderer) ? decoder.renderer : null;
             touchHandler = new TouchHandler(canvas, renderer, controlSocket, 'primary');
-            if (SPLIT_STRATEGY === 'dual_stream' && (!!state.right) && secondaryCanvas) {
+            // ### 수정 시작 ###
+            // Initialize touch handler for secondary display since system is dual stream only
+            if ((!!state.right) && secondaryCanvas) {
                 if (secondaryTouchHandler) secondaryTouchHandler.destroy();
                 secondaryTouchHandler = new TouchHandler(secondaryCanvas, getActiveSecondaryRenderer(), controlSocket, 'secondary');
             }
+            // ### 수정 끝 ###
 
             // Send viewport IMMEDIATELY and BEFORE displayDensity so the
             // server knows the correct dimensions before density triggers a
             // force rebuild (which otherwise uses stale full-screen size).
             sendViewportSize(true);
 
-            if (SPLIT_STRATEGY === 'dual_stream' && (!!state.right)) {
+            // ### 수정 시작 ###
+            // Initialize secondary video and trigger launch since system is dual stream only
+            if ((!!state.right)) {
                 if (!secondaryVideoSocket || secondaryVideoSocket.readyState === WebSocket.CLOSED) {
                     connectSecondaryVideo();
                 }
                 setTimeout(() => sendSecondaryLaunchRequest(), 150);
             }
+            // ### 수정 끝 ###
 
             if (codecMode === 'mjpeg') {
                 console.log(`[Main] Sending codec preference: mjpeg via control socket on open`);
@@ -2070,6 +2097,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                     // 드로어 밖으로 이탈
                     if (!dragOverlay.classList.contains('active')) {
                         dragOverlay.classList.add('active');
+                        // ### 수정 시작 ###
+                        // Apply Ghosting UI by adding dragging-active class to the drawer
+                        drawerEl?.classList.add('dragging-active');
+                        // ### 수정 끝 ###
                         const bottomWrap = document.getElementById('drag-row-bottom-wrap');
                         if (bottomWrap) {
                             bottomWrap.style.display = activeDragIsExisting ? 'flex' : 'none';
@@ -2083,6 +2114,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                     // 드로어 안으로 진입/복귀
                     if (dragOverlay.classList.contains('active')) {
                         dragOverlay.classList.remove('active');
+                        // ### 수정 시작 ###
+                        // Remove Ghosting UI when cursor goes back into the drawer
+                        drawerEl?.classList.remove('dragging-active');
+                        // ### 수정 끝 ###
                         console.log('[DragAndDrop] Entered split drawer. Deactivated drag overlay.');
                     }
                 }
@@ -2175,6 +2210,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         isFromSidebarDrag = false;
         shouldDeferDragOverlay = false;
         dragOverlay.classList.remove('active');
+        // ### 수정 시작 ###
+        // Clean up Ghosting UI class on drag end to restore opacity
+        if (splitDrawer) {
+            splitDrawer.classList.remove('dragging-active');
+        }
+        // ### 수정 끝 ###
         if (dragGhost) {
             dragGhost.remove();
             dragGhost = null;
@@ -2238,6 +2279,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         isFromSidebarDrag = false;
         shouldDeferDragOverlay = false;
         dragOverlay.classList.remove('active');
+        // ### 수정 시작 ###
+        // Clean up Ghosting UI class on drag cancel to restore opacity
+        if (splitDrawer) {
+            splitDrawer.classList.remove('dragging-active');
+        }
+        // ### 수정 끝 ###
         if (dragGhost) {
             dragGhost.remove();
             dragGhost = null;
