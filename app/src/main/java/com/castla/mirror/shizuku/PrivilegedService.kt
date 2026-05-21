@@ -313,6 +313,102 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     } else {
                         Log.w(TAG, "IActivityTaskManager.startActivity method not found")
                     }
+
+                    /* ### 수정 시작 ### */
+                    // Search for moveTaskToDisplay in IActivityTaskManager first
+                    try {
+                        val atmTargetClass = Class.forName("android.app.IActivityTaskManager")
+                        moveTaskToDisplayMethod = atmTargetClass.declaredMethods.find { m ->
+                            m.name == "moveTaskToDisplay" && m.parameterTypes.size == 2 &&
+                            m.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                            m.parameterTypes[1] == Int::class.javaPrimitiveType
+                        } ?: atmTargetClass.methods.find { m ->
+                            m.name == "moveTaskToDisplay" && m.parameterTypes.size == 2 &&
+                            m.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                            m.parameterTypes[1] == Int::class.javaPrimitiveType
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to resolve moveTaskToDisplay on IActivityTaskManager class, trying proxy instance", e)
+                    }
+
+                    if (moveTaskToDisplayMethod == null) {
+                        // Fallback to proxy instance methods
+                        moveTaskToDisplayMethod = atmInterface?.methods?.find { m ->
+                            m.name == "moveTaskToDisplay" && m.parameterTypes.size == 2 &&
+                            m.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                            m.parameterTypes[1] == Int::class.javaPrimitiveType
+                        } ?: atmInterface?.declaredMethods?.find { m ->
+                            m.name == "moveTaskToDisplay" && m.parameterTypes.size == 2 &&
+                            m.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                            m.parameterTypes[1] == Int::class.javaPrimitiveType
+                        }
+                    }
+
+                    if (moveTaskToDisplayMethod != null) {
+                        Log.i(TAG, "IActivityTaskManager.moveTaskToDisplay method successfully cached")
+                    } else {
+                        Log.w(TAG, "IActivityTaskManager.moveTaskToDisplay method not found. Checking IActivityManager fallback.")
+                        // Fallback to IActivityManager
+                        try {
+                            val amClass = Class.forName("android.app.IActivityManager")
+                            moveTaskToDisplayMethod = amClass.declaredMethods.find { m ->
+                                m.name == "moveTaskToDisplay" && m.parameterTypes.size == 2 &&
+                                m.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                                m.parameterTypes[1] == Int::class.javaPrimitiveType
+                            } ?: amClass.methods.find { m ->
+                                m.name == "moveTaskToDisplay" && m.parameterTypes.size == 2 &&
+                                m.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                                m.parameterTypes[1] == Int::class.javaPrimitiveType
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to resolve moveTaskToDisplay on IActivityManager class, trying proxy instance", e)
+                        }
+
+                        if (moveTaskToDisplayMethod == null) {
+                            val amInterface = activityManagerInstance?.javaClass
+                            moveTaskToDisplayMethod = amInterface?.methods?.find { m ->
+                                m.name == "moveTaskToDisplay" && m.parameterTypes.size == 2 &&
+                                m.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                                m.parameterTypes[1] == Int::class.javaPrimitiveType
+                            } ?: amInterface?.declaredMethods?.find { m ->
+                                m.name == "moveTaskToDisplay" && m.parameterTypes.size == 2 &&
+                                m.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                                m.parameterTypes[1] == Int::class.javaPrimitiveType
+                            }
+                        }
+
+                        if (moveTaskToDisplayMethod != null) {
+                            Log.i(TAG, "IActivityManager.moveTaskToDisplay method successfully cached as fallback")
+                        } else {
+                            // Ultimate fallback: loose parameters check (name and size only)
+                            try {
+                                val atmTargetClass = Class.forName("android.app.IActivityTaskManager")
+                                moveTaskToDisplayMethod = atmTargetClass.declaredMethods.find { m ->
+                                    m.name == "moveTaskToDisplay" && m.parameterTypes.size == 2
+                                } ?: atmTargetClass.methods.find { m ->
+                                    m.name == "moveTaskToDisplay" && m.parameterTypes.size == 2
+                                }
+                            } catch (_: Exception) {}
+
+                            if (moveTaskToDisplayMethod == null) {
+                                try {
+                                    val amClass = Class.forName("android.app.IActivityManager")
+                                    moveTaskToDisplayMethod = amClass.declaredMethods.find { m ->
+                                        m.name == "moveTaskToDisplay" && m.parameterTypes.size == 2
+                                    } ?: amClass.methods.find { m ->
+                                        m.name == "moveTaskToDisplay" && m.parameterTypes.size == 2
+                                    }
+                                } catch (_: Exception) {}
+                            }
+
+                            if (moveTaskToDisplayMethod != null) {
+                                Log.i(TAG, "moveTaskToDisplay cached via loose parameters match")
+                            } else {
+                                Log.e(TAG, "Failed to resolve moveTaskToDisplay method in both IActivityTaskManager and IActivityManager")
+                            }
+                        }
+                    }
+                    /* ### 수정 끝 ### */
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to prepare IActivityTaskManager binder interface", e)

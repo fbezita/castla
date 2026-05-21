@@ -1666,26 +1666,27 @@ class MirrorForegroundService : Service() {
 
                 /* ### 수정 시작 ### */
                 for (taskId in matchingTaskIds) {
-                    try {
-                        val nativeMoved = runBinderSafe { controller.moveTaskToDisplayNative(taskId) } ?: false
-                        if (nativeMoved) {
-                            runBinderSafe { service.execCommand("cmd activity task move-to-front $taskId") }
-                        } else {
-                            Log.w(TAG, "[$name Pipeline] Native task migration failed, falling back to shell executor")
-                            runBinderSafe {
-                                service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId")
-                                service.execCommand("cmd activity task move-to-front $taskId")
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "[$name Pipeline] Native moveTaskToDisplay error, executing shell fallback", e)
-                        try {
-                            runBinderSafe {
-                                service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId")
-                                service.execCommand("cmd activity task move-to-front $taskId")
-                            }
-                        } catch (_: Exception) {}
-                    }
+                    try { runBinderSafe { service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId"); service.execCommand("cmd activity task move-to-front $taskId") } } catch (_: Exception) {}
+                    // try {
+                    //     val nativeMoved = runBinderSafe { controller.moveTaskToDisplayNative(taskId) } ?: false
+                    //     if (nativeMoved) {
+                    //         runBinderSafe { service.execCommand("cmd activity task move-to-front $taskId") }
+                    //     } else {
+                    //         Log.w(TAG, "[$name Pipeline] Native task migration failed, falling back to shell executor")
+                    //         runBinderSafe {
+                    //             service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId")
+                    //             service.execCommand("cmd activity task move-to-front $taskId")
+                    //         }
+                    //     }
+                    // } catch (e: Exception) {
+                    //     Log.w(TAG, "[$name Pipeline] Native moveTaskToDisplay error, executing shell fallback", e)
+                    //     try {
+                    //         runBinderSafe {
+                    //             service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId")
+                    //             service.execCommand("cmd activity task move-to-front $taskId")
+                    //         }
+                    //     } catch (_: Exception) {}
+                    // }
                 }
 
                 // Prevent redundant 'am start' shell command execution immediately following async task migration command.
@@ -1719,7 +1720,8 @@ class MirrorForegroundService : Service() {
                         val retryTasks = try { runBinderSafe { service.getTaskIdsForPackage(cleanPkg) } ?: intArrayOf() } catch (_: Exception) { intArrayOf() }
                         for (taskId in retryTasks) {
                             try {
-                                val retryNativeMoved = runBinderSafe { controller.moveTaskToDisplayNative(taskId) } ?: false
+                                // val retryNativeMoved = runBinderSafe { controller.moveTaskToDisplayNative(taskId) } ?: false
+                                val retryNativeMoved = false
                                 if (!retryNativeMoved) {
                                     service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId")
                                     service.execCommand("cmd activity task move-to-front $taskId")
