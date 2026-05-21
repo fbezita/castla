@@ -1245,7 +1245,10 @@
                 <canvas id="display"></canvas>
                 <video id="mse-video" muted autoplay playsinline></video>
             </div>
-            <div id="split-divider" aria-hidden="true">
+            <!-- ### 수정 시작 ### -->
+            <!-- Remove destructive aria-hidden to prevent focus blockade on descendant interactive buttons -->
+            <div id="split-divider">
+            <!-- ### 수정 끝 ### -->
                 <div class="split-control-pill">
                     <!-- Left Fullscreen -->
                     <button id="split-expand-left-btn" class="split-control-btn" title="Left Fullscreen">
@@ -1505,6 +1508,6 @@
     <script src="js/touch.js"></script>
     <script src="js/audio.js"></script>
     <script src="js/fallback.js"></script>
-    <script src="js/main.js"></script>
+    <script type="module" src="js/main.js"></script>
 </body>
 </html>

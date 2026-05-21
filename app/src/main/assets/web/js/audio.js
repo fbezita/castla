@@ -235,3 +235,6 @@ class AudioPlayer {
         return !!(window.AudioContext || window.webkitAudioContext);
     }
 }
+
+// Expose AudioPlayer class explicitly to the window scope for ESM destructured access
+window.AudioPlayer = AudioPlayer;

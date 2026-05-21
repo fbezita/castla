@@ -196,16 +196,18 @@ class VideoEncoder(
         }
     }
 
+    // ### 수정 시작 ###
     fun requestKeyFrame() {
         try {
             val params = Bundle().apply {
-                putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 1) // Corrected from 0 to 1 to force immediate I-frame generation
             }
             codec?.setParameters(params)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to request keyframe", e)
         }
     }
+    // ### 수정 끝 ###
 
     fun setBitrate(bps: Int) {
         try {

@@ -779,7 +779,15 @@ class MirrorForegroundService : Service() {
                         }
                     }
                 }
-                server.setQualityReportListener { d, a, b -> adaptiveBitrateManager.updateQualityMetrics(d, a, b) }
+                server.setQualityReportListener { d, a, b ->
+                    adaptiveBitrateManager.updateQualityMetrics(d, a, b)
+                    // Active Self-Tuning Feedback loop for Content-Aware Quality Engine
+                    pipelines.forEach { (name, pipeline) ->
+                        if (pipeline.videoEncoder != null && pipeline.width > 0 && pipeline.height > 0) {
+                            contentAwareQualityEngine.executeSelfTuningFeedback(name, pipeline, d, a)
+                        }
+                    }
+                }
                 server.setBrowserConnectionListener { connected ->
                     if (connected) {
                         cancelPendingBrowserDisconnect("browser_reconnected")
@@ -906,6 +914,15 @@ class MirrorForegroundService : Service() {
     private fun handleShizukuReconnect(setup: ShizukuSetup) {
         if (!browserConnected) return
         val svc = setup.privilegedService ?: return
+        // ### 수정 시작 ###
+        // Re-register Binder Death Token upon reconnection to prevent virtual display leaks if the app is forcefully killed afterward
+        try {
+            svc.registerDeathToken(binder)
+            Log.i(TAG, "[Shizuku Safeguard] Successfully re-registered Service Binder Death Token during reconnect.")
+        } catch (e: Exception) {
+            Log.e(TAG, "[Shizuku Safeguard] Failed to re-register Binder Death Token during reconnect", e)
+        }
+        // ### 수정 끝 ###
         Log.i(TAG, "[Shizuku] Privileged core reconnected. Restoring context mappings symmetrically.")
         pipelines.values.forEach { it.controller.attachPrivilegedService(svc) }
         

@@ -1,0 +1,451 @@
+// English comment: Layout action handlers, split resizing, and viewport boundary locks for Castla Web Client.
+// Maintains 100% functional integrity and strictly respects the 300-line constraint.
+
+function lockBrowserSplitViewports(app = state.right) {
+  if (!!!state.right) return;
+  const preset = resolveSplitPreset(state.left, app);
+
+  // Use current ratio (may have been changed by divider drag), not preset ratio
+  const activeRatio = splitRatio;
+  const { primaryWidth, secondaryWidth, shellHeight } =
+    getDesiredSplitWidths(activeRatio);
+  const primaryHeight = Math.round(
+    streamPane?.clientHeight ||
+      canvas?.clientHeight ||
+      shellHeight ||
+      window.innerHeight ||
+      0,
+  );
+
+  // console.log(
+  //   `[ViewportLockDebug] activeRatio=${activeRatio} primaryWidth=${primaryWidth} secondaryWidth=${secondaryWidth} shellHeight=${shellHeight} isFullscreen=${playerShell?.classList.contains("secondary-fullscreen")}`,
+  // );
+
+  if (primaryWidth > 0 && primaryHeight > 0) {
+    leftLockedViewport = buildLockedViewport(primaryWidth, primaryHeight);
+  } else {
+    leftLockedViewport = null;
+  }
+
+  // ### 수정 시작 ###
+  // Automatically build secondary locked viewport since system is dual stream only.
+  const secondaryHeight = shellHeight;
+  if (secondaryWidth > 0 && secondaryHeight > 0) {
+    rightLockedViewport = buildLockedViewport(
+      secondaryWidth,
+      secondaryHeight,
+      preset.secondaryAspectRatio,
+    );
+    // console.log(
+    //   `[ViewportLockDebug] lockedSecondaryViewport locked! width=${rightLockedViewport.width} height=${rightLockedViewport.height}`,
+    // );
+  } else {
+    // console.warn(
+    //   `[ViewportLockDebug] Secondary lock skipped because secondaryWidth=${secondaryWidth} or secondaryHeight=${secondaryHeight}`,
+    // );
+  }
+  // ### 수정 끝 ###
+}
+
+function updateSplitFitButton() {
+  // No-op: fit button removed in browser-only split
+}
+
+function applyActiveFitModes() {
+  const primaryFitMode = getEffectivePrimaryFitMode();
+  const secondaryFitMode = getEffectiveSecondaryFitMode();
+  document.body.dataset.fitMode = !!state.right
+    ? secondaryFitMode
+    : primaryFitMode;
+  getActiveRenderer()?.setFitMode?.(primaryFitMode);
+  getActiveSecondaryRenderer()?.setFitMode?.(secondaryFitMode);
+  updateSplitFitButton();
+}
+
+function getSplitShellSize() {
+  const shellWidth = Math.round(
+    playerShell?.clientWidth || window.innerWidth || 0,
+  );
+  const shellHeight = Math.round(
+    playerShell?.clientHeight || window.innerHeight || 0,
+  );
+  return { shellWidth, shellHeight };
+}
+
+function getDesiredSplitWidths(ratio = splitRatio) {
+  const { shellWidth, shellHeight } = getSplitShellSize();
+  if (shellWidth <= 0 || shellHeight <= 0) {
+    return { primaryWidth: 0, secondaryWidth: 0, shellWidth, shellHeight };
+  }
+
+  // Strict Secondary Fullscreen Safeguard: Dedicate 100% shellWidth to VD_2 viewport
+  if (playerShell?.classList.contains("secondary-fullscreen")) {
+    return {
+      primaryWidth: 0,
+      secondaryWidth: shellWidth,
+      shellWidth,
+      shellHeight,
+    };
+  }
+
+  // ### 수정 시작 ###
+  // Relax minimum width constraints from 320px to 160px for extremely flexible resizing
+  const minPrimaryWidth = 160;
+  const minSecondaryWidth = 160;
+  // ### 수정 끝 ###
+  const desiredPrimaryWidth = Math.round(shellWidth * ratio);
+  const maxPrimaryWidth = Math.max(
+    minPrimaryWidth,
+    shellWidth - minSecondaryWidth,
+  );
+  const primaryWidth = Math.max(
+    minPrimaryWidth,
+    Math.min(maxPrimaryWidth, desiredPrimaryWidth),
+  );
+  const secondaryWidth = Math.max(
+    minSecondaryWidth,
+    shellWidth - primaryWidth,
+  );
+  return { primaryWidth, secondaryWidth, shellWidth, shellHeight };
+}
+
+function updateSplitToolbarVisibility() {
+  // ### 수정 시작 ###
+  // Reference splitToolbar and state from window scope to prevent ReferenceError under strict ESM modules
+  const tb = window.splitToolbar;
+  if (!tb) return;
+  tb.style.display = !!window.state?.right ? "flex" : "none";
+  // ### 수정 끝 ###
+}
+
+function setBrowserSplitRatio(nextRatio) {
+  const ratio = Math.max(0.1, Math.min(0.9, nextRatio));
+  splitRatio = ratio;
+  const { primaryWidth, shellWidth } = getDesiredSplitWidths(ratio);
+  if (primaryWidth > 0 && shellWidth > 0) {
+    playerShell?.style.setProperty("--split-left-width", `${primaryWidth}px`);
+  } else {
+    playerShell?.style.setProperty(
+      "--split-left-width",
+      `${Math.round(ratio * 1000) / 10}%`,
+    );
+  }
+}
+
+function isDualStreamCapable(app) {
+  return !!app;
+}
+
+// Update the overall layout UI depending on the active left and right app states
+async function updateLayoutUI() {
+  const {
+    isPromotingSecondary,
+    state,
+    destroySecondaryTransport,
+    streamPolicy,
+    document,
+    splitRatio,
+    DEFAULT_SPLIT_RATIO,
+    setBrowserSplitRatio,
+    playerShell,
+    updateSplitToolbarVisibility,
+    applyActiveFitModes,
+    lockBrowserSplitViewports,
+    initSecondaryDecoder,
+    secondaryCanvas,
+    getActiveSecondaryRenderer,
+    controlSocket,
+    connectSecondaryVideo,
+    sendViewportSize,
+    webLauncher,
+    splitDrawer,
+    homeBtn,
+    canvas,
+    clearCanvas
+  } = window;
+
+  if (isPromotingSecondary) {
+    console.log(
+      "[Layout] Layout update bypassed due to active secondary-to-primary promotion.",
+    );
+    return;
+  }
+
+  const hasLeft = !!state?.left;
+  const hasRight = !!state?.right;
+
+  console.log(
+    `[Launcher] updateLayoutUI: hasLeft=${hasLeft}, hasRight=${hasRight}`,
+  );
+
+  if (hasLeft && hasRight) {
+    // Scenario 1: Both apps are active -> Enable 50:50 dual split layout
+    destroySecondaryTransport();
+
+    streamPolicy.layoutMode = "browser_split";
+    document.body.dataset.layoutMode = streamPolicy.layoutMode;
+
+    const initialRatio = splitRatio || DEFAULT_SPLIT_RATIO;
+    setBrowserSplitRatio(initialRatio);
+
+    document.querySelectorAll(".split-ratio-btn").forEach((b) => {
+      const btnRatio = parseFloat(b.dataset.ratio);
+      b.classList.toggle("active", Math.abs(btnRatio - initialRatio) < 0.05);
+    });
+
+    playerShell?.classList.remove("secondary-fullscreen");
+    playerShell?.classList.add("browser-split");
+    updateSplitToolbarVisibility();
+    applyActiveFitModes();
+
+    lockBrowserSplitViewports(state.right);
+
+    await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    lockBrowserSplitViewports(state.right);
+    await initSecondaryDecoder();
+    if (window.secondaryTouchHandler) {
+      window.secondaryTouchHandler.destroy();
+    }
+    // ### 수정 시작 ###
+    // Guard: bind TouchHandler only if the secondary canvas element exists
+    if (secondaryCanvas) {
+      window.secondaryTouchHandler = new TouchHandler(
+        secondaryCanvas,
+        getActiveSecondaryRenderer(),
+        controlSocket,
+        "secondary",
+      );
+    } else {
+      console.warn("[Layout] secondaryCanvas element is missing. TouchHandler skipped.");
+    }
+    // ### 수정 끝 ###
+    applyActiveFitModes();
+    connectSecondaryVideo();
+    requestAnimationFrame(() => sendViewportSize(true));
+  } else if (hasRight) {
+    // Scenario 2: Only secondary app (VD_2) is active -> Show right app full screen
+    destroySecondaryTransport();
+
+    streamPolicy.layoutMode = "browser_split";
+    document.body.dataset.layoutMode = streamPolicy.layoutMode;
+
+    const initialRatio = 0.5;
+    setBrowserSplitRatio(initialRatio);
+
+    document.querySelectorAll(".split-ratio-btn").forEach((b) => {
+      const btnRatio = parseFloat(b.dataset.ratio);
+      b.classList.toggle("active", Math.abs(btnRatio - initialRatio) < 0.05);
+    });
+
+    playerShell?.classList.add("secondary-fullscreen");
+    playerShell?.classList.add("browser-split");
+    updateSplitToolbarVisibility();
+    applyActiveFitModes();
+
+    lockBrowserSplitViewports(state.right);
+
+    await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    lockBrowserSplitViewports(state.right);
+    await initSecondaryDecoder();
+    if (window.secondaryTouchHandler) {
+      window.secondaryTouchHandler.destroy();
+    }
+    // ### 수정 시작 ###
+    // Guard: bind TouchHandler only if the secondary canvas element exists
+    if (secondaryCanvas) {
+      window.secondaryTouchHandler = new TouchHandler(
+        secondaryCanvas,
+        getActiveSecondaryRenderer(),
+        controlSocket,
+        "secondary",
+      );
+    } else {
+      console.warn("[Layout] secondaryCanvas element is missing. TouchHandler skipped.");
+    }
+    // ### 수정 끝 ###
+    applyActiveFitModes();
+    connectSecondaryVideo();
+    requestAnimationFrame(() => sendViewportSize(true));
+  } else if (hasLeft || !window.isLauncherMode) {
+    // Scenario 3: Only left (primary) app is active -> Show primary app full screen
+    destroySecondaryTransport();
+    updateSplitToolbarVisibility();
+
+    playerShell?.classList.remove("secondary-fullscreen");
+    playerShell?.classList.remove("browser-split");
+
+    window.isLauncherMode = false;
+    webLauncher.classList.add("hidden");
+    splitDrawer.style.display = "flex";
+    homeBtn.style.display = "block";
+
+    window.leftLockedViewport = null;
+    window.rightLockedViewport = null;
+
+    canvas.style.opacity = "1";
+    const mseVideo = document.getElementById("mse-video");
+    if (mseVideo) mseVideo.style.opacity = "0";
+
+    applyActiveFitModes();
+    sendViewportSize();
+  } else {
+    // Scenario 4: Neither app is active -> Cleanly return to the launcher UI
+    destroySecondaryTransport();
+    updateSplitToolbarVisibility();
+
+    playerShell?.classList.remove("secondary-fullscreen");
+    playerShell?.classList.remove("browser-split");
+
+    state.left = null;
+    state.right = null;
+    window.isLauncherMode = true;
+    webLauncher.classList.remove("hidden");
+    splitDrawer.style.display = "none";
+    homeBtn.style.display = "none";
+
+    clearCanvas();
+  }
+}
+
+// Handle seamless layout changes upon video frame resolution change
+function handleRendererResolutionChange(width, height) {
+  if (window.pendingLayoutSwitch === "single") {
+    const aspect = width / height;
+    // Fullscreen expects a landscape layout (typically >= 1.0)
+    if (aspect >= 1.0) {
+      console.log(`[LayoutSmoothing] Target fullscreen frame received: ${width}x${height} (aspect: ${aspect.toFixed(2)}). Smoothly expanding layout.`);
+      window.executeVisualFullscreenLayout();
+    }
+  }
+}
+
+function executeVisualFullscreenLayout() {
+  // ### 수정 시작 ###
+  // Clear layout promotion lock and reset secondary app states
+  window.pendingLayoutSwitch = null;
+  window.isPromotingSecondary = false;
+  if (window.state) {
+    window.state.right = null;
+  }
+  // ### 수정 끝 ###
+  window.playerShell?.classList.remove("browser-split");
+  window.playerShell?.classList.remove("secondary-fullscreen");
+  window.playerShell?.style.removeProperty("--split-left-width");
+
+  // Force synchronous browser layout reflow immediately after removing layout classes
+  if (window.playerShell) {
+    const _reflow = window.playerShell.offsetWidth;
+  }
+
+  window.applyActiveFitModes();
+
+  // Instantly fit and redraw the primary canvas layout to cover 100% fullscreen
+  window.getActiveRenderer()?.updateLayout?.();
+  
+  // Force immediate keyframe request to trigger fast stream startup
+  window.controlSocket.send(JSON.stringify({ type: "requestKeyframe", pane: "primary" }));
+  
+  // Set backup keyframe request
+  setTimeout(() => {
+    if (window.controlSocket && window.controlSocket.readyState === WebSocket.OPEN) {
+      window.controlSocket.send(JSON.stringify({ type: "requestKeyframe", pane: "primary" }));
+    }
+  }, 800);
+}
+
+function disableBrowserSplit(options = {}) {
+  const { notifyServer = true } = options;
+  const wasActive = !!window.state?.right;
+  
+  // ### 수정 시작 ###
+  // Clear any active promotion locks on browser split closure
+  window.isPromotingSecondary = false;
+  // ### 수정 끝 ###
+  if (window.state) {
+    window.state.right = null;
+  }
+  
+  window.updateSplitToolbarVisibility?.();
+  
+  window.leftLockedViewport = null;
+  window.rightLockedViewport = null;
+  
+  if (window.streamPolicy) {
+    window.streamPolicy.layoutMode = "single";
+  }
+  document.body.dataset.layoutMode = "single";
+  
+  const playerShell = window.playerShell;
+  playerShell?.classList.remove("browser-split");
+  playerShell?.classList.remove("secondary-fullscreen");
+  playerShell?.style.removeProperty("--split-left-width");
+
+  window.destroySecondaryTransport?.();
+  
+  if (notifyServer && wasActive && window.controlSocket && window.controlSocket.readyState === WebSocket.OPEN) {
+    window.controlSocket.send(JSON.stringify({ type: "closeSecondary" }));
+  }
+
+  window.applyActiveFitModes?.();
+  
+  // Force send full viewport size immediately to guarantee responsive resizing reflow
+  if (wasActive && window.controlSocket && window.controlSocket.readyState === WebSocket.OPEN) {
+    const fullWidth = Math.round(window.innerWidth || 1920);
+    const fullHeight = Math.round(window.innerHeight || 1080);
+    console.log(`[Main] Split closed: forcing full viewport ${fullWidth}x${fullHeight}`);
+    window.controlSocket.send(
+      JSON.stringify({
+        type: "viewport",
+        pane: "primary",
+        width: fullWidth,
+        height: fullHeight,
+        fitMode: typeof window.getEffectivePrimaryFitMode === "function" ? window.getEffectivePrimaryFitMode() : "contain",
+        layoutMode: "single"
+      })
+    );
+  }
+}
+
+// ### 수정 시작 ###
+// Restore and optimize the stream quality and layout policy applicator
+function applyStreamPolicy(config = {}) {
+  window.streamPolicy = {
+    ...window.streamPolicy,
+    ...config
+  };
+
+  document.body.dataset.layoutMode = window.streamPolicy.layoutMode;
+
+  const adBanner = document.getElementById("ad-banner");
+  if (adBanner) {
+    adBanner.style.display = window.streamPolicy.showAdBanner ? "block" : "none";
+  }
+
+  if (typeof window.applyActiveFitModes === "function") {
+    window.applyActiveFitModes();
+  }
+  if (typeof window.sendViewportSize === "function") {
+    requestAnimationFrame(() => window.sendViewportSize());
+  }
+}
+// ### 수정 끝 ###
+
+// Bind methods globally to window scope for seamless multi-module integration
+Object.assign(window, {
+  lockBrowserSplitViewports,
+  updateSplitFitButton,
+  applyActiveFitModes,
+  getSplitShellSize,
+  getDesiredSplitWidths,
+  updateSplitToolbarVisibility,
+  setBrowserSplitRatio,
+  isDualStreamCapable,
+  updateLayoutUI,
+  handleRendererResolutionChange,
+  executeVisualFullscreenLayout,
+  disableBrowserSplit,
+  // ### 수정 시작 ###
+  // Globally expose applyStreamPolicy for launcher loader dispatcher
+  applyStreamPolicy
+  // ### 수정 끝 ###
+});

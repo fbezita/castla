@@ -30,6 +30,13 @@ class TouchHandler {
     }
 
     bindEvents() {
+        // ### 수정 시작 ###
+        // Guard: prevent TypeError if canvas is not initialized or null
+        if (!this.canvas) {
+            console.warn('[TouchHandler] canvas element is missing. Event binding skipped.');
+            return;
+        }
+        // ### 수정 끝 ###
         // Store bound handlers so we can remove them in destroy()
         this._handlers = [];
         const addEvent = (target, type, fn, opts) => {
@@ -202,8 +209,21 @@ class TouchHandler {
 
     /** Convert client coordinates to normalized 0-1 video coordinates */
     _toNormalized(clientX, clientY, rect) {
-        if (this.renderer && typeof this.renderer.canvasToVideo === 'function') {
-            return this.renderer.canvasToVideo(clientX - rect.left, clientY - rect.top);
+        // ### 수정 시작 ###
+        // Apply a generous margin of 5% (0.05) to bounds checks to prevent touch event drops near edges
+        const touchMargin = 0.05;
+
+        // Dynamically resolve the active renderer instance depending on the target pane to ensure correct projection after hot-refreshes
+        let activeRenderer = this.renderer;
+        if (this.pane === "primary" && typeof window.getActiveRenderer === "function") {
+            activeRenderer = window.getActiveRenderer() || this.renderer;
+        } else if (this.pane === "secondary" && typeof window.getActiveSecondaryRenderer === "function") {
+            activeRenderer = window.getActiveSecondaryRenderer() || this.renderer;
+        }
+        // ### 수정 끝 ###
+
+        if (activeRenderer && typeof activeRenderer.canvasToVideo === 'function') {
+            return activeRenderer.canvasToVideo(clientX - rect.left, clientY - rect.top);
         }
 
         // MSE mode: <video> uses object-fit:contain — account for letterboxing
@@ -232,7 +252,7 @@ class TouchHandler {
             return {
                 x: Math.max(0, Math.min(1, x)),
                 y: Math.max(0, Math.min(1, y)),
-                inBounds: x >= 0 && x <= 1 && y >= 0 && y <= 1
+                inBounds: x >= -touchMargin && x <= 1 + touchMargin && y >= -touchMargin && y <= 1 + touchMargin
             };
         }
 
@@ -242,7 +262,7 @@ class TouchHandler {
         return {
             x: Math.max(0, Math.min(1, x)),
             y: Math.max(0, Math.min(1, y)),
-            inBounds: x >= 0 && x <= 1 && y >= 0 && y <= 1
+            inBounds: x >= -touchMargin && x <= 1 + touchMargin && y >= -touchMargin && y <= 1 + touchMargin
         };
     }
 
@@ -278,3 +298,5 @@ class TouchHandler {
         this._nextPointerId = 0;
     }
 }
+
+window.TouchHandler = TouchHandler;

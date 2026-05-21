@@ -341,7 +341,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
     override fun releaseVirtualDisplay(displayId: Int) {
         virtualDisplays.remove(displayId)?.let {
             virtualDisplayNames.remove(displayId)
-            it.release()
+            cleanupVirtualDisplayResources(displayId, it)
             Log.i(TAG, "Virtual display released: id=$displayId")
         }
     }
@@ -1157,10 +1157,57 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
     override fun destroy() {
         stopSystemAudioCapture()
-        virtualDisplays.values.forEach { it.release() }
+        // Clean up resources and release all virtual displays
+        virtualDisplays.forEach { (displayId, vd) ->
+            cleanupVirtualDisplayResources(displayId, vd)
+        }
         virtualDisplays.clear()
         virtualDisplayNames.clear()
         Log.i(TAG, "PrivilegedService destroyed")
+    }
+
+    private fun cleanupVirtualDisplayResources(displayId: Int, vd: android.hardware.display.VirtualDisplay) {
+        tetheringExecutor.execute {
+            try {
+                Log.i(TAG, "Cleaning up resources for virtual display: id=$displayId")
+                
+                val apps = getRunningTasksOnDisplay(displayId)
+                apps.forEach { app ->
+                    if (app.isNotEmpty() && !app.contains("/") && app != "com.castla.mirror" && app != "com.castla.mirror.debug") {
+                        try {
+                            execCommand("am force-stop $app")
+                            Log.i(TAG, "Successfully force-stopped app $app on display $displayId")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to force-stop app $app on display $displayId", e)
+                        }
+                    }
+                }
+                
+                try {
+                    execCommand("wm size reset -d $displayId")
+                    Log.i(TAG, "WindowManager size reset for display $displayId")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to reset WindowManager size for display $displayId", e)
+                }
+
+                try {
+                    execCommand("wm density reset -d $displayId")
+                    Log.i(TAG, "WindowManager density reset for display $displayId")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to reset WindowManager density for display $displayId", e)
+                }
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in cleanupVirtualDisplayResources for display $displayId", e)
+            } finally {
+                try {
+                    vd.release()
+                    Log.i(TAG, "Virtual display released successfully: id=$displayId")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to release VirtualDisplay object for id=$displayId", e)
+                }
+            }
+        }
     }
 
     override fun wakeUpDisplay(displayId: Int) {
@@ -1209,7 +1256,10 @@ class PrivilegedService : IPrivilegedService.Stub() {
             token.linkToDeath({
                 Log.w(TAG, "Client died! Cleaning up PrivilegedService and killing VDs.")
                 destroy()
-                System.exit(0)
+                // ### 수정 시작 ###
+                // REMOVED System.exit(0) to prevent the privileged shell process from exploding immediately,
+                // which was causing a race condition interrupting the asynchronous Binder release IPC transactions of VirtualDisplays.
+                // ### 수정 끝 ###
             }, 0)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to link to death", e)

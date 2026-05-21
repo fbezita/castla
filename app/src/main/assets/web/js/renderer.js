@@ -49,6 +49,12 @@ class CanvasRenderer {
         const sourceWidth = frame.displayWidth || frame.width;
         const sourceHeight = frame.displayHeight || frame.height;
 
+        // ### 수정 시작 ###
+        // if (this.frameCount % 60 === 0) {
+        //     console.log(`[RendererTelemetry] Frame #${this.frameCount}: size=${sourceWidth}x${sourceHeight}, canvasElement=${this.canvas.id}, clientSize=${this.canvas.clientWidth}x${this.canvas.clientHeight}, opacity=${this.canvas.style.opacity || 'default(0)'}, display=${this.canvas.style.display || 'default'}`);
+        // }
+        // ### 수정 끝 ###
+
         if (sourceWidth !== this.videoWidth || sourceHeight !== this.videoHeight) {
             this.videoWidth = sourceWidth;
             this.videoHeight = sourceHeight;
@@ -120,6 +126,13 @@ class CanvasRenderer {
         const canvasWidth = this.canvas.clientWidth;
         const canvasHeight = this.canvas.clientHeight;
 
+        // ### 수정 시작 ###
+        // Safely bypass layout synchronization when canvas is visually hidden
+        if (canvasWidth <= 0 || canvasHeight <= 0) {
+            return;
+        }
+        // ### 수정 끝 ###
+
         this.canvas.width = canvasWidth;
         this.canvas.height = canvasHeight;
 
@@ -169,6 +182,9 @@ class CanvasRenderer {
     }
 
     canvasToVideo(canvasX, canvasY) {
+        // ### 수정 시작 ###
+        // Apply a generous margin of 5% (0.05) to bounds checks to prevent touch event drops near edges
+        const touchMargin = 0.05;
         if (!this.renderWidth || isNaN(this.renderWidth) || this.renderWidth <= 0 ||
             !this.renderHeight || isNaN(this.renderHeight) || this.renderHeight <= 0) {
             const canvasWidth = this.canvas.clientWidth || 1;
@@ -178,7 +194,7 @@ class CanvasRenderer {
             return {
                 x: Math.max(0, Math.min(1, x)),
                 y: Math.max(0, Math.min(1, y)),
-                inBounds: x >= 0 && x <= 1 && y >= 0 && y <= 1
+                inBounds: x >= -touchMargin && x <= 1 + touchMargin && y >= -touchMargin && y <= 1 + touchMargin
             };
         }
         const x = (canvasX - this.renderX) / this.renderWidth;
@@ -186,8 +202,9 @@ class CanvasRenderer {
         return {
             x: Math.max(0, Math.min(1, x)),
             y: Math.max(0, Math.min(1, y)),
-            inBounds: x >= 0 && x <= 1 && y >= 0 && y <= 1
+            inBounds: x >= -touchMargin && x <= 1 + touchMargin && y >= -touchMargin && y <= 1 + touchMargin
         };
+        // ### 수정 끝 ###
     }
 
     updateFps() {

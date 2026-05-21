@@ -2,15 +2,30 @@
  * WebCodecs H.264 Decoder
  * Decodes raw H.264 NAL units using hardware-accelerated VideoDecoder
  */
+// ### 수정 시작 ###
+const DecoderState = {
+    UNINITIALIZED: 'UNINITIALIZED',
+    WAITING_SPS_PPS: 'WAITING_SPS_PPS',
+    WAITING_KEYFRAME: 'WAITING_KEYFRAME',
+    DECODING: 'DECODING',
+    RECOVERING: 'RECOVERING',
+    ERROR: 'ERROR'
+};
+
 class H264Decoder {
     // Profile-dependent backlog thresholds.
     // Higher buffer profiles tolerate more decode queue depth
     // before dropping, since the pacer absorbs the extra latency.
+    // ### 수정 시작 ###
+    // Profile-dependent backlog thresholds.
+    // Greatly expanded to prevent transient GPU spikes from triggering destructive
+    // delta frame drops, which cause immediate stream corruption and keyframe storm stall loops.
     static BACKLOG_THRESHOLDS = {
-        low_latency: 3,
-        balanced: 5,
-        smooth: 8
+        low_latency: 12,
+        balanced: 24,
+        smooth: 40
     };
+    // ### 수정 끝 ###
 
     constructor(onFrame, onError) {
         this.onFrame = onFrame;
@@ -22,12 +37,21 @@ class H264Decoder {
         this.startTime = 0;
         this.codecString = null; // dynamically detected from SPS
         this._backlogProfile = 'balanced';
-        this._waitingForKeyframe = false; // Flag to discard delta frames after drop
+        this.state = DecoderState.UNINITIALIZED;
+        this._lastSeqNum = undefined;
+        this._cachedSpsPps = null;
+        this._lastGapRequestTime = 0; // Throttle frame gap recovery requests to prevent congestion collapse
 
         // Backlog metrics
         this._backlogHits = 0;
         this._backlogDrops = 0;
         this._lastBacklogWarn = 0;
+    }
+
+    _transitionTo(newState) {
+        if (this.state === newState) return;
+        // console.log(`[Decoder] State transition: ${this.state} -> ${newState}`);
+        this.state = newState;
     }
 
     setBacklogProfile(profileName) {
@@ -42,6 +66,7 @@ class H264Decoder {
 
     async init() {
         if (!H264Decoder.isSupported()) {
+            this._transitionTo(DecoderState.ERROR);
             throw new Error('WebCodecs VideoDecoder not available');
         }
 
@@ -62,21 +87,32 @@ class H264Decoder {
         }
 
         if (!supportedCodec) {
+            this._transitionTo(DecoderState.ERROR);
             throw new Error('H.264 not supported');
         }
 
         this.codecString = supportedCodec;
 
+        // Clean up previous decoder instance if exists to prevent hardware leak
+        if (this.decoder && this.decoder.state !== 'closed') {
+            try {
+                this.decoder.close();
+            } catch (_) {}
+        }
+
         this.decoder = new VideoDecoder({
             output: (frame) => {
                 this.frameCount++;
+                // if (this.frameCount % 60 === 0) {
+                //     console.log(`[DecoderTelemetry] VideoDecoder decoded frame successfully. Total decoded frames=${this.frameCount}`);
+                // }
                 this.onFrame(frame);
             },
             error: (e) => {
                 console.error('[Decoder] Hardware decoder error:', e);
                 this.onError(e);
-                // Trigger auto-recovery on hardware error
-                this.configured = false;
+                this._transitionTo(DecoderState.ERROR);
+                this._handleAutoRecovery();
             }
         });
 
@@ -88,8 +124,25 @@ class H264Decoder {
 
         this.configured = true;
         this.startTime = performance.now();
-        this._waitingForKeyframe = true; // [SAFEGUARD] Wait for a valid keyframe before decoding delta frames to prevent hardware decoder crash
-        console.log('[Decoder] Initialized with WebCodecs, codec:', supportedCodec);
+        
+        // Advance state smoothly based on config availability
+        if (this._cachedSpsPps) {
+            this._transitionTo(DecoderState.WAITING_KEYFRAME);
+        } else {
+            this._transitionTo(DecoderState.WAITING_SPS_PPS);
+        }
+        
+        // console.log('[Decoder] Initialized with WebCodecs, codec:', supportedCodec);
+    }
+
+    _handleAutoRecovery() {
+        console.warn('[Decoder] Initiating automatic hardware decoder recovery...');
+        this.configured = false;
+        this._transitionTo(DecoderState.UNINITIALIZED);
+        this.init().catch(err => {
+            console.error('[Decoder] Automatic recovery failed:', err);
+            this._transitionTo(DecoderState.ERROR);
+        });
     }
 
     /**
@@ -101,8 +154,8 @@ class H264Decoder {
     decode(data) {
         if (!this.configured || !this.decoder || this.decoder.state === 'closed') {
             if (this.decoder && this.decoder.state === 'closed') {
-                console.warn('[Decoder] VideoDecoder is closed, attempting automatic recovery/re-init');
-                this.init().catch(err => console.error('[Decoder] Recovery failed:', err));
+                console.warn('[Decoder] VideoDecoder is closed, attempting automatic recovery');
+                this._handleAutoRecovery();
             }
             return;
         }
@@ -118,48 +171,67 @@ class H264Decoder {
         if (flags === 0x02) {
             this._cachedSpsPps = data.slice(8);
             this._detectCodecFromSps(new Uint8Array(this._cachedSpsPps));
+            if (this.state === DecoderState.WAITING_SPS_PPS) {
+                this._transitionTo(DecoderState.WAITING_KEYFRAME);
+            }
             return;
         }
 
         const isKeyFrame = flags === 0x01;
 
-        // [SAFEGUARD 1] If this is a valid keyframe and we were waiting for it, smoothly unlock the waiting state immediately
-        if (isKeyFrame && this._waitingForKeyframe) {
-            console.log(`[Decoder] Re-anchoring sequence tracking smoothly to keyframe #${seqNum}`);
-            this._waitingForKeyframe = false;
-        }
-
-        // If waiting for a keyframe after a gap, discard all delta frames
-        if (this._waitingForKeyframe) {
+        // Discard delta frames if we are not in active DECODING state.
+        // We MUST start with a keyframe after configure or flush to protect hardware decoder.
+        // ### 수정 시작 ###
+        if (this.state !== DecoderState.DECODING) {
             if (!isKeyFrame) {
-                // [CRITICAL SAFEGUARD] Keep the sequence tracking updated even when dropping deltas to prevent cascade false positives
+                // if (seqNum % 30 === 0) {
+                //     console.log(`[DecoderTelemetry] Discarding delta frame: seqNum=${seqNum} due to state=${this.state}`);
+                // }
+                // Keep sequence tracker updated to prevent false positive gaps on sync recovery
                 this._lastSeqNum = seqNum;
-                return; // Discard delta frame silently to prevent hardware decoder crash
+                return;
+            } else {
+                if (this._cachedSpsPps) {
+                    // console.log(`[Decoder] Anchor/Recovery keyframe received: seqNum=${seqNum}. Transitioning to DECODING`);
+                    this._transitionTo(DecoderState.DECODING);
+                } else {
+                    console.warn(`[Decoder] Received keyframe but missing SPS/PPS in state=${this.state}. Dropping.`);
+                    this._lastSeqNum = seqNum;
+                    return;
+                }
             }
         }
-
-        const nalData = data.slice(8); // Remove 8-byte header
+        // ### 수정 끝 ###
 
         // Detect frame drops via sequence gap
         if (this._lastSeqNum !== undefined) {
             const expected = (this._lastSeqNum + 1) & 0xFFFF;
             
-            // [SAFEGUARD 2] Independently evaluate sequence continuity to catch genuine gaps
             if (seqNum !== expected) {
-                console.warn('[Decoder] Frame gap detected: expected', expected, 'got', seqNum, '- requesting keyframe and skipping delta frames');
-                this._waitingForKeyframe = true;
-                if (this.onFrameGap) {
-                    this.onFrameGap();
+                console.warn(`[Decoder] Frame gap detected: expected ${expected} got ${seqNum}. Transitioning to RECOVERING.`);
+                this._transitionTo(DecoderState.RECOVERING);
+                
+                const now = performance.now();
+                if (now - this._lastGapRequestTime > 1500) {
+                    this._lastGapRequestTime = now;
+                    if (this.onFrameGap) {
+                        this.onFrameGap();
+                    }
                 }
+                
+                // Discard invalid delta immediately
                 if (!isKeyFrame) {
                     this._lastSeqNum = seqNum;
-                    return; // Discard this frame and wait for keyframe
+                    return;
                 } else {
-                    this._waitingForKeyframe = false;
+                    // Recover instantly if this is a keyframe
+                    this._transitionTo(DecoderState.DECODING);
                 }
             }
         }
         this._lastSeqNum = seqNum;
+
+        const nalData = data.slice(8); // Remove 8-byte header
 
         // On keyframes, prepend cached SPS/PPS for decoder
         let frameData = nalData;
@@ -181,20 +253,15 @@ class H264Decoder {
             const queueSize = this.decoder.decodeQueueSize;
             const threshold = H264Decoder.BACKLOG_THRESHOLDS[this._backlogProfile] || 5;
 
-            // Profile-aware backlog policy:
-            // - Keyframes are never dropped (they reset the decode chain)
-            // - Delta frames dropped when queue exceeds profile threshold
-            //   (low_latency=3, balanced=5, smooth=8)
+            // Delta frames dropped when queue exceeds profile threshold to prevent latency accumulation
             if (!isKeyFrame && queueSize > threshold) {
                 this._backlogHits++;
                 this._backlogDrops++;
-                // Warn sparingly — unified metrics are logged by FramePacer
                 const now = performance.now();
                 if (now - this._lastBacklogWarn > 10000) {
                     this._lastBacklogWarn = now;
                     console.warn(`[Decoder] Backlog: queueSize=${queueSize} threshold=${threshold} totalDrops=${this._backlogDrops}`);
                 }
-                // [CRITICAL SAFEGUARD] Keep the sequence tracking updated even when dropping backlog deltas to prevent subsequent gap false positives
                 this._lastSeqNum = seqNum;
                 return;
             }
@@ -203,8 +270,11 @@ class H264Decoder {
         } catch (e) {
             console.error('[Decoder] Decode error:', e);
             this.onError(e);
+            this._transitionTo(DecoderState.ERROR);
+            this._handleAutoRecovery();
         }
     }
+// ### 수정 끝 ###
 
     /**
      * Parse SPS NAL from keyframe to detect actual codec string (avc1.XXYYZZ).
