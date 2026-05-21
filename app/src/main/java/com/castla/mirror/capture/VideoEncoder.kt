@@ -19,8 +19,8 @@ class VideoEncoder(
 ) {
     companion object {
         private const val TAG = "VideoEncoder"
-        private const val MIME_TYPE = "video/avc" // H.264
-        private const val KEYFRAME_INTERVAL = 1 // seconds
+        private const val MIME_TYPE = "video/avc"
+        private const val KEYFRAME_INTERVAL = 1
     }
 
     private var codec: MediaCodec? = null
@@ -28,14 +28,39 @@ class VideoEncoder(
     private var encoderHandler: Handler? = null
     private var isRunning = false
 
-    // SPS and PPS NAL units needed for decoder initialization
     private var sps: ByteArray? = null
     private var pps: ByteArray? = null
 
+    /**
+     * 💡 [추가 완료] MediaCodec을 재시작하지 않고 화질 프로파일 및 비트레이트를 동적으로 가변 제어합니다.
+     */
+    fun setQualityProfile(bps: Int, isTextHeavy: Boolean, qpOffset: Int) {
+        val currentCodec = codec ?: return
+        try {
+            val params = Bundle().apply {
+                putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bps)
+                
+                if (isTextHeavy) {
+                    putInt("video-qp-i-min", (18 + qpOffset).coerceIn(1, 51))
+                    putInt("video-qp-i-max", (25 + qpOffset).coerceIn(1, 51))
+                    putInt("video-qp-p-min", (20 + qpOffset).coerceIn(1, 51))
+                    putInt("video-qp-p-max", (28 + qpOffset).coerceIn(1, 51))
+                    putInt("intra-refresh-period", 0) 
+                } else {
+                    putInt("video-qp-i-min", (22 + qpOffset).coerceIn(1, 51))
+                    putInt("video-qp-i-max", (38 + qpOffset).coerceIn(1, 51))
+                    putInt("video-qp-p-min", (24 + qpOffset).coerceIn(1, 51))
+                    putInt("video-qp-p-max", (40 + qpOffset).coerceIn(1, 51))
+                }
+            }
+            currentCodec.setParameters(params)
+            Log.i(TAG, "Dynamic encoder params applied. Bitrate: ${bps / 1000}kbps, TextMode: $isTextHeavy, QpOffset: $qpOffset")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to set dynamic quality profile parameters", e)
+        }
+    }
+
     fun createInputSurface(): Surface {
-        // Try High Profile first (15-25% better compression via CABAC + 8x8 transform),
-        // fall back to Baseline if the hardware encoder rejects it
-        // (some Exynos/MediaTek SoCs crash with High Profile + low-latency + no B-frames)
         return try {
             createEncoderWithProfile(
                 MediaCodecInfo.CodecProfileLevel.AVCProfileHigh,
@@ -58,31 +83,19 @@ class VideoEncoder(
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, KEYFRAME_INTERVAL)
-            
-            // [OPTIMIZATION] Switch from CBR to VBR for dynamic video streaming playback.
-            // CBR forces a rigid data stream which wastes bandwidth on static screens and causes 
-            // severe frame stuttering/dropping during high-motion video sequences like YouTube.
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
-            
             setInteger(MediaFormat.KEY_PROFILE, profile)
             setInteger(MediaFormat.KEY_LEVEL, level)
-            
-            // Low latency hints
             setInteger(MediaFormat.KEY_LATENCY, 0)
             
-            // Max out operating rate to prevent the SoC from underclocking the hardware encoder.
-            // This keeps the VPU acceleration active even when the screen activity drops significantly.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 setInteger(MediaFormat.KEY_OPERATING_RATE, 32767) 
             }
             
-            // Force repeat previous frame after 100ms of idling to keep the frontend watchdog fed
-            // and eliminate packet loss artifacts on steady streams.
-            setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000) // 100,000 microseconds (0.1s)
-
+            setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000)
             setInteger("android.media.playback-params.low-latency", 1)
-            setInteger(MediaFormat.KEY_PRIORITY, 1) // Real-time priority
-            setInteger("max-bframes", 0) // Explicitly disable B-frames to bypass Samsung-specific rendering quirks
+            setInteger(MediaFormat.KEY_PRIORITY, 1)
+            setInteger("max-bframes", 0)
             setInteger("vendor.rtc-ext-dec-low-latency.enable", 1)
         }
 
@@ -99,25 +112,18 @@ class VideoEncoder(
 
     fun start(onEncodedFrame: (data: ByteArray, isKeyFrame: Boolean) -> Unit) {
         val encoder = codec ?: throw IllegalStateException("Call createInputSurface() first")
-
         encoderThread = HandlerThread("VideoEncoder").also { it.start() }
         encoderHandler = Handler(encoderThread!!.looper)
-
         isRunning = true
 
         encoder.setCallback(object : MediaCodec.Callback() {
-            override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
-                // Not used with Surface input
-            }
+            override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {}
 
             override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
                 if (!isRunning) return
-
                 try {
                     val buffer = codec.getOutputBuffer(index) ?: return
-
                     if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
-                        // Extract SPS/PPS and send as separate config message
                         extractSpsPps(buffer, info)
                         if (sps != null && pps != null) {
                             onSpsPps?.invoke(sps!! + pps!!)
@@ -127,18 +133,14 @@ class VideoEncoder(
                     }
 
                     if (info.size > 0) {
-                        // ZERO-COPY OPTIMIZATION: 
-                        // Pre-allocate 8 bytes at the front of the array for the network header.
-                        // This prevents creating a second ByteArray during socket transmission.
                         val data = ByteArray(info.size + 8)
                         buffer.position(info.offset)
                         buffer.limit(info.offset + info.size)
-                        buffer.get(data, 8, info.size) // Write video data starting at index 8
+                        buffer.get(data, 8, info.size)
 
                         val isKeyFrame = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
                         onEncodedFrame(data, isKeyFrame)
                     }
-
                     codec.releaseOutputBuffer(index, false)
                 } catch (e: Exception) {
                     Log.e(TAG, "Error processing output buffer", e)
@@ -156,7 +158,6 @@ class VideoEncoder(
         }, encoderHandler)
 
         encoder.start()
-        Log.i(TAG, "Encoder started")
     }
 
     private fun extractSpsPps(buffer: ByteBuffer, info: MediaCodec.BufferInfo) {
@@ -165,17 +166,13 @@ class VideoEncoder(
         buffer.limit(info.offset + info.size)
         buffer.get(configData)
 
-        // Parse Annex-B NAL units to find SPS (type 7) and PPS (type 8)
         var i = 0
         while (i < configData.size - 4) {
-            // Look for start code 0x00000001
             if (configData[i] == 0.toByte() && configData[i + 1] == 0.toByte() &&
                 configData[i + 2] == 0.toByte() && configData[i + 3] == 1.toByte()) {
 
                 val nalType = configData[i + 4].toInt() and 0x1F
                 val nalStart = i
-
-                // Find next start code or end
                 var nalEnd = configData.size
                 var j = i + 4
                 while (j < configData.size - 3) {
@@ -189,14 +186,8 @@ class VideoEncoder(
 
                 val nalUnit = configData.copyOfRange(nalStart, nalEnd)
                 when (nalType) {
-                    7 -> {
-                        sps = nalUnit
-                        Log.i(TAG, "SPS extracted (${nalUnit.size} bytes)")
-                    }
-                    8 -> {
-                        pps = nalUnit
-                        Log.i(TAG, "PPS extracted (${nalUnit.size} bytes)")
-                    }
+                    7 -> sps = nalUnit
+                    8 -> pps = nalUnit
                 }
                 i = nalEnd
             } else {
@@ -211,23 +202,17 @@ class VideoEncoder(
                 putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
             }
             codec?.setParameters(params)
-            Log.d(TAG, "Keyframe requested")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to request keyframe", e)
         }
     }
 
-    /**
-     * Dynamically change bitrate without rebuilding the pipeline.
-     * Uses MediaCodec.setParameters() which is supported on most devices.
-     */
     fun setBitrate(bps: Int) {
         try {
             val params = Bundle().apply {
                 putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bps)
             }
             codec?.setParameters(params)
-            Log.i(TAG, "Bitrate changed to ${bps / 1000}kbps")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to set bitrate", e)
         }
@@ -235,24 +220,15 @@ class VideoEncoder(
 
     fun stop() {
         isRunning = false
-        try {
-            codec?.stop()
-        } catch (e: Exception) {
-            Log.w(TAG, "Error stopping encoder", e)
-        }
+        try { codec?.stop() } catch (_: Exception) {}
     }
 
     fun release() {
         stop()
-        try {
-            codec?.release()
-        } catch (e: Exception) {
-            Log.w(TAG, "Error releasing encoder", e)
-        }
+        try { codec?.release() } catch (_: Exception) {}
         codec = null
         encoderThread?.quitSafely()
         encoderThread = null
         encoderHandler = null
-        Log.i(TAG, "Encoder released")
     }
 }

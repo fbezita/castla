@@ -15,7 +15,6 @@ import com.castla.mirror.policy.AutoScalePolicy
 class AdaptiveBitrateManager(
     private val context: Context,
     private val serviceScope: CoroutineScope,
-    // 특정 개별 변수 대신 전체 파이프라인 풀을 조회하는 람다 하나만 수용
     private val getPipelines: () -> Map<String, MirrorForegroundService.MirroringPipeline>,
     private val getBrowserConnected: () -> Boolean,
     private val getIsServiceRunning: () -> Boolean,
@@ -41,15 +40,16 @@ class AdaptiveBitrateManager(
         private const val AUTO_SCALE_INITIAL_DELAY_MS = 5_000L
     }
 
-    // 기본 네트워크 보장 대역폭 버젯
     var globalBitrateBudget: Int = 5_000_000
     var abrJob: Job? = null
     var lastCongestionTimeMs: Long = 0L
     var autoScaleJob: Job? = null
 
-    // 각 독립 파이프라인별 오토스케일 제어 상태 인덱스를 격리 관리하기 위한 매핑 컨텍스트
     private val pipelineScaleTiers = java.util.concurrent.ConcurrentHashMap<String, Int>()
     private val pipelineStableCounts = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    
+    // 💡 [오토스케일 평가 쿨타임 가드 맵 컨텍스트 추가]
+    private val lastScaleEvaluationTimeMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     @Volatile var lastQualityDroppedFrames: Int = 0
     @Volatile var lastQualityAvgDelayMs: Double = 0.0
@@ -64,27 +64,19 @@ class AdaptiveBitrateManager(
     fun startAllLoops() {
         stopAllLoops()
         
-        // ABR 대역폭 복구 루프 시작
         abrJob = serviceScope.launch {
             while (getIsServiceRunning() && getBrowserConnected()) {
                 kotlinx.coroutines.delay(2000)
                 val now = android.os.SystemClock.elapsedRealtime()
                 if (now - lastCongestionTimeMs >= 2000) {
-                    var incrementalApplied = false
-                    getPipelines().values.filter { it.width > 0 && it.height > 0 }.forEach { pipeline ->
-                        val target = getSharedBitrateForPipeline(pipeline)
-                        if (pipeline.currentBitrate < target) {
-                            pipeline.currentBitrate = (pipeline.currentBitrate * 1.1).toInt().coerceAtMost(target)
-                            pipeline.videoEncoder?.setBitrate(pipeline.currentBitrate)
-                            incrementalApplied = true
-                        }
-                    }
-                    if (incrementalApplied) Log.i(TAG, "ABR: Network stable. Step-increasing shared allocation.")
+                    // ABR 증량 필요 시 가중치 분배 엔진 호출 라우팅 유도 가능
+                    MirrorForegroundService.instance?.contentAwareQualityEngine?.rebalanceMultiDisplayBitrates(
+                        getPipelines().values.toList()
+                    )
                 }
             }
         }
 
-        // 오토스케일 루프 시작
         autoScaleJob = serviceScope.launch {
             kotlinx.coroutines.delay(AUTO_SCALE_INITIAL_DELAY_MS)
             while (getIsServiceRunning() && getBrowserConnected()) {
@@ -99,14 +91,10 @@ class AdaptiveBitrateManager(
     fun stopAllLoops() {
         abrJob?.cancel(); abrJob = null
         autoScaleJob?.cancel(); autoScaleJob = null
-        lastQualityDroppedFrames = 0; lastQualityAvgDelayMs = 0.0; lastQualityBacklogDrops = 0
-        pipelineScaleTiers.clear(); pipelineStableCounts.clear()
+        pipelineScaleTiers.clear(); pipelineStableCounts.clear(); lastScaleEvaluationTimeMs.clear()
     }
 
-    fun resetTiers() {
-        pipelineScaleTiers.clear()
-        pipelineStableCounts.clear()
-    }
+    fun resetTiers() { pipelineScaleTiers.clear(); pipelineStableCounts.clear() }
 
     fun onNetworkCongestion() {
         val now = android.os.SystemClock.elapsedRealtime()
@@ -116,17 +104,14 @@ class AdaptiveBitrateManager(
                 pipeline.currentBitrate = (pipeline.currentBitrate * 0.8).toInt().coerceAtLeast(400_000)
                 pipeline.videoEncoder?.setBitrate(pipeline.currentBitrate)
             }
-            Log.w(TAG, "ABR: Network congestion -> Symmetrically dropping bitrates across all active loops.")
         }
     }
 
-    // [독립화 핵심] 가상화면에 주어질 대역폭을 독립 파이프라인의 해상도 및 비디오 여부 상태에 맞춰 순수 계산식으로 도출
     fun getSharedBitrateForPipeline(pipeline: MirrorForegroundService.MirroringPipeline): Int {
         val allActivePipelines = getPipelines().values.filter { it.displayId >= 0 && it.width > 0 }
         val activeCount = allActivePipelines.size.coerceAtLeast(1)
 
-        val baseBitrate = if (activeCount > 1) {
-            // 다중 결합 화면 구동 시 비디오 여부 파이를 수식으로 도출 (Symmetric Fair Share)
+        return if (activeCount > 1) {
             if (pipeline.isVideoApp) StreamMath.calculateSplitVideoBitrate(pipeline.width, pipeline.height)
             else StreamMath.calculateSplitCompanionBitrate(pipeline.width, pipeline.height)
         } else {
@@ -135,25 +120,32 @@ class AdaptiveBitrateManager(
             val tierBitrate = if (activeTiers.isNotEmpty()) activeTiers[tierIdx.coerceIn(0, activeTiers.size - 1)].bitrate else 3_000_000
             if (pipeline.isVideoApp && !getThermalActive()) StreamMath.calculateOttBitrate(tierBitrate) else tierBitrate
         }
-        return baseBitrate
     }
 
     fun rebalanceBitrates() {
-        getPipelines().values.filter { it.width > 0 && it.height > 0 }.forEach { pipeline ->
-            val budget = getSharedBitrateForPipeline(pipeline)
-            pipeline.currentBitrate = budget
-            pipeline.videoEncoder?.setBitrate(budget)
-        }
+        // 💡 기존의 레거시 구조를 무너뜨리지 않고 고성능 엔진 단일 통로 채널로 자동 토스 처리를 수행합니다.
+        MirrorForegroundService.instance?.contentAwareQualityEngine?.rebalanceMultiDisplayBitrates(
+            getPipelines().values.toList()
+        )
     }
 
     fun evaluateSinglePipelineScale(pipeline: MirrorForegroundService.MirroringPipeline) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val lastEval = lastScaleEvaluationTimeMs[pipeline.name] ?: 0L
+        
+        // 💡 [중복 겹침 방지 레이어] 1.5초 이내에 연속으로 들어온 요구 사항은 중복 과부하 처리이므로 원천 거절합니다.
+        if (now - lastEval < 1500L) {
+            Log.d(TAG, "[AutoScale Guard] Debounced duplicate evaluation request for ${pipeline.name}")
+            return
+        }
+        lastScaleEvaluationTimeMs[pipeline.name] = now
+
         val activeTiers = AUTO_TIERS.filter { it.maxHeight == pipeline.currentMaxHeight }
         if (activeTiers.isEmpty()) return
 
         val tierIdx = pipelineScaleTiers[pipeline.name] ?: activeTiers.indexOfFirst { it.fps == 30 }.coerceAtLeast(0)
         val stableCount = pipelineStableCounts[pipeline.name] ?: 0
 
-        val now = android.os.SystemClock.elapsedRealtime()
         val input = AutoScaleInput(
             thermalStatus = _getThermalStatusValue(),
             networkStable = now - lastCongestionTimeMs >= AUTO_SCALE_INTERVAL_MS,
@@ -197,9 +189,10 @@ class AdaptiveBitrateManager(
         if (pipeline.autoResolution) pipeline.currentMaxHeight = tier.maxHeight
         if (pipeline.autoFps) pipeline.targetFps = tier.fps
 
-        val targetBudget = getSharedBitrateForPipeline(pipeline)
-        pipeline.currentBitrate = targetBudget
-        pipeline.videoEncoder?.setBitrate(targetBudget)
+        // 💡 변경된 오토스케일 예하 비트레이트 주입도 일원화된 엔진 연산 체계를 거치도록 보정
+        MirrorForegroundService.instance?.contentAwareQualityEngine?.rebalanceMultiDisplayBitrates(
+            getPipelines().values.toList()
+        )
 
         if (isResolutionChanging && getBrowserConnected()) {
             serviceScope.launch { pipeline.rebuild(pipeline.width, pipeline.height, force = true) }
@@ -209,13 +202,9 @@ class AdaptiveBitrateManager(
     private fun notifyAutoTierChange(pipeline: MirrorForegroundService.MirroringPipeline, activeTiers: List<AutoTier>, reason: String) {
         val tierIdx = pipelineScaleTiers[pipeline.name] ?: 0
         val label = activeTiers[tierIdx.coerceIn(0, activeTiers.size - 1)].label
-        val json = JSONObject().apply {
-            put("type", "autoScaleChange")
-            put("pane", pipeline.name)
-            put("tier", label)
-            put("reason", reason)
-        }.toString()
-        getMirrorServer()?.broadcastControlMessage(json)
+        getMirrorServer()?.broadcastControlMessage(JSONObject().apply {
+            put("type", "autoScaleChange"); put("pane", pipeline.name); put("tier", label); put("reason", reason)
+        }.toString())
     }
 
     private fun _getThermalStatusValue(): Int {

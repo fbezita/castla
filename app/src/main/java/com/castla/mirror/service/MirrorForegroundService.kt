@@ -54,6 +54,7 @@ import com.castla.mirror.diagnostics.DiagnosticEvent
 import com.castla.mirror.diagnostics.FileLogger
 import com.castla.mirror.diagnostics.MirrorDiagnostics
 import com.castla.mirror.diagnostics.TerminalReason
+import com.castla.mirror.utils.AppLaunchRequest
 import com.castla.mirror.utils.StreamMath
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -128,18 +129,10 @@ class MirrorForegroundService : Service() {
     // N개 파이프라인 대칭 확장을 위한 핵심 맵 컬렉션
     val pipelines = java.util.concurrent.ConcurrentHashMap<String, MirroringPipeline>()
 
-    // 기존 외부 파일들과의 상호 호환 참조 바인딩 프로퍼티 완벽 복원
-    var isCurrentAppVideo: Boolean
-        get() = pipelines["primary"]?.isVideoApp ?: false
-        set(value) { pipelines["primary"]?.isVideoApp = value }
-
-    var isSecondaryAppVideo: Boolean
-        get() = pipelines["secondary"]?.isVideoApp ?: false
-        set(value) { pipelines["secondary"]?.isVideoApp = value }
-
     private lateinit var powerLockManager: PowerLockManager
     private lateinit var thermalThrottleManager: ThermalThrottleManager
     private lateinit var adaptiveBitrateManager: AdaptiveBitrateManager
+    lateinit var contentAwareQualityEngine: ContentAwareQualityEngine
 
     val thermalStatus: kotlinx.coroutines.flow.StateFlow<Int>
         get() = thermalThrottleManager.thermalStatus
@@ -333,6 +326,11 @@ class MirrorForegroundService : Service() {
             getMirrorServer = { mirrorServer },
         )
 
+        contentAwareQualityEngine = ContentAwareQualityEngine(
+            getGlobalBudget = { adaptiveBitrateManager.globalBitrateBudget }, // ABR 버젯 연동
+            broadcastControlMessage = { json -> mirrorServer?.broadcastControlMessage(json) } // 웹소켓 연동
+        )
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             thermalThrottleManager.register()
         }
@@ -386,42 +384,63 @@ class MirrorForegroundService : Service() {
 
     private fun observeAppLaunchRequests() {
         serviceScope.launch {
+            // AppLaunchBus.requestLaunch() 또는 emitEvent()를 통해 주입된 패킷을 상시 감시
             com.castla.mirror.utils.AppLaunchBus.events.collect { request ->
-                val component = if (request.className != null) "${request.packageName}/${request.className}" else request.packageName
                 val pane = request.pane ?: "primary"
                 val targetPipeline = pipelines[pane] ?: return@collect
 
-                Log.i(TAG, "[AppLaunchBus] Received routing request to ($pane) pane -> Target: $component")
+                Log.i(TAG, "[AppLaunchBus Observer] Event Captured! Processing pipeline architecture setup for: ${request.packageName} ($pane pane)")
 
-                when (request.launchMode) {
-                    LaunchMode.EXTERNAL_BROWSER_URL -> request.url?.let { targetPipeline.launchBrowser(it, request.sourceAppPackage, request.allowEmbeddedFallback) }
-                    LaunchMode.INTERNAL_WEBVIEW -> {
-                        val url = request.url ?: request.intentExtra ?: return@collect
-                        targetPipeline.launchWeb(component.substringAfter('/', "com.castla.mirror.ui.WebBrowserActivity"), url)
-                    }
-                    LaunchMode.STANDARD_APP -> {
-                        if (request.intentExtra != null) {
-                            targetPipeline.launchWeb(component.substringAfter('/', "com.castla.mirror.ui.WebBrowserActivity"), request.intentExtra)
-                        } else {
-                            targetPipeline.launchStandard(component)
-                        }
-                    }
-                }
+                // ─────────────────────────────────────────────────────────────────
+                // 💡 [개선 1] 인코더 그릇 최적화 선제 집행 (앱이 켜지기 "전"에 실행해야 함)
+                // ─────────────────────────────────────────────────────────────────
 
+                // 1-1. 앱이 켜지기 전, 기존 파이프라인의 프로파일 상태를 먼저 백업합니다.
+                val oldProfile = contentAwareQualityEngine.resolveContentProfile(
+                    targetPipeline.currentApp,
+                    targetPipeline.isVideoApp
+                )
+
+                // 1-2. 티켓에 적혀있는 신규 가이드라인(isVideoApp)을 파이프라인 컨텍스트에 즉시 선반영합니다.
+                targetPipeline.isVideoApp = request.isVideoApp
+
+                // 1-3. 기동 예정인 새로운 앱의 식별 정보를 바탕으로 타깃 프로파일을 산출합니다.
+                val newProfile = contentAwareQualityEngine.resolveContentProfile(
+                    request.packageName, // targetPipeline.currentApp은 아직 옛날 앱이므로 request에서 가져옵니다.
+                    request.isVideoApp
+                )
+
+                // 1-4. 단순히 비디오 플래그 변경 여부만 보는 것이 아니라,
+                // 텍스트 모드 ➔ 모션 모드 등의 "실질적 화질 엔진 프로파일 변경"을 인지하여 스케줄링합니다.
+                val profileChanged = oldProfile != newProfile
                 val now = android.os.SystemClock.elapsedRealtime()
-                val videoChanged = request.isVideoApp != targetPipeline.isVideoApp
-                if (videoChanged) { targetPipeline.isVideoApp = request.isVideoApp }
 
-                if (videoChanged && now - lastBitrateChangeMs > 500) {
+                if (profileChanged && now - lastBitrateChangeMs > 500) {
                     lastBitrateChangeMs = now
-                    adaptiveBitrateManager.rebalanceBitrates()
+                    Log.d(TAG, "[Architecture Sync] Profile shift detected (${oldProfile.name} -> ${newProfile.name}). Rebalancing bandwidth ahead of app launch.")
+
+                    // 💥 앱이 가상 화면에 첫 픽셀 버퍼를 쏟아붓기 전에 비트레이트 분배 및 QP 범위 조정을 "완벽히 선제 집행"합니다!
+                    contentAwareQualityEngine.rebalanceMultiDisplayBitrates(pipelines.values.toList())
                 }
 
+                // ─────────────────────────────────────────────────────────────────
+                // 💡 [개선 2] 인코더 그릇이 완벽히 고정된 안전 타이밍에 최종 하드웨어 기동 집행
+                // ─────────────────────────────────────────────────────────────────
+
+                // 2-1. 복잡한 외부 브라우저 우회, 패키지 검증 등이 내장된 통합 함수를 이 타이밍에 호출합니다.
+                targetPipeline.launchAppFromWebLauncher(request.packageName, request.className)
+
+                // 2-2. 후속 오토스케일러(해상도 및 FPS 티어링) 평가 연계
                 if (targetPipeline.autoResolution || targetPipeline.autoFps) {
                     adaptiveBitrateManager.evaluateSinglePipelineScale(targetPipeline)
                 }
 
-                mirrorServer?.broadcastControlMessage(JSONObject().apply { put("type", "ottProfileHint"); put("pane", pane); put("active", targetPipeline.isVideoApp) }.toString())
+                // 2-3. 웹 프론트엔드 OTT 수신 레이어 상태 연동 힌트 전송 유지
+                mirrorServer?.broadcastControlMessage(JSONObject().apply {
+                    put("type", "ottProfileHint")
+                    put("pane", pane)
+                    put("active", targetPipeline.isVideoApp)
+                }.toString())
             }
         }
     }
@@ -721,7 +740,37 @@ class MirrorForegroundService : Service() {
                         }
                     }
                 }
-                server.setAppLaunchListener { pkg, cmp, pane -> serviceScope.launch { pipelines[pane]?.launchAppFromWebLauncher(pkg, cmp) } }
+                server.setAppLaunchListener { pkg, cmp, pane, isVideoApp ->
+                    serviceScope.launch {
+                        try {
+                            // pipelines[pane]?.isVideoApp = isVideoApp
+                            // pipelines[pane]?.launchAppFromWebLauncher(pkg, cmp)
+                            // 💡 바로 여기에 위치하여 패킷의 성격을 먼저 규정합니다!
+                           val mode = if (pkg.startsWith("http")) {
+                               LaunchMode.EXTERNAL_BROWSER_URL
+                           } else {
+                               LaunchMode.STANDARD_APP
+                           }
+                           val rawLaunchTarget = cmp ?: pkg
+                           // 정제된 데이터를 기반으로 버스용 이벤트 객체(Envelope)를 조립합니다.
+                           val requestEvent = AppLaunchRequest(
+                               packageName = pkg,
+                               className = cmp,
+                               pane = pane,
+                               launchMode = mode, // 판별된 모드 주입
+                               isVideoApp = isVideoApp
+                           )
+
+                           Log.i(TAG, "[Server Bridge] Routing request packed directly: pkg=$pkg, cmp=$cmp")
+
+                           // 단일 이벤트 버스 채널(Flow)에 티켓 분사 (옵저버를 깨우는 스위치)
+                           com.castla.mirror.utils.AppLaunchBus.requestLaunch(requestEvent)
+
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to parse and emit inbound app launch packet", e)
+                        }
+                    }
+                }
                 server.setDisplayDensityListener { scale ->
                     dpiScale = scale
                     pipelines.values.forEach { pipeline ->

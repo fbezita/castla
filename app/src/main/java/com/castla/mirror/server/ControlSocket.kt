@@ -95,8 +95,9 @@ class ControlSocket(
                     val pane = json.optString("pane", "primary")
                     val componentName = json.optString("componentName", "")
                         .takeIf { it.isNotEmpty() }
+                    val isVideoApp = json.optBoolean("isVideoApp", false)
                     if (pkg.isNotEmpty()) {
-                        server.onAppLaunchRequest(pkg, componentName, pane)
+                        server.onAppLaunchRequest(pkg, componentName, pane, isVideoApp)
                     }
                 }
 
@@ -144,7 +145,7 @@ class ControlSocket(
                 else -> "primary"
             }
         } else "primary"
-        if (action != "move") Log.i(TAG, "Touch[$pane]: $action id=$id x=${"%.3f".format(x)} y=${"%.3f".format(y)}")
+//        if (action != "move") Log.i(TAG, "Touch[$pane]: $action id=$id x=${"%.3f".format(x)} y=${"%.3f".format(y)}")
         server.onTouchEvent(TouchEvent(action, x, y, id, pane))
     }
 
