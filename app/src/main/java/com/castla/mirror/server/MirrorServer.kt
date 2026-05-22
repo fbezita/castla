@@ -61,7 +61,13 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         // 🚨 현재 폰의 핫스팟/셀룰러 IP 체크
         val currentIp = serverIp 
 
-        if (currentIp == "192.0.0.4") {
+        /* ### 수정 시작 ### */
+        // Load settings to check if WebCodecs hardware accelerated decoding is enabled
+        val settings = com.castla.mirror.ui.StreamSettings.load(context)
+
+        // ✅ Only enable SSL/HTTPS socket binding if IP is 192.0.0.4 and WebCodecs option is enabled
+        if (currentIp == "192.0.0.4" && settings.webCodecsEnabled) {
+        /* ### 수정 끝 ### */
             try {
                 val password = "castla123".toCharArray() 
                 val keyStore = KeyStore.getInstance("PKCS12")

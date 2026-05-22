@@ -1435,6 +1435,7 @@ class MirrorForegroundService : Service() {
                             if (displayId >= 0) {
                                 // 1. Wakeup virtual display power state
                                 controller.getPrivilegedService()?.wakeUpDisplay(displayId)
+                                delay(100) // Increase stabilization delay to guarantee display wakeup processing before touch input
 
                                 // 2. Inject a gentle down & up touch event to force Graphics Pipeline refresh
                                 touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 99, name))
@@ -1470,6 +1471,7 @@ class MirrorForegroundService : Service() {
                             if (displayId >= 0) {
                                 // 1. Wakeup virtual display power state
                                 controller.getPrivilegedService()?.wakeUpDisplay(displayId)
+                                delay(100) // Increase stabilization delay to guarantee display wakeup processing before touch input
                                 
                                 // 2. Inject a gentle down & up touch event to force Graphics Pipeline refresh
                                 touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 99, name))
@@ -1572,19 +1574,23 @@ class MirrorForegroundService : Service() {
             if (displayId >= 0) {
                 try { mirrorServer?.broadcastControlMessage(org.json.JSONObject().apply { put("type", "resolutionChanged"); put("pane", name); put("width", w); put("height", h) }.toString()) } catch (_: Exception) {}
                 /* ### 수정 시작 ### */
-                // Force a gentle touch sequence down & up immediately after rebuild to trigger the graphics pipeline update.
-                // This guarantees the first frame is generated and sent out instantly without stalling.
-                if (currentCodecMode == "mjpeg") {
-                    serviceScope.launch {
-                        try {
-                            delay(100)
-                            touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 99, name))
-                            delay(50)
-                            touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 99, name))
-                            Log.i(TAG, "[$name Pipeline] Injected early graphics wakeup touch sequence after MJPEG rebuild")
-                        } catch (e: Exception) {
-                            Log.w(TAG, "[$name Pipeline] Failed to force graphics wakeup post MJPEG rebuild", e)
+                // Force a gentle display wakeup and touch sequence immediately after rebuild to trigger the graphics pipeline update.
+                // This guarantees the first frame is generated and sent out instantly without stalling on any codec mode.
+                serviceScope.launch {
+                    try {
+                        delay(150)
+                        controller.getPrivilegedService()?.wakeUpDisplay(displayId)
+                        delay(100)
+                        touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 99, name))
+                        delay(50)
+                        touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 99, name))
+                        
+                        if (currentCodecMode != "mjpeg") {
+                            videoEncoder?.requestKeyFrame()
                         }
+                        Log.i(TAG, "[$name Pipeline] Injected early graphics wakeup and touch sequence after rebuild (codec: $currentCodecMode)")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "[$name Pipeline] Failed to force graphics wakeup post rebuild", e)
                     }
                 }
                 /* ### 수정 끝 ### */
@@ -1592,6 +1598,51 @@ class MirrorForegroundService : Service() {
         }
 
         fun invalidateVd(reason: String): Long { Log.w(TAG, "[$name Pipeline] Invalidating display channel cache token. Reason: $reason"); displayId = -1; return vdGeneration.incrementAndGet() }
+        
+        /* ### 수정 시작 ### */
+        // English comment: Periodically monitors task residency on the virtual display to inject layout wakeup events adaptively as soon as the app mounts.
+        // It relies on the global hardware mutex to sequentialize and synchronize the wakeup sequence with any active rebuild tasks.
+        private fun executeAdaptiveWakeup(targetDisplayId: Int, cleanPkg: String, service: IPrivilegedService) {
+            if (targetDisplayId < 0) return
+            serviceScope.launch {
+                var appMounted = false
+                // Quick polling: 50ms intervals, up to 8 iterations (400ms max timeout budget)
+                for (attempt in 1..8) {
+                    val runningTasks = try { service.getRunningTasksOnDisplay(targetDisplayId) } catch (_: Exception) { null }
+                    val isPresent = runningTasks?.any { it.contains(cleanPkg) } ?: false
+                    if (isPresent) {
+                        appMounted = true
+                        Log.i(TAG, "[$name Pipeline] Adaptive wakeup detected target app $cleanPkg in display $targetDisplayId on attempt $attempt")
+                        break
+                    }
+                    delay(50)
+                }
+
+                if (!appMounted) {
+                    Log.w(TAG, "[$name Pipeline] Adaptive wakeup timed out waiting for $cleanPkg on display $targetDisplayId. Proceeding with fallback wakeup.")
+                }
+
+                // English comment: Synchronize with the virtual display hardware mutex to guarantee that any active or pending rebuild completes first before touch injection.
+                virtualDisplayHardwareMutex.withLock {
+                    try {
+                        service.wakeUpDisplay(targetDisplayId)
+                        delay(40)
+                        touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 99, name))
+                        delay(40)
+                        touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 99, name))
+                        
+                        if (currentCodecMode != "mjpeg") {
+                            videoEncoder?.requestKeyFrame()
+                        }
+                        Log.i(TAG, "[$name Pipeline] Symmetrical adaptive wakeup successfully completed on display $targetDisplayId under hardware lock")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "[$name Pipeline] Failed to trigger adaptive wakeup sequence under hardware lock", e)
+                    }
+                }
+            }
+        }
+        /* ### 수정 끝 ### */
+
         fun markVdCreated(activeId: Int, reason: String): Long { displayId = activeId; return vdGeneration.incrementAndGet() }
         fun isCurrentVd(expectedGeneration: Long, expectedDisplayId: Int): Boolean = expectedDisplayId >= 0 && expectedGeneration == vdGeneration.get() && expectedDisplayId == displayId && controller.hasVirtualDisplay() && controller.getDisplayId() == expectedDisplayId
         fun currentVdToken(): Pair<Long, Int>? { val gen = vdGeneration.get(); val activeId = displayId; return if (isCurrentVd(gen, activeId)) gen to activeId else null }
@@ -1618,17 +1669,23 @@ class MirrorForegroundService : Service() {
             if (cleanPkg.isBlank() || cleanPkg == packageName || cleanPkg.contains("com.castla.mirror")) return@withContext false
             
             
-            // Self-healing: restore released graphics pipelines before shifting app focus
+            // Self-healing: restore released graphics pipelines and realign to requested viewport before shifting app focus
             /* ### 수정 시작 ### */
             // Account for active JpegEncoder in MJPEG mode to prevent redundant self-healing loops.
             // Also enforce isSelfHealingInProgress state lock to prevent recursive rebuild requests.
             val isEncoderReleased = if (currentCodecMode == "mjpeg") jpegEncoder == null else videoEncoder == null
-            if ((isEncoderReleased || width <= 1) && !isSelfHealingInProgress) {
+            val targetW = if (requestedWidth > 0) requestedWidth else (if (lastValidWidth > 0) lastValidWidth else 384)
+            val targetH = if (requestedHeight > 0) requestedHeight else (if (lastValidHeight > 0) lastValidHeight else 672)
+            
+            // Align dimensions to 16-pixel boundaries to check layout equivalence
+            val alignedW = ((targetW + 15) and 15.inv()).coerceAtLeast(320)
+            val alignedH = ((targetH + 15) and 15.inv()).coerceAtLeast(320)
+            val needsViewportRealignment = width != alignedW || height != alignedH
+
+            if ((isEncoderReleased || width <= 1 || needsViewportRealignment) && !isSelfHealingInProgress) {
                 isSelfHealingInProgress = true
                 try {
-                    val targetW = if (lastValidWidth > 0) lastValidWidth else 384
-                    val targetH = if (lastValidHeight > 0) lastValidHeight else 672
-                    Log.i(TAG, "[$name Pipeline] Self-healing activated on launchComponent. Restoring layout state to ${targetW}x${targetH}")
+                    Log.i(TAG, "[$name Pipeline] Self-healing or Viewport Alignment activated on launchComponent. Restoring layout state to ${targetW}x${targetH}")
                     // Eliminate fragile hardcoded delays via event-driven coroutine completion tokens.
                     // Awaiting the CompletableDeferred guarantees the virtual display surfaces are fully bound 
                     // natively by the sequential worker before moving forward to launch components.
@@ -1667,35 +1724,17 @@ class MirrorForegroundService : Service() {
                 /* ### 수정 시작 ### */
                 for (taskId in matchingTaskIds) {
                     try { runBinderSafe { service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId"); service.execCommand("cmd activity task move-to-front $taskId") } } catch (_: Exception) {}
-                    // try {
-                    //     val nativeMoved = runBinderSafe { controller.moveTaskToDisplayNative(taskId) } ?: false
-                    //     if (nativeMoved) {
-                    //         runBinderSafe { service.execCommand("cmd activity task move-to-front $taskId") }
-                    //     } else {
-                    //         Log.w(TAG, "[$name Pipeline] Native task migration failed, falling back to shell executor")
-                    //         runBinderSafe {
-                    //             service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId")
-                    //             service.execCommand("cmd activity task move-to-front $taskId")
-                    //         }
-                    //     }
-                    // } catch (e: Exception) {
-                    //     Log.w(TAG, "[$name Pipeline] Native moveTaskToDisplay error, executing shell fallback", e)
-                    //     try {
-                    //         runBinderSafe {
-                    //             service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId")
-                    //             service.execCommand("cmd activity task move-to-front $taskId")
-                    //         }
-                    //     } catch (_: Exception) {}
-                    // }
                 }
 
                 // Prevent redundant 'am start' shell command execution immediately following async task migration command.
                 // Re-launching via 'am start' in parallel with active task displacement commands causes Android OS task stack conflict,
                 // frequently forcing the primary Display 0 (MainActivity) to recede to the background Recents view.
                 if (isWarmStart && !forceColdStart) {
-                    if (isWarmStart) {
-                        verifySurfaceAndFallback(this@MirroringPipeline, service, targetDisplayId, cleanPkg, matchingTaskIds, packageOrComponent, extraKey, extraValue)
-                    }
+                    verifySurfaceAndFallback(this@MirroringPipeline, service, targetDisplayId, cleanPkg, matchingTaskIds, packageOrComponent, extraKey, extraValue)
+                    
+                    // Trigger adaptive task residency-aware wakeup asynchronously instead of waiting on hardcoded timings
+                    executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
+                    
                     currentApp = packageOrComponent
                     return@withContext true
                 }

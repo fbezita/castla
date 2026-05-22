@@ -11,15 +11,16 @@ function getActiveSecondaryRenderer() {
     : null;
 }
 
+/* ### 수정 시작 ### */
+// Symmetrical scaling getters configured to return fill fallback instead of contain to absorb viewport gaps
 function getEffectivePrimaryFitMode() {
-  // English comment: Safe null guard check for window.state and window.streamPolicy to prevent early init errors
-  return !!(window.state && window.state.right) ? "fill" : (window.streamPolicy ? window.streamPolicy.fitMode : "contain");
+  return !!(window.state && window.state.right) ? "fill" : (window.streamPolicy ? window.streamPolicy.fitMode : "fill");
 }
 
 function getEffectiveSecondaryFitMode() {
-  // English comment: Safe null guard check for window.state and window.streamPolicy to prevent early init errors
-  return !!(window.state && window.state.right) ? "fill" : (window.streamPolicy ? window.streamPolicy.fitMode : "contain");
+  return !!(window.state && window.state.right) ? "fill" : (window.streamPolicy ? window.streamPolicy.fitMode : "fill");
 }
+/* ### 수정 끝 ### */
 
 function alignDimension(value) {
   return Math.max(320, (Math.round(value) + 15) & ~15);

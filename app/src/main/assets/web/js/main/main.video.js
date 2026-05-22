@@ -57,10 +57,14 @@ function connectVideo(isHotRefresh = false) {
       );
       window.sendControlMessage?.({ type: "codec", mode: "mjpeg" });
     } else if (window.codecMode === "h264") {
+      /* ### 수정 시작 ### */
+      // Proactively request a clean H.264 keyframe and trigger stream recovery on open to prevent initial decoder buffer stuck.
       console.log(
-        `[Main] Requesting H264 keyframe via control socket on video open`,
+        `[Main] Proactively requesting H.264 stream recovery and keyframe on open`,
       );
       window.sendControlMessage?.({ type: "requestKeyframe", pane: "primary" });
+      window.requestStreamRecovery?.();
+      /* ### 수정 끝 ### */
     }
   };
 
@@ -194,8 +198,11 @@ function checkReady() {
 // Frame-arrival watchdog: first try to recover an open but quiet stream by
 // asking the server/encoder for a fresh frame. Only reconnect if the stream
 // stays quiet for the hard timeout.
-const FRAME_SOFT_TIMEOUT_MS = 4000;
-const FRAME_HARD_TIMEOUT_MS = 10000;
+/* ### 수정 시작 ### */
+// Relax watchdog timeout thresholds to prevent false stall recoveries on static screens.
+const FRAME_SOFT_TIMEOUT_MS = 8000;
+const FRAME_HARD_TIMEOUT_MS = 20000;
+/* ### 수정 끝 ### */
 
 function armFrameWatchdog(socket) {
   

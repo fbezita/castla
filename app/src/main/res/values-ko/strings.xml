@@ -112,4 +112,9 @@
     <string name="settings_logs_copied">최근 로그를 클립보드에 복사했어요.</string>
     <string name="settings_logs_share_failed">로그를 공유할 수 없습니다.</string>
     <string name="settings_logs_chooser_title">진단 로그 공유</string>
+
+    <!-- WebCodecs (Hardware Decoding) -->
+    <string name="settings_webcodecs">WebCodecs 디코더</string>
+    <string name="settings_webcodecs_title">WebCodecs 하드웨어 디코더 사용</string>
+    <string name="settings_webcodecs_description">브라우저의 하드웨어 가속 WebCodecs를 사용합니다. 보안 컨텍스트(HTTPS/wss) 환경 및 지정된 URL 페어링이 필요합니다.</string>
 </resources>

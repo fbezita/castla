@@ -152,6 +152,12 @@ class TouchHandler {
 
   /* ### 수정 시작 ### */
   _onPointer(event, actionCode) {
+    /* ### 수정 시작 ### */
+    // Refresh frame watchdog on pointer interaction to prevent false-positive static screen stalls.
+    if (typeof window.armFrameWatchdog === "function" && window.videoSocket) {
+      window.armFrameWatchdog(window.videoSocket);
+    }
+    /* ### 수정 끝 ### */
     const currentTarget = event.currentTarget || this.canvas;
     const rect = currentTarget.getBoundingClientRect();
     const coords = this._toNormalized(event.clientX, event.clientY, rect, currentTarget);
@@ -189,6 +195,12 @@ class TouchHandler {
   }
 
   _onTouch(event, actionCode) {
+    /* ### 수정 시작 ### */
+    // Refresh frame watchdog on touch interaction to prevent false-positive static screen stalls.
+    if (typeof window.armFrameWatchdog === "function" && window.videoSocket) {
+      window.armFrameWatchdog(window.videoSocket);
+    }
+    /* ### 수정 끝 ### */
     event.preventDefault();
     const currentTarget = event.currentTarget || this.canvas;
     const rect = currentTarget.getBoundingClientRect();
@@ -229,6 +241,12 @@ class TouchHandler {
   }
 
   _sendMouse(event, actionCode) {
+    /* ### 수정 시작 ### */
+    // Refresh frame watchdog on mouse interaction to prevent false-positive static screen stalls.
+    if (typeof window.armFrameWatchdog === "function" && window.videoSocket) {
+      window.armFrameWatchdog(window.videoSocket);
+    }
+    /* ### 수정 끝 ### */
     const currentTarget = event.currentTarget || this.canvas;
     const rect = currentTarget.getBoundingClientRect();
     const coords = this._toNormalized(event.clientX, event.clientY, rect, currentTarget);

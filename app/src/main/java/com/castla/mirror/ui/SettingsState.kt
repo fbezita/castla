@@ -13,7 +13,11 @@ data class StreamSettings(
     val mirroringMode: MirroringMode = MirroringMode.FULL_SCREEN,
     val targetAppPackage: String = "",
     val targetAppLabel: String = "",
-    val autoHotspot: Boolean = true
+    val autoHotspot: Boolean = true,
+    /* ### 수정 시작 ### */
+    // Option to enable or disable WebCodecs hardware accelerated decoding
+    val webCodecsEnabled: Boolean = false
+    /* ### 수정 끝 ### */
 ) {
     enum class Resolution(val maxHeight: Int, val label: String) {
         AUTO(720, "Auto"),
@@ -36,6 +40,9 @@ data class StreamSettings(
         private const val KEY_TARGET_APP_PACKAGE = "target_app_package"
         private const val KEY_TARGET_APP_LABEL = "target_app_label"
         private const val KEY_AUTO_HOTSPOT = "auto_hotspot"
+        /* ### 수정 시작 ### */
+        private const val KEY_WEBCODECS = "webcodecs"
+        /* ### 수정 끝 ### */
 
         /** Sentinel value indicating auto FPS mode. Must not collide with real FPS values. */
         const val FPS_AUTO = 0
@@ -60,7 +67,10 @@ data class StreamSettings(
                 } catch (_: Exception) { MirroringMode.FULL_SCREEN },
                 targetAppPackage = prefs.getString(KEY_TARGET_APP_PACKAGE, "") ?: "",
                 targetAppLabel = prefs.getString(KEY_TARGET_APP_LABEL, "") ?: "",
-                autoHotspot = prefs.getBoolean(KEY_AUTO_HOTSPOT, true)
+                autoHotspot = prefs.getBoolean(KEY_AUTO_HOTSPOT, true),
+                /* ### 수정 시작 ### */
+                webCodecsEnabled = prefs.getBoolean(KEY_WEBCODECS, false)
+                /* ### 수정 끝 ### */
             )
         }
 
@@ -73,6 +83,9 @@ data class StreamSettings(
                 .putString(KEY_TARGET_APP_PACKAGE, settings.targetAppPackage)
                 .putString(KEY_TARGET_APP_LABEL, settings.targetAppLabel)
                 .putBoolean(KEY_AUTO_HOTSPOT, settings.autoHotspot)
+                /* ### 수정 시작 ### */
+                .putBoolean(KEY_WEBCODECS, settings.webCodecsEnabled)
+                /* ### 수정 끝 ### */
                 .apply()
         }
     }

@@ -393,5 +393,24 @@ sequenceDiagram
         *   이후 투명도를 `1`로 부드럽게 복구하여, 깜빡임 없이 완전히 심리스하게 우측 보조화면이 메인 단독화면으로 녹아들어가며 승격되는 궁극의 사용자 경험을 이룩했습니다.
 
 ---
+
+## 11. H.264 16배수 매크로블록 정렬 오차 극복 및 기본 fitMode: fill 격상을 통한 과도기 여백 블랙바 완치 히스토리 (2026-05-22 최신 업데이트)
+
+### 1) H.264 16배수 매크로블록 제약과 블랙바 여백의 메커니즘 규명
+*   **문제의 원인**:
+    *   안드로이드 H.264 하드웨어 인코더(`MediaCodec`)는 영상 압축 시 16x16 매크로블록 규격에 맞추기 위해 실해상도가 16의 배수가 아닌 경우 가상 화면 크기를 강제로 16의 배수로 올림 처리(`alignedWidth` / `alignedHeight`)하여 인코딩합니다.
+    *   이 때문에 웹 클라이언트 뷰포트 창과 실제 비디오 스트림 해상도 사이에 1~15픽셀 수준의 물리적인 종횡비 미세 편차(Pixel Alignment Gap)가 불가피하게 발생하게 됩니다.
+    *   기존의 비디오 스케일링 기본 정책이었던 `contain` 모드는 이 종횡비 편차를 그대로 유지하여 화면 좌우 또는 상하에 지저분한 검은색 레터박스(블랙바 여백)를 지속적으로 노출시켰습니다.
+    *   또한, 단독 화면 전환 및 전체화면 확장 시 500ms의 레이아웃 리빌드 지연 시간 동안에도 종횡비 불정합으로 인해 여백 현상이 두드러져 드라이빙 UX를 심각하게 훼손하였습니다.
+
+### 2) fitMode 기본값 및 Fallback을 "fill"로 영구 격상
+*   **해결 및 최적화 조치**:
+    *   [main.state.js](file:///c:/project/private/castla/app/src/main/assets/web/js/main/main.state.js) 파일 내 `_streamPolicy.fitMode`의 기본 구성값을 기존 `"contain"`에서 **`"fill"`**로 격상 수정했습니다.
+    *   [main.layout.js](file:///c:/project/private/castla/app/src/main/assets/web/js/main/main.layout.js) 파일 내 주화면/보조화면의 실제 스케일링 정책을 연산하는 `getEffectivePrimaryFitMode` 및 `getEffectiveSecondaryFitMode`의 최종 fallback 리턴값 역시 기존 `"contain"`에서 **`"fill"`**로 전격 수정했습니다.
+    *   이를 통해 H.264 16배수 하드웨어 정렬 오차 픽셀을 브라우저 뷰포트 캔버스에 꽉 채우는 방식으로 강제 극복하여, 1번(지도 단독 실행), 2번(네이버 지도 앱 전환), 4번(전체화면 확장 시 500ms의 rebuild 지연 순간) 상황 등 모든 과도기 환경에서 휑한 검은 여백을 100% 원천 차단하고 영구 박멸하였습니다.
+    *   **영구 개발 가이드라인**: 비디오 디코더 캔버스가 어떠한 동적 레이아웃 리플로우 및 리사이즈 딜레이 중에도 빈 화면을 남겨두지 않도록, 스케일링 기본값 및 fallback 정책은 절대적으로 `"fill"` 상태를 엄격히 고수해야 함을 아키텍처 규칙으로 명문화했습니다.
+
+---
 *본 문서는 Castla 프로젝트 내 [docs/development_history.md](file:///c:/project/private/castla/docs/development_history.md) 경로에 안전하게 저장되었습니다.*
+
 

@@ -108,4 +108,9 @@
     <string name="settings_logs_copied">Recent logs copied to clipboard.</string>
     <string name="settings_logs_share_failed">Could not share logs.</string>
     <string name="settings_logs_chooser_title">Share diagnostic logs</string>
+
+    <!-- WebCodecs (Hardware Decoding) -->
+    <string name="settings_webcodecs">WebCodecs Decoder</string>
+    <string name="settings_webcodecs_title">Enable WebCodecs decoder</string>
+    <string name="settings_webcodecs_description">Use browser hardware-accelerated WebCodecs. Requires secure context (HTTPS/wss) and pairing on the specific URL.</string>
 </resources>

@@ -50,11 +50,14 @@ let _currentDensity = (() => {
     return 0.7;
   }
 })();
+/* ### 수정 시작 ### */
+// Adjust default scaling policy to fill to absorb 16-pixel hardware boundary padding and prevent visual letterboxes
 let _streamPolicy = {
-  fitMode: "contain",
+  fitMode: "fill",
   autoFit: false,
   layoutMode: "single",
 };
+/* ### 수정 끝 ### */
 
 let _autoTierToastTimer = null;
 const DEFAULT_SPLIT_RATIO = 0.5;
