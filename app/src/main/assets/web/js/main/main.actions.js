@@ -126,7 +126,16 @@ function launchAppPair(leftPkg, rightPkg) {
     `[Launcher] Smart Launching App Pair: left=${leftPkg}, right=${rightPkg}`,
   );
   if (Date.now() < launchGuardUntil) return;
-  window.lastLaunchTime = Date.now(); // Record launch timestamp
+
+  // Debounce guard to prevent double-clicking or rapid touch double-triggers (within 1200ms)
+  const now = Date.now();
+  if (window.lastLaunchTime && now - window.lastLaunchTime < 1200) {
+    console.log(
+      `[Launcher] Blocked rapid double launch attempt for App Pair: ${leftPkg} + ${rightPkg}`,
+    );
+    return;
+  }
+  window.lastLaunchTime = now;
 
   const targetLeftApp = allApps.find((a) => a.packageName === leftPkg);
   const targetRightApp = allApps.find((a) => a.packageName === rightPkg);
@@ -138,94 +147,21 @@ function launchAppPair(leftPkg, rightPkg) {
     return;
   }
 
-  // Get current running package names (if any)
-  const currentLeftPkg = state.left ? state.left.packageName : null;
-  const currentRightPkg = state.right ? state.right.packageName : null;
-
-  // Check if either of the target apps is already running in either slot
-  const leftRunningMatch =
-    currentLeftPkg === leftPkg
-      ? "left"
-      : currentRightPkg === leftPkg
-        ? "right"
-        : null;
-  const rightRunningMatch =
-    currentLeftPkg === rightPkg
-      ? "left"
-      : currentRightPkg === rightPkg
-        ? "right"
-        : null;
-
-  console.log(
-    `[Launcher] AppPair Smart Evaluation: X(${leftPkg}) runningSlot=${leftRunningMatch}, Y(${rightPkg}) runningSlot=${rightRunningMatch}`,
-  );
-
-  if (leftRunningMatch && rightRunningMatch) {
-    // Case 1: Both apps are already running on the screen (regardless of swap)
-    console.log(
-      `[Launcher] Both apps ${leftPkg} and ${rightPkg} are already running. Skipping.`,
-    );
-    return;
-  }
-
-  if (leftRunningMatch && !rightRunningMatch) {
-    // Case 2: Only the requested left app (X) is running.
-    // Keep X where it is running, and launch Y (rightPkg) in the other slot!
-    if (leftRunningMatch === "left") {
-      console.log(
-        `[Launcher] ${leftPkg} is running on Left. Launching ${rightPkg} on Right.`,
-      );
-      window._leftApp = targetLeftApp;
-      window._rightApp = targetRightApp;
-      updateLayoutUI();
-      launchApp(targetRightApp, true, true);
-    } else {
-      console.log(
-        `[Launcher] ${leftPkg} is running on Right. Keeping it, launching ${rightPkg} on Left.`,
-      );
-      window._leftApp = targetRightApp; // the missing app goes to the Left
-      window._rightApp = targetLeftApp; // the existing app stays on the Right
-      updateLayoutUI();
-      launchApp(targetRightApp, false, true);
-    }
-    return;
-  }
-
-  if (!leftRunningMatch && rightRunningMatch) {
-    // Case 3: Only the requested right app (Y) is running.
-    // Keep Y where it is running, and launch X (leftPkg) in the other slot!
-    if (rightRunningMatch === "right") {
-      console.log(
-        `[Launcher] ${rightPkg} is running on Right. Launching ${leftPkg} on Left.`,
-      );
-      window._leftApp = targetLeftApp;
-      window._rightApp = targetRightApp;
-      updateLayoutUI();
-      launchApp(targetLeftApp, false, true);
-    } else {
-      console.log(
-        `[Launcher] ${rightPkg} is running on Left. Keeping it, launching ${leftPkg} on Right.`,
-      );
-      window._leftApp = targetRightApp; // the existing app stays on the Left
-      window._rightApp = targetLeftApp; // the missing app goes to the Right
-      updateLayoutUI();
-      launchApp(targetLeftApp, true, true);
-    }
-    return;
-  }
-
-  // Case 4: Neither app is running anywhere. Launch both!
-  console.log(
-    `[Launcher] Neither app in pair is running. Launching both: X(${leftPkg}) and Y(${rightPkg})`,
-  );
+  /* ### 수정 시작 ### */
+  // Consistently enforce the exact user-specified App Pair layout direction (Left -> Primary, Right -> Secondary).
+  // Avoid fragile 'Smart Swap' prediction branches which violate user-defined layouts and trigger task displacement deadlocks.
   window._leftApp = targetLeftApp;
   window._rightApp = targetRightApp;
   updateLayoutUI();
 
+  // Launch the primary (Left) app on the left slot (pane=primary)
   launchApp(targetLeftApp, false, true);
+
+  // Launch the secondary (Right) app on the right slot (pane=secondary) after a 300ms safety delay
   setTimeout(() => {
     launchApp(targetRightApp, true, true);
   }, 300);
+  /* ### 수정 끝 ### */
 }
 
 function launchApp(app, isRight = false, forceLaunch = false) {
@@ -251,33 +187,52 @@ function launchApp(app, isRight = false, forceLaunch = false) {
     return;
   }
 
+  // Debounce guard to prevent double-clicking or rapid touch double-triggers (within 1200ms).
+  // Cache the timestamp per panel and packageName to only debounce identical launch commands.
+  // Also bypass this safeguard entirely if forceLaunch is enabled (e.g. app pair launching sequence).
+  const now = Date.now();
+  window.lastLaunchCache = window.lastLaunchCache || {};
+  const paneKey = isRight ? "right" : "left";
+  const cacheKey = `${paneKey}_${app.packageName}`;
+
+  if (
+    !forceLaunch &&
+    window.lastLaunchCache[cacheKey] &&
+    now - window.lastLaunchCache[cacheKey] < 1200
+  ) {
+    console.log(
+      `[Launcher] Debounced duplicate launch attempt for same package: ${app.packageName} on ${paneKey} pane`,
+    );
+    return;
+  }
+  window.lastLaunchCache[cacheKey] = now;
+
+  /* ### 수정 시작 ### */
   // Strict Duplication Safeguard:
   // Prevent running the exact same app on both VD_1 (left) and VD_2 (right) simultaneously.
   const pkgName = app.packageName;
   if (!forceLaunch) {
     if (isRight) {
-      // 1. 이미 동일한 오른쪽(right) 화면에 실행 중이라면, 에러 공지 없이 조용히 리턴!
+      // 1. If it's already running on the same Right pane, do not return. Send launch request to backend to trigger recovery.
       if (state.right && state.right.packageName === pkgName) {
         console.log(
-          `[Launcher] ${pkgName} is already running on Right. Skipping redundant launch without Notice.`,
+          `[Launcher] ${pkgName} is already running on Right. Sending redundant launch to trigger recovery.`,
         );
-        return;
       }
-      // 2. 반대쪽인 왼쪽(left) 화면에 이미 실행 중인 경우에만 고급 알림을 주고 차단!
-      if (state.left && state.left.packageName === pkgName) {
+      // 2. Prevent identical app launch if it's running on the opposite Left pane.
+      else if (state.left && state.left.packageName === pkgName) {
         showLauncherNotice("이미 왼쪽 화면(Primary)에서 실행 중인 앱입니다.");
         return;
       }
     } else {
-      // 3. 이미 동일한 왼쪽(left) 화면에 실행 중이라면, 에러 공지 없이 조용히 리턴!
+      // 3. If it's already running on the same Left pane, do not return. Send launch request to backend to trigger recovery.
       if (state.left && state.left.packageName === pkgName) {
         console.log(
-          `[Launcher] ${pkgName} is already running on Left. Skipping redundant launch without Notice.`,
+          `[Launcher] ${pkgName} is already running on Left. Sending redundant launch to trigger recovery.`,
         );
-        return;
       }
-      // 4. 반대쪽인 오른쪽(right) 화면에 이미 실행 중인 경우에만 고급 알림을 주고 차단!
-      if (state.right && state.right.packageName === pkgName) {
+      // 4. Prevent identical app launch if it's running on the opposite Right pane.
+      else if (state.right && state.right.packageName === pkgName) {
         showLauncherNotice(
           "이미 오른쪽 화면(Secondary)에서 실행 중인 앱입니다.",
         );
@@ -285,6 +240,7 @@ function launchApp(app, isRight = false, forceLaunch = false) {
       }
     }
   }
+  /* ### 수정 끝 ### */
 
   // Block accidental launches right after splash dismiss
   if (Date.now() < launchGuardUntil) {
@@ -444,7 +400,6 @@ async function promoteSecondaryToPrimary(secondaryApp) {
   });
 }
 
-
 // Bind methods globally to window scope for seamless multi-module integration
 Object.assign(window, {
   launchDualAppsDirectly,
@@ -455,5 +410,4 @@ Object.assign(window, {
 
   // Expose promoteSecondaryToPrimary globally
   promoteSecondaryToPrimary,
-  
 });

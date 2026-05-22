@@ -27,7 +27,6 @@ function lockBrowserSplitViewports(app = state.right) {
     leftLockedViewport = null;
   }
 
-  
   // Automatically build secondary locked viewport since system is dual stream only.
   const secondaryHeight = shellHeight;
   if (secondaryWidth > 0 && secondaryHeight > 0) {
@@ -44,7 +43,6 @@ function lockBrowserSplitViewports(app = state.right) {
     //   `[ViewportLockDebug] Secondary lock skipped because secondaryWidth=${secondaryWidth} or secondaryHeight=${secondaryHeight}`,
     // );
   }
-  
 }
 
 function updateSplitFitButton() {
@@ -88,11 +86,10 @@ function getDesiredSplitWidths(ratio = splitRatio) {
     };
   }
 
-  
   // Relax minimum width constraints from 320px to 160px for extremely flexible resizing
   const minPrimaryWidth = 160;
   const minSecondaryWidth = 160;
-  
+
   const desiredPrimaryWidth = Math.round(shellWidth * ratio);
   const maxPrimaryWidth = Math.max(
     minPrimaryWidth,
@@ -102,10 +99,7 @@ function getDesiredSplitWidths(ratio = splitRatio) {
     minPrimaryWidth,
     Math.min(maxPrimaryWidth, desiredPrimaryWidth),
   );
-  const secondaryWidth = Math.max(
-    minSecondaryWidth,
-    shellWidth - primaryWidth,
-  );
+  const secondaryWidth = Math.max(minSecondaryWidth, shellWidth - primaryWidth);
   return { primaryWidth, secondaryWidth, shellWidth, shellHeight };
 }
 
@@ -114,7 +108,9 @@ function updateSplitToolbarVisibility() {
   // Reference splitToolbar and layoutState from window scope to prevent ReferenceError under strict ESM modules
   const tb = window.splitToolbar;
   if (!tb) return;
-  const activePipelines = (window.layoutState?.pipelines || []).filter(p => p !== null);
+  const activePipelines = (window.layoutState?.pipelines || []).filter(
+    (p) => p !== null,
+  );
   tb.style.display = activePipelines.length >= 2 ? "flex" : "none";
   // ### 수정 끝 ###
 }
@@ -164,7 +160,7 @@ async function updateLayoutUI() {
     splitDrawer,
     homeBtn,
     canvas,
-    clearCanvas
+    clearCanvas,
   } = window;
 
   if (isPromotingSecondary) {
@@ -175,7 +171,7 @@ async function updateLayoutUI() {
   }
 
   const pipelines = layoutState.pipelines;
-  const activePipelinesCount = pipelines.filter(p => p !== null).length;
+  const activePipelinesCount = pipelines.filter((p) => p !== null).length;
 
   console.log(
     `[Launcher] updateLayoutUI: activePipelinesCount=${activePipelinesCount}, pipelinesLength=${pipelines.length}`,
@@ -199,7 +195,11 @@ async function updateLayoutUI() {
     homeBtn.style.display = "none";
 
     clearCanvas();
-  } else if (pipelines.length === 2 && pipelines[0] === null && pipelines[1] !== null) {
+  } else if (
+    pipelines.length === 2 &&
+    pipelines[0] === null &&
+    pipelines[1] !== null
+  ) {
     // Scenario 2: Only secondary app (VD_2) is active -> Show right app full screen
     destroySecondaryTransport();
 
@@ -235,7 +235,7 @@ async function updateLayoutUI() {
     if (window.secondaryTouchHandler) {
       window.secondaryTouchHandler.destroy();
     }
-    
+
     if (secondaryCanvas) {
       window.secondaryTouchHandler = new TouchHandler(
         secondaryCanvas,
@@ -244,13 +244,19 @@ async function updateLayoutUI() {
         "secondary",
       );
     } else {
-      console.warn("[Layout] secondaryCanvas element is missing. TouchHandler skipped.");
+      console.warn(
+        "[Layout] secondaryCanvas element is missing. TouchHandler skipped.",
+      );
     }
-    
+
     applyActiveFitModes();
     connectSecondaryVideo();
     requestAnimationFrame(() => sendViewportSize(true));
-  } else if (pipelines.length >= 2 && pipelines[0] !== null && pipelines[1] !== null) {
+  } else if (
+    pipelines.length >= 2 &&
+    pipelines[0] !== null &&
+    pipelines[1] !== null
+  ) {
     // Scenario 1: Both apps are active -> Enable 50:50 dual split layout
     destroySecondaryTransport();
 
@@ -286,7 +292,7 @@ async function updateLayoutUI() {
     if (window.secondaryTouchHandler) {
       window.secondaryTouchHandler.destroy();
     }
-    
+
     if (secondaryCanvas) {
       window.secondaryTouchHandler = new TouchHandler(
         secondaryCanvas,
@@ -295,9 +301,11 @@ async function updateLayoutUI() {
         "secondary",
       );
     } else {
-      console.warn("[Layout] secondaryCanvas element is missing. TouchHandler skipped.");
+      console.warn(
+        "[Layout] secondaryCanvas element is missing. TouchHandler skipped.",
+      );
     }
-    
+
     applyActiveFitModes();
     connectSecondaryVideo();
     requestAnimationFrame(() => sendViewportSize(true));
@@ -324,7 +332,8 @@ async function updateLayoutUI() {
     window.leftLockedViewport = null;
     window.rightLockedViewport = null;
 
-    const isMseActive = window.decoder && window.decoder.constructor.name === "MseDecoder";
+    const isMseActive =
+      window.decoder && window.decoder.constructor.name === "MseDecoder";
     if (isMseActive) {
       canvas.style.opacity = "0";
       canvas.style.display = "block";
@@ -349,29 +358,28 @@ async function updateLayoutUI() {
 }
 /* ### 수정 끝 ### */
 
-
-
 // Handle seamless layout changes upon video frame resolution change
 function handleRendererResolutionChange(width, height) {
   if (window.pendingLayoutSwitch === "single") {
     const aspect = width / height;
     // Fullscreen expects a landscape layout (typically >= 1.0)
     if (aspect >= 1.0) {
-      console.log(`[LayoutSmoothing] Target fullscreen frame received: ${width}x${height} (aspect: ${aspect.toFixed(2)}). Smoothly expanding layout.`);
+      console.log(
+        `[LayoutSmoothing] Target fullscreen frame received: ${width}x${height} (aspect: ${aspect.toFixed(2)}). Smoothly expanding layout.`,
+      );
       window.executeVisualFullscreenLayout();
     }
   }
 }
 
 function executeVisualFullscreenLayout() {
-  
   // Clear layout promotion lock and reset secondary app states
   window.pendingLayoutSwitch = null;
   window.isPromotingSecondary = false;
   if (window.state) {
     window.state.right = null;
   }
-  
+
   window.playerShell?.classList.remove("browser-split");
   window.playerShell?.classList.remove("secondary-fullscreen");
   window.playerShell?.style.removeProperty("--split-left-width");
@@ -385,14 +393,21 @@ function executeVisualFullscreenLayout() {
 
   // Instantly fit and redraw the primary canvas layout to cover 100% fullscreen
   window.getActiveRenderer()?.updateLayout?.();
-  
+
   // Force immediate keyframe request to trigger fast stream startup
-  window.controlSocket.send(JSON.stringify({ type: "requestKeyframe", pane: "primary" }));
-  
+  window.controlSocket.send(
+    JSON.stringify({ type: "requestKeyframe", pane: "primary" }),
+  );
+
   // Set backup keyframe request
   setTimeout(() => {
-    if (window.controlSocket && window.controlSocket.readyState === WebSocket.OPEN) {
-      window.controlSocket.send(JSON.stringify({ type: "requestKeyframe", pane: "primary" }));
+    if (
+      window.controlSocket &&
+      window.controlSocket.readyState === WebSocket.OPEN
+    ) {
+      window.controlSocket.send(
+        JSON.stringify({ type: "requestKeyframe", pane: "primary" }),
+      );
     }
   }, 800);
 }
@@ -400,69 +415,70 @@ function executeVisualFullscreenLayout() {
 function disableBrowserSplit(options = {}) {
   const { notifyServer = true } = options;
   const wasActive = !!window.state?.right;
-  
-  
-  // Clear any active promotion locks on browser split closure
+
+  // 승격 및 전환 관련 잔여 플래그/락 모두 청소
   window.isPromotingSecondary = false;
-  
+  window.pendingLayoutSwitch = null;
+
   if (window.state) {
     window.state.right = null;
   }
-  
+
+  // ### 수정 시작: 파이프라인 ID 'primary' 강제 정렬 ###
+  // 활성화된 파이프라인 중 첫 번째 항목을 추출하되,
+  // 백엔드가 싱글 모드 전체 화면으로 정확히 인지하도록 id를 무조건 "primary"로 덮어씁니다.
+  if (window.layoutState && window.layoutState.pipelines) {
+    const activePipes = window.layoutState.pipelines.filter((p) => p !== null);
+    if (activePipes.length > 0) {
+      const singlePipe = { ...activePipes[0], id: "primary" };
+      window.layoutState.pipelines = [singlePipe];
+    } else {
+      window.layoutState.pipelines = [];
+    }
+  }
+  // ### 수정 끝 ###
+
   window.updateSplitToolbarVisibility?.();
-  
+
   window.leftLockedViewport = null;
   window.rightLockedViewport = null;
-  
+
   if (window.streamPolicy) {
     window.streamPolicy.layoutMode = "single";
   }
   document.body.dataset.layoutMode = "single";
-  
+
   const playerShell = window.playerShell;
   playerShell?.classList.remove("browser-split");
   playerShell?.classList.remove("secondary-fullscreen");
   playerShell?.style.removeProperty("--split-left-width");
 
   window.destroySecondaryTransport?.();
-  
-  if (notifyServer && wasActive && window.controlSocket && window.controlSocket.readyState === WebSocket.OPEN) {
-    window.controlSocket.send(JSON.stringify({ type: "closeSecondary" }));
-  }
-
   window.applyActiveFitModes?.();
-  
-  // Force send full viewport size immediately to guarantee responsive resizing reflow
-  if (wasActive && window.controlSocket && window.controlSocket.readyState === WebSocket.OPEN) {
-    const fullWidth = Math.round(window.innerWidth || 1920);
-    const fullHeight = Math.round(window.innerHeight || 1080);
-    console.log(`[Main] Split closed: forcing full viewport ${fullWidth}x${fullHeight}`);
-    window.controlSocket.send(
-      JSON.stringify({
-        type: "viewport",
-        pane: "primary",
-        width: fullWidth,
-        height: fullHeight,
-        fitMode: typeof window.getEffectivePrimaryFitMode === "function" ? window.getEffectivePrimaryFitMode() : "contain",
-        layoutMode: "single"
-      })
+
+  // 1개로 재정렬되고 id가 "primary"로 통일된 layoutState.pipelines를 백엔드에 전송합니다.
+  if (wasActive && typeof window.sendViewportSize === "function") {
+    console.log(
+      `[Main] Split closed: syncing pipeline as primary via sendViewportSize.`,
     );
+    window.sendViewportSize(true);
   }
 }
-
 
 // Restore and optimize the stream quality and layout policy applicator
 function applyStreamPolicy(config = {}) {
   window.streamPolicy = {
     ...window.streamPolicy,
-    ...config
+    ...config,
   };
 
   document.body.dataset.layoutMode = window.streamPolicy.layoutMode;
 
   const adBanner = document.getElementById("ad-banner");
   if (adBanner) {
-    adBanner.style.display = window.streamPolicy.showAdBanner ? "block" : "none";
+    adBanner.style.display = window.streamPolicy.showAdBanner
+      ? "block"
+      : "none";
   }
 
   if (typeof window.applyActiveFitModes === "function") {
@@ -472,7 +488,6 @@ function applyStreamPolicy(config = {}) {
     requestAnimationFrame(() => window.sendViewportSize());
   }
 }
-
 
 // Bind methods globally to window scope for seamless multi-module integration
 Object.assign(window, {
@@ -488,8 +503,7 @@ Object.assign(window, {
   handleRendererResolutionChange,
   executeVisualFullscreenLayout,
   disableBrowserSplit,
-  
+
   // Globally expose applyStreamPolicy for launcher loader dispatcher
-  applyStreamPolicy
-  
+  applyStreamPolicy,
 });

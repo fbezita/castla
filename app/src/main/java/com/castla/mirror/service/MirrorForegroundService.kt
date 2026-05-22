@@ -213,6 +213,8 @@ class MirrorForegroundService : Service() {
     private var pendingBrowserDisconnectJob: Job? = null
 
     @Volatile private var lastAppLaunchTime: Long = 0L
+    private val paneLastLaunchTimes = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val paneLastLaunchPackages = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val screenOffPolicy = ScreenOffPolicy()
     private val keyguardManager by lazy { getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager }
 
@@ -394,6 +396,23 @@ class MirrorForegroundService : Service() {
                 val pane = request.pane ?: "primary"
                 val targetPipeline = pipelines[pane] ?: return@collect
 
+                // Prevent rapid multi-tap bounce and OS window manager stacking hazards.
+                val now = android.os.SystemClock.elapsedRealtime()
+                val lastLaunchTime = paneLastLaunchTimes[pane] ?: 0L
+                val lastPackage = paneLastLaunchPackages[pane] ?: ""
+
+                // Rule 1: Block duplicate launch of the exact same app on the same display pane within 1.5 seconds.
+                val isDuplicate = lastPackage == request.packageName && (now - lastLaunchTime < 1500L)
+
+                if (isDuplicate) {
+                    Log.d(TAG, "[AppLaunchBus Observer] Debounced duplicate request for ${request.packageName} on $pane pane (elapsed=${now - lastLaunchTime}ms)")
+                    return@collect
+                }
+
+                // Update launch state cache
+                paneLastLaunchTimes[pane] = now
+                paneLastLaunchPackages[pane] = request.packageName
+
                 Log.i(TAG, "[AppLaunchBus Observer] Event Captured! Processing pipeline architecture setup for: ${request.packageName} ($pane pane)")
 
                 // ─────────────────────────────────────────────────────────────────
@@ -418,7 +437,6 @@ class MirrorForegroundService : Service() {
                 // 1-4. 단순히 비디오 플래그 변경 여부만 보는 것이 아니라,
                 // 텍스트 모드 ➔ 모션 모드 등의 "실질적 화질 엔진 프로파일 변경"을 인지하여 스케줄링합니다.
                 val profileChanged = oldProfile != newProfile
-                val now = android.os.SystemClock.elapsedRealtime()
 
                 if (profileChanged && now - lastBitrateChangeMs > 500) {
                     lastBitrateChangeMs = now
@@ -709,10 +727,18 @@ class MirrorForegroundService : Service() {
             width = (width + 15) and 15.inv()
             height = (height + 15) and 15.inv()
 
+            /* ### 수정 시작 ### */
+            // Initialize target viewport dimensions with screen default landscape or portrait layout to 
+            // prevent square (720x720) or uninitialized display sizing anomalies during cold start launches.
             pipelines.values.forEach {
                 it.width = width
                 it.height = height
+                it.requestedWidth = width
+                it.requestedHeight = height
+                it.lastValidWidth = width
+                it.lastValidHeight = height
             }
+            /* ### 수정 끝 ### */
             
             pendingAudioEnabled = audioEnabled
             audioOrchestrator = AudioCaptureOrchestrator(object : AudioCaptureOrchestrator.Actions {
@@ -1280,22 +1306,36 @@ class MirrorForegroundService : Service() {
     private fun verifySurfaceAndFallback(pipeline: MirroringPipeline, service: IPrivilegedService, displayId: Int, pkg: String, taskIds: List<Int>, packageOrComponent: String, extraKey: String?, extraValue: String?) {
         if (pkg.contains("com.castla.mirror") || pkg == "HOME" || pkg.isBlank()) return
         
-        // Cancel the previous active fallback watchdog job to refresh the 1200ms grace period.
+        // Cancel the previous active fallback watchdog job to refresh the 5500ms grace period.
         // This prevents race condition and false positives where a subsequent fast layout rebuild
         // or concurrent launch request incorrectly triggers cold-start force stop.
         pipeline.activeFallbackJob?.cancel()
         
         pipeline.activeFallbackJob = serviceScope.launch(Dispatchers.IO) {
-            // Wait for activity manager to settle down task placement
-            kotlinx.coroutines.delay(1200L)
+            // Wait for activity manager to settle down task placement and allow the first graphic frame to render.
+            // Increase stabilization grace period to 5.5s to comfortably accommodate heavy apps like Google Maps on cold start.
+            kotlinx.coroutines.delay(5500L)
             try {
                 val runningTasks = try { service.getRunningTasksOnDisplay(displayId) } catch (e: Exception) {
                     Log.w(TAG, "[Fallback] Failed to retrieve running tasks on Display $displayId: ${e.message}")
                     null
                 }
-                val isNotPresent = runningTasks == null || runningTasks.none { it.contains(pkg) }
-                if (isNotPresent) {
-                    Log.w(TAG, "[Fallback] Self-healing recovery triggered for app: $pkg on Display $displayId. Executing cold launch.")
+                
+                // Absent Detection: Verify if the target app has successfully entered the virtual display's task stack.
+                // If it's completely missing from the running tasks on this display, it's a guaranteed launch failure.
+                val isAbsent = runningTasks == null || runningTasks.none { it.contains(pkg) }
+                
+                // Stagnation Detection: Verify if the app has failed to render its very first graphic frame (lastFrameRenderedTime == 0L)
+                // within the 5.5-second launch grace period due to graphics lockup or initialization freeze.
+                // Already rendered static scenes (lastFrameRenderedTime > 0L) are excluded from recovery triggers.
+                val isStagnated = !isAbsent && (pipeline.lastFrameRenderedTime == 0L)
+                
+                // Trigger recovery ONLY when the app has failed to render its very first graphic frame (lastFrameRenderedTime == 0L).
+                // If a frame has already been rendered successfully (lastFrameRenderedTime > 0L), we MUST NOT trigger recovery,
+                // as any 'Absent' detection is a guaranteed false positive caused by OS task query sync delay or displayId mismatch.
+                val shouldRecover = (isAbsent || isStagnated) && (pipeline.lastFrameRenderedTime == 0L)
+                if (shouldRecover) {
+                    Log.w(TAG, "[Fallback] Self-healing recovery triggered for app: $pkg on Display $displayId (absent: $isAbsent, stagnated: $isStagnated). Executing cold launch.")
                     for (taskId in taskIds) { 
                         try { service.removeTask(taskId) } catch (e: Exception) {
                             Log.w(TAG, "[Fallback] Failed to remove task $taskId: ${e.message}")
@@ -1340,6 +1380,7 @@ class MirrorForegroundService : Service() {
         // State guards to prevent concurrent self-healing re-entry which triggers duplicate am start shell command floods
         @Volatile var isSelfHealingInProgress = false
         @Volatile var activeFallbackJob: kotlinx.coroutines.Job? = null
+        @Volatile var lastFrameRenderedTime = 0L
         /* ### 수정 끝 ### */
         
 
@@ -1365,13 +1406,24 @@ class MirrorForegroundService : Service() {
                 resizeJob?.cancel(); serviceScope.launch { release() }; return 
             }
             
+            /* ### 수정 시작 ### */
+            // Check if this is the initial setup phase. If so, bypass the 500ms debounce delay 
+            // to instantly rebuild virtual display surface layout, preventing unaligned viewports during app startup.
+            val isFirstSetup = requestedWidth <= 0 || displayId < 0
+            
             // Cache the latest valid viewport sizes for runtime self-healing recovery
             lastValidWidth = w
             lastValidHeight = h
             
             requestedWidth = w; requestedHeight = h
             resizeJob?.cancel()
-            resizeJob = serviceScope.launch { kotlinx.coroutines.delay(500L); rebuild(w, h, forceSingle = (layoutMode == "single")) }
+            resizeJob = serviceScope.launch { 
+                if (!isFirstSetup) {
+                    kotlinx.coroutines.delay(500L) 
+                }
+                rebuild(w, h, forceSingle = (layoutMode == "single")) 
+            }
+            /* ### 수정 끝 ### */
         }
 
         
@@ -1456,6 +1508,9 @@ class MirrorForegroundService : Service() {
 
             Log.i(TAG, "[$name Pipeline] Rebuilding hardware layout canvas context to ${w}x${h} (DPI=$dpi, Bitrate=${calculatedBitrate/1000}kbps)")
 
+            // Reset frame indicator on viewport/encoder layout reconstruction to guarantee correct watchdog operation
+            lastFrameRenderedTime = 0L
+
             videoEncoder?.release(); videoEncoder = null
             jpegEncoder?.release(); jpegEncoder = null
             delay(50)
@@ -1466,7 +1521,12 @@ class MirrorForegroundService : Service() {
                 // Clear cached H.264 SPS/PPS packet to prevent leaking obsolete configurations to the new client socket.
                 mirrorServer?.clearCachedSpsPps(name)
                 val jpeg = JpegEncoder(w, h, fps = 15, quality = 65); val inputSurface = jpeg.createInputSurface(); jpegEncoder = jpeg
-                startEncoderTask = { jpeg.start { data, key -> mirrorServer?.broadcastFrame(data, key, name) } }
+                startEncoderTask = {
+                    jpeg.start { data, key ->
+                        lastFrameRenderedTime = System.currentTimeMillis()
+                        mirrorServer?.broadcastFrame(data, key, name)
+                    }
+                }
                 
                 // Throttle keyframe requests to once per 1000ms and inject a gentle touch event to trigger graphics pipeline rendering.
                 mirrorServer?.setKeyframeRequester(name) {
@@ -1482,10 +1542,10 @@ class MirrorForegroundService : Service() {
 
                                 /* ### 수정 시작 ### */
                                 // Use pointer ID 9 instead of 99 to conform with Android InputDispatcher validation (0-31 range).
-                                // 2. Inject a gentle down & up touch event to force Graphics Pipeline refresh
-                                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 9, name))
+                                // 2. Inject a micro swipe gesture at safe bottom-right corner (0.99f, 0.99f -> 0.99f, 0.98f) to refresh graphics pipeline without click side effects.
+                                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.99f, 0.99f, 9, name))
                                 delay(50)
-                                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 9, name))
+                                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.99f, 0.98f, 9, name))
                                 /* ### 수정 끝 ### */
                             }
                             restoreContent()
@@ -1505,7 +1565,12 @@ class MirrorForegroundService : Service() {
                 videoEncoder = encoder
                 /* ### 수정 끝 ### */
                 encoder.onSpsPps = { mirrorServer?.broadcastSpsPps(it, name) }
-                startEncoderTask = { encoder.start { data, key -> mirrorServer?.broadcastFrame(data, key, name) } }
+                startEncoderTask = {
+                    encoder.start { data, key ->
+                        lastFrameRenderedTime = System.currentTimeMillis()
+                        mirrorServer?.broadcastFrame(data, key, name)
+                    }
+                }
                 
                 // Throttle keyframe requests to once per 1000ms to prevent duplicate wakeup/touch injector coroutine flood and binder bottlenecks
                 mirrorServer?.setKeyframeRequester(name) {
@@ -1519,10 +1584,10 @@ class MirrorForegroundService : Service() {
                                 controller.getPrivilegedService()?.wakeUpDisplay(displayId)
                                 delay(100) // Increase stabilization delay to guarantee display wakeup processing before touch input
                                 
-                                // 2. Inject a gentle down & up touch event to force Graphics Pipeline refresh
-                                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 9, name))
+                                // 2. Inject a micro swipe gesture at safe bottom-right corner (0.99f, 0.99f -> 0.99f, 0.98f) to refresh graphics pipeline without click side effects.
+                                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.99f, 0.99f, 9, name))
                                 delay(50)
-                                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 9, name))
+                                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.99f, 0.98f, 9, name))
                             }
                             // 3. Request I-Frame from the encoder
                             encoder.requestKeyFrame()
@@ -1586,9 +1651,10 @@ class MirrorForegroundService : Service() {
                         // Symmetrical wakeup guard on initial VirtualDisplay mount to clear early STATE_OFF
                         try {
                             controller.getPrivilegedService()?.wakeUpDisplay(activeId)
-                            touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 9, name))
+                            // Inject micro swipe gesture at safe bottom-right corner (0.99f, 0.99f -> 0.99f, 0.98f) to bypass tap clicks
+                            touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.99f, 0.99f, 9, name))
                             delay(50)
-                            touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 9, name))
+                            touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.99f, 0.98f, 9, name))
                         } catch (e: Exception) {
                             Log.w(TAG, "[$name Pipeline] Failed to trigger early wakeup guard", e)
                         }
@@ -1613,15 +1679,15 @@ class MirrorForegroundService : Service() {
                 /* ### 수정 시작 ### */
                 // Force a gentle display wakeup and touch sequence immediately after rebuild to trigger the graphics pipeline update.
                 // This guarantees the first frame is generated and sent out instantly without stalling on any codec mode.
-                // Pointer ID changed from 99 to 9 to satisfy Android InputDispatcher validation.
+                // Inject micro swipe gesture at safe bottom-right corner (0.99f, 0.99f -> 0.99f, 0.98f) to prevent back-button triggers.
                 serviceScope.launch {
                     try {
                         delay(150)
                         controller.getPrivilegedService()?.wakeUpDisplay(displayId)
                         delay(100)
-                        touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 9, name))
+                        touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.99f, 0.99f, 9, name))
                         delay(50)
-                        touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 9, name))
+                        touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.99f, 0.98f, 9, name))
                         
                         if (currentCodecMode != "mjpeg") {
                             videoEncoder?.requestKeyFrame()
@@ -1666,9 +1732,10 @@ class MirrorForegroundService : Service() {
                         service.wakeUpDisplay(targetDisplayId)
                     }
                     delay(40)
-                    touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 9, name))
+                    // Inject micro swipe gesture at safe bottom-right corner (0.99f, 0.99f -> 0.99f, 0.98f) to prevent back-button triggers.
+                    touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.99f, 0.99f, 9, name))
                     delay(40)
-                    touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 9, name))
+                    touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.99f, 0.98f, 9, name))
                     
                     if (currentCodecMode != "mjpeg") {
                         videoEncoder?.requestKeyFrame()
@@ -1703,8 +1770,37 @@ class MirrorForegroundService : Service() {
             }
         }
         suspend fun launchComponent(packageOrComponent: String, extraKey: String? = null, extraValue: String? = null, forceColdStart: Boolean = false, forceDisplayId: Boolean = false): Boolean = withContext(vdDispatcher) {
+            /* ### 수정 시작 ### */
+            // Ensure lastFrameRenderedTime is reset only when actually switching to a different application package
+            // or when a clean cold start is explicitly requested. This preserves frame rendering timestamps for 
+            // the active app, allowing the Command Equivalence Guard to accurately prevent duplicate launch floods.
             val cleanPkg = packageOrComponent.substringBefore('/').substringBefore('?').substringBefore(' ').trim()
             if (cleanPkg.isBlank() || cleanPkg == packageName || cleanPkg.contains("com.castla.mirror")) return@withContext false
+
+            val isNewApp = currentApp.substringBefore('/') != cleanPkg
+            if (isNewApp || forceColdStart) {
+                lastFrameRenderedTime = 0L
+            }
+            /* ### 수정 끝 ### */
+
+            // Command Equivalence Guard: If target app is already active and rendering on this virtual display, skip redundant window displacement commands.
+            // However, if the screen streaming has stagnated or has not yet rendered its first frame, bypass this safeguard to enforce visual recovery.
+            val isAlreadyActive = currentApp == packageOrComponent || currentApp.substringBefore('/') == cleanPkg
+            val isEncoderActive = if (currentCodecMode == "mjpeg") jpegEncoder != null else videoEncoder != null
+            val now = System.currentTimeMillis()
+            val isFrameStreamingNormal = lastFrameRenderedTime > 0L && (now - lastFrameRenderedTime < 3000L)
+            
+            if (isAlreadyActive && isEncoderActive && isFrameStreamingNormal && !forceColdStart && !isSelfHealingInProgress) {
+                Log.i(TAG, "[$name Pipeline] Command Equivalence Guard activated. $cleanPkg is already running and active on display $displayId. Bypassing redundant launch command.")
+                
+                // Keep-awake graphic trigger
+                val correctedDisplayId = if (displayId >= 0) displayId else controller.getDisplayId()
+                val service = controller.getPrivilegedService()
+                if (correctedDisplayId >= 0 && service != null) {
+                    executeAdaptiveWakeup(correctedDisplayId, cleanPkg, service)
+                }
+                return@withContext true
+            }
             
             
             // Self-healing: restore released graphics pipelines and realign to requested viewport before shifting app focus
@@ -1768,11 +1864,21 @@ class MirrorForegroundService : Service() {
                 // Re-launching via 'am start' in parallel with active task displacement commands causes Android OS task stack conflict,
                 // frequently forcing the primary Display 0 (MainActivity) to recede to the background Recents view.
                 if (isWarmStart && !forceColdStart) {
-                    verifySurfaceAndFallback(this@MirroringPipeline, service, targetDisplayId, cleanPkg, matchingTaskIds, packageOrComponent, extraKey, extraValue)
-                    
                     // Trigger adaptive task residency-aware wakeup asynchronously instead of waiting on hardcoded timings
                     executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
                     
+                    // Trigger the 4-second frame-based watchdog for graceful recovery on warm start layout transition
+                    verifySurfaceAndFallback(
+                        pipeline = this@MirroringPipeline,
+                        service = service,
+                        displayId = targetDisplayId,
+                        pkg = cleanPkg,
+                        taskIds = matchingTaskIds,
+                        packageOrComponent = packageOrComponent,
+                        extraKey = extraKey,
+                        extraValue = extraValue
+                    )
+
                     currentApp = packageOrComponent
                     return@withContext true
                 }
@@ -1791,6 +1897,10 @@ class MirrorForegroundService : Service() {
                 // 2. Fallback to buildShellLaunchCommand if native launch is inapplicable or failed
                 if (!nativeStarted) {
                     Log.i(TAG, "[$name Pipeline] Executing fallback shell launch command for $packageOrComponent")
+                    /* ### 수정 시작 ### */
+                    // Introduce a 150ms delay for stabilization of window manager and focus subsystems.
+                    delay(150L)
+                    /* ### 수정 끝 ### */
                     val command = buildShellLaunchCommand(targetDisplayId, packageOrComponent, extraKey, extraValue, reorderToFront = isWarmStart)
                     val result = runBinderSafe { service.execCommand(command) } ?: ""
                     if (result.contains("SecurityException") || result.contains("Permission Denial")) {
@@ -1808,7 +1918,27 @@ class MirrorForegroundService : Service() {
                     }
                 }
                 
-                if (isWarmStart) verifySurfaceAndFallback(this@MirroringPipeline, service, targetDisplayId, cleanPkg, matchingTaskIds, packageOrComponent, extraKey, extraValue)
+                /* ### 수정 시작 ### */
+                // Force an immediate graphics wakeup sequence and request encoder keyframe for Cold-Start apps to prevent early stream corruption.
+                if (!isWarmStart || forceColdStart) {
+                    executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
+                    if (currentCodecMode != "mjpeg") {
+                        videoEncoder?.requestKeyFrame()
+                    }
+                }
+                
+                // Trigger the 4-second frame-based watchdog for graceful recovery on cold start layout transition
+                verifySurfaceAndFallback(
+                    pipeline = this@MirroringPipeline,
+                    service = service,
+                    displayId = targetDisplayId,
+                    pkg = cleanPkg,
+                    taskIds = matchingTaskIds,
+                    packageOrComponent = packageOrComponent,
+                    extraKey = extraKey,
+                    extraValue = extraValue
+                )
+
                 currentApp = packageOrComponent; return@withContext true
                 /* ### 수정 끝 ### */
             } catch (e: Exception) { Log.e(TAG, "[$name Pipeline] Component push crashed inside system shell launcher layer.", e); return@withContext false }
@@ -1822,6 +1952,7 @@ class MirrorForegroundService : Service() {
                 append("-n ${escapeShellArg(browserComponent)} ")
             }.trim()
         }
+        /* ### 수정 시작 ### */
         suspend fun launchBrowser(url: String, sourceAppPackage: String? = null, allowFallback: Boolean = true) {
             val browser = BrowserResolver.resolve(this@MirrorForegroundService, url)
             val targetComponent = browser?.componentFlat ?: internalComponentName("com.castla.mirror.ui.WebBrowserActivity")
@@ -1829,7 +1960,10 @@ class MirrorForegroundService : Service() {
                 currentApp = targetComponent; currentWebUrl = url; isVideoApp = (browser != null)
                 serviceScope.launch(Dispatchers.IO) {
                     try {
-                        rebuild(if (requestedWidth > 0) requestedWidth else 720, if (requestedHeight > 0) requestedHeight else 720)
+                        // Dynamically fallback to the last valid system screen resolution to prevent layout squishing (720x720) during early startup.
+                        val fallbackW = if (lastValidWidth > 0) lastValidWidth else 720
+                        val fallbackH = if (lastValidHeight > 0) lastValidHeight else 720
+                        rebuild(if (requestedWidth > 0) requestedWidth else fallbackW, if (requestedHeight > 0) requestedHeight else fallbackH)
                         if (displayId >= 0) {
                             if (browser != null) controller.getPrivilegedService()?.execCommand(buildExternalBrowserCommand(displayId, url, browser.componentFlat))
                             else launchOwnActivity("com.castla.mirror.ui.WebBrowserActivity", url)
@@ -1853,7 +1987,6 @@ class MirrorForegroundService : Service() {
             }
         }
 
-        /* ### 수정 시작 ### */
         suspend fun launchStandard(launchTarget: String, forceDisplayId: Boolean = false) {
             val resolvedTarget = normalizeLaunchTarget(launchTarget)
             val launched = if (displayId >= 0) launchComponent(resolvedTarget, forceDisplayId = forceDisplayId) else false
@@ -1861,7 +1994,10 @@ class MirrorForegroundService : Service() {
                 currentApp = resolvedTarget; currentWebUrl = null; isVideoApp = false
                 serviceScope.launch(Dispatchers.IO) {
                     try {
-                        rebuild(if (requestedWidth > 0) requestedWidth else 720, if (requestedHeight > 0) requestedHeight else 720)
+                        // Dynamically fallback to the last valid system screen resolution to prevent layout squishing (720x720) during early startup.
+                        val fallbackW = if (lastValidWidth > 0) lastValidWidth else 720
+                        val fallbackH = if (lastValidHeight > 0) lastValidHeight else 720
+                        rebuild(if (requestedWidth > 0) requestedWidth else fallbackW, if (requestedHeight > 0) requestedHeight else fallbackH)
                         if (displayId >= 0) launchComponent(resolvedTarget, forceDisplayId = forceDisplayId)
                     } catch (_: Exception) {}
                 }
@@ -1870,7 +2006,6 @@ class MirrorForegroundService : Service() {
                 adaptiveBitrateManager.rebalanceBitrates()
             }
         }
-        /* ### 수정 끝 ### */
 
         suspend fun launchWeb(activityClassName: String, url: String) {
             val targetComponent = internalComponentName(activityClassName)
@@ -1878,7 +2013,10 @@ class MirrorForegroundService : Service() {
                 currentApp = targetComponent; currentWebUrl = url; isVideoApp = false
                 serviceScope.launch(Dispatchers.IO) {
                     try {
-                        rebuild(if (requestedWidth > 0) requestedWidth else 720, if (requestedHeight > 0) requestedHeight else 720)
+                        // Dynamically fallback to the last valid system screen resolution to prevent layout squishing (720x720) during early startup.
+                        val fallbackW = if (lastValidWidth > 0) lastValidWidth else 720
+                        val fallbackH = if (lastValidHeight > 0) lastValidHeight else 720
+                        rebuild(if (requestedWidth > 0) requestedWidth else fallbackW, if (requestedHeight > 0) requestedHeight else fallbackH)
                         if (displayId >= 0) launchOwnActivity(activityClassName, url)
                     } catch (_: Exception) {}
                 }
@@ -1889,6 +2027,7 @@ class MirrorForegroundService : Service() {
             currentApp = targetComponent; currentWebUrl = url; isVideoApp = false
             adaptiveBitrateManager.rebalanceBitrates()
         }
+        /* ### 수정 끝 ### */
 
         /* ### 수정 시작 ### */
         suspend fun launchAppFromWebLauncher(pkgName: String, componentName: String? = null, forceDisplayId: Boolean = true) {
@@ -1903,9 +2042,10 @@ class MirrorForegroundService : Service() {
             else OttCatalog.webUrlFor(pkgName)?.let { launchBrowser(it, pkgName) }
 
             // Use pointer ID 9 instead of 99 to satisfy Android InputDispatcher validation (0-31 range).
+            // Inject micro swipe gesture at safe bottom-right corner (0.99f, 0.99f -> 0.99f, 0.98f) to prevent back-button triggers.
             if (currentCodecMode == "mjpeg") {
-                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 9))
-                serviceScope.launch { kotlinx.coroutines.delay(50); touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 9)) }
+                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.99f, 0.99f, 9))
+                serviceScope.launch { kotlinx.coroutines.delay(50); touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.99f, 0.98f, 9)) }
             }
         }
         /* ### 수정 끝 ### */

@@ -2020,6 +2020,24 @@ class PrivilegedService : IPrivilegedService.Stub() {
                         packages.add(baseActivity.packageName)
                         packages.add(baseActivity.flattenToShortString())
                     }
+
+                    /* ### 수정 시작 ### */
+                    val baseIntentField = try {
+                        taskClass.getField("baseIntent")
+                    } catch (_: Exception) {
+                        try {
+                            taskClass.getSuperclass()?.getField("baseIntent")
+                        } catch (_: Exception) {
+                            null
+                        }
+                    }
+                    val baseIntentObj = baseIntentField?.get(task) as? android.content.Intent
+                    val baseIntentPkg = baseIntentObj?.`package` ?: baseIntentObj?.component?.packageName ?: ""
+                    if (baseIntentPkg.isNotEmpty()) {
+                        packages.add(baseIntentPkg)
+                        baseIntentObj?.component?.flattenToShortString()?.let { packages.add(it) }
+                    }
+                    /* ### 수정 끝 ### */
                 }
             }
         } catch (e: Exception) {
@@ -2072,10 +2090,17 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 val realStr = realActivityObj?.toString() ?: ""
                 val origStr = origActivityObj?.toString() ?: ""
 
+                /* ### 수정 시작 ### */
+                val baseIntentField = try { taskClass.getField("baseIntent") } catch (_: Exception) { null }
+                val baseIntentObj = baseIntentField?.get(task) as? android.content.Intent
+                val baseIntentPkg = baseIntentObj?.`package` ?: baseIntentObj?.component?.packageName ?: ""
+
                 val matches = topStr.contains(packageName) ||
                               baseStr.contains(packageName) ||
-                              realStr.contains(packageName) ||
-                              origStr.contains(packageName)
+ realStr.contains(packageName) ||
+                              origStr.contains(packageName) ||
+                              (baseIntentPkg.isNotEmpty() && baseIntentPkg.contains(packageName))
+                /* ### 수정 끝 ### */
 
                 if (matches) {
                     // 안드로이드 API 29+ 에서는 taskId 필드가 표준이며, 이전 버전은 id 필드를 사용함
@@ -2150,10 +2175,17 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 val realStr = realActivityObj?.toString() ?: ""
                 val origStr = origActivityObj?.toString() ?: ""
 
+                /* ### 수정 시작 ### */
+                val baseIntentField = try { taskClass.getField("baseIntent") } catch (_: Exception) { null }
+                val baseIntentObj = baseIntentField?.get(task) as? android.content.Intent
+                val baseIntentPkg = baseIntentObj?.`package` ?: baseIntentObj?.component?.packageName ?: ""
+
                 val matches = topStr.contains(packageName) ||
                               baseStr.contains(packageName) ||
-                              realStr.contains(packageName) ||
-                              origStr.contains(packageName)
+ realStr.contains(packageName) ||
+                              origStr.contains(packageName) ||
+                              (baseIntentPkg.isNotEmpty() && baseIntentPkg.contains(packageName))
+                /* ### 수정 끝 ### */
 
                 if (matches) {
                     val displayIdField = try {

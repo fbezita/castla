@@ -97,3 +97,34 @@
 
 다중 가상 디스플레이 동시 구동 및 완벽한 분배 스트리밍이라는 최종 목표를 향한 견고한 교두보가 완성되었습니다. 빌드 후 극적으로 향상된 멀티 태스킹의 연출을 체감해 보십시오! 🟢
 
+---
+
+## ⚡ 실시간 프레임 정체(Stagnation) 감지 및 자가치유 와치독 고도화
+
+### 1. 신규 블랙 스크린 엣지 케이스 분석
+* **현상**: 앱 페어(App-pair) 런칭 시점이나 신규 앱 기동 극초반에 잠시 깨진 화면(1~2프레임)이 유입된 뒤, 그래픽 버퍼 꼬임으로 블랙화면 상태에서 정지(Freeze)되는 현상이 발생했습니다.
+* **원인**:
+  - 기존 와치독의 조건식은 `hasRenderedFirstFrame`이라는 단순 바이너리 플래그에 의존했습니다.
+  - 이로 인해 런칭 초기에 깨진 화면 1~2프레임이 들어오는 순간 플래그가 `true`로 바뀌어, 그 후 화면 송출이 완전히 중단되는 영구적인 블랙 스크린이 고착화되어도 와치독이 "정상 기동"으로 판정하여 자가치유 복구를 스킵해버렸습니다.
+
+### 2. 고도화된 정체(Stagnation) 감지 아키텍처 설계
+* **실시간 프레임 타임스탬프 가드 탑재**:
+  - 단일 플래그 대신 `@Volatile var lastFrameRenderedTime = 0L`을 도입하여 인코더가 프레임을 성공적으로 클라이언트에 송출할 때마다 시스템의 실시간 타임스탬프로 계속해서 업데이트하도록 수정했습니다.
+  - 신규 런칭(`launchComponent`) 및 하드웨어 레이아웃 캔버스 재구축(`executeActualRebuild`) 발생 시 해당 타임스탬프를 즉시 `0L`로 강제 리셋하여 오진을 원천 배제합니다.
+* **복합 먹통 진단 메트릭 수립**:
+  - 와치독이 기동되는 런칭 4.0초 시점에 다음 조건들을 결합하여 무오진 감지를 수행합니다.
+    1. **정체 상태 판정 (`isStagnated`)**: 최초 프레임이 아예 유입되지 않았거나(`lastFrameRenderedTime == 0L`), 최초 1~2프레임 유입은 있었으나 그 이후 그래픽 꼬임 등으로 인해 최근 2.5초(2500ms) 동안 프레임 송출이 완전히 중단된 경우.
+    2. **가상 디스플레이 태스크 감시**: `isStagnated` 상태이면서 동시에 해당 가상 디스플레이에 대상 패키지(`pkg`)의 실제 액티비티가 기동되지 않고 이탈해 있는 경우.
+  - 위 복합 조건 충족 시 가상 디스플레이 렌더링에 영구 결함이 생긴 **진짜 먹통** 상태로 결론짓고 백그라운드에서 `am force-stop` 후 안전하고 우아하게 **Clean Launch**를 재집행합니다.
+
+### 3. 소스코드 반영 상세
+* **[MirrorForegroundService.kt](file:///c:/project/private/castla/app/src/main/java/com/castla/mirror/service/MirrorForegroundService.kt)**
+  - L1364 부근: `MirroringPipeline` 내 `@Volatile var lastFrameRenderedTime = 0L` 선언.
+  - L1496 및 L1540 부근: MJPEG 인코더(`JpegEncoder`) 및 H.264 인코더(`VideoEncoder`)의 `start` 콜백 내부에서 실시간 프레임 방송이 성공할 때마다 `lastFrameRenderedTime = System.currentTimeMillis()`로 업데이트.
+  - L1317 부근: `verifySurfaceAndFallback` 와치독 메서드 내부에서 4초 딜레이 유예를 준 뒤 `lastFrameRenderedTime`이 `0L`이거나 마지막 프레임 송출 시각이 2.5초를 초과하였고, 가상 디스플레이 내 활성 태스크에 존재하지 않는 경우를 포착하도록 고도화 완료.
+  - L1482 및 L1743 부근: 뷰포트 재구성 시 및 컴포넌트 신규 런칭 시 타임스탬프 가드를 `0L`로 초기화하여 와치독 오판 방지.
+
+### 4. 컴파일 검증 결과
+* **결과**: `.\gradlew.bat assembleDebug` 빌드를 구동하여 무결성 컴파일 통과를 검증 완료했습니다 (`BUILD SUCCESSFUL in 8s`).
+
+

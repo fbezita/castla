@@ -198,6 +198,19 @@ function handleDragMove(x, y) {
   const drawerEl = document.getElementById("split-drawer");
   const drawerRect = drawerEl?.getBoundingClientRect();
   if (isFromSidebarDrag && drawerRect && x >= drawerRect.left) {
+    /* ### 수정 시작 ### */
+    // Auto-scroll split drawer list during sidebar drag when hovering near top/bottom list boundaries
+    const drawerListEl = document.getElementById("split-app-list");
+    if (drawerListEl) {
+      const listRect = drawerListEl.getBoundingClientRect();
+      if (y > listRect.bottom - 100 && y < listRect.bottom + 20) {
+        drawerListEl.scrollTop += 12;
+      } else if (y < listRect.top + 100 && y > listRect.top - 20) {
+        drawerListEl.scrollTop -= 12;
+      }
+    }
+    /* ### 수정 끝 ### */
+
     // 바깥 분할 드롭 영역 hover 효과 전부 리셋
     if (dropZoneTop) dropZoneTop.classList.remove("hovered");
     if (dropZoneAutorun) dropZoneAutorun.classList.remove("hovered");
