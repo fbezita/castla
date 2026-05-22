@@ -83,22 +83,36 @@ class NetworkMonitor(private val context: Context) {
                 if (iface.isLoopback || !iface.isUp) continue
                 val name = iface.name.lowercase()
 
+                // Skip known cellular/mobile interfaces entirely to avoid picking up carrier IPs
+                if (name.startsWith("rmnet") || name.startsWith("ccmni") || name.startsWith("p2p") || name.startsWith("ppp")) {
+                    Log.d(TAG, "Skipping cellular/non-local interface: ${iface.name}")
+                    continue
+                }
+
                 val addresses = iface.inetAddresses
                 while (addresses.hasMoreElements()) {
                     val address = addresses.nextElement()
                     if (address is Inet4Address && !address.isLoopbackAddress) {
                         val ip = address.hostAddress ?: continue
 
+                        // 🚨 Thoroughly filter out cellular carrier IPs starting with "10."
+                        if (ip.startsWith("10.")) {
+                            Log.d(TAG, "Filtering out cellular carrier IP: $ip on ${iface.name}")
+                            continue
+                        }
+
                         val priority = when {
                             // Hotspot gateway IPs — highest priority (reachable by hotspot clients)
-                            ip.startsWith("192.168.43.") || ip.startsWith("192.168.49.") -> 20
+                            ip.startsWith("192.168.43.") || ip.startsWith("192.168.49.") -> 30
+                            // Known hotspot / tethering / Wifi virtual interfaces with private local IP ranges
+                            (name.contains("swlan") || name.contains("ap") || name.contains("softap") || name.contains("wlan")) && 
+                            (ip.startsWith("192.168.") || ip == "192.0.0.4") -> 25
                             // Other private IPs on known hotspot interfaces
                             (name.startsWith("swlan") || name.startsWith("ap") || name.startsWith("softap")) -> 15
                             // wlan with private IP (WiFi connected to router)
                             name.startsWith("wlan") && ip.startsWith("192.168.") -> 10
-                            name.startsWith("wlan") && ip.startsWith("10.") -> 5
                             name.startsWith("eth") -> 3
-                            // Everything else (likely mobile data) — low priority
+                            // Everything else (likely mobile data or other local) — low priority
                             else -> 1
                         }
 

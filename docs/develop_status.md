@@ -139,6 +139,12 @@ graph TD
 4. **Shizuku 바인더 안전 가드**: 모든 AIDL 호출부를 백그라운드 스레드에 귀속시키고 최대 3초의 타임아웃을 지닌 `runBinderSafe`로 래핑하여 Binder Crash 격벽 완성.
 5. **Shizuku SecurityException 완벽 완치**: Shizuku 셸 권한 직접 바인딩 시 안드로이드 14+ 대응을 위해 `com.android.shell` 패키지명과 올바른 AttributionTag를 리플렉션으로 주입하여, `IWindowManager` 및 `IActivityTaskManager` AIDL 인터페이스 리플렉션 호출 시의 권한 에러를 완벽 영구 차단.
 
+### 4.4. 정적 접속 주소 안내 및 공인 IP 기반 자동 세션 페어링 (2026-05-23 업데이트)
+* **정적 안내 주소**: HTTPS/WebCodecs 모드가 켜져 있을 때 주소창 지저분함을 방지하기 위해 안내 URL을 `https://car.fbezita.com/castla` 단일 정적 주소로 구성합니다 (기존의 `?userId=xxx` 파라미터 완전 소멸).
+* **공인 IP 기반 자동 매핑**: 안드로이드 폰과 테슬라 차량이 모바일 핫스팟/와이파이망을 통해 인터넷 접속 시 **동일한 셀룰러 공인 IP**를 할당받는 네트워크의 공통적인 생태계적 특성을 이용합니다.
+  - 안드로이드가 `POST /api/castla/register-ip`로 사설 IP를 등록할 때 백엔드 시그널링 서버가 클라이언트의 공인 IP(cf-connecting-ip, x-forwarded-for 등)를 가로채 매핑 테이블(`publicIpMap`)에 등록합니다.
+  - 테슬라 브라우저가 정적 주소로 접근하여 `GET /api/castla/get-phone-ip`를 조회할 때 기기 식별 파라미터가 디폴트이거나 없을 경우, 요청한 브라우저의 공인 IP와 매칭되는 폰의 최적 사설 IP(`192.168.x.x`)를 역추적해 자동 반환 및 페어링을 체결합니다.
+
 ---
 
 ## 5. ⚙️ 가상 디스플레이 리사이즈(Resize) 최적화 및 미러링 종료 시 자율 청소(Cleanup) 설계

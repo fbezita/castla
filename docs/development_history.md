@@ -411,6 +411,28 @@ sequenceDiagram
     *   **영구 개발 가이드라인**: 비디오 디코더 캔버스가 어떠한 동적 레이아웃 리플로우 및 리사이즈 딜레이 중에도 빈 화면을 남겨두지 않도록, 스케일링 기본값 및 fallback 정책은 절대적으로 `"fill"` 상태를 엄격히 고수해야 함을 아키텍처 규칙으로 명문화했습니다.
 
 ---
-*본 문서는 Castla 프로젝트 내 [docs/development_history.md](file:///c:/project/private/castla/docs/development_history.md) 경로에 안전하게 저장되었습니다.*
+
+## 12. 정적 접속 주소 안내 및 공인 IP 매핑 기반 자동 세션 페어링 구현 (2026-05-23 업데이트)
+
+### 1) 사용자 경험 단순화: 정적 접속 주소 도입
+*   **문제 현상**:
+    *   기존에는 테슬라 브라우저가 기기를 식별할 수 있도록 `https://car.fbezita.com/castla?userId=[기기ID]` 형태의 지저분한 query parameter 주소를 스마트폰 화면에 표기하고 사용자가 입력해야 하는 번거로움이 있었습니다.
+*   **해결 및 최적화**:
+    *   안드로이드 앱의 `MainActivity.kt` 내 `updateServerUrl()`을 개편하여 WebCodecs가 활성화되어 있을 때 사용자에게 제공되는 주소를 깔끔한 **`https://car.fbezita.com/castla`** 단일 정적 주소로 구성했습니다. 주소에서 `userId` 파라미터를 영구 소멸시켜 입력 편의성과 미관을 획득했습니다.
+
+### 2) 공인 IP 기반 자동 세션 페어링 (Shared Public IP Correlation)
+*   **핵심 메커니즘**:
+    *   차량의 테슬라 브라우저가 스마트폰의 모바일 핫스팟(Tethering)에 연결되는 경우, 스마트폰(Castla 앱)과 차량 브라우저(Viewer)가 인터넷으로 향할 때 **동일한 셀룰러 공인 IP 주소**를 외부로부터 할당받게 되는 통신망의 구조적 특성을 적용했습니다.
+*   **NestJS 백엔드 개편 (`tesla_manager`)**:
+    *   `CastlaService` 내에 기존의 `ipMap` 외에도 공인 IP 주소를 매핑하여 사설 IP를 역추적하는 `publicIpMap`을 동시에 관리하는 이중 맵 구조를 구현했습니다.
+    *   `CastlaController`에서 안드로이드가 IP를 등록(`POST /api/castla/register-ip`)하거나 브라우저가 IP를 조회(`GET /api/castla/get-phone-ip`)할 때, 요청 헤더(`cf-connecting-ip`, `x-forwarded-for` 또는 소켓 리모트 IP)로부터 클라이언트의 공인 IP 주소를 추출하도록 보완했습니다.
+    *   클라이언트가 `userId` 파라미터가 없거나 디폴트 상태(`default_user`)로 접속하여 폰의 사설 IP를 요청하는 경우, 요청한 테슬라 브라우저의 공인 IP를 조회하여 그와 일치하는 공인 IP로 최근에 사설 IP를 등록했던 안드로이드 폰의 사설 IP(`192.168.x.x`)를 백엔드 단에서 실시간으로 정합 페어링해 전달하도록 지능화시켰습니다.
+
+### 3) Svelte 5 뷰어 피드백 정돈
+*   **개선 사항**:
+    *   `+page.svelte` 내 `fetchPhoneIpAndConnect()` 함수를 정돈하여 기기 식별 파라미터가 없는 환경에서 혹시 모를 로컬 접속 지연 또는 오류 발생 시, 쌩뚱맞은 디폴트 유저 ID 노출이나 기기 식별 에러가 아닌 직관적이고 완성도 높은 한글 피드백 메시지를 노출하여 진단 가독성을 극적으로 정돈했습니다.
+
+---
+*본 문서는 Castla 프로젝트 내 [docs/development_history.md](file:///c:/project/castla/docs/development_history.md) 경로에 안전하게 저장되었습니다.*
 
 

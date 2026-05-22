@@ -193,6 +193,9 @@ class MainActivity : AppCompatActivity() {
                         is NetworkState.Connected -> {
                             currentIp = state.ip
                             updateServerUrl()
+                            if (isStreaming && streamSettings.webCodecsEnabled && currentIp != "0.0.0.0") {
+                                registerPhoneIpWithSignalingServer(getUserId(), currentIp)
+                            }
                         }
                         is NetworkState.Disconnected -> {
                             currentIp = "0.0.0.0"
@@ -586,7 +589,46 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    private fun getUserId(): String {
+        return android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: "default_user"
+    }
+
+    private fun registerPhoneIpWithSignalingServer(userId: String, localIp: String) {
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val url = java.net.URL("https://car.fbezita.com/api/castla/register-ip")
+                val conn = url.openConnection() as java.net.HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                conn.setRequestProperty("Accept", "application/json")
+                conn.doOutput = true
+                
+                val jsonInputString = "{\"userId\": \"$userId\", \"ip\": \"$localIp\"}"
+                conn.outputStream.use { os ->
+                    val input = jsonInputString.toByteArray(charset("utf-8"))
+                    os.write(input, 0, input.size)
+                }
+
+                val responseCode = conn.responseCode
+                Log.i(TAG, "Signaling server registration response code: $responseCode")
+                if (responseCode == 200 || responseCode == 201) {
+                    val response = conn.inputStream.bufferedReader().use { it.readText() }
+                    Log.i(TAG, "Signaling server registration success: $response")
+                } else {
+                    Log.w(TAG, "Signaling server registration failed with code $responseCode")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error registering IP with signaling server", e)
+            }
+        }
+    }
+
     private fun updateServerUrl() {
+        if (streamSettings.webCodecsEnabled) {
+            serverUrl = "https://car.fbezita.com/castla"
+            return
+        }
+
         val cellularIp = getCellularIpv4Address()
         val hotspotIp = currentIp
 
@@ -1128,6 +1170,19 @@ class MainActivity : AppCompatActivity() {
             try { unbindService(serviceConnection) } catch (_: IllegalArgumentException) {}
             serviceBound = false
             bindRequested = false
+        }
+
+        if (streamSettings.webCodecsEnabled) {
+            val cellularIp = getCellularIpv4Address()
+            val hotspotIp = currentIp
+            val ip = when {
+                hotspotIp != "0.0.0.0" && hotspotIp.isNotEmpty() -> hotspotIp
+                cellularIp != null && !cellularIp.startsWith("10.") -> cellularIp
+                else -> "0.0.0.0"
+            }
+            if (ip != "0.0.0.0") {
+                registerPhoneIpWithSignalingServer(getUserId(), ip)
+            }
         }
         bindRequested = bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
         isStreaming = true
