@@ -39,88 +39,50 @@ function sendViewportSize(immediate = false) {
         ? leftLockedViewport
         : { width: livePrimaryWidth, height: livePrimaryHeight };
 
-    
-    // Send secondary viewport if dual display is active, otherwise reset secondary cache
-    if (!!state.right && browserSplitPane) {
-      const secondaryViewport = rightLockedViewport;
-      if (
-        secondaryViewport &&
-        secondaryViewport.width > 0 &&
-        secondaryViewport.height > 0
-      ) {
-        const secFitMode = getEffectiveSecondaryFitMode();
-        const secLayoutMode = streamPolicy.layoutMode;
-
-        if (
-          lastSentSecondary.width !== secondaryViewport.width ||
-          lastSentSecondary.height !== secondaryViewport.height ||
-          lastSentSecondary.fitMode !== secFitMode ||
-          lastSentSecondary.layoutMode !== secLayoutMode
-        ) {
-          lastSentSecondary = {
-            width: secondaryViewport.width,
-            height: secondaryViewport.height,
-            fitMode: secFitMode,
-            layoutMode: secLayoutMode,
+    // ### 수정 시작 ###
+    // Build declarative virtual display layout updates for the backend
+    const layoutUpdatePipelines = [];
+    if (window.layoutState && window.layoutState.pipelines && window.layoutState.pipelines.length > 0) {
+      window.layoutState.pipelines.forEach((pipe, index) => {
+        if (!pipe) return;
+        let w = 0;
+        let h = 0;
+        if (index === 0) {
+          w = primaryViewport.width;
+          h = primaryViewport.height;
+        } else if (index === 1) {
+          const secondaryViewport = rightLockedViewport || {
+            width: Math.round(browserSplitPane?.clientWidth || window.innerWidth / 2),
+            height: Math.round(browserSplitPane?.clientHeight || window.innerHeight)
           };
-
-          console.log(
-            `[Main] Sending viewport pane=secondary requested=${secondaryViewport.width}x${secondaryViewport.height} fitMode=${secFitMode} locked=${describeViewport(secondaryViewport)} split=${!!state.right}`,
-          );
-          controlSocket.send(
-            JSON.stringify({
-              type: "viewport",
-              pane: "secondary",
-              width: secondaryViewport.width,
-              height: secondaryViewport.height,
-              fitMode: secFitMode,
-              layoutMode: secLayoutMode,
-            }),
-          );
+          w = secondaryViewport.width;
+          h = secondaryViewport.height;
         }
-      }
-    } else {
-      // Secondary is not active (single screen mode). Reset the cache to guarantee the next dual transition triggers viewport packet.
-      lastSentSecondary = {
-        width: 0,
-        height: 0,
-        fitMode: null,
-        layoutMode: null,
-      };
+        if (w > 0 && h > 0) {
+          layoutUpdatePipelines.push({
+            id: pipe.id || (index === 0 ? "primary" : "secondary"),
+            packageName: pipe.packageName || "",
+            className: pipe.className || "",
+            width: w,
+            height: h
+          });
+        }
+      });
     }
-    
 
-    const primFitMode = getEffectivePrimaryFitMode();
-    const primLayoutMode = streamPolicy.layoutMode;
-
-    if (
-      lastSentPrimary.width !== primaryViewport.width ||
-      lastSentPrimary.height !== primaryViewport.height ||
-      lastSentPrimary.fitMode !== primFitMode ||
-      lastSentPrimary.layoutMode !== primLayoutMode
-    ) {
-      lastSentPrimary = {
-        width: primaryViewport.width,
-        height: primaryViewport.height,
-        fitMode: primFitMode,
-        layoutMode: primLayoutMode,
-      };
-
-      console.log(
-        `[Main] Sending viewport pane=primary requested=${primaryViewport.width}x${primaryViewport.height} fitMode=${primFitMode} locked=${describeViewport(leftLockedViewport)} split=${!!state.right}`,
-      );
-
+    // Safeguard: Optimize websocket traffic by throttling duplicate layout packets
+    const currentLayoutString = JSON.stringify(layoutUpdatePipelines);
+    if (window.lastSentLayoutString !== currentLayoutString) {
+      window.lastSentLayoutString = currentLayoutString;
+      console.log(`[Viewport] Sending layout_update with ${layoutUpdatePipelines.length} pipelines`);
       controlSocket.send(
         JSON.stringify({
-          type: "viewport",
-          pane: "primary",
-          width: primaryViewport.width,
-          height: primaryViewport.height,
-          fitMode: primFitMode,
-          layoutMode: primLayoutMode,
-        }),
+          type: "layout_update",
+          pipelines: layoutUpdatePipelines
+        })
       );
     }
+    // ### 수정 끝 ###
   };
   if (immediate) doSend();
   else resizeTimer = setTimeout(doSend, 500);

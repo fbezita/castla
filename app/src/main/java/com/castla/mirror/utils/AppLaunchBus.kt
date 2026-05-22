@@ -10,6 +10,7 @@ enum class LaunchMode {
     INTERNAL_WEBVIEW
 }
 
+/* ### 수정 시작 ### */
 data class AppLaunchRequest(
     val packageName: String,
     val className: String? = null,
@@ -20,7 +21,8 @@ data class AppLaunchRequest(
     val url: String? = null,
     val preferredBrowserPackage: String? = null,
     val sourceAppPackage: String? = null,
-    val allowEmbeddedFallback: Boolean = true
+    val allowEmbeddedFallback: Boolean = true,
+    val forceDisplayId: Boolean = true
 )
 
 /**
@@ -30,11 +32,12 @@ object AppLaunchBus {
     private val _events = MutableSharedFlow<AppLaunchRequest>(extraBufferCapacity = 5)
     val events: SharedFlow<AppLaunchRequest> = _events.asSharedFlow()
 
-    fun requestLaunch(packageName: String, className: String? = null, isVideoApp: Boolean = false, intentExtra: String? = null, pane: String = "primary") {
-        _events.tryEmit(AppLaunchRequest(packageName, className, isVideoApp, intentExtra, pane))
+    fun requestLaunch(packageName: String, className: String? = null, isVideoApp: Boolean = false, intentExtra: String? = null, pane: String = "primary", forceDisplayId: Boolean = true) {
+        _events.tryEmit(AppLaunchRequest(packageName, className, isVideoApp, intentExtra, pane, forceDisplayId = forceDisplayId))
     }
 
     fun requestLaunch(request: AppLaunchRequest) {
         _events.tryEmit(request)
     }
 }
+/* ### 수정 끝 ### */

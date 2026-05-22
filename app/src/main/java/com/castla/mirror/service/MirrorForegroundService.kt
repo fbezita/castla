@@ -433,7 +433,10 @@ class MirrorForegroundService : Service() {
                 // ─────────────────────────────────────────────────────────────────
 
                 // 2-1. 복잡한 외부 브라우저 우회, 패키지 검증 등이 내장된 통합 함수를 이 타이밍에 호출합니다.
-                targetPipeline.launchAppFromWebLauncher(request.packageName, request.className)
+                /* ### 수정 시작 ### */
+                // Pass forceDisplayId constraint dynamically from the launch request.
+                targetPipeline.launchAppFromWebLauncher(request.packageName, request.className, forceDisplayId = request.forceDisplayId)
+                /* ### 수정 끝 ### */
 
                 // 2-2. 후속 오토스케일러(해상도 및 FPS 티어링) 평가 연계
                 if (targetPipeline.autoResolution || targetPipeline.autoFps) {
@@ -735,7 +738,20 @@ class MirrorForegroundService : Service() {
                     if (event.action == "up") { lastTouchPane = event.pane }
                 }
                 server.setCodecModeListener { onCodecModeRequest(it) }
-                server.setViewportChangeListener { pane, w, h, layoutMode -> pipelines[pane]?.onViewportChange(w, h, layoutMode) }
+                /* ### 수정 시작 ### */
+                // Handle dynamic screen layout updates declaratively to update pane viewports.
+                server.setLayoutUpdateListener { pipelinesArray ->
+                    for (i in 0 until pipelinesArray.length()) {
+                        val pipeObj = pipelinesArray.optJSONObject(i) ?: continue
+                        val paneId = pipeObj.optString("id")
+                        val w = pipeObj.optInt("width", 0)
+                        val h = pipeObj.optInt("height", 0)
+                        if (!paneId.isNullOrEmpty()) {
+                            pipelines[paneId]?.onViewportChange(w, h)
+                        }
+                    }
+                }
+                /* ### 수정 끝 ### */
                 server.setTextInputListener { injectText(it) }
                 server.setKeyEventListener { injectKeyEvent(it) }
                 server.setCompositionUpdateListener { bs, text -> injectCompositionUpdate(bs, text) }
@@ -745,9 +761,16 @@ class MirrorForegroundService : Service() {
                     serviceScope.launch(Dispatchers.IO) {
                         Log.i(TAG, "[MirrorServer] GoHome received. Forcing home stack on all active displays.")
                         pipelines.values.forEach { pipeline ->
+                            /* ### 수정 시작 ### */
+                            // Avoid calling binder launchHomeOnDisplay inside virtualDisplayHardwareMutex lock.
+                            var hasToken = false
                             virtualDisplayHardwareMutex.withLock {
-                                if (pipeline.currentVdToken() != null) pipeline.controller.launchHomeOnDisplay()
+                                hasToken = (pipeline.currentVdToken() != null)
                             }
+                            if (hasToken) {
+                                pipeline.controller.launchHomeOnDisplay()
+                            }
+                            /* ### 수정 끝 ### */
                             pipeline.currentApp = "HOME"; pipeline.currentWebUrl = null
                         }
                     }
@@ -942,15 +965,24 @@ class MirrorForegroundService : Service() {
             val surf = pipeline.currentEncoderSurface ?: return@forEach
             if (pipeline.width <= 0 || pipeline.height <= 0) return@forEach
             serviceScope.launch(Dispatchers.IO) {
+                /* ### 수정 시작 ### */
+                // Minimize lock scope to prevent blocking coroutine threads while restoring content via binder.
+                var generation: Long = -1L
+                var displayId = -1
+                var hasVd = false
                 virtualDisplayHardwareMutex.withLock {
                     pipeline.controller.createVirtualDisplay(pipeline.width, pipeline.height, computeVirtualDisplayDpi(pipeline.width, pipeline.height), surf)
                     if (pipeline.controller.hasVirtualDisplay()) {
-                        val displayId = pipeline.controller.getDisplayId()
-                        val generation = pipeline.markVdCreated(displayId, "shizuku_reconnect")
+                        displayId = pipeline.controller.getDisplayId()
+                        generation = pipeline.markVdCreated(displayId, "shizuku_reconnect")
                         pipeline.touchInjector?.setVirtualDisplayInjector { pipeline.controller.injectMotionEvent(it) }
-                        pipeline.restoreContentLocked(generation, displayId)
+                        hasVd = true
                     }
                 }
+                if (hasVd && generation != -1L && displayId >= 0) {
+                    pipeline.restoreContentLocked(generation, displayId)
+                }
+                /* ### 수정 끝 ### */
             }
         }
     }
@@ -1016,19 +1048,30 @@ class MirrorForegroundService : Service() {
                 val w = if (pipeline.width > 0) pipeline.width else width
                 val h = if (pipeline.height > 0) pipeline.height else height
                 val dpi = computeVirtualDisplayDpi(w, h)
+                /* ### 수정 시작 ### */
+                // Minimize lock scope to prevent blocking binder calls like restoreContentLocked within the mutex.
+                var activeId = -1
+                var generation = -1L
+                var success = false
                 virtualDisplayHardwareMutex.withLock {
-                    val success = runBinderSafe {
+                    success = runBinderSafe {
                         pipeline.controller.createVirtualDisplay(w, h, dpi, pipeline.currentEncoderSurface ?: surface)
                         pipeline.controller.hasVirtualDisplay()
                     } ?: false
                     if (success) {
-                        val activeId = pipeline.controller.getDisplayId()
-                        val generation = pipeline.markVdCreated(activeId, "try_setup")
+                        activeId = pipeline.controller.getDisplayId()
+                        generation = pipeline.markVdCreated(activeId, "try_setup")
                         pipeline.touchInjector?.setVirtualDisplayInjector { pipeline.controller.injectMotionEvent(it) }
-                        pipeline.restoreContentLocked(generation, activeId)
-                        Log.i(TAG, "[VDRebuild] Sub-session core mounted safely. Pane: (${pipeline.name}), Id: $activeId")
-                    } else { Log.e(TAG, "[VDRebuild] Failed to create virtual display for pane (${pipeline.name})"); globalSuccess = false }
+                    }
                 }
+                if (success && activeId >= 0 && generation != -1L) {
+                    pipeline.restoreContentLocked(generation, activeId)
+                    Log.i(TAG, "[VDRebuild] Sub-session core mounted safely. Pane: (${pipeline.name}), Id: $activeId")
+                } else if (!success) {
+                    Log.e(TAG, "[VDRebuild] Failed to create virtual display for pane (${pipeline.name})")
+                    globalSuccess = false
+                }
+                /* ### 수정 끝 ### */
             }
             if (globalSuccess) { startVdKeepAlive(); serviceScope.launch(Dispatchers.IO) { setup.ensureShizukuHardened() } }
             globalSuccess
@@ -1437,10 +1480,13 @@ class MirrorForegroundService : Service() {
                                 controller.getPrivilegedService()?.wakeUpDisplay(displayId)
                                 delay(100) // Increase stabilization delay to guarantee display wakeup processing before touch input
 
+                                /* ### 수정 시작 ### */
+                                // Use pointer ID 9 instead of 99 to conform with Android InputDispatcher validation (0-31 range).
                                 // 2. Inject a gentle down & up touch event to force Graphics Pipeline refresh
-                                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 99, name))
+                                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 9, name))
                                 delay(50)
-                                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 99, name))
+                                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 9, name))
+                                /* ### 수정 끝 ### */
                             }
                             restoreContent()
                         } catch (e: Exception) {
@@ -1474,9 +1520,9 @@ class MirrorForegroundService : Service() {
                                 delay(100) // Increase stabilization delay to guarantee display wakeup processing before touch input
                                 
                                 // 2. Inject a gentle down & up touch event to force Graphics Pipeline refresh
-                                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 99, name))
+                                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 9, name))
                                 delay(50)
-                                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 99, name))
+                                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 9, name))
                             }
                             // 3. Request I-Frame from the encoder
                             encoder.requestKeyFrame()
@@ -1493,81 +1539,72 @@ class MirrorForegroundService : Service() {
             delay(100)
             
             if (controller.isBound()) {
+                var success = false
+                var activeId = -1
+                var isNewVd = false
+                var gen = -1L
+
+                /* ### 수정 시작 ### */
+                // Minimize mutex scope to exclude binder activity launches and delay suspends, preventing deadlocks.
                 vdOperationGlobalMutex.withLock {
-                    // 🔴 [대칭 구조 교정 완료] 전역 하드웨어 뮤텍스를 통해 자원 충돌 제어
                     virtualDisplayHardwareMutex.withLock {
-                        val activeId = controller.getDisplayId()
-                        if (activeId >= 0) {
-                            Log.i(TAG, "[$name Pipeline] Reusing existing Display surface token ID: $activeId")
-                            runBinderSafe { controller.resizeDisplay(w, h, dpi) }; delay(200)
-                            runBinderSafe { controller.setSurface(surface) }; delay(100)
-                            runBinderSafe { controller.keepDisplayAwake() }
-                            
-                            displayId = activeId
-                            touchInjector = (touchInjector ?: TouchInjector(w, h)).also { injector ->
-                                injector.updateDimensions(w, h)
-                                injector.setVirtualDisplayInjector { controller.injectMotionEvent(it) }
-                            }
-                            startEncoderTask?.invoke()
-
-                            val gen = markVdCreated(activeId, "${name}_reuse")
-                            if (currentApp.isBlank()) { 
-                                currentApp = "HOME"
-                                runBinderSafe { controller.launchHomeOnDisplay() } 
-                            } else { restoreContentLocked(gen, activeId) }
-                            Log.i(TAG, "[$name Pipeline] Resized, woke up and content-restored virtual display successfully. ID: $activeId")
+                        val currentId = controller.getDisplayId()
+                        if (currentId >= 0) {
+                            runBinderSafe { controller.resizeDisplay(w, h, dpi) }
+                            runBinderSafe { controller.setSurface(surface) }
+                            displayId = currentId
+                            activeId = currentId
+                            gen = markVdCreated(currentId, "${name}_reuse")
+                            isNewVd = false
+                            success = true
                         } else {
-                            if (controller.hasVirtualDisplay()) delay(200)
-                            val doubleCheckId = controller.getDisplayId()
-                            if (doubleCheckId >= 0) {
-                                runBinderSafe { controller.resizeDisplay(w, h, dpi) }; delay(50)
-                                runBinderSafe { controller.setSurface(surface) }
-                                displayId = doubleCheckId
-                                touchInjector = (touchInjector ?: TouchInjector(w, h)).also { injector ->
-                                    injector.updateDimensions(w, h)
-                                    injector.setVirtualDisplayInjector { controller.injectMotionEvent(it) }
-                                }
-                                startEncoderTask?.invoke(); return@withLock
-                            }
-
-                            runBinderSafe { controller.releaseVirtualDisplay() }; delay(50)
+                            runBinderSafe { controller.releaseVirtualDisplay() }
                             runBinderSafe { controller.createVirtualDisplay(w, h, dpi, surface) }
-                            
                             if (controller.hasVirtualDisplay()) {
                                 val newActiveId = controller.getDisplayId()
-                                displayId = newActiveId; val gen = markVdCreated(newActiveId, "${name}_rebuild")
-                                touchInjector = (touchInjector ?: TouchInjector(w, h)).also { injector ->
-                                    injector.updateDimensions(w, h)
-                                    injector.setVirtualDisplayInjector { controller.injectMotionEvent(it) }
-                                }
-                                startEncoderTask?.invoke()
-                                delay(100)
-                                runBinderSafe { controller.keepDisplayAwake() }
-
-                                
-                                // Symmetrical wakeup guard on initial VirtualDisplay mount to clear early STATE_OFF
-                                try {
-                                    controller.getPrivilegedService()?.wakeUpDisplay(newActiveId)
-                                    touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 99, name))
-                                    delay(50)
-                                    touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 99, name))
-                                } catch (e: Exception) {
-                                    Log.w(TAG, "[$name Pipeline] Failed to trigger early wakeup guard", e)
-                                }
-                                
-
-                                if (currentApp.isBlank()) {
-                                    currentApp = "HOME"
-                                    runBinderSafe { controller.launchHomeOnDisplay() }
-                                } else { restoreContentLocked(gen, newActiveId) }
-                                Log.i(TAG, "[$name Pipeline] VirtualDisplay cleanly re-mounted on display channel: $newActiveId")
-                            } else { 
-                                // 🔴 [의존성 격리] 정책 하드코딩 종료 분기를 날리고 순수 예외 피드백만 투척
-                                throw IllegalStateException("VirtualDisplay allocation completely failed via binder server.")
+                                displayId = newActiveId
+                                activeId = newActiveId
+                                gen = markVdCreated(newActiveId, "${name}_rebuild")
+                                isNewVd = true
+                                success = true
                             }
                         }
                     }
                 }
+
+                if (success && activeId >= 0) {
+                    touchInjector = (touchInjector ?: TouchInjector(w, h)).also { injector ->
+                        injector.updateDimensions(w, h)
+                        injector.setVirtualDisplayInjector { controller.injectMotionEvent(it) }
+                    }
+                    startEncoderTask?.invoke()
+                    
+                    delay(100) // Small stabilization delay outside lock
+                    runBinderSafe { controller.keepDisplayAwake() }
+
+                    if (isNewVd) {
+                        // Symmetrical wakeup guard on initial VirtualDisplay mount to clear early STATE_OFF
+                        try {
+                            controller.getPrivilegedService()?.wakeUpDisplay(activeId)
+                            touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 9, name))
+                            delay(50)
+                            touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 9, name))
+                        } catch (e: Exception) {
+                            Log.w(TAG, "[$name Pipeline] Failed to trigger early wakeup guard", e)
+                        }
+                    }
+
+                    if (currentApp.isBlank()) {
+                        currentApp = "HOME"
+                        runBinderSafe { controller.launchHomeOnDisplay() }
+                    } else {
+                        restoreContentLocked(gen, activeId)
+                    }
+                    Log.i(TAG, "[$name Pipeline] VirtualDisplay configured successfully. ID: $activeId (New VD: $isNewVd)")
+                } else {
+                    throw IllegalStateException("VirtualDisplay allocation completely failed via binder server.")
+                }
+                /* ### 수정 끝 ### */
             } else {
                 if (trySetupVirtualDisplay(w, h, surface)) startEncoderTask?.invoke()
             }
@@ -1576,14 +1613,15 @@ class MirrorForegroundService : Service() {
                 /* ### 수정 시작 ### */
                 // Force a gentle display wakeup and touch sequence immediately after rebuild to trigger the graphics pipeline update.
                 // This guarantees the first frame is generated and sent out instantly without stalling on any codec mode.
+                // Pointer ID changed from 99 to 9 to satisfy Android InputDispatcher validation.
                 serviceScope.launch {
                     try {
                         delay(150)
                         controller.getPrivilegedService()?.wakeUpDisplay(displayId)
                         delay(100)
-                        touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 99, name))
+                        touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 9, name))
                         delay(50)
-                        touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 99, name))
+                        touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 9, name))
                         
                         if (currentCodecMode != "mjpeg") {
                             videoEncoder?.requestKeyFrame()
@@ -1600,8 +1638,7 @@ class MirrorForegroundService : Service() {
         fun invalidateVd(reason: String): Long { Log.w(TAG, "[$name Pipeline] Invalidating display channel cache token. Reason: $reason"); displayId = -1; return vdGeneration.incrementAndGet() }
         
         /* ### 수정 시작 ### */
-        // English comment: Periodically monitors task residency on the virtual display to inject layout wakeup events adaptively as soon as the app mounts.
-        // It relies on the global hardware mutex to sequentialize and synchronize the wakeup sequence with any active rebuild tasks.
+        // Periodically monitors task residency on the virtual display to inject layout wakeup events adaptively as soon as the app mounts.
         private fun executeAdaptiveWakeup(targetDisplayId: Int, cleanPkg: String, service: IPrivilegedService) {
             if (targetDisplayId < 0) return
             serviceScope.launch {
@@ -1622,22 +1659,23 @@ class MirrorForegroundService : Service() {
                     Log.w(TAG, "[$name Pipeline] Adaptive wakeup timed out waiting for $cleanPkg on display $targetDisplayId. Proceeding with fallback wakeup.")
                 }
 
-                // English comment: Synchronize with the virtual display hardware mutex to guarantee that any active or pending rebuild completes first before touch injection.
-                virtualDisplayHardwareMutex.withLock {
-                    try {
+                // Acquire the hardware mutex briefly to ensure any active rebuild has finalized before we perform touch injection.
+                // Performing the delays and touch events outside the lock prevents any deadlock conditions under concurrent resizing.
+                try {
+                    virtualDisplayHardwareMutex.withLock {
                         service.wakeUpDisplay(targetDisplayId)
-                        delay(40)
-                        touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 99, name))
-                        delay(40)
-                        touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 99, name))
-                        
-                        if (currentCodecMode != "mjpeg") {
-                            videoEncoder?.requestKeyFrame()
-                        }
-                        Log.i(TAG, "[$name Pipeline] Symmetrical adaptive wakeup successfully completed on display $targetDisplayId under hardware lock")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "[$name Pipeline] Failed to trigger adaptive wakeup sequence under hardware lock", e)
                     }
+                    delay(40)
+                    touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 9, name))
+                    delay(40)
+                    touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 9, name))
+                    
+                    if (currentCodecMode != "mjpeg") {
+                        videoEncoder?.requestKeyFrame()
+                    }
+                    Log.i(TAG, "[$name Pipeline] Symmetrical adaptive wakeup successfully completed on display $targetDisplayId")
+                } catch (e: Exception) {
+                    Log.w(TAG, "[$name Pipeline] Failed to trigger adaptive wakeup sequence", e)
                 }
             }
         }
@@ -1815,15 +1853,16 @@ class MirrorForegroundService : Service() {
             }
         }
 
-        suspend fun launchStandard(launchTarget: String) {
+        /* ### 수정 시작 ### */
+        suspend fun launchStandard(launchTarget: String, forceDisplayId: Boolean = false) {
             val resolvedTarget = normalizeLaunchTarget(launchTarget)
-            val launched = if (displayId >= 0) launchComponent(resolvedTarget) else false
+            val launched = if (displayId >= 0) launchComponent(resolvedTarget, forceDisplayId = forceDisplayId) else false
             if (!launched) {
                 currentApp = resolvedTarget; currentWebUrl = null; isVideoApp = false
                 serviceScope.launch(Dispatchers.IO) {
                     try {
                         rebuild(if (requestedWidth > 0) requestedWidth else 720, if (requestedHeight > 0) requestedHeight else 720)
-                        if (displayId >= 0) launchComponent(resolvedTarget)
+                        if (displayId >= 0) launchComponent(resolvedTarget, forceDisplayId = forceDisplayId)
                     } catch (_: Exception) {}
                 }
             } else {
@@ -1831,6 +1870,7 @@ class MirrorForegroundService : Service() {
                 adaptiveBitrateManager.rebalanceBitrates()
             }
         }
+        /* ### 수정 끝 ### */
 
         suspend fun launchWeb(activityClassName: String, url: String) {
             val targetComponent = internalComponentName(activityClassName)
@@ -1850,7 +1890,8 @@ class MirrorForegroundService : Service() {
             adaptiveBitrateManager.rebalanceBitrates()
         }
 
-        suspend fun launchAppFromWebLauncher(pkgName: String, componentName: String? = null) {
+        /* ### 수정 시작 ### */
+        suspend fun launchAppFromWebLauncher(pkgName: String, componentName: String? = null, forceDisplayId: Boolean = true) {
             if (pkgName.isBlank()) return
             val isAppInstalled = try {
                 val pm = packageManager
@@ -1858,14 +1899,16 @@ class MirrorForegroundService : Service() {
                 else @Suppress("DEPRECATION") pm.getApplicationInfo(pkgName, 0).enabled
             } catch (_: PackageManager.NameNotFoundException) { false }
 
-            if (isAppInstalled) launchStandard(componentName ?: pkgName)
+            if (isAppInstalled) launchStandard(componentName ?: pkgName, forceDisplayId = forceDisplayId)
             else OttCatalog.webUrlFor(pkgName)?.let { launchBrowser(it, pkgName) }
 
+            // Use pointer ID 9 instead of 99 to satisfy Android InputDispatcher validation (0-31 range).
             if (currentCodecMode == "mjpeg") {
-                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 99))
-                serviceScope.launch { kotlinx.coroutines.delay(50); touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 99)) }
+                touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("down", 0.5f, 0.5f, 9))
+                serviceScope.launch { kotlinx.coroutines.delay(50); touchInjector?.onTouchEvent(com.castla.mirror.server.TouchEvent("up", 0.5f, 0.5f, 9)) }
             }
         }
+        /* ### 수정 끝 ### */
 
         suspend fun restoreContentLocked(expectedGeneration: Long, expectedDisplayId: Int) {
             if (!isCurrentVd(expectedGeneration, expectedDisplayId)) return

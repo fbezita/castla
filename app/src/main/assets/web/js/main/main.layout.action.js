@@ -110,12 +110,13 @@ function getDesiredSplitWidths(ratio = splitRatio) {
 }
 
 function updateSplitToolbarVisibility() {
-  
-  // Reference splitToolbar and state from window scope to prevent ReferenceError under strict ESM modules
+  // ### 수정 시작 ###
+  // Reference splitToolbar and layoutState from window scope to prevent ReferenceError under strict ESM modules
   const tb = window.splitToolbar;
   if (!tb) return;
-  tb.style.display = !!window.state?.right ? "flex" : "none";
-  
+  const activePipelines = (window.layoutState?.pipelines || []).filter(p => p !== null);
+  tb.style.display = activePipelines.length >= 2 ? "flex" : "none";
+  // ### 수정 끝 ###
 }
 
 function setBrowserSplitRatio(nextRatio) {
@@ -136,10 +137,12 @@ function isDualStreamCapable(app) {
   return !!app;
 }
 
-// Update the overall layout UI depending on the active left and right app states
+/* ### 수정 시작 ### */
+// Reactive multi-pipeline based layout renderer
 async function updateLayoutUI() {
   const {
     isPromotingSecondary,
+    layoutState,
     state,
     destroySecondaryTransport,
     streamPolicy,
@@ -171,60 +174,42 @@ async function updateLayoutUI() {
     return;
   }
 
-  const hasLeft = !!state?.left;
-  const hasRight = !!state?.right;
+  const pipelines = layoutState.pipelines;
+  const activePipelinesCount = pipelines.filter(p => p !== null).length;
 
   console.log(
-    `[Launcher] updateLayoutUI: hasLeft=${hasLeft}, hasRight=${hasRight}`,
+    `[Launcher] updateLayoutUI: activePipelinesCount=${activePipelinesCount}, pipelinesLength=${pipelines.length}`,
   );
 
-  if (hasLeft && hasRight) {
-    // Scenario 1: Both apps are active -> Enable 50:50 dual split layout
+  if (activePipelinesCount === 0) {
+    // Scenario 4: No active pipelines -> Cleanly return to the standby UI
     destroySecondaryTransport();
-
-    streamPolicy.layoutMode = "browser_split";
-    document.body.dataset.layoutMode = streamPolicy.layoutMode;
-
-    const initialRatio = splitRatio || DEFAULT_SPLIT_RATIO;
-    setBrowserSplitRatio(initialRatio);
-
-    document.querySelectorAll(".split-ratio-btn").forEach((b) => {
-      const btnRatio = parseFloat(b.dataset.ratio);
-      b.classList.toggle("active", Math.abs(btnRatio - initialRatio) < 0.05);
-    });
+    updateSplitToolbarVisibility();
 
     playerShell?.classList.remove("secondary-fullscreen");
-    playerShell?.classList.add("browser-split");
-    updateSplitToolbarVisibility();
-    applyActiveFitModes();
+    playerShell?.classList.remove("browser-split");
 
-    lockBrowserSplitViewports(state.right);
+    layoutState.pipelines = [];
+    webLauncher.classList.remove("hidden");
+    // ### 수정 시작 ###
+    // Ensure the sidebar split launcher remains visible in standby dashboard mode
+    // to allow automatic sliding out and manual gesture pulling.
+    splitDrawer.style.display = "flex";
+    // ### 수정 끝 ###
+    homeBtn.style.display = "none";
 
-    await new Promise((resolve) => requestAnimationFrame(() => resolve()));
-    lockBrowserSplitViewports(state.right);
-    await initSecondaryDecoder();
-    if (window.secondaryTouchHandler) {
-      window.secondaryTouchHandler.destroy();
-    }
-    
-    // Guard: bind TouchHandler only if the secondary canvas element exists
-    if (secondaryCanvas) {
-      window.secondaryTouchHandler = new TouchHandler(
-        secondaryCanvas,
-        getActiveSecondaryRenderer(),
-        controlSocket,
-        "secondary",
-      );
-    } else {
-      console.warn("[Layout] secondaryCanvas element is missing. TouchHandler skipped.");
-    }
-    
-    applyActiveFitModes();
-    connectSecondaryVideo();
-    requestAnimationFrame(() => sendViewportSize(true));
-  } else if (hasRight) {
+    clearCanvas();
+  } else if (pipelines.length === 2 && pipelines[0] === null && pipelines[1] !== null) {
     // Scenario 2: Only secondary app (VD_2) is active -> Show right app full screen
     destroySecondaryTransport();
+
+    /* ### 수정 시작 ### */
+    // Automatically close the sidebar split drawer when mirroring starts to optimize viewport space.
+    if (splitDrawer) {
+      splitDrawer.classList.remove("open");
+      splitDrawer.style.right = "-300px";
+    }
+    /* ### 수정 끝 ### */
 
     streamPolicy.layoutMode = "browser_split";
     document.body.dataset.layoutMode = streamPolicy.layoutMode;
@@ -251,7 +236,6 @@ async function updateLayoutUI() {
       window.secondaryTouchHandler.destroy();
     }
     
-    // Guard: bind TouchHandler only if the secondary canvas element exists
     if (secondaryCanvas) {
       window.secondaryTouchHandler = new TouchHandler(
         secondaryCanvas,
@@ -266,7 +250,58 @@ async function updateLayoutUI() {
     applyActiveFitModes();
     connectSecondaryVideo();
     requestAnimationFrame(() => sendViewportSize(true));
-  } else if (hasLeft || !window.isLauncherMode) {
+  } else if (pipelines.length >= 2 && pipelines[0] !== null && pipelines[1] !== null) {
+    // Scenario 1: Both apps are active -> Enable 50:50 dual split layout
+    destroySecondaryTransport();
+
+    /* ### 수정 시작 ### */
+    // Automatically close the sidebar split drawer when mirroring starts to optimize viewport space.
+    if (splitDrawer) {
+      splitDrawer.classList.remove("open");
+      splitDrawer.style.right = "-300px";
+    }
+    /* ### 수정 끝 ### */
+
+    streamPolicy.layoutMode = "browser_split";
+    document.body.dataset.layoutMode = streamPolicy.layoutMode;
+
+    const initialRatio = splitRatio || DEFAULT_SPLIT_RATIO;
+    setBrowserSplitRatio(initialRatio);
+
+    document.querySelectorAll(".split-ratio-btn").forEach((b) => {
+      const btnRatio = parseFloat(b.dataset.ratio);
+      b.classList.toggle("active", Math.abs(btnRatio - initialRatio) < 0.05);
+    });
+
+    playerShell?.classList.remove("secondary-fullscreen");
+    playerShell?.classList.add("browser-split");
+    updateSplitToolbarVisibility();
+    applyActiveFitModes();
+
+    lockBrowserSplitViewports(state.right);
+
+    await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    lockBrowserSplitViewports(state.right);
+    await initSecondaryDecoder();
+    if (window.secondaryTouchHandler) {
+      window.secondaryTouchHandler.destroy();
+    }
+    
+    if (secondaryCanvas) {
+      window.secondaryTouchHandler = new TouchHandler(
+        secondaryCanvas,
+        getActiveSecondaryRenderer(),
+        controlSocket,
+        "secondary",
+      );
+    } else {
+      console.warn("[Layout] secondaryCanvas element is missing. TouchHandler skipped.");
+    }
+    
+    applyActiveFitModes();
+    connectSecondaryVideo();
+    requestAnimationFrame(() => sendViewportSize(true));
+  } else {
     // Scenario 3: Only left (primary) app is active -> Show primary app full screen
     destroySecondaryTransport();
     updateSplitToolbarVisibility();
@@ -274,23 +309,25 @@ async function updateLayoutUI() {
     playerShell?.classList.remove("secondary-fullscreen");
     playerShell?.classList.remove("browser-split");
 
-    window.isLauncherMode = false;
     webLauncher.classList.add("hidden");
     splitDrawer.style.display = "flex";
-    homeBtn.style.display = "block";
+    /* ### 수정 시작 ### */
+    // Automatically close the sidebar split drawer when mirroring starts to optimize viewport space,
+    // and completely hide the home button as launcher mode is deprecated and unified under the standby dashboard.
+    if (splitDrawer) {
+      splitDrawer.classList.remove("open");
+      splitDrawer.style.right = "-300px";
+    }
+    homeBtn.style.display = "none";
+    /* ### 수정 끝 ### */
 
     window.leftLockedViewport = null;
     window.rightLockedViewport = null;
 
-    /* ### 수정 시작 ### */
-    // Ensure primary video element visibility is correctly routed to MseVideo when MseDecoder is active on layout update
     const isMseActive = window.decoder && window.decoder.constructor.name === "MseDecoder";
     if (isMseActive) {
       canvas.style.opacity = "0";
-      /* ### 수정 시작 ### */
-      // Keep canvas displayed but transparent to fully capture remote pointer events on layout update
       canvas.style.display = "block";
-      /* ### 수정 끝 ### */
       const mseVideo = document.getElementById("mse-video");
       if (mseVideo) {
         mseVideo.style.opacity = "1";
@@ -305,28 +342,14 @@ async function updateLayoutUI() {
         mseVideo.style.display = "none";
       }
     }
-    /* ### 수정 끝 ### */
 
     applyActiveFitModes();
     sendViewportSize();
-  } else {
-    // Scenario 4: Neither app is active -> Cleanly return to the launcher UI
-    destroySecondaryTransport();
-    updateSplitToolbarVisibility();
-
-    playerShell?.classList.remove("secondary-fullscreen");
-    playerShell?.classList.remove("browser-split");
-
-    state.left = null;
-    state.right = null;
-    window.isLauncherMode = true;
-    webLauncher.classList.remove("hidden");
-    splitDrawer.style.display = "none";
-    homeBtn.style.display = "none";
-
-    clearCanvas();
   }
 }
+/* ### 수정 끝 ### */
+
+
 
 // Handle seamless layout changes upon video frame resolution change
 function handleRendererResolutionChange(width, height) {

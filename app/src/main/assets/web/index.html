@@ -6,26 +6,116 @@
     <title>Castla</title>
     <link rel="stylesheet" href="css/player.css">
     <style>
-        /* Web Native Launcher Styles */
+        /* ### 수정 시작 ### */
+        /* Web Standby Dashboard Styles replacing legacy Web Launcher */
         #web-launcher {
-            display: none !important; /* Unified sidebar launcher is now the primary launcher! Completely hidden. */
+            display: flex;
             position: absolute;
             top: 0; left: 0; right: 0; bottom: 0;
-            background-color: #0F0F1A;
-            z-index: 200; /* Above the video player */
-            overflow-y: auto;
+            background: radial-gradient(circle at center, #18182A 0%, #09090E 100%);
+            z-index: 100; /* Behind toolbars but visible when pipelines are empty */
+            overflow: hidden;
             flex-direction: column;
-            padding: 30px;
+            align-items: center;
+            justify-content: center;
             color: #fff;
-            font-family: sans-serif;
-            transition: opacity 0.3s ease;
+            font-family: 'Outfit', sans-serif;
+            transition: opacity 0.4s ease, visibility 0.4s;
         }
 
         #web-launcher.hidden {
-            display: none !important;
             opacity: 0;
+            visibility: hidden;
             pointer-events: none;
         }
+
+        .standby-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            padding: 40px;
+            max-width: 450px;
+            z-index: 10;
+        }
+
+        .standby-logo {
+            width: 120px;
+            height: 120px;
+            margin-bottom: 24px;
+            filter: drop-shadow(0 0 15px rgba(0, 229, 255, 0.4));
+        }
+
+        .pulsing-logo {
+            width: 100%;
+            height: 100%;
+            animation: pulse-glow 2.5s ease-in-out infinite alternate;
+        }
+
+        .standby-title {
+            font-size: 32px;
+            font-weight: 700;
+            letter-spacing: 6px;
+            background: linear-gradient(135deg, #00E5FF 0%, #E040FB 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin: 0 0 12px 0;
+        }
+
+        .standby-subtitle {
+            font-size: 14px;
+            color: #8C8C9E;
+            line-height: 1.6;
+            margin: 0 0 32px 0;
+            font-weight: 300;
+        }
+
+        .standby-status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: rgba(255, 255, 255, 0.05);
+            padding: 8px 18px;
+            border-radius: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        .status-pulse {
+            width: 8px;
+            height: 8px;
+            background-color: #00E5FF;
+            border-radius: 50%;
+            position: relative;
+        }
+
+        .status-pulse::after {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            border-radius: 50%;
+            background-color: #00E5FF;
+            animation: pulse-ring 1.5s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+        }
+
+        .status-text {
+            font-size: 12px;
+            font-weight: 500;
+            color: #E2E2E9;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        @keyframes pulse-glow {
+            from { transform: scale(1); filter: drop-shadow(0 0 10px rgba(0, 229, 255, 0.3)); }
+            to { transform: scale(1.05); filter: drop-shadow(0 0 25px rgba(224, 64, 251, 0.6)); }
+        }
+
+        @keyframes pulse-ring {
+            0% { transform: scale(0.95); opacity: 0.8; }
+            100% { transform: scale(2.8); opacity: 0; }
+        }
+        /* ### 수정 끝 ### */
 
         #launcher-loading {
             display: none;
@@ -1219,10 +1309,35 @@
             <div class="loading-text">Loading apps...</div>
         </div>
 
-        <!-- Web Native Launcher UI -->
-        <div id="web-launcher">
-            <div id="launcher-content" style="display:none;"></div>
+        <!-- ### 수정 시작 ### -->
+        <!-- Web Native Launcher UI (Standby Dashboard) -->
+        <div id="web-launcher" class="standby-dashboard">
+            <div class="standby-container">
+                <div class="standby-logo">
+                    <svg viewBox="0 0 100 100" class="pulsing-logo">
+                        <defs>
+                            <linearGradient id="logo-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" stop-color="#00E5FF" />
+                                <stop offset="100%" stop-color="#E040FB" />
+                            </linearGradient>
+                            <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+                                <feGaussianBlur stdDeviation="6" result="blur" />
+                                <feComposite in="SourceGraphic" in2="blur" operator="over" />
+                            </filter>
+                        </defs>
+                        <circle cx="50" cy="50" r="40" fill="none" stroke="url(#logo-grad)" stroke-width="2" filter="url(#glow)"/>
+                        <path d="M35 50 L45 60 L65 40" fill="none" stroke="url(#logo-grad)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
+                    </svg>
+                </div>
+                <h1 class="standby-title">CASTLA</h1>
+                <p class="standby-subtitle">Ready to Stream. Open the sidebar drawer to launch an app.</p>
+                <div class="standby-status">
+                    <span class="status-pulse"></span>
+                    <span class="status-text">Server Active</span>
+                </div>
+            </div>
         </div>
+        <!-- ### 수정 끝 ### -->
 
         <!-- Split Drawer triggers & UI -->
         <div id="split-drawer">

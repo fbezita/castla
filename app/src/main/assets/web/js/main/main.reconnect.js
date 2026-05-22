@@ -270,19 +270,10 @@ function connectControl() {
   controlSocket.onopen = () => {
     console.log(`[Main] Control socket connected!`);
 
-    // Reset last sent viewports so the initial size is always sent
-    lastSentPrimary = {
-      width: 0,
-      height: 0,
-      fitMode: null,
-      layoutMode: null,
-    };
-    lastSentSecondary = {
-      width: 0,
-      height: 0,
-      fitMode: null,
-      layoutMode: null,
-    };
+    // ### 수정 시작 ###
+    // Reset last sent layout string to guarantee immediate declarative sync on reconnect
+    window.lastSentLayoutString = "";
+    // ### 수정 끝 ###
 
     // Reset active apps state to prevent launch evaluation mismatches on reconnect
     state.left = null;

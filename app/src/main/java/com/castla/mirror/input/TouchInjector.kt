@@ -125,19 +125,22 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
             }
         }
 
-        // 2. Compute MotionEvent action
+        /* ### 수정 시작 ### */
+        // Compute MotionEvent action by verifying if other active pointers exist to avoid incorrect ACTION_POINTER_DOWN generation.
+        val hasOtherPointers = activePointers.keys.any { it != pointerId }
         val actionCode = when (event.action) {
             "down" -> {
-                if (beforeCount == 0) MotionEvent.ACTION_DOWN
+                if (!hasOtherPointers) MotionEvent.ACTION_DOWN
                 else MotionEvent.ACTION_POINTER_DOWN or (targetIndex shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
             }
             "up" -> {
-                if (afterCount == 1) MotionEvent.ACTION_UP
+                if (!hasOtherPointers) MotionEvent.ACTION_UP
                 else MotionEvent.ACTION_POINTER_UP or (targetIndex shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
             }
             "move" -> MotionEvent.ACTION_MOVE
             else -> return
         }
+        /* ### 수정 끝 ### */
 
         // 3. Create and inject event
         val motionEvent = MotionEvent.obtain(

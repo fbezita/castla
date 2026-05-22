@@ -148,11 +148,16 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
 
     private var onTouchListener: ((TouchEvent) -> Unit)? = null
     private var onCodecModeListener: ((String) -> Unit)? = null
-    private var onViewportChangeListener: ((String, Int, Int, String) -> Unit)? = null
+    /* ### 수정 시작 ### */
+    // Redundant onViewportChangeListener declaration has been completely removed.
+    /* ### 수정 끝 ### */
     private var onTextInputListener: ((String) -> Unit)? = null
     private var onKeyEventListener: ((Int) -> Unit)? = null
     private var onCompositionUpdateListener: ((Int, String) -> Unit)? = null
     private var onAudioCodecListener: ((String) -> Unit)? = null
+    /* ### 수정 시작 ### */
+    private var onLayoutUpdateListener: ((org.json.JSONArray) -> Unit)? = null
+    /* ### 수정 끝 ### */
     private var onPrimaryKeyframeRequest: (() -> Unit)? = null
     private var onSecondaryKeyframeRequest: (() -> Unit)? = null
     private var networkCongestionListener: (() -> Unit)? = null
@@ -180,6 +185,12 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
 
     private var cachedSpsPps: ByteArray? = null
 
+    /* ### 수정 시작 ### */
+    fun setLayoutUpdateListener(listener: (org.json.JSONArray) -> Unit) {
+        onLayoutUpdateListener = listener
+    }
+    /* ### 수정 끝 ### */
+
     fun setTouchListener(listener: (TouchEvent) -> Unit) {
         onTouchListener = listener
     }
@@ -188,9 +199,9 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         onCodecModeListener = listener
     }
 
-    fun setViewportChangeListener(listener: (String, Int, Int, String) -> Unit) {
-        onViewportChangeListener = listener
-    }
+    /* ### 수정 시작 ### */
+    // Redundant setViewportChangeListener has been completely removed.
+    /* ### 수정 끝 ### */
 
     fun setTextInputListener(listener: (String) -> Unit) {
         onTextInputListener = listener
@@ -489,6 +500,27 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     }
     
     fun onKeyframeRequest(channel: String = "primary") {
+        /* ### 수정 시작 ### */
+        // Replay cached SPS/PPS parameters to all active video stream sockets on keyframe request.
+        // This ensures the decoder recovering from a browser hot-refresh gets the required parameters.
+        val codecMode = if (channel == "secondary") secondaryCodecMode else primaryCodecMode
+        if (!codecMode.equals("mjpeg", ignoreCase = true)) {
+            val cached = if (channel == "secondary") cachedSecondarySpsPps else cachedPrimarySpsPps
+            cached?.let { spsPps ->
+                val sockets = if (channel == "secondary") secondaryVideoSockets else primaryVideoSockets
+                val deadSockets = mutableListOf<VideoStreamSocket>()
+                for (socket in sockets) {
+                    try {
+                        socket.sendBinary(spsPps)
+                        Log.i(TAG, "Replayed cached SPS/PPS to $channel video socket on keyframe request")
+                    } catch (e: Exception) {
+                        deadSockets.add(socket)
+                    }
+                }
+                deadSockets.forEach { unregisterVideoSocket(channel, it) }
+            }
+        }
+        /* ### 수정 끝 ### */
         if (channel == "secondary") onSecondaryKeyframeRequest?.invoke() else onPrimaryKeyframeRequest?.invoke()
     }
     
@@ -517,9 +549,15 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     }
     /* ### 수정 끝 ### */
     
-    fun onViewportChange(pane: String, width: Int, height: Int, layoutMode: String = "") {
-        onViewportChangeListener?.invoke(pane, width, height, layoutMode)
+    /* ### 수정 시작 ### */
+    fun onLayoutUpdate(pipelines: org.json.JSONArray) {
+        onLayoutUpdateListener?.invoke(pipelines)
     }
+    /* ### 수정 끝 ### */
+
+    /* ### 수정 시작 ### */
+    // Redundant onViewportChange relay helper has been completely removed.
+    /* ### 수정 끝 ### */
     
     fun onTextInput(text: String) {
         onTextInputListener?.invoke(text)

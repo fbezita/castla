@@ -1,6 +1,23 @@
 // English comment: Favorites and auto-run state helpers, and app fetch dispatcher for Castla Web Client.
 // Strictly respects 100% functional integrity and keeps code within the 300-line limit.
 
+// ### 수정 시작 ###
+function getPairPseudoApps(apps) {
+  return window.appPairs.map((pair) => {
+    const leftApp = apps.find((a) => a.packageName === pair.left);
+    const rightApp = apps.find((a) => a.packageName === pair.right);
+    return {
+      packageName: `pair:${pair.left}:${pair.right}`,
+      isPair: true,
+      left: pair.left,
+      right: pair.right,
+      label: `${leftApp?.label || "Left"} + ${rightApp?.label || "Right"}`,
+      category: "PAIR",
+    };
+  });
+}
+// ### 수정 끝 ###
+
 function getFavorites() {
   try {
     return JSON.parse(localStorage.getItem("castla_favorites") || "[]");
@@ -105,6 +122,11 @@ async function loadLauncherApps() {
     if (typeof window.showLauncherNotice === "function") {
       window.showLauncherNotice("Failed to load apps. Try refreshing.");
     }
+  } finally {
+    // ### 수정 시작 ###
+    // Emit launcher-ready event to safely dismiss the splash loading screen.
+    window.dispatchEvent(new CustomEvent("launcher-ready"));
+    // ### 수정 끝 ###
   }
 }
 
@@ -120,10 +142,13 @@ function refreshLauncherUI() {
 }
 
 // Bind methods globally to window scope for seamless multi-module integration
+// ### 수정 시작 ###
 Object.assign(window, {
+  getPairPseudoApps,
   getFavorites,
   toggleFavorite,
   toggleAutoRun,
   loadLauncherApps,
   refreshLauncherUI
 });
+// ### 수정 끝 ###

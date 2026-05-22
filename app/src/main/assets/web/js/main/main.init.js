@@ -101,9 +101,28 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Edge Swipe Handlers for Split Drawer ──
   if (splitHandle) {
-    splitHandle.addEventListener("click", () => {
-      splitDrawer.classList.toggle("open");
+    // ### 수정 시작 ###
+    // Add event parameter and call stopPropagation() to block bubbling up to document and triggering handleOutsideTouchOrClick
+    // Universal pointer events are also intercepted to fully block click propagation on mobile/touch interfaces.
+    const handleHandleInteraction = (e) => {
+      e.stopPropagation();
+    };
+    splitHandle.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const isOpen = splitDrawer.classList.contains("open");
+      if (isOpen) {
+        splitDrawer.classList.remove("open");
+        splitDrawer.style.right = "-300px";
+      } else {
+        splitDrawer.classList.add("open");
+        splitDrawer.style.right = "0px";
+      }
     });
+    splitHandle.addEventListener("touchstart", handleHandleInteraction);
+    splitHandle.addEventListener("touchend", handleHandleInteraction);
+    splitHandle.addEventListener("pointerdown", handleHandleInteraction);
+    splitHandle.addEventListener("pointerup", handleHandleInteraction);
+    // ### 수정 끝 ###
 
     let startX = 0;
     splitHandle.addEventListener(
@@ -120,8 +139,10 @@ document.addEventListener("DOMContentLoaded", async () => {
         let endX = e.changedTouches[0].clientX;
         if (startX - endX > 15) {
           splitDrawer.classList.add("open");
+          splitDrawer.style.right = "0px";
         } else if (endX - startX > 15) {
           splitDrawer.classList.remove("open");
+          splitDrawer.style.right = "-300px";
         }
       },
       { passive: true },
@@ -129,6 +150,19 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   if (splitDrawer) {
+    // ### 수정 시작 ###
+    // Add stopPropagation to click and touchstart events inside splitDrawer to avoid triggering document click handlers
+    // Intercept universal pointer/touch event types to guarantee no event leaks.
+    const stopDrawerBubbling = (e) => {
+      e.stopPropagation();
+    };
+    splitDrawer.addEventListener("click", stopDrawerBubbling);
+    splitDrawer.addEventListener("touchstart", stopDrawerBubbling);
+    splitDrawer.addEventListener("touchend", stopDrawerBubbling);
+    splitDrawer.addEventListener("pointerdown", stopDrawerBubbling);
+    splitDrawer.addEventListener("pointerup", stopDrawerBubbling);
+    // ### 수정 끝 ###
+
     let drawerStartX = 0;
     splitDrawer.addEventListener(
       "touchstart",
@@ -144,23 +178,35 @@ document.addEventListener("DOMContentLoaded", async () => {
         let endX = e.changedTouches[0].clientX;
         if (endX - drawerStartX > 30) {
           splitDrawer.classList.remove("open");
+          splitDrawer.style.right = "-300px";
         }
       },
       { passive: true },
     );
 
-    
+    // ### 수정 시작 ###
     // Close split drawer when clicking or touching outside of the drawer area
+    // Protect against the splash screen dismissal and general initialization event noise.
     const handleOutsideTouchOrClick = (e) => {
       if (!splitDrawer.classList.contains("open")) return;
+      // Safeguard: Ignore clicks hitting the splash screen during transitioning
+      if (e.target && e.target.closest && e.target.closest("#splash-screen")) return;
       if (splitDrawer.contains(e.target)) return;
       if (splitHandle && splitHandle.contains(e.target)) return;
       splitDrawer.classList.remove("open");
+      splitDrawer.style.right = "-300px";
     };
 
-    document.addEventListener("click", handleOutsideTouchOrClick);
-    document.addEventListener("touchstart", handleOutsideTouchOrClick, { passive: true });
-    
+    // Safely delay the outside event listener registration until 800ms after launcher-ready
+    // to shield against residual tap gesture bubbling during first startup.
+    window.addEventListener("launcher-ready", () => {
+      setTimeout(() => {
+        document.addEventListener("click", handleOutsideTouchOrClick);
+        document.addEventListener("touchstart", handleOutsideTouchOrClick, { passive: true });
+        console.log("[Main] Outside click listeners for splitDrawer successfully bound after delay.");
+      }, 800);
+    });
+    // ### 수정 끝 ###
   }
 
   // Split toolbar ratio selector bindings
@@ -514,9 +560,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       setTimeout(() => splashScreen.classList.add("removed"), 500);
     }
 
+    // ### 수정 시작 ###
     // Open the split drawer by default so users can select their first app!
+    // Instantly enforce inline styles to guarantee CSS rendering visibility.
     splitDrawer.classList.add("open");
-    if (homeBtn) homeBtn.style.display = "block";
+    splitDrawer.style.right = "0px";
+    // Obsolete homeBtn is kept hidden as launcher mode has been deprecated and unified under the standby dashboard.
+    // ### 수정 끝 ###
   });
 
   // Initialize audio lazily upon the first actual user interaction

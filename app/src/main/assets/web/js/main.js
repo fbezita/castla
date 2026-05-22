@@ -10,8 +10,9 @@ import './main/main.reconnect.js';
 import './main/main.viewport.js';
 import './main/main.ime.js';
 import './main/main.launcher.js';
-import './main/main.launcher.render.js';
+// ### 수정 시작 ###
 import './main/main.launcher.render.split.js';
+// ### 수정 끝 ###
 import './main/main.dragdrop.js';
 import './main/main.dragdrop.handler.js';
 import './main/main.dragdrop.action.js';

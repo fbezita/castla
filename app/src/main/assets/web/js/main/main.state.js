@@ -66,30 +66,92 @@ let _isResizing = false;
 let _leftLockedViewport = null;
 let _rightLockedViewport = null;
 
-let _leftApp = null;
-let _rightApp = null;
+/* ### 수정 시작 ### */
+// Array-based layout state (SSOT) for dynamic multi-pipeline scalability
+let _layoutState = {
+  pipelines: [], // Array of { id: string, packageName: string, className: string, label: string, isVideo: boolean }
+  ratios: [DEFAULT_SPLIT_RATIO]
+};
 
-// Reactive state engine to track VD_1 (left) and VD_2 (right) virtual displays (SSOT)
+function trimPipelines() {
+  while (_layoutState.pipelines.length > 0 && _layoutState.pipelines[_layoutState.pipelines.length - 1] === null) {
+    _layoutState.pipelines.pop();
+  }
+}
+
+// Retrofitted state compatibility layer maps legacy left/right calls directly to pipelines array
 let _state = {
-  get left() { return _leftApp; },
+  get left() {
+    return _layoutState.pipelines[0] || null;
+  },
   set left(app) {
-    if (_leftApp === app) return;
-    console.log(`[State] Left display app changed: ${app ? app.label : 'null'}`);
-    _leftApp = app;
+    const prev = _layoutState.pipelines[0];
+    if (prev === app) return;
+    console.log(`[State] Left display app changed: ${app ? (app.label || app.packageName) : 'null'}`);
+    
+    if (!app) {
+      if (_layoutState.pipelines.length > 0) {
+        _layoutState.pipelines[0] = null;
+      }
+    } else {
+      const pipelineApp = {
+        id: app.id || "primary",
+        packageName: app.packageName,
+        className: app.className || null,
+        label: app.label || app.packageName,
+        isVideo: app.isVideo || false
+      };
+      if (_layoutState.pipelines.length > 0) {
+        _layoutState.pipelines[0] = pipelineApp;
+      } else {
+        _layoutState.pipelines.push(pipelineApp);
+      }
+    }
+    
+    trimPipelines();
+    
     if (typeof window.updateLayoutUI === 'function') {
       requestAnimationFrame(() => window.updateLayoutUI());
     }
   },
-  get right() { return _rightApp; },
+  get right() {
+    return _layoutState.pipelines[1] || null;
+  },
   set right(app) {
-    if (_rightApp === app) return;
-    console.log(`[State] Right display app changed: ${app ? app.label : 'null'}`);
-    _rightApp = app;
+    const prev = _layoutState.pipelines[1];
+    if (prev === app) return;
+    console.log(`[State] Right display app changed: ${app ? (app.label || app.packageName) : 'null'}`);
+    
+    if (!app) {
+      if (_layoutState.pipelines.length > 1) {
+        _layoutState.pipelines[1] = null;
+      }
+    } else {
+      const pipelineApp = {
+        id: app.id || "secondary",
+        packageName: app.packageName,
+        className: app.className || null,
+        label: app.label || app.packageName,
+        isVideo: app.isVideo || false
+      };
+      while (_layoutState.pipelines.length < 1) {
+        _layoutState.pipelines.push(null);
+      }
+      if (_layoutState.pipelines.length > 1) {
+        _layoutState.pipelines[1] = pipelineApp;
+      } else {
+        _layoutState.pipelines.push(pipelineApp);
+      }
+    }
+    
+    trimPipelines();
+    
     if (typeof window.updateLayoutUI === 'function') {
       requestAnimationFrame(() => window.updateLayoutUI());
     }
   }
 };
+/* ### 수정 끝 ### */
 
 let _browserSplitState = { url: null, preset: null, swapped: false };
 const BROWSER_PRESETS = [
@@ -137,18 +199,9 @@ let _qualityReportInterval = null;
 let _frameWatchdogTimer = null;
 let _resizeTimer = null;
 
-let _lastSentPrimary = {
-  width: 0,
-  height: 0,
-  fitMode: null,
-  layoutMode: null,
-};
-let _lastSentSecondary = {
-  width: 0,
-  height: 0,
-  fitMode: null,
-  layoutMode: null,
-};
+  /* ### 수정 시작 ### */
+  // Obsolete _lastSentPrimary and _lastSentSecondary viewport caches have been removed.
+  /* ### 수정 끝 ### */
 let _pendingLayoutSwitch = null;
 
 // DOM Element references (bound dynamically in init module)
@@ -168,7 +221,21 @@ const properties = {
   framePacer: { get() { return _framePacer; }, set(v) { _framePacer = v; } },
   secondaryFramePacer: { get() { return _secondaryFramePacer; }, set(v) { _secondaryFramePacer = v; } },
   currentPrimaryApp: { get() { return _currentPrimaryApp; }, set(v) { _currentPrimaryApp = v; } },
-  isLauncherMode: { get() { return _isLauncherMode; }, set(v) { _isLauncherMode = v; } },
+  /* ### 수정 시작 ### */
+  isLauncherMode: { 
+    get() { return _layoutState.pipelines.length === 0; }, 
+    set(v) { 
+      console.log(`[State] Set launcher mode via window: ${v}`);
+      if (v) {
+        _layoutState.pipelines = [];
+      }
+      if (typeof window.updateLayoutUI === 'function') {
+        requestAnimationFrame(() => window.updateLayoutUI());
+      }
+    } 
+  },
+  layoutState: { get() { return _layoutState; } },
+  /* ### 수정 끝 ### */
   currentServerInstanceId: { get() { return _currentServerInstanceId; }, set(v) { _currentServerInstanceId = v; } },
   lastLaunchedInstanceId: { get() { return _lastLaunchedInstanceId; }, set(v) { _lastLaunchedInstanceId = v; } },
   launchGuardUntil: { get() { return _launchGuardUntil; }, set(v) { _launchGuardUntil = v; } },
@@ -188,8 +255,16 @@ const properties = {
   isResizing: { get() { return _isResizing; }, set(v) { _isResizing = v; } },
   leftLockedViewport: { get() { return _leftLockedViewport; }, set(v) { _leftLockedViewport = v; } },
   rightLockedViewport: { get() { return _rightLockedViewport; }, set(v) { _rightLockedViewport = v; } },
-  _leftApp: { get() { return _leftApp; }, set(v) { _leftApp = v; } },
-  _rightApp: { get() { return _rightApp; }, set(v) { _rightApp = v; } },
+  /* ### 수정 시작 ### */
+  _leftApp: { 
+    get() { return _layoutState.pipelines[0] || null; }, 
+    set(v) { _state.left = v; } 
+  },
+  _rightApp: { 
+    get() { return _layoutState.pipelines[1] || null; }, 
+    set(v) { _state.right = v; } 
+  },
+  /* ### 수정 끝 ### */
   state: { get() { return _state; }, set(v) { _state = v; } },
   browserSplitState: { get() { return _browserSplitState; }, set(v) { _browserSplitState = v; } },
   BROWSER_PRESETS: { get() { return BROWSER_PRESETS; } },
@@ -215,8 +290,9 @@ const properties = {
   qualityReportInterval: { get() { return _qualityReportInterval; }, set(v) { _qualityReportInterval = v; } },
   frameWatchdogTimer: { get() { return _frameWatchdogTimer; }, set(v) { _frameWatchdogTimer = v; } },
   resizeTimer: { get() { return _resizeTimer; }, set(v) { _resizeTimer = v; } },
-  lastSentPrimary: { get() { return _lastSentPrimary; }, set(v) { _lastSentPrimary = v; } },
-  lastSentSecondary: { get() { return _lastSentSecondary; }, set(v) { _lastSentSecondary = v; } },
+  /* ### 수정 시작 ### */
+  // Obsolete viewport cache property bindings have been removed.
+  /* ### 수정 끝 ### */
   pendingLayoutSwitch: { get() { return _pendingLayoutSwitch; }, set(v) { _pendingLayoutSwitch = v; } },
   elements: { get() { return _elements; } }
 };

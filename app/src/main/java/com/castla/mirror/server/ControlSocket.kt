@@ -33,7 +33,8 @@ class ControlSocket(
                 handleBinaryTouch(message.binaryPayload)
                 return
             }
-            Log.d(TAG, "Text message received: ${message.textPayload?.take(50)}")
+//            Log.d(TAG, "Text message received: ${message.textPayload?.take(50)}")
+            Log.d(TAG, "Text message received: ${message.textPayload}")
 
             val json = JSONObject(message.textPayload)
             val type = json.optString("type", "")
@@ -61,15 +62,17 @@ class ControlSocket(
                     server.onCodecModeRequest(mode, profile, pane)
                 }
                 /* ### 수정 끝 ### */
-                "viewport" -> {
-                    val width = json.optInt("width", 0)
-                    val height = json.optInt("height", 0)
-                    val pane = json.optString("pane", "primary")
-                    val layoutMode = json.optString("layoutMode", "")
-                    if (width >= 0 && height >= 0) {
-                        server.onViewportChange(pane, width, height, layoutMode)
+                /* ### 수정 시작 ### */
+                "layout_update" -> {
+                    val pipelinesArray = json.optJSONArray("pipelines")
+                    if (pipelinesArray != null) {
+                        server.onLayoutUpdate(pipelinesArray)
                     }
                 }
+                /* ### 수정 끝 ### */
+                /* ### 수정 시작 ### */
+                // Legacy "viewport" protocol has been completely removed.
+                /* ### 수정 끝 ### */
                 "textInput" -> {
                     val text = json.optString("text", "")
                     if (text.isNotEmpty()) {
@@ -105,9 +108,9 @@ class ControlSocket(
                     }
                 }
 
-                "closeSecondary", "closeSplit" -> {
-                    server.onViewportChange("secondary", 0, 0)
-                }
+                /* ### 수정 시작 ### */
+                // Legacy "closeSecondary" and "closeSplit" protocols have been completely removed.
+                /* ### 수정 끝 ### */
                 "displayDensity" -> {
                     val scale = json.optDouble("scale", 1.0).toFloat()
                     if (scale in 0.4f..1.5f) {
