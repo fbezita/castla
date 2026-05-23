@@ -58,23 +58,18 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         // 1단계에서 구축한 오라클 백엔드 다운로드 트리거
         triggerCertDownloadInBackground()
 
-        // 🚨 현재 폰의 핫스팟/셀룰러 IP 체크
-        val currentIp = serverIp 
-
-        /* ### 수정 시작 ### */
         // Load settings to check if WebCodecs hardware accelerated decoding is enabled
         val settings = com.castla.mirror.ui.StreamSettings.load(context)
 
-        // ✅ Only enable SSL/HTTPS socket binding if IP is 192.0.0.4 and WebCodecs option is enabled
-        if (currentIp == "192.0.0.4" && settings.webCodecsEnabled) {
-        /* ### 수정 끝 ### */
+        // ✅ Only enable SSL/HTTPS socket binding if WebCodecs option is enabled
+        if (settings.webCodecsEnabled) {
             try {
                 val password = "castla123".toCharArray() 
                 val keyStore = KeyStore.getInstance("PKCS12")
                 val dynamicKeyStoreFile = File(context.filesDir, "dynamic_castla.p12")
                 
                 val keystoreStream: InputStream = if (dynamicKeyStoreFile.exists() && dynamicKeyStoreFile.length() > 0) {
-                    Log.i(TAG, "🔓 [성공] 192.0.0.4 일치: 공인 인증서 로드")
+                    Log.i(TAG, "🔓 [성공] WebCodecs 활성화: 공인 인증서 로드")
                     FileInputStream(dynamicKeyStoreFile)
                 } else {
                     context.assets.open("castla.p12")
@@ -87,7 +82,7 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
                 val sslContext = SSLContext.getInstance("TLS")
                 sslContext.init(keyManagerFactory.keyManagers, null, null)
 
-                // ✅ 192.0.0.4 일 때만 SSL 소켓 바인딩 (HTTPS)
+                // ✅ SSL 소켓 바인딩 (HTTPS)
                 makeSecure(sslContext.serverSocketFactory, null)
                 Log.i(TAG, "🚀 [🚀 HTTPS 모드] Let's Encrypt 공인 SSL 서버 가동")
                 return
@@ -96,8 +91,8 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
             }
         }
 
-        // 🌐 192.0.0.4가 아니면 makeSecure()를 호출하지 않으므로 자동으로 [순수 HTTP 모드]로 동작합니다.
-        Log.w(TAG, "⚠️ [🌐 HTTP 모드] IP가 $currentIp 이므로 일반 HTTP 서버로 구동합니다.")
+        // 🌐 WebCodecs가 꺼져 있으면 makeSecure()를 호출하지 않으므로 자동으로 [순수 HTTP 모드]로 동작합니다.
+        Log.w(TAG, "⚠️ [🌐 HTTP 모드] WebCodecs 비활성화 상태이므로 일반 HTTP 서버로 구동합니다.")
     }
     /**
      * 외부 내 개인 서버(NAS/클라우드)에서 최신 .p12 인증서를 다운로드하는 함수

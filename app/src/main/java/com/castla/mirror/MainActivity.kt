@@ -638,18 +638,7 @@ class MainActivity : AppCompatActivity() {
             else -> "0.0.0.0"
         }
 
-        if (ip != "0.0.0.0") {
-            // 🔐 핫스팟 주소가 안드로이드 고정 IP 대역(192.0.0.4)일 때 -> 내 공인 도메인 사용
-            if (ip == "192.0.0.4") {
-                serverUrl = "https://ip-192-0-0-4.fbezita.com:${MirrorServer.DEFAULT_PORT}"
-            } else {
-                // 그 외의 주소는 기존 sslip.io 로직 유지 (하이브리드 폴백)
-                serverUrl = "http://${ip}:${MirrorServer.DEFAULT_PORT}"
-                Log.d("MirrorServer", "🎬 예외 대역 ($ip) 감지: 일반 HTTP 주소로 매핑 완료")
-            }
-        } else {
-            serverUrl = "http://${ip}:${MirrorServer.DEFAULT_PORT}"
-        }
+        serverUrl = "http://${ip}:${MirrorServer.DEFAULT_PORT}"
     }
 
     private fun getCellularIpv4Address(): String? {
