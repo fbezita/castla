@@ -190,3 +190,38 @@ dependencies {
     androidTestImplementation("androidx.test:rules:1.7.0")
     androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
 }
+
+val frontendDistDir = rootProject.layout.projectDirectory.dir("frontend/dist")
+val frontendDir = rootProject.layout.projectDirectory.dir("frontend")
+val embeddedWebDir = layout.projectDirectory.dir("src/main/assets/web")
+
+fun pnpmCommand(vararg args: String): List<String> {
+    return if (org.gradle.internal.os.OperatingSystem.current().isWindows) {
+        listOf("cmd", "/c", "pnpm") + args
+    } else {
+        listOf("pnpm") + args
+    }
+}
+
+tasks.register<Exec>("pnpmInstallFrontend") {
+    onlyIf { frontendDir.asFile.exists() }
+    workingDir = frontendDir.asFile
+    commandLine(pnpmCommand("install", "--frozen-lockfile"))
+}
+
+tasks.register<Exec>("buildFrontend") {
+    onlyIf { frontendDir.asFile.exists() }
+    dependsOn("pnpmInstallFrontend")
+    workingDir = frontendDir.asFile
+    commandLine(pnpmCommand("run", "build"))
+}
+
+tasks.register<Sync>("copyFrontendDistToAssets") {
+    dependsOn("buildFrontend")
+    from(frontendDistDir)
+    into(embeddedWebDir)
+}
+
+tasks.named("preBuild") {
+    dependsOn("copyFrontendDistToAssets")
+}

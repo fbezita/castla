@@ -34,6 +34,7 @@ import com.castla.mirror.capture.AudioCapture
 import com.castla.mirror.capture.JpegEncoder
 import com.castla.mirror.capture.VideoEncoder
 import com.castla.mirror.capture.VirtualDisplayController
+import com.castla.mirror.compositor.DisplayTier
 import com.castla.mirror.input.TouchInjector
 import com.castla.mirror.server.MirrorServer
 import com.castla.mirror.shizuku.BinderConnectionTracker
@@ -71,6 +72,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONArray
 import org.json.JSONObject
 
 class MirrorForegroundService : Service() {
@@ -173,6 +175,10 @@ class MirrorForegroundService : Service() {
     private var browserConnected = false
     private var isInitialRebuildTriggered = false
     @Volatile private var currentCodecMode: String = "h264"
+    private val paneVisibility = java.util.concurrent.ConcurrentHashMap<String, Boolean>().apply {
+        put("primary", true)
+        put("secondary", false)
+    }
 
     private val virtualDisplayHardwareMutex = Mutex()
     private val vdOperationGlobalMutex = Mutex()
@@ -414,6 +420,26 @@ class MirrorForegroundService : Service() {
                 paneLastLaunchPackages[pane] = request.packageName
 
                 Log.i(TAG, "[AppLaunchBus Observer] Event Captured! Processing pipeline architecture setup for: ${request.packageName} ($pane pane)")
+
+                paneVisibility[pane] = true
+                if (pane == "secondary") {
+                    val fallbackW = targetPipeline.requestedWidth.takeIf { it > 1 }
+                        ?: pipelines["primary"]?.requestedWidth?.takeIf { it > 1 }
+                        ?: pipelines["primary"]?.width?.takeIf { it > 1 }
+                        ?: targetPipeline.lastValidWidth.coerceAtLeast(720)
+                    val fallbackH = targetPipeline.requestedHeight.takeIf { it > 1 }
+                        ?: pipelines["primary"]?.requestedHeight?.takeIf { it > 1 }
+                        ?: pipelines["primary"]?.height?.takeIf { it > 1 }
+                        ?: targetPipeline.lastValidHeight.coerceAtLeast(720)
+                    targetPipeline.setTier(DisplayTier.VISIBLE, "secondary_launch_requested")
+                    if (!targetPipeline.isEncoderRunning() || targetPipeline.width <= 1 || targetPipeline.height <= 1) {
+                        val rebuildDeferred = kotlinx.coroutines.CompletableDeferred<Unit>()
+                        targetPipeline.rebuild(fallbackW, fallbackH, force = true, onComplete = rebuildDeferred)
+                        withTimeoutOrNull(2500L) { rebuildDeferred.await() }
+                    }
+                } else {
+                    targetPipeline.setTier(DisplayTier.ACTIVE, "primary_launch_requested")
+                }
 
                 // ─────────────────────────────────────────────────────────────────
                 // 💡 [개선 1] 인코더 그릇 최적화 선제 집행 (앱이 켜지기 "전"에 실행해야 함)
@@ -767,15 +793,7 @@ class MirrorForegroundService : Service() {
                 /* ### 수정 시작 ### */
                 // Handle dynamic screen layout updates declaratively to update pane viewports.
                 server.setLayoutUpdateListener { pipelinesArray ->
-                    for (i in 0 until pipelinesArray.length()) {
-                        val pipeObj = pipelinesArray.optJSONObject(i) ?: continue
-                        val paneId = pipeObj.optString("id")
-                        val w = pipeObj.optInt("width", 0)
-                        val h = pipeObj.optInt("height", 0)
-                        if (!paneId.isNullOrEmpty()) {
-                            pipelines[paneId]?.onViewportChange(w, h)
-                        }
-                    }
+                    applyBrowserLayoutUpdate(pipelinesArray)
                 }
                 /* ### 수정 끝 ### */
                 server.setTextInputListener { injectText(it) }
@@ -874,15 +892,61 @@ class MirrorForegroundService : Service() {
             serviceScope.launch {
                 kotlinx.coroutines.delay(200)
                 isInitialRebuildTriggered = true
-                pipelines.values.forEach { pipeline ->
-                    val finalW = if (pipeline.width > 0) pipeline.width else 720
-                    val finalH = if (pipeline.height > 0) pipeline.height else 720
-                    
-                    // 🔴 바깥 오케스트레이터 정책 프레임워크를 경유하여 비동기 리빌딩 및 예외 일괄 청소 수행
-                    triggerPipelineRebuildWithPolicy(pipeline.name, finalW, finalH, force = true)
+                val primary = pipelines["primary"] ?: return@launch
+                val finalW = if (primary.width > 1) primary.width else primary.lastValidWidth.coerceAtLeast(720)
+                val finalH = if (primary.height > 1) primary.height else primary.lastValidHeight.coerceAtLeast(720)
+                paneVisibility["primary"] = true
+                primary.setTier(DisplayTier.ACTIVE, "browser_connected")
+                triggerPipelineRebuildWithPolicy(primary.name, finalW, finalH, force = true)
+
+                pipelines["secondary"]?.let { secondary ->
+                    if (paneVisibility["secondary"] != true) {
+                        secondary.setTier(DisplayTier.SUSPENDED, "browser_connected_secondary_hidden")
+                    }
                 }
             }
         } catch (t: Throwable) { Log.e(TAG, "Failed onBrowserConnected", t); markTerminal(TerminalReason.BROWSER_ACTIVATION_FAILED) }
+    }
+
+    private fun applyBrowserLayoutUpdate(panes: JSONArray) {
+        val paneStates = mutableListOf<Triple<String, android.util.Size, Boolean>>()
+        val seen = mutableSetOf<String>()
+        for (i in 0 until panes.length()) {
+            val paneObj = panes.optJSONObject(i) ?: continue
+            val paneId = paneObj.optString("id")
+            if (paneId.isBlank()) continue
+            val w = paneObj.optInt("width", 0)
+            val h = paneObj.optInt("height", 0)
+            val visible = paneObj.optBoolean("visible", w > 0 && h > 0)
+            seen += paneId
+            paneVisibility[paneId] = visible
+            paneStates += Triple(paneId, android.util.Size(w, h), visible)
+        }
+
+        val visiblePanes = paneStates.filter { (_, size, visible) -> visible && size.width > 0 && size.height > 0 }
+        val singleVisiblePane = if (visiblePanes.size == 1) visiblePanes.first().first else null
+
+        for ((paneId, size, visible) in paneStates) {
+            val pipeline = pipelines[paneId] ?: continue
+            if (visible && size.width > 0 && size.height > 0) {
+                val targetTier = if (singleVisiblePane == paneId || (singleVisiblePane == null && paneId == "primary")) {
+                    DisplayTier.ACTIVE
+                } else {
+                    DisplayTier.VISIBLE
+                }
+                serviceScope.launch { pipeline.setTier(targetTier, "browser_layout_visible") }
+                pipeline.onViewportChange(size.width, size.height)
+            } else {
+                serviceScope.launch { pipeline.setTier(DisplayTier.SUSPENDED, "browser_layout_hidden") }
+            }
+        }
+
+        pipelines.forEach { (paneId, pipeline) ->
+            if (!seen.contains(paneId) && paneVisibility[paneId] == true) {
+                paneVisibility[paneId] = false
+                serviceScope.launch { pipeline.setTier(DisplayTier.SUSPENDED, "browser_layout_absent") }
+            }
+        }
     }
 
     private fun onBrowserDisconnected() {
@@ -1383,9 +1447,11 @@ class MirrorForegroundService : Service() {
         @Volatile var lastFrameRenderedTime = 0L
         /* ### 수정 끝 ### */
         
+        private val encoderSession = java.util.concurrent.atomic.AtomicLong(0)
 
         var videoEncoder: VideoEncoder? = null; var jpegEncoder: JpegEncoder? = null; var currentEncoderSurface: Surface? = null
         var pipelineState = PipelineState.IDLE; var pendingRebuildRequest: RebuildRequest? = null
+        @Volatile var displayTier: DisplayTier = if (name == "primary") DisplayTier.ACTIVE else DisplayTier.SUSPENDED
 
         var currentBitrate = 0; var currentApp = ""; var currentWebUrl: String? = null
         var isVideoApp = false
@@ -1400,10 +1466,46 @@ class MirrorForegroundService : Service() {
 
         private val pipelineMutex = Mutex()
 
-        fun onViewportChange(w: Int, h: Int, layoutMode: String = "") {
+        fun isEncoderRunning(): Boolean {
+            return if (currentCodecMode == "mjpeg") jpegEncoder != null else videoEncoder != null
+        }
+
+        suspend fun setTier(next: DisplayTier, reason: String) {
+            if (displayTier == next && (next == DisplayTier.ACTIVE || next == DisplayTier.VISIBLE)) return
+            displayTier = next
+            Log.i(TAG, "[$name Pipeline] Display tier -> $next ($reason)")
+            when (next) {
+                DisplayTier.ACTIVE, DisplayTier.VISIBLE -> {
+                    val targetW = requestedWidth.takeIf { it > 1 } ?: lastValidWidth.coerceAtLeast(720)
+                    val targetH = requestedHeight.takeIf { it > 1 } ?: lastValidHeight.coerceAtLeast(720)
+                    if (!isEncoderRunning() && displayId >= 0 && browserConnected) {
+                        rebuild(targetW, targetH, force = true)
+                    }
+                }
+                DisplayTier.SUSPENDED, DisplayTier.PARKED -> suspendEncoder(reason)
+            }
+        }
+
+        suspend fun suspendEncoder(reason: String) {
+            Log.i(TAG, "[$name Pipeline] Suspending encoder and stream while preserving VD/app session. Reason=$reason")
+            resizeJob?.cancel()
+            videoEncoder?.release(); videoEncoder = null
+            jpegEncoder?.release(); jpegEncoder = null
+            currentEncoderSurface = null
+            lastFrameRenderedTime = 0L
+            try { touchInjector?.setVirtualDisplayInjector(null) } catch (_: Exception) {}
+            if (displayId >= 0) {
+                runBinderSafe { controller.setSurface(null) }
+            }
+            mirrorServer?.setKeyframeRequester(name) {}
+            mirrorServer?.pauseStream(name, displayId, width, height)
+            adaptiveBitrateManager.rebalanceBitrates()
+        }
+
+        fun onViewportChange(w: Int, h: Int) {
             if (w <= 0 && h <= 0) { 
-                Log.w(TAG, "[$name Pipeline] Viewport parameters shrunk below zero boundary -> Destroying graphics surface context.")
-                resizeJob?.cancel(); serviceScope.launch { release() }; return 
+                Log.w(TAG, "[$name Pipeline] Viewport hidden or invalid -> suspending encoder without destroying VD.")
+                resizeJob?.cancel(); serviceScope.launch { setTier(DisplayTier.SUSPENDED, "viewport_invalid") }; return
             }
             
             /* ### 수정 시작 ### */
@@ -1419,9 +1521,10 @@ class MirrorForegroundService : Service() {
             resizeJob?.cancel()
             resizeJob = serviceScope.launch { 
                 if (!isFirstSetup) {
-                    kotlinx.coroutines.delay(500L) 
+                    kotlinx.coroutines.delay(120L) 
                 }
-                rebuild(w, h, forceSingle = (layoutMode == "single")) 
+                val forceResume = !isEncoderRunning()
+                rebuild(w, h, force = forceResume)
             }
             /* ### 수정 끝 ### */
         }
@@ -1495,6 +1598,7 @@ class MirrorForegroundService : Service() {
         /* ### 수정 끝 ### */
 
         suspend fun executeActualRebuild(targetWidth: Int, targetHeight: Int, force: Boolean = false, forceSingle: Boolean = false) {
+            val sessionId = encoderSession.incrementAndGet()
             val effectiveMaxHeight = targetHeight.coerceAtMost(currentMaxHeight)
             var targetW = targetWidth; var targetH = targetHeight
             if (targetH > effectiveMaxHeight) { val scale = effectiveMaxHeight.toFloat() / targetH; targetH = effectiveMaxHeight; targetW = (targetW * scale).toInt() }
@@ -1510,6 +1614,8 @@ class MirrorForegroundService : Service() {
 
             // Reset frame indicator on viewport/encoder layout reconstruction to guarantee correct watchdog operation
             lastFrameRenderedTime = 0L
+            mirrorServer?.beginStreamGeneration(name, displayId, w, h)
+            var firstFrameMetadataSent = false
 
             videoEncoder?.release(); videoEncoder = null
             jpegEncoder?.release(); jpegEncoder = null
@@ -1522,9 +1628,17 @@ class MirrorForegroundService : Service() {
                 mirrorServer?.clearCachedSpsPps(name)
                 val jpeg = JpegEncoder(w, h, fps = 15, quality = 65); val inputSurface = jpeg.createInputSurface(); jpegEncoder = jpeg
                 startEncoderTask = {
-                    jpeg.start { data, key ->
-                        lastFrameRenderedTime = System.currentTimeMillis()
-                        mirrorServer?.broadcastFrame(data, key, name)
+                    if (encoderSession.get() != sessionId || jpegEncoder !== jpeg || currentEncoderSurface !== inputSurface) {
+                        Log.i(TAG, "[$name Pipeline] Skipping stale JPEG encoder start for session=$sessionId")
+                    } else {
+                        jpeg.start { data, key ->
+                            lastFrameRenderedTime = System.currentTimeMillis()
+                            if (!firstFrameMetadataSent) {
+                                firstFrameMetadataSent = true
+                                mirrorServer?.markFirstFrameReady(name, displayId, w, h)
+                            }
+                            mirrorServer?.broadcastFrame(data, key, name)
+                        }
                     }
                 }
                 
@@ -1566,9 +1680,17 @@ class MirrorForegroundService : Service() {
                 /* ### 수정 끝 ### */
                 encoder.onSpsPps = { mirrorServer?.broadcastSpsPps(it, name) }
                 startEncoderTask = {
-                    encoder.start { data, key ->
-                        lastFrameRenderedTime = System.currentTimeMillis()
-                        mirrorServer?.broadcastFrame(data, key, name)
+                    if (encoderSession.get() != sessionId || videoEncoder !== encoder || currentEncoderSurface !== inputSurface) {
+                        Log.i(TAG, "[$name Pipeline] Skipping stale video encoder start for session=$sessionId")
+                    } else {
+                        encoder.start { data, key ->
+                            lastFrameRenderedTime = System.currentTimeMillis()
+                            if (!firstFrameMetadataSent) {
+                                firstFrameMetadataSent = true
+                                mirrorServer?.markFirstFrameReady(name, displayId, w, h)
+                            }
+                            mirrorServer?.broadcastFrame(data, key, name)
+                        }
                     }
                 }
                 

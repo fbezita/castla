@@ -15,6 +15,24 @@ class ControlSocket(
 
     companion object {
         private const val TAG = "ControlSocket"
+        private const val DECODER_TAG = "CastlaDecoder"
+        private val QUIET_DECODER_EVENTS = setOf(
+            "metadata",
+            "configFrame",
+            "keyFrame",
+            "frameSummary",
+            "jmuxerReady",
+            "jmuxerConfig",
+            "jmuxerCreated",
+            "jmuxerMseReady",
+            "jmuxerQueue",
+            "jmuxerFeedSummary",
+            "videoLoadedMetadata",
+            "videoLoadedData",
+            "videoCanPlay",
+            "videoPlaying",
+            "videoHasCurrentData"
+        )
     }
 
     override fun onOpen() {
@@ -34,8 +52,6 @@ class ControlSocket(
                 return
             }
 //            Log.d(TAG, "Text message received: ${message.textPayload?.take(50)}")
-            Log.d(TAG, "Text message received: ${message.textPayload}")
-
             val json = JSONObject(message.textPayload)
             val type = json.optString("type", "")
 
@@ -90,6 +106,24 @@ class ControlSocket(
                     val text = json.optString("text", "")
                     server.onCompositionUpdate(backspaces, text)
                 }
+                "ime" -> {
+                    when (json.optString("op", "")) {
+                        "commitText" -> {
+                            val text = json.optString("text", "")
+                            if (text.isNotEmpty()) server.onTextInput(text)
+                        }
+                        "setComposingText" -> {
+                            val replaceChars = json.optInt("replaceChars", 0)
+                            val text = json.optString("text", "")
+                            server.onCompositionUpdate(replaceChars, text)
+                        }
+                        "deleteSurroundingText" -> {
+                            val beforeLength = json.optInt("beforeLength", 1).coerceAtLeast(0)
+                            repeat(beforeLength) { server.onKeyEvent(67) }
+                        }
+                        "finishComposingText" -> server.onCompositionUpdate(0, "")
+                    }
+                }
                 "goHome" -> {
                     server.onGoHomeRequest()
                 }
@@ -123,6 +157,14 @@ class ControlSocket(
                         avgDelayMs = json.optDouble("avgDelayMs", 0.0),
                         backlogDrops = json.optInt("backlogDrops", 0)
                     )
+                }
+                "decoderStatus" -> {
+                    val pane = json.optString("pane", "primary")
+                    val event = json.optString("event", "")
+                    val detail = json.optString("detail", "")
+                    if (!QUIET_DECODER_EVENTS.contains(event)) {
+                        Log.w(DECODER_TAG, "[$pane] $event ${detail.take(180)}")
+                    }
                 }
                 "bubbleClosed" -> {
                     server.onBubbleClosed()

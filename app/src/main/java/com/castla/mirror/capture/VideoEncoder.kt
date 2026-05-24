@@ -30,6 +30,9 @@ class VideoEncoder(
     private var encoderThread: HandlerThread? = null
     private var encoderHandler: Handler? = null
     private var isRunning = false
+    private var lastAppliedBitrate: Int? = null
+    private var lastAppliedTextMode: Boolean? = null
+    private var lastAppliedQpOffset: Int? = null
 
     private var sps: ByteArray? = null
     private var pps: ByteArray? = null
@@ -39,6 +42,9 @@ class VideoEncoder(
      */
     fun setQualityProfile(bps: Int, isTextHeavy: Boolean, qpOffset: Int) {
         val currentCodec = codec ?: return
+        if (lastAppliedBitrate == bps && lastAppliedTextMode == isTextHeavy && lastAppliedQpOffset == qpOffset) {
+            return
+        }
         try {
             val params = Bundle().apply {
                 putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bps)
@@ -57,6 +63,9 @@ class VideoEncoder(
                 }
             }
             currentCodec.setParameters(params)
+            lastAppliedBitrate = bps
+            lastAppliedTextMode = isTextHeavy
+            lastAppliedQpOffset = qpOffset
             Log.i(TAG, "Dynamic encoder params applied. Bitrate: ${bps / 1000}kbps, TextMode: $isTextHeavy, QpOffset: $qpOffset")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to set dynamic quality profile parameters", e)
@@ -251,6 +260,9 @@ class VideoEncoder(
         stop()
         try { codec?.release() } catch (_: Exception) {}
         codec = null
+        lastAppliedBitrate = null
+        lastAppliedTextMode = null
+        lastAppliedQpOffset = null
         encoderThread?.quitSafely()
         encoderThread = null
         encoderHandler = null

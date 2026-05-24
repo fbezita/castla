@@ -224,7 +224,20 @@ class VirtualDisplayController(private val displayName: String) {
 
     /** Launch an app on this managed virtual display. */
     fun launchAppOnDisplay(packageName: String): Boolean {
-        return launchAppOnDisplayV2(packageName, forceStop = true)
+        val id = displayId
+        if (id < 0 || packageName.isEmpty()) return false
+        return try {
+            privilegedService?.launchAppOnDisplay(id, packageName)
+            Log.i(TAG, "[$displayName] Launched $packageName on virtual display $id")
+            true
+        } catch (e: SecurityException) {
+            Log.e(TAG, "[$displayName] Failed to launch $packageName on display $id (display not found?)", e)
+            displayId = -1
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "[$displayName] Failed to launch $packageName on display $id", e)
+            false
+        }
     }
 
     /** Launch an app on this managed virtual display with explicit cold start/forceStop control. */

@@ -14,6 +14,8 @@ import javax.net.ssl.SSLContext
 import fi.iki.elonen.NanoWSD
 import fi.iki.elonen.NanoWSD.WebSocket
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import com.castla.mirror.diagnostics.DiagnosticEvent
 import com.castla.mirror.diagnostics.MirrorDiagnostics
 import com.castla.mirror.utils.AppCategoryClassifier
@@ -179,6 +181,9 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     /* ### 수정 끝 ### */
 
     private var cachedSpsPps: ByteArray? = null
+    private val streamGenerations = ConcurrentHashMap<String, AtomicInteger>()
+    private val firstFrameReady = ConcurrentHashMap<String, Boolean>()
+    private val latestStreamMetadata = ConcurrentHashMap<String, String>()
 
     /* ### 수정 시작 ### */
     fun setLayoutUpdateListener(listener: (org.json.JSONArray) -> Unit) {
@@ -322,6 +327,16 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
             catch (e: Exception) { Log.w(TAG, "Failed to send cached thermal status", e) }
         }
 
+        var replayedMetadata = 0
+        latestStreamMetadata.values.forEach { json ->
+            try { socket.send(json) }
+            catch (e: Exception) { Log.w(TAG, "Failed to replay stream metadata", e) }
+            replayedMetadata++
+        }
+        if (replayedMetadata > 0) {
+            Log.i(TAG, "Replayed $replayedMetadata cached stream metadata message(s) to new control socket")
+        }
+
         updateConnectionState()
     }
 
@@ -348,6 +363,56 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
 
     private var primaryFrameSeqNum: Int = 0
     private var secondaryFrameSeqNum: Int = 0
+
+    fun beginStreamGeneration(channel: String = "primary", vdId: Int, width: Int, height: Int): Int {
+        val normalized = normalizeChannel(channel)
+        val generation = streamGenerations
+            .getOrPut(normalized) { AtomicInteger(0) }
+            .incrementAndGet()
+        firstFrameReady[normalized] = false
+        broadcastStreamMetadata(normalized, vdId, generation, width, height, streamReady = true, firstFrame = false)
+        return generation
+    }
+
+    fun markFirstFrameReady(channel: String = "primary", vdId: Int, width: Int, height: Int) {
+        val normalized = normalizeChannel(channel)
+        if (firstFrameReady[normalized] == true) return
+        firstFrameReady[normalized] = true
+        val generation = streamGenerations[normalized]?.get() ?: 0
+        broadcastStreamMetadata(normalized, vdId, generation, width, height, streamReady = true, firstFrame = true)
+    }
+
+    fun pauseStream(channel: String = "primary", vdId: Int, width: Int, height: Int) {
+        val normalized = normalizeChannel(channel)
+        firstFrameReady[normalized] = false
+        val generation = streamGenerations[normalized]?.get() ?: 0
+        broadcastStreamMetadata(normalized, vdId, generation, width, height, streamReady = false, firstFrame = false)
+    }
+
+    private fun broadcastStreamMetadata(
+        channel: String,
+        vdId: Int,
+        generation: Int,
+        width: Int,
+        height: Int,
+        streamReady: Boolean,
+        firstFrame: Boolean
+    ) {
+        val json = JSONObject().apply {
+            put("type", "streamMetadata")
+            put("sessionId", channel)
+            put("vdId", vdId)
+            put("generation", generation)
+            put("width", width)
+            put("height", height)
+            put("streamReady", streamReady)
+            put("firstFrameReady", firstFrame)
+        }
+        val payload = json.toString()
+        latestStreamMetadata[channel] = payload
+        Log.i(TAG, "Stream metadata: channel=$channel vdId=$vdId generation=$generation ${width}x$height streamReady=$streamReady firstFrame=$firstFrame")
+        broadcastControlMessage(payload)
+    }
 
     private fun fillVideoHeader(data: ByteArray, flags: Byte, seq: Int) {
         val tsMs = android.os.SystemClock.elapsedRealtime().toInt()
@@ -405,7 +470,8 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     /* ### 수정 끝 ### */
 
     fun broadcastFrame(data: ByteArray, isKeyFrame: Boolean, channel: String = "primary") {
-        val seq = if (channel == "secondary") ++secondaryFrameSeqNum else ++primaryFrameSeqNum
+        val normalized = normalizeChannel(channel)
+        val seq = if (normalized == "secondary") ++secondaryFrameSeqNum else ++primaryFrameSeqNum
         val flags: Byte = if (isKeyFrame) 0x01 else 0x00
         
         // Check if this is a pre-allocated array from VideoEncoder (size > 8)
@@ -423,7 +489,7 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
             header + data
         }
 
-        val sockets = if (channel == "secondary") secondaryVideoSockets else primaryVideoSockets
+        val sockets = if (normalized == "secondary") secondaryVideoSockets else primaryVideoSockets
         val deadSockets = mutableListOf<VideoStreamSocket>()
         for (socket in sockets) {
             try {
@@ -432,7 +498,11 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
                 deadSockets.add(socket)
             }
         }
-        deadSockets.forEach { unregisterVideoSocket(channel, it) }
+        deadSockets.forEach { unregisterVideoSocket(normalized, it) }
+    }
+
+    private fun normalizeChannel(channel: String): String {
+        return if (channel == "secondary") "secondary" else "primary"
     }
 
     private var cachedAudioConfig: ByteArray? = null
