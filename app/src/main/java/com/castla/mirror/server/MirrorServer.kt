@@ -21,7 +21,15 @@ import com.castla.mirror.diagnostics.MirrorDiagnostics
 import com.castla.mirror.utils.AppCategoryClassifier
 import com.castla.mirror.ott.OttCatalog
 
-data class TouchEvent(val action: String, val x: Float, val y: Float, val pointerId: Int, val pane: String = "primary")
+data class TouchEvent(
+    val action: String,
+    val x: Float,
+    val y: Float,
+    val pointerId: Int,
+    val pane: String = "primary",
+    val clientTsMs: Long = 0L,
+    val receivedAtElapsedMs: Long = 0L
+)
 
 class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
 
@@ -142,8 +150,18 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     private val secondaryVideoSockets = mutableSetOf<VideoStreamSocket>()
     private val controlSockets = mutableSetOf<ControlSocket>()
     private val audioSockets = mutableSetOf<AudioStreamSocket>()
+    private val controlSocketLock = Any()
+    private val activeControlSessionId = AtomicInteger(0)
+    @Volatile private var activeControlSocket: ControlSocket? = null
+    private val staleControlLogTimes = ConcurrentHashMap<Int, Long>()
+    @Volatile private var lastSkippedBroadcastLogAt = 0L
+    private val layoutUpdateReceivedCount = AtomicInteger(0)
+    private val layoutUpdateRelayedCount = AtomicInteger(0)
+    private val layoutUpdateDedupedCount = AtomicInteger(0)
+    @Volatile private var lastLayoutUpdateSignature: String = ""
 
     private var onTouchListener: ((TouchEvent) -> Unit)? = null
+    private var onTouchResetListener: (() -> Unit)? = null
     private var onCodecModeListener: ((String) -> Unit)? = null
     /* ### 수정 시작 ### */
     // Redundant onViewportChangeListener declaration has been completely removed.
@@ -193,6 +211,10 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
 
     fun setTouchListener(listener: (TouchEvent) -> Unit) {
         onTouchListener = listener
+    }
+
+    fun setTouchResetListener(listener: () -> Unit) {
+        onTouchResetListener = listener
     }
 
     fun setCodecModeListener(listener: (String) -> Unit) {
@@ -265,7 +287,7 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     }
 
     private fun updateConnectionState() {
-        val connected = primaryVideoSockets.isNotEmpty() || secondaryVideoSockets.isNotEmpty() || controlSockets.isNotEmpty()
+        val connected = primaryVideoSockets.isNotEmpty() || secondaryVideoSockets.isNotEmpty() || controlSocketCount() > 0
         if (connected != isBrowserConnected) {
             isBrowserConnected = connected
             if (!connected) {
@@ -279,7 +301,7 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     fun registerVideoSocket(channel: String, socket: VideoStreamSocket) {
         val sockets = if (channel == "secondary") secondaryVideoSockets else primaryVideoSockets
         sockets.add(socket)
-        Log.i(TAG, "$channel video client connected (total: ${sockets.size})")
+        Log.i(TAG, "[InputDebug] $channel video client connected (total: ${sockets.size}) control=${controlSockets.size} audio=${audioSockets.size}")
 
         /* ### 수정 시작 ### */
         // Playback cached H.264 SPS/PPS parameters ONLY if the display channel is not configured for MJPEG fallback mode.
@@ -302,19 +324,48 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     fun unregisterVideoSocket(channel: String, socket: VideoStreamSocket) {
         val sockets = if (channel == "secondary") secondaryVideoSockets else primaryVideoSockets
         sockets.remove(socket)
-        Log.i(TAG, "$channel video client disconnected (total: ${sockets.size})")
+        Log.i(TAG, "[InputDebug] $channel video client disconnected (total: ${sockets.size}) control=${controlSockets.size} audio=${audioSockets.size}")
         updateConnectionState()
     }
 
-    fun registerControlSocket(socket: ControlSocket) {
-        controlSockets.add(socket)
-        Log.i(TAG, "Control client connected (total: ${controlSockets.size})")
+    fun registerControlSocket(socket: ControlSocket): Int {
+        val staleSockets = mutableListOf<ControlSocket>()
+        val sessionId: Int
+        synchronized(controlSocketLock) {
+            sessionId = activeControlSessionId.incrementAndGet()
+            socket.attachSession(sessionId)
+            controlSockets.remove(socket)
+            controlSockets.add(socket)
+            staleSockets += controlSockets.filter { it !== socket }
+            staleSockets.forEach { stale ->
+                stale.markInactive("superseded_by_session_$sessionId")
+            }
+            controlSockets.retainAll(setOf(socket))
+            activeControlSocket = socket
+        }
+        staleSockets.forEach { stale ->
+            try {
+                stale.close(
+                    NanoWSD.WebSocketFrame.CloseCode.NormalClosure,
+                    "Superseded by control session $sessionId",
+                    false
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to close stale control socket ${stale.debugId}", e)
+            }
+        }
+        Log.i(
+            TAG,
+            "[InputDebug] Control client connected ${socket.debugSummary()} activeSessionId=${activeControlSessionId.get()} " +
+                "total=${controlSocketCount()} primaryVideo=${primaryVideoSockets.size} secondaryVideo=${secondaryVideoSockets.size} audio=${audioSockets.size}"
+        )
 
         // Send serverInit greeting with unique instanceId
         try {
             val initMsg = JSONObject().apply {
                 put("type", "serverInit")
                 put("instanceId", instanceId)
+                put("controlSessionId", sessionId)
             }
             socket.send(initMsg.toString())
         } catch (e: Exception) {
@@ -338,17 +389,28 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         }
 
         updateConnectionState()
+        return sessionId
     }
 
     fun unregisterControlSocket(socket: ControlSocket) {
-        controlSockets.remove(socket)
-        Log.i(TAG, "Control client disconnected (total: ${controlSockets.size})")
+        synchronized(controlSocketLock) {
+            controlSockets.remove(socket)
+            if (activeControlSocket === socket) {
+                activeControlSocket = null
+            }
+            socket.markUnregistered("unregister")
+        }
+        Log.i(
+            TAG,
+            "[InputDebug] Control client disconnected ${socket.debugSummary()} activeSessionId=${activeControlSessionId.get()} " +
+                "total=${controlSocketCount()} primaryVideo=${primaryVideoSockets.size} secondaryVideo=${secondaryVideoSockets.size} audio=${audioSockets.size}"
+        )
         updateConnectionState()
     }
 
     fun registerAudioSocket(socket: AudioStreamSocket) {
         audioSockets.add(socket)
-        Log.i(TAG, "Audio client connected (total: ${audioSockets.size})")
+        Log.i(TAG, "[InputDebug] Audio client connected total=${audioSockets.size} control=${controlSockets.size}")
         onAudioSocketConnectedListener?.invoke()
         cachedAudioConfig?.let {
             socket.sendBinary(it)
@@ -358,7 +420,7 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
 
     fun unregisterAudioSocket(socket: AudioStreamSocket) {
         audioSockets.remove(socket)
-        Log.i(TAG, "Audio client disconnected (total: ${audioSockets.size})")
+        Log.i(TAG, "[InputDebug] Audio client disconnected total=${audioSockets.size} control=${controlSockets.size}")
     }
 
     private var primaryFrameSeqNum: Int = 0
@@ -541,27 +603,112 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     }
     /* ### 수정 끝 ### */
 
-    fun controlSocketCount(): Int = controlSockets.size
+    fun controlSocketCount(): Int = synchronized(controlSocketLock) {
+        controlSockets.count { it.registered && it.active && it.sessionId == activeControlSessionId.get() }
+    }
+    fun videoSocketCount(channel: String): Int = if (channel == "secondary") secondaryVideoSockets.size else primaryVideoSockets.size
+    fun audioSocketCount(): Int = audioSockets.size
+    fun controlSocketRegistrySize(): Int = synchronized(controlSocketLock) { controlSockets.size }
+    fun socketDebugSummary(): String =
+        "controlActive=${controlSocketCount()} controlRegistry=${controlSocketRegistrySize()} " +
+            "primaryVideo=${primaryVideoSockets.size} secondaryVideo=${secondaryVideoSockets.size} audio=${audioSockets.size}"
+    fun layoutDebugSummary(): String =
+        "layoutReceived=${layoutUpdateReceivedCount.get()} layoutRelayed=${layoutUpdateRelayedCount.get()} layoutDeduped=${layoutUpdateDedupedCount.get()}"
+
+    fun shouldAcceptControlMessage(socket: ControlSocket): Boolean = synchronized(controlSocketLock) {
+        val activeSocket = activeControlSocket
+        val activeSession = activeControlSessionId.get()
+        val accepted = activeSocket === socket &&
+            socket.registered &&
+            socket.active &&
+            socket.sessionId == activeSession &&
+            controlSockets.contains(socket)
+        accepted
+    }
+
+    fun ensureActiveControlSocket(socket: ControlSocket): Boolean {
+        synchronized(controlSocketLock) {
+            val activeSocket = activeControlSocket
+            val activeSession = activeControlSessionId.get()
+            val alreadyAccepted = activeSocket === socket &&
+                socket.registered &&
+                socket.active &&
+                socket.sessionId == activeSession &&
+                controlSockets.contains(socket)
+            if (alreadyAccepted) {
+                return true
+            }
+            if (activeSocket == null) {
+                val adoptedSessionId = activeControlSessionId.incrementAndGet()
+                socket.attachSession(adoptedSessionId)
+                controlSockets.remove(socket)
+                controlSockets.add(socket)
+                activeControlSocket = socket
+                Log.w(
+                    TAG,
+                    "[InputDebug] Recovered orphan control socket ${socket.debugSummary()} adoptedSessionId=$adoptedSessionId"
+                )
+                try {
+                    val initMsg = JSONObject().apply {
+                        put("type", "serverInit")
+                        put("instanceId", instanceId)
+                        put("controlSessionId", adoptedSessionId)
+                    }
+                    socket.send(initMsg.toString())
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to resend serverInit during orphan control recovery", e)
+                }
+                updateConnectionState()
+                return true
+            }
+        }
+        return false
+    }
+
+    fun logStaleControlMessage(socket: ControlSocket, messageCount: Int) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val last = staleControlLogTimes[socket.debugId] ?: 0L
+        if (now - last < 2000L) return
+        staleControlLogTimes[socket.debugId] = now
+        val activeSocket = synchronized(controlSocketLock) { activeControlSocket }
+        val activeSession = activeControlSessionId.get()
+        Log.w(
+            TAG,
+            "[InputDebug] Rejecting control message from ${socket.debugSummary()} activeSessionId=$activeSession " +
+                "activeSocketId=${activeSocket?.debugId ?: -1} registrySize=${synchronized(controlSocketLock) { controlSockets.size }} " +
+                "messageCount=$messageCount"
+        )
+    }
 
     fun broadcastControlMessage(json: String) {
         // Cache thermal status so new control sockets receive it immediately
         if (json.contains("\"thermalStatus\"")) {
             cachedThermalJson = json
         }
-        val deadSockets = mutableListOf<ControlSocket>()
-        for (socket in controlSockets) {
-            try {
-                socket.send(json)
-            } catch (e: Exception) {
-                deadSockets.add(socket)
+        val socket = synchronized(controlSocketLock) { activeControlSocket }
+        if (socket == null || !shouldAcceptControlMessage(socket)) {
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (now - lastSkippedBroadcastLogAt >= 2000L) {
+                lastSkippedBroadcastLogAt = now
+                Log.w(TAG, "[InputDebug] broadcastControlMessage skipped activeSocket=${socket?.debugSummary() ?: "null"}")
             }
+            return
         }
-        deadSockets.forEach { unregisterControlSocket(it) }
+        try {
+            socket.send(json)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to send control message to active socket ${socket.debugId}", e)
+            unregisterControlSocket(socket)
+        }
     }
     
     // Callbacks from ControlSocket
     fun onTouchEvent(event: TouchEvent) {
         onTouchListener?.invoke(event)
+    }
+
+    fun onTouchReset() {
+        onTouchResetListener?.invoke()
     }
     
     fun onKeyframeRequest(channel: String = "primary") {
@@ -616,6 +763,29 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     
     /* ### 수정 시작 ### */
     fun onLayoutUpdate(pipelines: org.json.JSONArray) {
+        layoutUpdateReceivedCount.incrementAndGet()
+        val summary = buildString {
+            append("layout_update relay")
+            for (i in 0 until pipelines.length()) {
+                val pane = pipelines.optJSONObject(i) ?: continue
+                append(" | ")
+                append(pane.optString("id", "?"))
+                append("=")
+                append(pane.optInt("width", 0))
+                append("x")
+                append(pane.optInt("height", 0))
+                append(" visible=")
+                append(pane.optBoolean("visible", true))
+            }
+        }
+        if (summary == lastLayoutUpdateSignature) {
+            val deduped = layoutUpdateDedupedCount.incrementAndGet()
+            Log.i(TAG, "[InputDebug] layout_update deduped count=$deduped summary=$summary")
+            return
+        }
+        lastLayoutUpdateSignature = summary
+        layoutUpdateRelayedCount.incrementAndGet()
+        Log.i(TAG, summary)
         onLayoutUpdateListener?.invoke(pipelines)
     }
     /* ### 수정 끝 ### */

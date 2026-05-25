@@ -11,6 +11,7 @@
   export let touchRouter: TouchRouter;
   export let runtime: StreamRuntime;
   export let paneStyle = '';
+  export let fitMode: 'contain' | 'fill' = 'contain';
 
   let canvas: HTMLCanvasElement;
   let video: HTMLVideoElement;
@@ -18,32 +19,63 @@
   let decoder: DecoderBackend | undefined;
   let detachVideo: (() => void) | undefined;
   let detachConnection: (() => void) | undefined;
+  let detachSession: (() => void) | undefined;
   let decoderError = '';
   let backend: 'jmuxer' | 'webcodecs' = 'jmuxer';
   let currentGeneration = -1;
+  let decoderSession = 0;
+  let stallTimer = 0;
+  let lastRecoveryAt = 0;
+  let recoveryAttempt = 0;
+  let lastDecoderRecoveryAt = 0;
 
   onMount(async () => {
+    const debug = ((window as Window & { __castlaInputDebug?: Record<string, unknown> }).__castlaInputDebug ??= {});
+    const livePanes = ((debug.liveViewportPanes as Record<string, number> | undefined) ??= {});
+    livePanes[viewport.pane] = (livePanes[viewport.pane] ?? 0) + 1;
+    console.info('[CastlaTouch] viewport pane mount', {
+      pane: viewport.pane,
+      livePaneInstances: livePanes[viewport.pane],
+      estimatedPointerListeners: livePanes[viewport.pane] * 4
+    });
     await tick();
     detachConnection = runtime.onConnectionChange(async (connected) => {
       if (!connected) {
-        hideSurface();
         return;
       }
-      if (decoder) {
-        await refreshDecoder();
-      }
+      runtime.requestKeyframe(viewport.pane);
     });
-    await initializeDecoder();
+    detachSession = runtime.onSessionChange(async () => {
+      currentGeneration = -1;
+      await refreshDecoder();
+    });
+    stallTimer = window.setInterval(() => {
+      void maybeRecoverStalledPane();
+    }, 1200);
+    await refreshDecoder();
   });
 
   onDestroy(() => {
+    const debug = (window as Window & { __castlaInputDebug?: Record<string, unknown> }).__castlaInputDebug;
+    const livePanes = debug?.liveViewportPanes as Record<string, number> | undefined;
+    if (livePanes) {
+      livePanes[viewport.pane] = Math.max(0, (livePanes[viewport.pane] ?? 1) - 1);
+      console.info('[CastlaTouch] viewport pane destroy', {
+        pane: viewport.pane,
+        livePaneInstances: livePanes[viewport.pane],
+        estimatedPointerListeners: livePanes[viewport.pane] * 4
+      });
+    }
+    window.clearInterval(stallTimer);
     detachConnection?.();
+    detachSession?.();
     detachVideo?.();
     decoder?.destroy();
   });
 
   $: if (viewport.generation > 0 && viewport.generation !== currentGeneration) {
     currentGeneration = viewport.generation;
+    recoveryAttempt = 0;
     if (decoder) {
       refreshDecoder();
     }
@@ -63,43 +95,78 @@
     if (video) video.style.opacity = '0';
   }
 
-  async function initializeDecoder() {
+  async function initializeDecoder(session: number) {
     try {
       decoderError = '';
       const wantsWebCodecs = new URLSearchParams(location.search).get('decoder') === 'webcodecs';
       const canUseWebCodecs = wantsWebCodecs && window.isSecureContext && 'VideoDecoder' in window;
+      let nextDecoder: DecoderBackend | undefined;
       if (canUseWebCodecs) {
         backend = 'webcodecs';
-        decoder = new WebCodecsBackend(() => markReady(), () => runtime.requestKeyframe(viewport.pane));
-        await decoder.initialize(canvas);
+        nextDecoder = new WebCodecsBackend(() => markReady(), () => runtime.requestKeyframe(viewport.pane));
+        await nextDecoder.initialize(canvas);
         runtime.setCodec(viewport.pane, 'h264', 'High');
       } else {
         backend = 'jmuxer';
-        decoder = new JMuxerBackend(
+        nextDecoder = new JMuxerBackend(
           () => markReady(),
           (event, detail) => runtime.reportDecoderStatus(viewport.pane, event, detail)
         );
-        await decoder.initialize(video);
+        await nextDecoder.initialize(video);
         runtime.setCodec(viewport.pane, 'h264', 'High');
       }
-      detachVideo ??= runtime.attachVideo(viewport.pane, (frame) => decoder?.decode(frame));
+
+      if (session !== decoderSession) {
+        nextDecoder.destroy();
+        return;
+      }
+
+      decoder = nextDecoder;
+      detachVideo = runtime.attachVideo(viewport.pane, (frame) => decoder?.decode(frame));
       runtime.requestKeyframe(viewport.pane);
     } catch (error) {
-      decoderError = error instanceof Error ? error.message : String(error);
+      if (session === decoderSession) {
+        decoderError = error instanceof Error ? error.message : String(error);
+      }
     }
   }
 
   async function refreshDecoder() {
+    const session = ++decoderSession;
     detachVideo?.();
     detachVideo = undefined;
     decoder?.destroy();
     decoder = undefined;
     hideSurface();
-    video.pause();
-    video.removeAttribute('src');
-    video.load();
+    decoderError = '';
+    if (video) {
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+    }
     await tick();
-    await initializeDecoder();
+    await initializeDecoder(session);
+  }
+
+  async function maybeRecoverStalledPane() {
+    if (!viewport.visible || !decoder) return;
+    if (currentGeneration <= 0) return;
+    const sample = runtime.health.sample(viewport.pane);
+    if (!sample.decoderStalled) {
+      recoveryAttempt = 0;
+      return;
+    }
+    const now = performance.now();
+    if (now - lastRecoveryAt < 5000) return;
+    lastRecoveryAt = now;
+    recoveryAttempt += 1;
+    runtime.health.beginRecovery(viewport.pane, 5000);
+    runtime.reportDecoderStatus(viewport.pane, 'stallRecover', `generation=${currentGeneration} attempt=${recoveryAttempt}`);
+    if (recoveryAttempt >= 3 && now - lastDecoderRecoveryAt > 20000) {
+      lastDecoderRecoveryAt = now;
+      await refreshDecoder();
+    }
+    runtime.recoverPaneStream(viewport.pane);
   }
 </script>
 
@@ -109,13 +176,13 @@
   class="viewport-pane"
   style={paneStyle}
   data-pane={viewport.pane}
-  on:pointerdown={(event) => touchRouter.pointer(event, viewport)}
-  on:pointermove={(event) => touchRouter.pointer(event, viewport)}
-  on:pointerup={(event) => touchRouter.pointer(event, viewport)}
-  on:pointercancel={(event) => touchRouter.pointer(event, viewport)}
+  on:pointerdown={(event) => touchRouter.pointer(event, viewport, fitMode)}
+  on:pointermove={(event) => touchRouter.pointer(event, viewport, fitMode)}
+  on:pointerup={(event) => touchRouter.pointer(event, viewport, fitMode)}
+  on:pointercancel={(event) => touchRouter.pointer(event, viewport, fitMode)}
 >
-  <video class:hidden={backend !== 'jmuxer'} bind:this={video} id={`video-${viewport.pane}`} playsinline muted autoplay></video>
-  <canvas class:hidden={backend !== 'webcodecs'} bind:this={canvas} id={`canvas-${viewport.pane}`}></canvas>
+  <video class:hidden={backend !== 'jmuxer'} class:fill-mode={fitMode === 'fill'} bind:this={video} id={`video-${viewport.pane}`} playsinline muted autoplay></video>
+  <canvas class:hidden={backend !== 'webcodecs'} class:fill-mode={fitMode === 'fill'} bind:this={canvas} id={`canvas-${viewport.pane}`}></canvas>
   {#if decoderError}
     <div class="decoder-error">{decoderError}</div>
   {/if}
@@ -140,6 +207,12 @@
     inset: 0;
     width: 100%;
     height: 100%;
+    object-fit: contain;
+    object-position: center;
+  }
+
+  video.fill-mode,
+  canvas.fill-mode {
     object-fit: fill;
   }
 

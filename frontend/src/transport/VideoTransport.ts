@@ -12,7 +12,11 @@ export class VideoTransport {
   ) {}
 
   connect(): void {
-    this.socket?.close();
+    const previous = this.socket;
+    if (previous) {
+      previous.onclose = null;
+      previous.close();
+    }
     const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
     this.socket = new WebSocket(`${protocol}://${this.host}/ws/video?channel=${encodeURIComponent(this.pane)}`);
     this.socket.binaryType = 'arraybuffer';
@@ -25,8 +29,16 @@ export class VideoTransport {
 
   close(): void {
     window.clearTimeout(this.reconnectTimer);
-    this.socket?.close();
+    if (this.socket) {
+      this.socket.onclose = null;
+      this.socket.close();
+    }
     this.socket = undefined;
+  }
+
+  reconnectNow(): void {
+    window.clearTimeout(this.reconnectTimer);
+    this.connect();
   }
 
   private scheduleReconnect(): void {

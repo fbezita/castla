@@ -10,14 +10,27 @@
 
   const runtime = new StreamRuntime(location.host);
   const compositor = new BrowserCompositor(runtime, compositorStore);
-  const touchRouter = new TouchRouter(runtime.control);
-  const imeBridge = new ImeBridge(runtime.control);
+  let touchRouter = new TouchRouter(runtime);
+  let imeBridge = new ImeBridge(runtime.control);
+  let frontendResetEpoch = 0;
+
+  runtime.onFrontendReset((reason) => {
+    console.info('[CastlaFrontend] reset interaction shell', { reason });
+    (document.activeElement as HTMLElement | null)?.blur?.();
+    touchRouter.dispose();
+    touchRouter = new TouchRouter(runtime);
+    imeBridge = new ImeBridge(runtime.control);
+    frontendResetEpoch += 1;
+  });
 
   compositor.start();
+  console.info('[CastlaFrontend] app bootstrap', { host: location.host });
 </script>
 
 <main class="app-shell">
-  <ViewportHost {touchRouter} {runtime} />
+  {#key frontendResetEpoch}
+    <ViewportHost {touchRouter} {runtime} />
+  {/key}
   <AppLauncher {runtime} />
   <DiagnosticsOverlay />
   <input class="ime-proxy" aria-hidden="true" on:compositionstart={(event) => imeBridge.compositionStart(event)}

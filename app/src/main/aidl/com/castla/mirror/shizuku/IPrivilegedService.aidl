@@ -194,4 +194,9 @@ interface IPrivilegedService {
      * Move an active task to the target virtual display natively via IActivityTaskManager.
      */
     boolean moveTaskToDisplayNative(int taskId, int displayId) = 33;
+
+    /**
+     * Inject a full MotionEvent on the specified display and return whether InputManager accepted it.
+     */
+    boolean injectMotionEventWithResult(int displayId, in MotionEvent event) = 34;
 }

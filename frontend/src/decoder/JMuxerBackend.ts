@@ -19,6 +19,7 @@ export class JMuxerBackend implements DecoderBackend {
   private pendingPayloads: Uint8Array[] = [];
   private fedFrames = 0;
   private rendered = false;
+  private destroyed = false;
 
   constructor(onFrame?: () => void, onStatus?: (event: string, detail?: string) => void) {
     this.onFrame = onFrame;
@@ -28,6 +29,7 @@ export class JMuxerBackend implements DecoderBackend {
   async initialize(target: HTMLCanvasElement | HTMLVideoElement): Promise<void> {
     if (!(target instanceof HTMLVideoElement)) throw new Error('JMuxer backend requires video');
     if (!window.JMuxer) throw new Error('JMuxer unavailable');
+    this.destroyed = false;
     this.video = target;
     target.muted = true;
     target.playsInline = true;
@@ -85,6 +87,7 @@ export class JMuxerBackend implements DecoderBackend {
   }
 
   destroy(): void {
+    this.destroyed = true;
     this.muxer?.destroy();
     this.muxer = undefined;
     this.pendingPayloads = [];
@@ -114,7 +117,10 @@ export class JMuxerBackend implements DecoderBackend {
     if (this.fedFrames === 1 || this.fedFrames % 120 === 0) {
       this.reportVideoState('jmuxerFeedSummary', `fed=${this.fedFrames} bytes=${payload.byteLength}`);
     }
-    this.video.play().catch((error) => this.onStatus?.('videoPlayError', String(error)));
+    this.video.play().catch((error) => {
+      if (this.destroyed || isAbortError(error)) return;
+      this.onStatus?.('videoPlayError', String(error));
+    });
     if (!this.rendered && this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
       this.rendered = true;
       this.reportVideoState('videoHasCurrentData');
@@ -133,6 +139,10 @@ export class JMuxerBackend implements DecoderBackend {
       `${prefix} ready=${this.video.readyState} paused=${this.video.paused} t=${this.video.currentTime.toFixed(3)} vw=${this.video.videoWidth} vh=${this.video.videoHeight} buffered=${ranges.join(',')}`
     );
   }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError';
 }
 
 function concat(a: ArrayBuffer, b: ArrayBuffer): ArrayBuffer {

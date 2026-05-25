@@ -2,348 +2,322 @@
 
 Last updated: 2026-05-25
 
-This document summarizes the current real runtime structure of the project after the Svelte frontend migration, the stream-generation stabilization work, and the ongoing launcher/App Pair restoration work.
+This document summarizes the current runtime structure after the Svelte frontend migration, split-layout stabilization, pane-local video recovery work, and the latest frontend touch quarantine changes.
 
 ## Project Intent
 
-Castla is a remote Android workspace compositor rather than simple phone-screen mirroring.
+Castla is a remote Android workspace compositor, not simple screen mirroring.
 
 The intended model is:
 
-- Android owns persistent VirtualDisplays and app/task placement.
-- The browser owns viewport composition, split ratio, and remote interaction UX.
-- Stream transitions are synchronized with generation metadata and first-frame readiness.
-- The remote screen should stay usable even when app layout, split state, or browser connections change.
+- Android owns VirtualDisplays, encoder lifecycle, app/task placement, and MotionEvent injection.
+- The browser owns split composition, launcher UX, fullscreen/split transitions, decoder lifecycle, and remote interaction gating.
+- Layout is browser-authored and Android-interpreted.
+- Video recovery should be pane-local whenever possible.
+- Touch recovery should be frontend-first because browser pointer/capture state can outlive Android touch reset.
 
-## Current Runtime Shape
+## Runtime Entry Points
 
-The runtime is still hybrid.
+Production runtime is still service-driven.
 
-Android production flow is still centered in:
+Android:
 
 - `app/src/main/java/com/castla/mirror/service/MirrorForegroundService.kt`
 - `app/src/main/java/com/castla/mirror/server/MirrorServer.kt`
 - `app/src/main/java/com/castla/mirror/server/ControlSocket.kt`
 - `app/src/main/java/com/castla/mirror/capture/VirtualDisplayController.kt`
+- `app/src/main/java/com/castla/mirror/input/TouchInjector.kt`
 
-Newer compositor/session abstractions exist under:
+Frontend:
 
-- `app/src/main/java/com/castla/mirror/compositor/`
+- `frontend/src/App.svelte`
+- `frontend/src/runtime/StreamRuntime.ts`
+- `frontend/src/components/ViewportHost.svelte`
+- `frontend/src/components/ViewportPane.svelte`
+- `frontend/src/touch/TouchRouter.ts`
+- `frontend/src/transport/ControlTransport.ts`
+- `frontend/src/transport/VideoTransport.ts`
 
-but they are still architectural scaffolding more than the live control center.
-
-Frontend production assets now come from:
-
-- `frontend/src`
-
-and are built into:
+Built frontend assets are copied to:
 
 - `app/src/main/assets/web`
 
-The old plain JS asset tree has largely been replaced by the Svelte + TypeScript frontend, but legacy behavior is still being restored feature-by-feature in the new UI.
+The newer `app/src/main/java/com/castla/mirror/compositor/` tree still exists, but the live orchestration path is still centered on `MirrorForegroundService.MirroringPipeline`.
 
-## Android Structure
+## Android Runtime
 
-### Main Active Runtime Files
+`MirrorForegroundService.MirroringPipeline` owns the active Android-side pane state:
 
-- `app/src/main/java/com/castla/mirror/service/MirrorForegroundService.kt`
-- `app/src/main/java/com/castla/mirror/server/MirrorServer.kt`
-- `app/src/main/java/com/castla/mirror/server/ControlSocket.kt`
-- `app/src/main/java/com/castla/mirror/capture/VideoEncoder.kt`
-- `app/src/main/java/com/castla/mirror/capture/VirtualDisplayController.kt`
+- `primary` / `secondary` pane pipelines
+- pane visibility and display tier
+- VirtualDisplay creation, resize, rebuild, and release
+- encoder/surface lifecycle
+- app launch and app restore
+- touch injector binding to the current virtual display
 
-### Important Compositor Scaffolding
+`MirrorServer` owns:
 
-- `DisplayTier.kt`
-- `DisplaySessionRegistry.kt`
-- `PersistentVirtualDisplaySession.kt`
-- `EncoderBudgetManager.kt`
-- `ResourcePolicyManager.kt`
-- `LayoutCoordinator.kt`
-- `LifecycleStateMachine.kt`
-- `ServerLayer.kt`
-- `StreamGenerationState.kt`
+- static web asset serving
+- `/api/apps`
+- `/api/icon`
+- control websocket
+- per-pane video websocket
+- stream metadata broadcast/replay
+- keyframe request callbacks
 
-### Important Reality Check
+`ControlSocket` parses browser commands, including:
 
-The production lifecycle is still effectively driven by `MirrorForegroundService.MirroringPipeline`.
+- `touch`
+- `touchReset`
+- `layout_update`
+- `launchApp`
+- `requestKeyframe`
+- `codec`
+- `ping`
 
-The service currently owns:
+## Layout Model
 
-- `primary` / `secondary` pipelines
-- browser-driven layout updates
-- VirtualDisplay rebuild scheduling
-- encoder lifecycle
-- app launching
-- suspend/visible/active tier transitions
+`ViewportHost.svelte` is the only authoritative frontend layout sender.
 
-## Current Android Lifecycle Model
-
-The service currently supports:
-
-- `primary` and `secondary` panes
-- generation-based stream metadata
-- first-frame signaling
-- browser-driven size and visibility changes
-- sequentialized VirtualDisplay rebuild work
-- stale encoder-start suppression
-
-Important methods to know:
-
-- `onBrowserConnected()`
-- `applyBrowserLayoutUpdate(...)`
-- `MirroringPipeline.onViewportChange(...)`
-- `MirroringPipeline.rebuild(...)`
-- `MirroringPipeline.executeActualRebuild(...)`
-- `MirroringPipeline.setTier(...)`
-
-### Current Layout Interpretation
-
-The browser now sends only:
+The browser sends `layout_update` packets containing:
 
 - `id`
 - `width`
 - `height`
 - `visible`
 
-The server no longer needs browser `layoutMode` to decide pane state.
+Android derives runtime behavior from that:
 
-Current tier behavior is:
+- one visible pane: that pane becomes `ACTIVE`
+- two visible panes: primary/selected pane is `ACTIVE`, the other visible pane is `VISIBLE`
+- hidden or absent panes are `SUSPENDED`
 
-- if only one pane is visible, that pane becomes `ACTIVE`
-- if two panes are visible, `primary` becomes `ACTIVE` and `secondary` becomes `VISIBLE`
-- hidden or absent panes are suspended
+Current frontend layout behavior:
 
-This is important because fullscreen vs split is now treated as a browser composition concern first, not a protocol mode.
+- splitbar movement updates frontend UI immediately
+- backend `layout_update` is sent only after resize end, expand, swap, host resize, or explicit layout flush
+- split dimensions are aligned to 16-pixel boundaries before sending
+- split mode uses `fill` coordinate mapping, single mode uses `contain`
 
-## MirrorServer Structure
+Current Android layout behavior:
 
-`MirrorServer` is still monolithic in implementation, but conceptually it now provides:
+- `applyBrowserLayoutUpdate(...)` updates `paneVisibility`
+- visible pane count changes are treated as stronger realignment opportunities
+- `MirroringPipeline.onViewportChange(...)` forwards viewport changes into the rebuild queue
+- rebuild requests are serialized through the VD hardware worker
 
-- static asset serving
-- `/api/apps`
-- `/api/icon`
-- control websocket
-- per-pane video websocket
-- generation metadata broadcast/replay
+## App Launch Model
 
-Important stream metadata methods already in place:
+Frontend launch flow:
 
-- `beginStreamGeneration(...)`
-- `markFirstFrameReady(...)`
-- `pauseStream(...)`
+1. `AppLauncher.svelte` selects target pane and layout mode.
+2. `StreamRuntime.launchApp(...)` resets frontend touch session state.
+3. Frontend suppresses/quarantines touch input during app launch.
+4. Control websocket sends `launchApp`.
+5. Android `ControlSocket` routes to `MirrorServer`.
+6. `MirrorForegroundService` receives the app launch request via `AppLaunchBus`.
+7. The target pane is promoted as needed.
+8. `MirroringPipeline.launchAppFromWebLauncher(...)` resolves browser/internal/standard launch paths.
 
-The latest `streamMetadata` is replayed to newly connected control sockets, which is now a required part of the frontend reconnect flow.
+Android now clears the target pane `TouchInjector` state before app launch:
 
-## Frontend Structure
+- this is a local injector state clear
+- fallback `ACTION_CANCEL` is not sent when no Android-side pointer is tracked
+- this avoids noisy `tracked=0 fallback=true` cancel injection failures
 
-The active frontend lives in:
+App-mounted detection still exists inside `executeAdaptiveWakeup(...)` using `getRunningTasksOnDisplay(displayId)`, but it is not currently used to gate frontend touch. Touch gating is frontend-owned.
 
-- `frontend/src`
+## Touch Model
 
-Main folders:
+Current touch path:
 
-- `components/`
-- `compositor/`
-- `decoder/`
-- `ime/`
-- `runtime/`
-- `stores/`
-- `touch/`
-- `transport/`
-- `viewport/`
-- `workers/`
+1. browser pointer event
+2. `TouchRouter`
+3. `StreamRuntime.control.send({ type: 'touch', ... })`
+4. `ControlSocket`
+5. `MirrorServer.onTouchEvent(...)`
+6. `MirrorForegroundService` touch listener
+7. `TouchInjector`
+8. `VirtualDisplayController.injectMotionEvent(...)`
+9. Shizuku privileged input injection
 
-Key active files:
+### Frontend Touch Ownership
 
-- `frontend/src/App.svelte`
-- `frontend/src/components/AppLauncher.svelte`
-- `frontend/src/components/ViewportHost.svelte`
-- `frontend/src/components/ViewportPane.svelte`
-- `frontend/src/components/DiagnosticsOverlay.svelte`
-- `frontend/src/compositor/BrowserCompositor.ts`
-- `frontend/src/runtime/StreamRuntime.ts`
-- `frontend/src/runtime/GenerationTracker.ts`
-- `frontend/src/runtime/StreamHealthMonitor.ts`
-- `frontend/src/decoder/JMuxerBackend.ts`
-- `frontend/src/transport/ControlTransport.ts`
-- `frontend/src/transport/VideoTransport.ts`
-- `frontend/src/stores/compositorStore.ts`
-- `frontend/src/touch/TouchRouter.ts`
+The latest conclusion is that the main failure mode is usually frontend/browser pointer state, not Android reset failure.
 
-## Current Frontend Runtime Model
+Evidence:
 
-Current flow:
+- F5 revives touch while Android service remains alive.
+- Android `touchReset` can be logged without recovery.
+- fallback `ACTION_CANCEL` can fail or succeed without reliably determining recovery.
+- aggressive drag during app launch reproduces the issue.
 
-1. `App.svelte` creates `StreamRuntime`, `BrowserCompositor`, `TouchRouter`, and `ImeBridge`.
-2. `BrowserCompositor` starts `StreamRuntime`.
-3. `StreamRuntime` opens:
-   - control websocket
-   - per-pane video websocket(s)
-4. `BrowserCompositor` updates `compositorStore` using `streamMetadata`.
-5. `ViewportHost` renders visible panes and is now the single source of `layout_update`.
-6. `ViewportPane` attaches a decoder per pane.
-7. The default decoder backend is `JMuxerBackend`.
+Therefore `TouchRouter` now owns stronger browser-side touch gating:
 
-### Important Frontend Decisions Now in Place
+- active pointer tracking stores both remote pointer id and browser pointer capture target
+- `resetTouchState(...)` emits a local frontend reset event
+- `resetTouchSession(...)` bumps frontend touch epoch before app launch
+- `suppressTouchInput(...)` blocks remote touch during risky windows
+- app launch enables pointer quarantine when a physical pointer/button is already down
+- quarantined pointer streams are blocked before they reach viewport handlers
+- `pointercancel` does not immediately release quarantine
+- quarantine releases only after real pointer idle is observed through `pointerup buttons=0`, `mouseup buttons=0`, or touch idle
 
-- `ViewportPane` no longer sends per-pane layout updates on its own.
-- `ViewportHost` sends the authoritative full layout packet.
-- single-pane mode explicitly sends the hidden opposite pane too.
-- reconnect now replays the last layout from `StreamRuntime`.
-- reconnect also re-requests codec setup and keyframes.
-- when disconnected, committed frames are hidden so stale images do not remain on screen.
+Important logs:
 
-## Current Decoder and Stream Behavior
+- `[CastlaTouch] suppress`
+- `[CastlaTouch] waiting for pointer idle`
+- `[CastlaTouch] quarantine kept after cancel`
+- `[CastlaTouch] quarantine kept active`
+- `[CastlaTouch] quarantine released`
+- `[CastlaTouch] quarantine released all`
+- `[CastlaTouch] pointer idle`
 
-Default production decoder path:
+### Android TouchInjector
 
-- H.264 over WebSocket
+`TouchInjector` still maintains Android-side active pointer state.
+
+Current behavior:
+
+- duplicate `down` clears stale Android-side state
+- overflow clears stale Android-side state
+- `updateDimensions(...)` cancels active pointers if tracked
+- `release()` clears local state
+- `release()` no longer sends fallback `ACTION_CANCEL` when no active pointer is tracked
+
+This keeps Android cleanup useful while avoiding synthetic cancel events with no real tracked pointer.
+
+## Video / Decoder Model
+
+Default stream path:
+
+- H.264 over per-pane video websocket
 - `JMuxerBackend`
 - MSE video element playback
 
-WebCodecs still exists as an optional path, but it is not the default production mode.
+WebCodecs still exists as an optional path but is not the default production path.
 
-Important stabilization already applied:
+`StreamRuntime.attachVideo(...)` owns per-pane `VideoTransport` instances:
 
-- control socket queues messages until open
-- latest layout is replayed after reconnect
-- latest `streamMetadata` is replayed to fresh control sockets
-- generation changes trigger decoder refresh
-- stale frames are hidden when stream commitment is lost
-- noisy decoder-status events are filtered so only meaningful faults remain
+- creates a video socket only when the pane has listeners
+- closes and removes the pane video socket when the last listener detaches
+- prevents hidden secondary video sockets from lingering forever
 
-## Current Logging and Diagnostics
+`ViewportPane.svelte` owns pane decoder lifecycle:
 
-Frontend decoder diagnostics are now intentionally much quieter.
+- attach/detach video frames
+- create/destroy decoder backend
+- request keyframes
+- run stall watchdog
+- report decoder status
 
-Useful log tags:
+Current recovery model:
 
-- `CastlaDecoder`
-- `MirrorServer`
-- `ControlSocket`
-- `MirrorService`
-- `VideoEncoder`
+- generation changes refresh pane decoder
+- frame rejection requests a keyframe after throttling
+- stall watchdog first attempts pane-local recovery
+- `recoverPaneStream(pane)` requests keyframe and updates health state
+- full decoder refresh is delayed until repeated recovery attempts
+- control reconnect no longer tears down the whole frontend session by itself
+- pane stall recovery no longer performs broad control/video soft reconnect by default
 
-Noise reductions already applied:
+This was changed to stop secondary pane flicker/reconnect loops.
 
-- normal decoder lifecycle events are filtered in frontend and Android logging
-- full control text payload logging was removed
-- repeated dynamic encoder-param logs are suppressed unless values really change
+## Transport Model
 
-Important backend race fix already applied:
+### ControlTransport
 
-- stale encoder `start()` callbacks are ignored using per-rebuild encoder session tokens
+Responsibilities:
 
-## Current UI Structure
+- open/reopen control websocket
+- queue outbound messages while closed
+- emit connection state
+- send `ping`
+- accept `pong`
+- reconnect only after a long pong timeout
 
-The active remote UI is now built around:
+Heartbeat is intentionally relaxed so temporary control hiccups do not reset video/decoder state aggressively.
 
-- `ViewportHost` for pane composition
-- `ViewportPane` for stream surfaces
-- `AppLauncher` for the right-side drawer launcher
-- `DiagnosticsOverlay` for debug visibility
+### VideoTransport
 
-### Side Drawer Status
+Responsibilities:
 
-The right-side launcher drawer is the main user-facing work surface still under restoration.
+- open per-pane video websocket
+- parse binary frame packets
+- reconnect on unexpected close
+- avoid reconnect scheduling when intentionally closed
+- support `reconnectNow()` for explicit recovery
 
-Currently implemented in Svelte:
+## Frontend Runtime Model
+
+Startup:
+
+1. `App.svelte` creates `StreamRuntime`, `BrowserCompositor`, `TouchRouter`, and `ImeBridge`.
+2. `BrowserCompositor.start()` starts `StreamRuntime`.
+3. `StreamRuntime` opens control websocket.
+4. Visible `ViewportPane` instances attach per-pane video sockets.
+5. `ViewportHost` observes host size and sends layout.
+
+`StreamRuntime` responsibilities:
+
+- own control transport
+- own pane video transports
+- replay last layout after control reconnect
+- request codec/keyframe after reconnect for attached panes
+- track stream generations
+- track frontend touch session epoch
+- send `touchReset`
+- suppress touch input around risky transitions
+- perform pane-local stream recovery
+
+## BrowserCompositor
+
+`BrowserCompositor.ts` bridges stream metadata into `compositorStore`.
+
+Current important behavior:
+
+- stream metadata updates committed pane state
+- session-level committed reset is no longer tied to transient control disconnect
+- this avoids periodic frontend visual reset/flicker caused by heartbeat/control reconnect behavior
+
+## Launcher UI
+
+`AppLauncher.svelte` includes:
 
 - grouped app list
+- cached app bootstrap
 - favorites
 - autorun toggles
-- cached app-list startup for faster drawer opening
 - long-press drag
-- drawer auto-scroll while dragging
-- App Pair creation by dropping one app onto another
-- App Pair pseudo-items
-- App Pair edit dialog
-- App Pair drag to `Auto-run`
-- App Pair drag to `Remove`
+- drag-to-primary / drag-to-secondary
+- drag-to-favorite / autorun / remove
+- app pair creation by dropping app onto app
+- app pair pseudo-items
+- app pair settings modal
 
-### Current App Pair Model
+Launcher long-press uses its own pointer capture. Remote viewport touch quarantine is separate and applies to remote stream input, not ordinary launcher interaction.
 
-`AppLauncher.svelte` currently stores App Pairs in:
+## Current Known Weak Spots
 
-- `localStorage.castla_app_pairs`
+Important current risks:
 
-It supports:
+1. Browser pointer/capture behavior during app launch is still the most sensitive area.
+2. `pointercancel` can arrive while the physical button/finger is still down, so it must not be trusted as idle by itself.
+3. `getRunningTasksOnDisplay(...)` may fail to detect some apps even when the launch visually succeeds.
+4. Some map/navigation apps behave differently during VirtualDisplay resize, app launch, and focus restore.
+5. Frontend and Android still use separate control/video paths, so local browser state must remain disciplined.
 
-- pair pseudo-app rendering
-- click-to-launch pair
-- drag app over app to create pair
-- `⚙️` edit dialog with:
-  - swap
-  - save
-  - dissolve
-  - cancel
-- drag pair to autorun to assign left/right autorun slots
-- drag pair to remove to dissolve the pair
+## Current Design Direction
 
-### Important Launcher Reality Check
+The current architecture is moving toward:
 
-The launcher is the area with the highest amount of recent regression/restore work.
+- browser-owned composition and touch gating
+- Android-owned VD/app/encoder execution
+- pane-local video recovery
+- fewer synthetic touch/wakeup hacks
+- no server-side touch block/unblock state machine unless proven necessary
+- explicit frontend quarantine for risky browser pointer streams
 
-It is much closer to the legacy behavior again, but it is still the part of the system most likely to have UX mismatches compared with the pre-refactor asset-based implementation.
+The most important current debugging rule:
 
-## Current Known Working State
-
-As of this summary:
-
-- `svelte-check` passes
-- frontend production build passes
-- frontend assets are copied into Android assets through Gradle
-- `compileDebugKotlin` passes
-- mirroring renders in both panes
-- splitbar movement works visually
-- layout updates are browser-authoritative
-- reconnect no longer leaves stale frames visible by default
-- App Pair drag creation, edit, autorun, and remove flows exist again in the Svelte drawer
-
-## Current Known Risk Areas
-
-These areas still need care:
-
-- exact visual fidelity of the restored side drawer compared with the old asset-based launcher
-- split layout correctness for some real Android apps, especially map/navigation apps
-- fullscreen promotion vs app-internal relayout behavior
-- drawer drag feel compared with the legacy implementation
-- reconnect behavior under real flaky network conditions
-
-## Important Files for the Next Chat
-
-If continuing work in a new chat, start with:
-
-- `frontend/src/components/AppLauncher.svelte`
-- `frontend/src/components/ViewportHost.svelte`
-- `frontend/src/components/ViewportPane.svelte`
-- `frontend/src/compositor/BrowserCompositor.ts`
-- `frontend/src/runtime/StreamRuntime.ts`
-- `frontend/src/runtime/GenerationTracker.ts`
-- `frontend/src/transport/ControlTransport.ts`
-- `frontend/src/transport/VideoTransport.ts`
-- `app/src/main/java/com/castla/mirror/server/MirrorServer.kt`
-- `app/src/main/java/com/castla/mirror/server/ControlSocket.kt`
-- `app/src/main/java/com/castla/mirror/service/MirrorForegroundService.kt`
-
-If restoring old launcher behavior, these legacy references are still useful:
-
-- `app/build/intermediates/assets/release/mergeReleaseAssets/web/js/main/main.launcher.render.split.js`
-- `app/build/intermediates/assets/release/mergeReleaseAssets/web/js/main/main.dragdrop.js`
-- `app/build/intermediates/assets/release/mergeReleaseAssets/web/js/main/main.dragdrop.handler.js`
-- `app/build/intermediates/assets/release/mergeReleaseAssets/web/js/main/main.dragdrop.action.js`
-
-## Recommended Next Steps
-
-Recommended order:
-
-1. Finish side-drawer UX restoration against the legacy launcher behavior.
-2. Verify real-device split/fullscreen behavior for map/navigation apps.
-3. Tighten reconnect validation under actual disconnect/reconnect cycles.
-4. Continue shrinking `MirrorForegroundService` responsibilities toward compositor/session abstractions.
-5. Only after launcher stability is good, revisit broader UI polish.
-
-## Short Handoff
-
-Castla now runs on a hybrid architecture where Android production behavior is still centered in `MirrorForegroundService` and `MirrorServer`, while the browser frontend has been migrated to Svelte + TypeScript and is authoritative for viewport layout. Stream generation replay, reconnect layout replay, stale-frame hiding, and quieter diagnostics are in place. The biggest remaining churn is no longer the decoder path but the side-drawer launcher and App Pair UX, which is being restored against the old asset-based implementation while keeping the newer stream/runtime architecture stable.
+- if F5 revives touch without restarting Android service, investigate frontend pointer/capture/session state first.

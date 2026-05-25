@@ -16,7 +16,7 @@ class PersistentVirtualDisplaySession(
     val sessionId: DisplaySessionId,
     private val virtualDisplayController: VirtualDisplayController,
     private val mirrorServer: MirrorServer,
-    private val touchInjector: TouchInjector,
+    private var touchInjector: TouchInjector?,
     private val initialSpec: DisplaySpec
 ) {
     companion object {
@@ -41,6 +41,9 @@ class PersistentVirtualDisplaySession(
 
     fun attachPrivilegedService(service: IPrivilegedService?) {
         virtualDisplayController.attachPrivilegedService(service)
+        if (service == null) {
+            touchInjector?.detachController("persistent_session_privileged_service_null")
+        }
     }
 
     suspend fun ensureDisplay() = mutex.withLock {
@@ -55,7 +58,7 @@ class PersistentVirtualDisplaySession(
         vdId = virtualDisplayController.getDisplayId()
         if (vdId >= 0) {
             lifecycle.transitionTo(SessionLifecycleState.VD_READY)
-            touchInjector.setVirtualDisplayInjector { event ->
+            touchInjector?.updateController { event ->
                 virtualDisplayController.injectMotionEvent(event)
             }
         }
@@ -77,7 +80,7 @@ class PersistentVirtualDisplaySession(
                 }
             }
         }
-        touchInjector.updateDimensions(spec.width, spec.height)
+        touchInjector?.updateDimensions(spec.width, spec.height)
     }
 
     suspend fun setTier(nextTier: DisplayTier) = mutex.withLock {
@@ -107,7 +110,8 @@ class PersistentVirtualDisplaySession(
         if (vdId < 0) return
         virtualDisplayController.injectInput(action, x, y, pointerId)
         if (action == MotionEvent.ACTION_UP) {
-            touchInjector.release()
+            touchInjector?.release()
+            touchInjector = null
         }
     }
 
@@ -130,6 +134,7 @@ class PersistentVirtualDisplaySession(
     }
 
     suspend fun release() = mutex.withLock {
+        touchInjector?.detachController("persistent_session_release")
         encoder?.release()
         encoder = null
         surface = null

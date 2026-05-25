@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import { compositorStore, type ViewportModel } from '../stores/compositorStore';
   import ViewportPane from './ViewportPane.svelte';
   import type { TouchRouter } from '../touch/TouchRouter';
@@ -14,14 +14,21 @@
   let controls: HTMLDivElement;
   let resizeObserver: ResizeObserver;
   let resizing = false;
+  let hostRect = new DOMRect();
+  let layoutTrigger = '';
+  let layoutFlushScheduled = false;
 
   onMount(() => {
     resizeObserver = new ResizeObserver(() => {
-      touchRouter.updateHost(host.getBoundingClientRect());
-      sendCurrentLayout();
+      hostRect = host.getBoundingClientRect();
+      touchRouter.updateHost(hostRect);
+      if (!resizing) {
+        sendCurrentLayout();
+      }
     });
     resizeObserver.observe(host);
-    touchRouter.updateHost(host.getBoundingClientRect());
+    hostRect = host.getBoundingClientRect();
+    touchRouter.updateHost(hostRect);
     sendCurrentLayout();
   });
 
@@ -31,34 +38,42 @@
   $: splitActive = $compositorStore.layoutMode === 'split' && visibleViewports.length >= 2;
   $: leftPane = $compositorStore.splitReversed ? 'secondary' : 'primary';
   $: rightPane = $compositorStore.splitReversed ? 'primary' : 'secondary';
-  $: boundary = boundaryPercent();
-  $: if (host) {
+  $: layoutMetrics = computeLayoutMetrics(hostRect.width, hostRect.height, $compositorStore.splitRatio, $compositorStore.splitReversed);
+  $: boundary = layoutMetrics.boundaryPercent;
+  $: layoutTrigger = [
+    Math.round(hostRect.width),
+    Math.round(hostRect.height),
+    $compositorStore.layoutMode,
+    $compositorStore.splitRatio.toFixed(4),
+    $compositorStore.splitReversed ? 'reversed' : 'normal',
+    visibleViewports.map((viewport) => `${viewport.pane}:${viewport.visible ? 1 : 0}:${viewport.generation}:${viewport.width}x${viewport.height}`).join('|')
+  ].join(';');
+  $: if (host && layoutTrigger) {
     updateSplitChrome();
-    sendCurrentLayout();
+    if (!resizing) {
+      sendCurrentLayout();
+    }
   }
 
   function paneStyle(pane: string): string {
     if (!splitActive) return 'left:0;right:0;width:100%;';
-    const primaryWidth = Math.round($compositorStore.splitRatio * 1000) / 10;
+    const { leftPercent, rightPercent } = layoutMetrics;
     if (!$compositorStore.splitReversed) {
-      if (pane === 'secondary') return `left:${primaryWidth}%;right:0;width:${100 - primaryWidth}%;`;
-      return `left:0;width:${primaryWidth}%;right:auto;`;
+      if (pane === 'secondary') return `left:${leftPercent}%;right:0;width:${rightPercent}%;`;
+      return `left:0;width:${leftPercent}%;right:auto;`;
     }
-    if (pane === 'secondary') return `left:0;width:${100 - primaryWidth}%;right:auto;`;
-    return `left:${100 - primaryWidth}%;right:0;width:${primaryWidth}%;`;
-  }
-
-  function boundaryPercent(): number {
-    const primary = Math.round($compositorStore.splitRatio * 1000) / 10;
-    return $compositorStore.splitReversed ? 100 - primary : primary;
+    if (pane === 'secondary') return `left:0;width:${leftPercent}%;right:auto;`;
+    return `left:${leftPercent}%;right:0;width:${rightPercent}%;`;
   }
 
   function beginResize(event: PointerEvent) {
     event.preventDefault();
+    touchRouter.reset();
     resizing = true;
     updateSplitChrome();
     window.addEventListener('pointermove', resizeMove);
     window.addEventListener('pointerup', endResize, { once: true });
+    window.addEventListener('pointercancel', endResize, { once: true });
   }
 
   function resizeMove(event: PointerEvent) {
@@ -74,14 +89,22 @@
   function endResize() {
     resizing = false;
     window.removeEventListener('pointermove', resizeMove);
+    window.removeEventListener('pointerup', endResize);
+    window.removeEventListener('pointercancel', endResize);
+    scheduleLayoutFlush();
+    visibleViewports.forEach((viewport) => runtime.requestKeyframe(viewport.pane));
+    touchRouter.reset();
   }
 
   function expand(pane: PaneId) {
+    touchRouter.reset();
     compositorStore.update((state) => {
       const viewports = new Map(state.viewports);
       viewports.forEach((viewport, key) => viewports.set(key, { ...viewport, visible: key === pane }));
       return { ...state, viewports, layoutMode: 'single' };
     });
+    scheduleLayoutFlush();
+    runtime.requestKeyframe(pane);
   }
 
   function expandLeft() {
@@ -93,8 +116,10 @@
   }
 
   function swap() {
+    touchRouter.reset();
     compositorStore.update((state) => ({ ...state, splitReversed: !state.splitReversed }));
     updateSplitChrome();
+    scheduleLayoutFlush();
   }
 
   function clamp(value: number, min: number, max: number) {
@@ -103,50 +128,62 @@
 
   function sendCurrentLayout() {
     if (!host) return;
-    const rect = host.getBoundingClientRect();
+    const rect = hostRect.width > 0 && hostRect.height > 0 ? hostRect : host.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
+    const alignedHeight = align16(rect.height);
     if (!splitActive) {
       const activePane = visibleViewports[0]?.pane ?? 'primary';
       const hiddenPane: PaneId = activePane === 'primary' ? 'secondary' : 'primary';
+      const alignedWidth = align16(rect.width);
       runtime.sendLayout([
         {
           id: activePane,
-          width: rect.width,
-          height: rect.height,
+          width: alignedWidth,
+          height: alignedHeight,
           visible: true
         },
         {
           id: hiddenPane,
-          width: rect.width,
-          height: rect.height,
+          width: alignedWidth,
+          height: alignedHeight,
           visible: false
         }
       ]);
       return;
     }
 
-    const ratio = $compositorStore.splitRatio;
-    const primaryWidth = Math.max(320, Math.round(rect.width * ratio));
-    const secondaryWidth = Math.max(320, Math.round(rect.width - primaryWidth));
+    const { primaryWidth, secondaryWidth } = layoutMetrics;
     runtime.sendLayout([
       {
         id: leftPane,
         width: leftPane === 'primary' ? primaryWidth : secondaryWidth,
-        height: rect.height,
+        height: alignedHeight,
         visible: true
       },
       {
         id: rightPane,
         width: rightPane === 'primary' ? primaryWidth : secondaryWidth,
-        height: rect.height,
+        height: alignedHeight,
         visible: true
       }
     ]);
   }
 
+  async function scheduleLayoutFlush() {
+    if (layoutFlushScheduled) return;
+    layoutFlushScheduled = true;
+    await tick();
+    await tick();
+    layoutFlushScheduled = false;
+    if (!host) return;
+    hostRect = host.getBoundingClientRect();
+    touchRouter.updateHost(hostRect);
+    sendCurrentLayout();
+  }
+
   function updateSplitChrome(ratio = $compositorStore.splitRatio) {
     if (!splitActive) return;
-    const boundaryValue = $compositorStore.splitReversed ? 100 - Math.round(ratio * 1000) / 10 : Math.round(ratio * 1000) / 10;
+    const boundaryValue = computeLayoutMetrics(hostRect.width, hostRect.height, ratio, $compositorStore.splitReversed).boundaryPercent;
     if (resizer) {
       resizer.style.left = `${boundaryValue}%`;
     }
@@ -154,11 +191,45 @@
       controls.style.left = `${boundaryValue}%`;
     }
   }
+
+  function computeLayoutMetrics(width: number, height: number, ratio: number, reversed: boolean) {
+    const safeWidth = Math.max(0, Math.round(width));
+    const safeHeight = Math.max(0, Math.round(height));
+    if (safeWidth <= 0 || safeHeight <= 0) {
+      return {
+        primaryWidth: 0,
+        secondaryWidth: 0,
+        leftPercent: reversed ? 50 : 50,
+        rightPercent: 50,
+        boundaryPercent: 50
+      };
+    }
+
+    const rawPrimaryWidth = Math.max(320, Math.round(safeWidth * ratio));
+    const rawSecondaryWidth = Math.max(320, safeWidth - rawPrimaryWidth);
+    const alignedPrimaryWidth = align16(rawPrimaryWidth);
+    const alignedSecondaryWidth = align16(rawSecondaryWidth);
+    const totalAlignedWidth = alignedPrimaryWidth + alignedSecondaryWidth;
+    const primaryPercent = (alignedPrimaryWidth / totalAlignedWidth) * 100;
+    const secondaryPercent = (alignedSecondaryWidth / totalAlignedWidth) * 100;
+
+    return {
+      primaryWidth: alignedPrimaryWidth,
+      secondaryWidth: alignedSecondaryWidth,
+      leftPercent: reversed ? secondaryPercent : primaryPercent,
+      rightPercent: reversed ? primaryPercent : secondaryPercent,
+      boundaryPercent: reversed ? secondaryPercent : primaryPercent
+    };
+  }
+
+  function align16(value: number): number {
+    return Math.max(320, (Math.round(value) + 15) & ~15);
+  }
 </script>
 
 <div bind:this={host} class="viewport-host">
   {#each visibleViewports as viewport (viewport.pane)}
-    <ViewportPane {viewport} {touchRouter} {runtime} paneStyle={paneStyle(viewport.pane)} />
+    <ViewportPane {viewport} {touchRouter} {runtime} paneStyle={paneStyle(viewport.pane)} fitMode={splitActive ? 'fill' : 'contain'} />
   {/each}
 
   {#if splitActive}

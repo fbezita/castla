@@ -12,15 +12,18 @@ export class BrowserCompositor {
   start(): void {
     this.runtime.start();
     this.runtime.control.onMessage((message) => this.handleControl(message));
-    this.runtime.onConnectionChange((connected) => {
-      if (connected) return;
-      this.store.update((state) => {
-        const viewports = new Map(state.viewports);
-        viewports.forEach((viewport, key) => {
-          viewports.set(key, { ...viewport, committed: false });
-        });
-        return { ...state, viewports };
+    this.runtime.onSessionChange(() => {
+      this.resetCommittedState();
+    });
+  }
+
+  private resetCommittedState(): void {
+    this.store.update((state) => {
+      const viewports = new Map(state.viewports);
+      viewports.forEach((viewport, key) => {
+        viewports.set(key, { ...viewport, committed: false });
       });
+      return { ...state, viewports };
     });
   }
 

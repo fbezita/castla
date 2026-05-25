@@ -62,6 +62,11 @@
   let pairTarget: AppInfo | null = null;
   let pairMenuOpen = '';
   let editingPair: AppInfo | null = null;
+  let drawerRevision = 0;
+  let pairApps: AppInfo[] = [];
+  let searchableApps: AppInfo[] = [];
+  let displayApps: AppInfo[] = [];
+  let groupedApps: Array<{ key: string; title: string; color: string; items: AppInfo[] }> = [];
 
   onMount(() => {
     if (apps.length > 0) {
@@ -75,15 +80,18 @@
   });
 
   $: hasVisibleStream = Array.from($compositorStore.viewports.values()).some((viewport) => viewport.committed);
-  $: pairApps = getPairApps();
-  $: searchableApps = [...pairApps, ...apps];
-  $: displayApps = searchableApps.filter((app) => app.label.toLowerCase().includes(search.trim().toLowerCase()));
-  $: groupedApps = groups.map(([key, title, color]) => ({
-    key,
-    title,
-    color,
-    items: displayApps.filter((app) => belongsToGroup(app, key))
-  })).filter((group) => group.items.length > 0);
+  $: {
+    void drawerRevision;
+    pairApps = getPairApps(appPairs, apps);
+    searchableApps = [...pairApps, ...apps];
+    displayApps = searchableApps.filter((app) => app.label.toLowerCase().includes(search.trim().toLowerCase()));
+    groupedApps = groups.map(([key, title, color]) => ({
+      key,
+      title,
+      color,
+      items: displayApps.filter((app) => belongsToGroup(app, key, favorites))
+    })).filter((group) => group.items.length > 0);
+  }
 
   async function loadApps() {
     try {
@@ -92,6 +100,7 @@
       const data = await response.json();
       apps = Array.isArray(data.apps) ? data.apps : [];
       localStorage.setItem(APP_CACHE_KEY, JSON.stringify(apps));
+      touchDrawer();
       runAutorunOnce();
       error = '';
     } catch (err) {
@@ -103,9 +112,9 @@
     }
   }
 
-  function belongsToGroup(app: AppInfo, group: string) {
+  function belongsToGroup(app: AppInfo, group: string, favoritePackages: string[]) {
     if (group === 'PAIR') return app.isPair === true;
-    if (group === 'FAVORITES') return favorites.includes(app.packageName);
+    if (group === 'FAVORITES') return favoritePackages.includes(app.packageName);
     if (group === 'OTHER') return !['NAVIGATION', 'VIDEO', 'MUSIC'].includes(app.category ?? '');
     return app.category === group;
   }
@@ -114,7 +123,6 @@
     launchedOnce = true;
     if (pane === 'primary') setSingle('primary');
     else setSplit(true);
-    syncLayout(pane === 'primary' ? 'single' : 'split');
     runtime.launchApp(app.packageName, pane, app.componentName, app.category === 'VIDEO' || app.isWeb === true);
     runtime.requestKeyframe(pane);
     drawerOpen = false;
@@ -124,7 +132,6 @@
   function launchPair(left: AppInfo, right: AppInfo) {
     launchedOnce = true;
     setSplit(true);
-    syncLayout('split');
     runtime.launchApp(left.packageName, 'primary', left.componentName, left.category === 'VIDEO' || left.isWeb === true);
     runtime.requestKeyframe('primary');
     setTimeout(() => {
@@ -172,13 +179,14 @@
   function toggleFavorite(packageName: string) {
     favorites = favorites.includes(packageName) ? favorites.filter((pkg) => pkg !== packageName) : [...favorites, packageName];
     localStorage.setItem('castla_favorites', JSON.stringify(favorites));
+    touchDrawer();
   }
 
-  function getPairApps(): AppInfo[] {
+  function getPairApps(pairs: AppPairRecord[], availableApps: AppInfo[]): AppInfo[] {
     const result: AppInfo[] = [];
-    for (const pair of appPairs) {
-      const leftApp = apps.find((app) => app.packageName === pair.left);
-      const rightApp = apps.find((app) => app.packageName === pair.right);
+    for (const pair of pairs) {
+      const leftApp = availableApps.find((app) => app.packageName === pair.left);
+      const rightApp = availableApps.find((app) => app.packageName === pair.right);
       if (!leftApp || !rightApp) continue;
       result.push({
         packageName: `pair:${pair.left}:${pair.right}`,
@@ -208,6 +216,7 @@
     }
     appPairs = [...appPairs, { left: source.packageName, right: target.packageName }];
     localStorage.setItem('castla_app_pairs', JSON.stringify(appPairs));
+    touchDrawer();
     openPairEdit({
       packageName: `pair:${source.packageName}:${target.packageName}`,
       label: `${source.label} + ${target.label}`,
@@ -249,12 +258,13 @@
       appPairs = [...appPairs, nextPair];
     }
     localStorage.setItem('castla_app_pairs', JSON.stringify(appPairs));
+    touchDrawer();
   }
 
   function saveEditingPair() {
     if (!editingPair?.left || !editingPair?.right) return;
     const nextPair = editingPair;
-    const original = getPairApps().find((app) => app.packageName === nextPair.packageName);
+    const original = getPairApps(appPairs, apps).find((app) => app.packageName === nextPair.packageName);
     persistPair(nextPair, original?.left, original?.right);
     editingPair = null;
     toast('App Pair updated');
@@ -266,6 +276,15 @@
       !((pair.left === app.left && pair.right === app.right) || (pair.left === app.right && pair.right === app.left))
     );
     localStorage.setItem('castla_app_pairs', JSON.stringify(appPairs));
+    favorites = favorites.filter((pkg) => pkg !== app.packageName);
+    localStorage.setItem('castla_favorites', JSON.stringify(favorites));
+    if (primaryAutorun === app.left && secondaryAutorun === app.right) {
+      primaryAutorun = '';
+      secondaryAutorun = '';
+      updateStorage('castla_autorun_primary', primaryAutorun);
+      updateStorage('castla_autorun_secondary', secondaryAutorun);
+    }
+    touchDrawer();
     if (editingPair?.packageName === app.packageName) editingPair = null;
     pairMenuOpen = '';
     toast('App Pair dissolved');
@@ -290,6 +309,28 @@
     }
     updateStorage('castla_autorun_primary', primaryAutorun);
     updateStorage('castla_autorun_secondary', secondaryAutorun);
+    touchDrawer();
+  }
+
+  function isAutorunPair(app: AppInfo) {
+    return Boolean(app.isPair && app.left && app.right && primaryAutorun === app.left && secondaryAutorun === app.right);
+  }
+
+  function toggleAutorunForApp(app: AppInfo) {
+    if (app.isPair && app.left && app.right) {
+      if (isAutorunPair(app)) {
+        primaryAutorun = '';
+        secondaryAutorun = '';
+      } else {
+        primaryAutorun = app.left;
+        secondaryAutorun = app.right;
+      }
+      updateStorage('castla_autorun_primary', primaryAutorun);
+      updateStorage('castla_autorun_secondary', secondaryAutorun);
+      touchDrawer();
+      return;
+    }
+    toggleAutorun(app.packageName);
   }
 
   function runAutorunOnce() {
@@ -391,6 +432,7 @@
         secondaryAutorun = app.right;
         updateStorage('castla_autorun_primary', primaryAutorun);
         updateStorage('castla_autorun_secondary', secondaryAutorun);
+        touchDrawer();
         toast(`${app.label} set to Auto-run`);
         return;
       }
@@ -416,6 +458,7 @@
       localStorage.setItem('castla_favorites', JSON.stringify(favorites));
       updateStorage('castla_autorun_primary', primaryAutorun);
       updateStorage('castla_autorun_secondary', secondaryAutorun);
+      touchDrawer();
       toast('Removed from shortcuts');
     }
   }
@@ -424,53 +467,6 @@
     if (!drawerElement || !drawerOpen) return false;
     const rect = drawerElement.getBoundingClientRect();
     return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
-  }
-
-  function syncLayout(mode: 'single' | 'split') {
-    const host = document.querySelector('.viewport-host');
-    if (!(host instanceof HTMLElement)) return;
-    const rect = host.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return;
-
-    if (mode === 'single') {
-      runtime.sendLayout([
-        {
-          id: 'primary',
-          width: rect.width,
-          height: rect.height,
-          visible: true
-        },
-        {
-          id: 'secondary',
-          width: rect.width,
-          height: rect.height,
-          visible: false
-        }
-      ]);
-      return;
-    }
-
-    const ratio = $compositorStore.splitRatio;
-    const reversed = $compositorStore.splitReversed;
-    const primaryWidth = Math.max(320, Math.round(rect.width * ratio));
-    const secondaryWidth = Math.max(320, Math.round(rect.width - primaryWidth));
-    const leftPane: PaneId = reversed ? 'secondary' : 'primary';
-    const rightPane: PaneId = reversed ? 'primary' : 'secondary';
-
-    runtime.sendLayout([
-      {
-        id: leftPane,
-        width: leftPane === 'primary' ? primaryWidth : secondaryWidth,
-        height: rect.height,
-        visible: true
-      },
-      {
-        id: rightPane,
-        width: rightPane === 'primary' ? primaryWidth : secondaryWidth,
-        height: rect.height,
-        visible: true
-      }
-    ]);
   }
 
   function findPairTarget(x: number, y: number): AppInfo | null {
@@ -522,6 +518,10 @@
     if (value) localStorage.setItem(key, value);
     else localStorage.removeItem(key);
   }
+
+  function touchDrawer() {
+    drawerRevision += 1;
+  }
 </script>
 
 <div class:hidden={launchedOnce || hasVisibleStream} class="standby">
@@ -571,19 +571,19 @@
             >
               {#if app.isPair && app.left && app.right}
                 <div class="pair-icons split-pair-icon">
-                  <img class="split-app-icon pair-half pair-left-half" src={`/api/icon?pkg=${encodeURIComponent(app.left)}`} alt="" loading="lazy" draggable="false" />
-                  <img class="split-app-icon pair-half pair-right-half" src={`/api/icon?pkg=${encodeURIComponent(app.right)}`} alt="" loading="lazy" draggable="false" />
-                  <div class="pair-seam"></div>
+                  <img class="app-pair-icon-left" src={`/api/icon?pkg=${encodeURIComponent(app.left)}`} alt="" loading="lazy" draggable="false" />
+                  <img class="app-pair-icon-right" src={`/api/icon?pkg=${encodeURIComponent(app.right)}`} alt="" loading="lazy" draggable="false" />
                 </div>
               {:else}
                 <img class="split-app-icon" src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`} alt="" loading="lazy" draggable="false" />
               {/if}
               <button class="launch-main" on:click|stopPropagation={() => activateApp(app)}><span>{app.label}</span></button>
+              <button class:primary={!app.isPair && primaryAutorun === app.packageName} class:secondary={!app.isPair && secondaryAutorun === app.packageName} class:active-pair={app.isPair && isAutorunPair(app)} class="bolt" title="Auto-run" on:click|stopPropagation={() => toggleAutorunForApp(app)}>↯</button>
+              <button class:active={favorites.includes(app.packageName)} class="star" title="Favorite" on:click|stopPropagation={() => toggleFavorite(app.packageName)}>★</button>
               {#if app.isPair}
                 <button class:active={pairMenuOpen === app.packageName} class="pair-settings" title="Pair settings" on:click|stopPropagation={() => openPairEdit(app)}>⚙️</button>
               {:else}
-                <button class:primary={primaryAutorun === app.packageName} class:secondary={secondaryAutorun === app.packageName} class="bolt" title="Auto-run" on:click|stopPropagation={() => toggleAutorun(app.packageName)}>↯</button>
-                <button class:active={favorites.includes(app.packageName)} class="star" title="Favorite" on:click|stopPropagation={() => toggleFavorite(app.packageName)}>★</button>
+                <span class="control-spacer" aria-hidden="true"></span>
               {/if}
               {#if pairTarget?.packageName === app.packageName && draggingApp}
                 <div class="merge-preview" aria-hidden="true">
@@ -879,7 +879,7 @@
   .split-app-item {
     position: relative;
     display: grid;
-    grid-template-columns: 48px 1fr 28px 28px;
+    grid-template-columns: 48px 1fr 28px 28px 28px;
     align-items: center;
     gap: 8px;
     min-height: 60px;
@@ -908,17 +908,12 @@
 
   .pair-icons {
     position: relative;
-    width: 48px;
+    width: 50px;
     height: 42px;
   }
 
   .split-pair-icon {
-    width: 42px;
-    height: 42px;
-    border-radius: 12px;
-    overflow: hidden;
-    box-shadow: 0 4px 12px rgb(0 0 0 / 0.25);
-    background: rgb(255 255 255 / 0.08);
+    overflow: visible;
   }
 
   .split-app-icon {
@@ -929,31 +924,31 @@
     user-select: none;
   }
 
-  .pair-half {
+  .app-pair-icon-left,
+  .app-pair-icon-right {
     position: absolute;
-    inset: 0;
-    width: 42px;
-    height: 42px;
-    object-fit: cover;
+    width: 30px;
+    height: 30px;
+    object-fit: contain;
+    border-radius: 10px;
+    background: rgb(18 22 34 / 0.92);
+    padding: 3px;
+    box-shadow: 0 8px 16px rgb(0 0 0 / 0.28);
+    -webkit-user-drag: none;
+    user-select: none;
   }
 
-  .pair-left-half {
-    clip-path: inset(0 50% 0 0);
-  }
-
-  .pair-right-half {
-    clip-path: inset(0 0 0 50%);
-  }
-
-  .pair-seam {
-    position: absolute;
+  .app-pair-icon-left {
+    left: 1px;
     top: 6px;
-    bottom: 6px;
-    left: 50%;
-    width: 1px;
-    transform: translateX(-50%);
-    background: rgb(255 255 255 / 0.65);
-    box-shadow: 0 0 6px rgb(255 255 255 / 0.3);
+    z-index: 1;
+    opacity: 0.98;
+  }
+
+  .app-pair-icon-right {
+    left: 18px;
+    top: 6px;
+    z-index: 2;
   }
 
   .launch-main,
@@ -1002,20 +997,30 @@
     color: #ff7043;
   }
 
+  .bolt.active-pair {
+    color: #ff7043;
+    text-shadow: 0 0 12px rgb(255 112 67 / 0.45);
+  }
+
   .pair-settings {
-    width: 32px;
+    width: 28px;
     height: 28px;
     border: 0;
-    border-radius: 14px;
-    background: rgb(0 229 255 / 0.14);
-    color: #00e5ff;
-    font-size: 16px;
+    border-radius: 50%;
+    background: transparent;
+    color: rgb(255 255 255 / 0.72);
+    font-size: 18px;
     line-height: 1;
   }
 
   .pair-settings.active {
-    background: rgb(0 229 255 / 0.24);
-    box-shadow: 0 0 0 1px rgb(0 229 255 / 0.25);
+    color: #00e5ff;
+    text-shadow: 0 0 12px rgb(0 229 255 / 0.42);
+  }
+
+  .control-spacer {
+    width: 28px;
+    height: 28px;
   }
 
   .merge-preview {

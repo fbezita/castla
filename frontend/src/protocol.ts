@@ -33,7 +33,17 @@ export interface DiagnosticsMessage {
   displays: DiagnosticsDisplay[];
 }
 
-export type ControlMessage = StreamMetadata | DiagnosticsMessage | Record<string, unknown>;
+export interface ServerInitMessage {
+  type: 'serverInit';
+  instanceId: string;
+  controlSessionId?: number;
+}
+
+export type ControlMessage =
+  | StreamMetadata
+  | DiagnosticsMessage
+  | ServerInitMessage
+  | Record<string, unknown>;
 
 export interface EncodedFrame {
   flags: number;

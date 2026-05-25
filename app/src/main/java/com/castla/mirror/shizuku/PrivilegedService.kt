@@ -674,6 +674,12 @@ class PrivilegedService : IPrivilegedService.Stub() {
     }
 
     override fun injectMotionEvent(displayId: Int, event: MotionEvent) {
+        injectMotionEventWithResult(displayId, event)
+    }
+
+    override fun injectMotionEventWithResult(displayId: Int, event: MotionEvent): Boolean {
+        val action = event.actionMasked
+        val pointerCount = event.pointerCount
         try {
             if (setDisplayIdMethod == null) {
                 setDisplayIdMethod = MotionEvent::class.java.getMethod(
@@ -683,10 +689,18 @@ class PrivilegedService : IPrivilegedService.Stub() {
             setDisplayIdMethod?.invoke(event, displayId)
         } catch (_: Exception) {}
 
-        try {
-            injectMethod?.invoke(inputManagerInstance, event, 0)
+        return try {
+            val result = (injectMethod?.invoke(inputManagerInstance, event, 0) as? Boolean) ?: false
+            if (action != MotionEvent.ACTION_MOVE) {
+                Log.i(
+                    TAG,
+                    "[InputProbe][privileged][inject] displayId=$displayId action=$action pointerCount=$pointerCount result=$result downTime=${event.downTime} eventTime=${event.eventTime}"
+                )
+            }
+            result
         } catch (e: Exception) {
             Log.e(TAG, "Input event injection failed on display $displayId", e)
+            false
         }
     }
 
