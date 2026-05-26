@@ -1,6 +1,6 @@
-import type { PaneId } from '../protocol';
-import type { StreamRuntime } from '../runtime/StreamRuntime';
-import type { ViewportModel } from '../stores/compositorStore';
+import type { PaneId } from "../protocol";
+import type { StreamRuntime } from "../runtime/StreamRuntime";
+import type { ViewportModel } from "../stores/compositorStore";
 
 type PendingMove = {
   pane: PaneId;
@@ -30,7 +30,10 @@ export class TouchRouter {
   private static nextRouterId = 1;
   private static liveRouterCount = 0;
   private hostRect = new DOMRect();
-  private activePointers = new Map<number, { browserPointerId: number; target: HTMLElement }>();
+  private activePointers = new Map<
+    number,
+    { browserPointerId: number; target: HTMLElement }
+  >();
   private pendingMoves = new Map<number, PendingMove>();
   private lastSentMoves = new Map<number, SentMove>();
   private moveFlushScheduled = false;
@@ -47,17 +50,27 @@ export class TouchRouter {
   private movePacketsThisSecond = 0;
   private movePacketsPerSecond = 0;
   private movePpsWindowStartedAt = performance.now();
+  private anomalousEvents = 0;
+  private recentEvents: Array<Record<string, unknown>> = [];
 
   constructor(private readonly runtime: StreamRuntime) {
     TouchRouter.liveRouterCount += 1;
     this.sessionEpoch = runtime.currentSessionEpoch();
-    this.cleanupFns.push(runtime.onSessionChange((epoch) => {
-      this.sessionEpoch = epoch;
-      this.reset();
-    }));
-    this.cleanupFns.push(runtime.onTouchStateReset((reason) => {
-      this.clearAll();
-    }));
+    this.cleanupFns.push(
+      runtime.onSessionChange((epoch) => {
+        this.sessionEpoch = epoch;
+        this.reset();
+      }),
+    );
+    this.cleanupFns.push(
+      runtime.onTouchStateReset((reason) => {
+        this.clearAll();
+      }),
+    );
+  }
+
+  static getLiveRouterCount(): number {
+    return TouchRouter.liveRouterCount;
   }
 
   dispose(): void {
@@ -73,35 +86,82 @@ export class TouchRouter {
   pointer(
     event: PointerEvent,
     viewport: ViewportModel,
-    fitMode: 'contain' | 'fill' = 'contain',
-    surface?: HTMLElement
+    fitMode: "contain" | "fill" = "contain",
+    surface?: HTMLElement,
   ): void {
     const captureTarget = event.currentTarget as HTMLElement;
     const rect = (surface ?? captureTarget).getBoundingClientRect();
     const pointerId = event.pointerId & 0xff;
     const action = pointerAction(event.type);
-    const mapped = mapViewportPoint(event.clientX, event.clientY, rect, viewport.width, viewport.height, fitMode, action !== 'down');
+    this.recordEvent("pointer_input", {
+      action,
+      browserPointerId: event.pointerId,
+      remotePointerId: pointerId,
+      pane: viewport.pane,
+      targetPane: surface?.dataset?.pane ?? null,
+      activePointersBefore: this.activePointers.size,
+      sessionEpoch: this.sessionEpoch,
+      launchSequence: this.runtime.currentAppLaunchSequence(),
+    });
+    const mapped = mapViewportPoint(
+      event.clientX,
+      event.clientY,
+      rect,
+      viewport.width,
+      viewport.height,
+      fitMode,
+      action !== "down",
+    );
     if (!mapped) {
-      if (action !== 'down') {
+      if (action === "down") {
+        this.logAnomaly("down_outside_viewport", {
+          browserPointerId: event.pointerId,
+          remotePointerId: pointerId,
+          pane: viewport.pane,
+          fitMode,
+        });
+      }
+      if (action !== "down") {
         this.clearPointer(event.pointerId);
       }
       return;
     }
-    if (action !== 'down' && !this.activePointers.has(pointerId)) {
+    if (action === "down" && this.activePointers.has(pointerId)) {
+      this.logAnomaly("duplicate_down_active_pointer", {
+        browserPointerId: event.pointerId,
+        remotePointerId: pointerId,
+        pane: viewport.pane,
+        activePointers: this.activePointers.size,
+      });
+    }
+    if (action !== "down" && !this.activePointers.has(pointerId)) {
+      this.logAnomaly("non_down_without_active_pointer", {
+        action,
+        browserPointerId: event.pointerId,
+        remotePointerId: pointerId,
+        pane: viewport.pane,
+        activePointers: this.activePointers.size,
+      });
       return;
     }
 
     event.preventDefault();
-    if (action === 'move') {
+    if (action === "move") {
       const stats = this.gestureStats.get(pointerId);
       if (stats) {
         stats.rawMoveEvents += 1;
-        stats.observedDistance += Math.hypot(mapped.x - stats.lastObservedX, mapped.y - stats.lastObservedY);
+        stats.observedDistance += Math.hypot(
+          mapped.x - stats.lastObservedX,
+          mapped.y - stats.lastObservedY,
+        );
         stats.lastObservedX = mapped.x;
         stats.lastObservedY = mapped.y;
       }
       const pending = this.pendingMoves.get(pointerId);
-      if (pending && this.isSameMove(pending.x, pending.y, mapped.x, mapped.y)) {
+      if (
+        pending &&
+        this.isSameMove(pending.x, pending.y, mapped.x, mapped.y)
+      ) {
         this.droppedMoveCount += 1;
         return;
       }
@@ -110,35 +170,35 @@ export class TouchRouter {
         id: pointerId,
         x: mapped.x,
         y: mapped.y,
-        epoch: this.sessionEpoch
+        epoch: this.sessionEpoch,
       });
       this.scheduleMoveFlush();
       return;
     }
-    if (action === 'down') {
+    if (action === "down") {
       this.capturePointer(pointerId, event.pointerId, captureTarget);
       this.gestureStats.set(pointerId, {
         rawMoveEvents: 0,
         emittedMovePackets: 0,
         observedDistance: 0,
         lastObservedX: mapped.x,
-        lastObservedY: mapped.y
+        lastObservedY: mapped.y,
       });
-    } else if (action === 'up') {
+    } else if (action === "up") {
       this.pendingMoves.delete(pointerId);
       this.lastSentMoves.delete(pointerId);
       this.clearPointer(event.pointerId);
     }
 
     this.sendTouch({
-      type: 'touch',
+      type: "touch",
       pane: viewport.pane,
       action,
       id: pointerId,
       x: mapped.x,
       y: mapped.y,
       epoch: this.sessionEpoch,
-      clientTs: Date.now()
+      clientTs: Date.now(),
     });
   }
 
@@ -167,10 +227,14 @@ export class TouchRouter {
 
   reset(): void {
     this.clearAll();
-    this.runtime.resetTouchState('router_reset');
+    this.runtime.resetTouchState("router_reset");
   }
 
-  private capturePointer(remotePointerId: number, browserPointerId: number, target: HTMLElement): void {
+  private capturePointer(
+    remotePointerId: number,
+    browserPointerId: number,
+    target: HTMLElement,
+  ): void {
     this.clearPointer(browserPointerId);
     this.activePointers.set(remotePointerId, { browserPointerId, target });
     try {
@@ -185,10 +249,16 @@ export class TouchRouter {
       const now = performance.now();
       const sinceLastFlush = now - this.lastMoveFlushAt;
       if (sinceLastFlush < TouchRouter.MOVE_FLUSH_INTERVAL_MS) {
-        window.setTimeout(() => {
-          this.moveFlushScheduled = false;
-          this.scheduleMoveFlush();
-        }, Math.max(1, Math.ceil(TouchRouter.MOVE_FLUSH_INTERVAL_MS - sinceLastFlush)));
+        window.setTimeout(
+          () => {
+            this.moveFlushScheduled = false;
+            this.scheduleMoveFlush();
+          },
+          Math.max(
+            1,
+            Math.ceil(TouchRouter.MOVE_FLUSH_INTERVAL_MS - sinceLastFlush),
+          ),
+        );
         return;
       }
       this.moveFlushScheduled = false;
@@ -198,7 +268,10 @@ export class TouchRouter {
       if (moves.length > 1) this.coalescedMoveFrames += 1;
       for (const move of moves) {
         const lastSent = this.lastSentMoves.get(move.id);
-        if (lastSent && this.isSameMove(lastSent.x, lastSent.y, move.x, move.y)) {
+        if (
+          lastSent &&
+          this.isSameMove(lastSent.x, lastSent.y, move.x, move.y)
+        ) {
           this.droppedMoveCount += 1;
           continue;
         }
@@ -208,32 +281,40 @@ export class TouchRouter {
           stats.emittedMovePackets += 1;
         }
         this.sendTouch({
-          type: 'touch',
+          type: "touch",
           pane: move.pane,
-          action: 'move',
+          action: "move",
           id: move.id,
           x: move.x,
           y: move.y,
           epoch: move.epoch,
-          clientTs: Date.now()
+          clientTs: Date.now(),
         });
       }
     });
   }
 
   private sendTouch(message: {
-    type: 'touch';
+    type: "touch";
     pane: PaneId;
-    action: 'down' | 'move' | 'up';
+    action: "down" | "move" | "up";
     id: number;
     x: number;
     y: number;
     epoch: number;
     clientTs?: number;
   }): void {
+    this.recordEvent("touch_send", {
+      action: message.action,
+      pane: message.pane,
+      id: message.id,
+      epoch: message.epoch,
+      launchSequence: this.runtime.currentAppLaunchSequence(),
+      activePointers: this.activePointers.size,
+    });
     this.sentPackets += 1;
     this.packetCounts[message.action] += 1;
-    if (message.action === 'move') {
+    if (message.action === "move") {
       this.movePacketsThisSecond += 1;
       const now = performance.now();
       if (now - this.movePpsWindowStartedAt >= 1000) {
@@ -244,32 +325,35 @@ export class TouchRouter {
     }
     const gesturePackets = (this.gesturePacketCounts.get(message.id) ?? 0) + 1;
     this.gesturePacketCounts.set(message.id, gesturePackets);
-    if (message.action === 'up') {
+    if (message.action === "up") {
       const stats = this.gestureStats.get(message.id);
-      console.info('[CastlaTouch] gesture complete', {
-        routerId: this.routerId,
-        pointerId: message.id,
-        launchSequence: this.runtime.currentAppLaunchSequence(),
-        sessionEpoch: message.epoch,
-        gesturePackets,
-        rawMoveEvents: stats?.rawMoveEvents ?? 0,
-        emittedMovePackets: stats?.emittedMovePackets ?? 0,
-        observedDistance: Number((stats?.observedDistance ?? 0).toFixed(4)),
-        emittedMovesPerUnitDistance: stats && stats.observedDistance > 0
-          ? Number((stats.emittedMovePackets / stats.observedDistance).toFixed(2))
-          : 0,
-        packetCounts: { ...this.packetCounts },
-        activePointers: this.activePointers.size,
-        pendingMoves: this.pendingMoves.size,
-        coalescedMoveFrames: this.coalescedMoveFrames,
-        droppedMoveCount: this.droppedMoveCount
-      });
+      // console.info("[CastlaTouch] gesture complete", {
+      //   routerId: this.routerId,
+      //   pointerId: message.id,
+      //   launchSequence: this.runtime.currentAppLaunchSequence(),
+      //   sessionEpoch: message.epoch,
+      //   gesturePackets,
+      //   rawMoveEvents: stats?.rawMoveEvents ?? 0,
+      //   emittedMovePackets: stats?.emittedMovePackets ?? 0,
+      //   observedDistance: Number((stats?.observedDistance ?? 0).toFixed(4)),
+      //   emittedMovesPerUnitDistance:
+      //     stats && stats.observedDistance > 0
+      //       ? Number(
+      //           (stats.emittedMovePackets / stats.observedDistance).toFixed(2),
+      //         )
+      //       : 0,
+      //   packetCounts: { ...this.packetCounts },
+      //   activePointers: this.activePointers.size,
+      //   pendingMoves: this.pendingMoves.size,
+      //   coalescedMoveFrames: this.coalescedMoveFrames,
+      //   droppedMoveCount: this.droppedMoveCount,
+      // });
       this.gesturePacketCounts.delete(message.id);
       this.gestureStats.delete(message.id);
     }
     this.runtime.control.send({
       ...message,
-      clientTs: message.clientTs ?? Date.now()
+      clientTs: message.clientTs ?? Date.now(),
     });
   }
 
@@ -292,20 +376,56 @@ export class TouchRouter {
       packetCounts: { ...this.packetCounts },
       coalescedMoveFrames: this.coalescedMoveFrames,
       droppedMoveCount: this.droppedMoveCount,
-      movePacketsPerSecond: this.movePacketsPerSecond
+      movePacketsPerSecond: this.movePacketsPerSecond,
+      anomalousEvents: this.anomalousEvents,
+      activePointerIds: Array.from(this.activePointers.keys()),
+      pendingMoveIds: Array.from(this.pendingMoves.keys()),
+      recentEvents: [...this.recentEvents],
     };
   }
 
-  private isSameMove(prevX: number, prevY: number, nextX: number, nextY: number): boolean {
-    return Math.abs(prevX - nextX) < TouchRouter.MOVE_EPSILON &&
-      Math.abs(prevY - nextY) < TouchRouter.MOVE_EPSILON;
+  private logAnomaly(type: string, detail: Record<string, unknown>): void {
+    this.anomalousEvents += 1;
+    console.warn("[CastlaTouch] anomaly", {
+      type,
+      routerId: this.routerId,
+      launchSequence: this.runtime.currentAppLaunchSequence(),
+      sessionEpoch: this.sessionEpoch,
+      sentPackets: this.sentPackets,
+      packetCounts: { ...this.packetCounts },
+      ...detail,
+    });
+    this.recordEvent("anomaly", { type, ...detail });
+  }
+
+  private recordEvent(type: string, detail: Record<string, unknown>): void {
+    this.recentEvents.push({
+      ts: Date.now(),
+      type,
+      ...detail,
+    });
+    if (this.recentEvents.length > 40) {
+      this.recentEvents.splice(0, this.recentEvents.length - 40);
+    }
+  }
+
+  private isSameMove(
+    prevX: number,
+    prevY: number,
+    nextX: number,
+    nextY: number,
+  ): boolean {
+    return (
+      Math.abs(prevX - nextX) < TouchRouter.MOVE_EPSILON &&
+      Math.abs(prevY - nextY) < TouchRouter.MOVE_EPSILON
+    );
   }
 }
 
-function pointerAction(type: string): 'down' | 'move' | 'up' {
-  if (type === 'pointerdown') return 'down';
-  if (type === 'pointermove') return 'move';
-  return 'up';
+function pointerAction(type: string): "down" | "move" | "up" {
+  if (type === "pointerdown") return "down";
+  if (type === "pointermove") return "move";
+  return "up";
 }
 
 function mapViewportPoint(
@@ -314,10 +434,10 @@ function mapViewportPoint(
   rect: DOMRect,
   displayWidth: number,
   displayHeight: number,
-  fitMode: 'contain' | 'fill',
-  clampToViewport = false
+  fitMode: "contain" | "fill",
+  clampToViewport = false,
 ): { x: number; y: number } | null {
-  if (fitMode === 'fill') {
+  if (fitMode === "fill") {
     const rawX = (clientX - rect.left) / rect.width;
     const rawY = (clientY - rect.top) / rect.height;
     const x = clampToViewport ? clamp(rawX, 0, 1) : rawX;

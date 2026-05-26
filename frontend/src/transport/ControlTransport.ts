@@ -1,4 +1,4 @@
-import type { ControlMessage } from '../protocol';
+import type { ControlMessage } from "../protocol";
 
 export class ControlTransport {
   private static nextSocketId = 1;
@@ -28,34 +28,36 @@ export class ControlTransport {
     this.socketId = ControlTransport.nextSocketId++;
     this.readyForControl = false;
     this.controlSessionId = 0;
-    const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+    const protocol = location.protocol === "https:" ? "wss" : "ws";
     this.socket = new WebSocket(`${protocol}://${this.host}/ws/control`);
     this.socket.onopen = () => {
       this.lastPongAt = performance.now();
-      console.info('[CastlaControl] open', {
-        socketId: this.socketId,
-        connectAttempt: this.connectAttempt
-      });
+      // console.info('[CastlaControl] open', {
+      //   socketId: this.socketId,
+      //   connectAttempt: this.connectAttempt
+      // });
       this.startHeartbeat();
     };
     this.socket.onmessage = (event) => {
-      if (typeof event.data !== 'string') return;
+      if (typeof event.data !== "string") return;
       try {
         const message = JSON.parse(event.data) as ControlMessage;
-        if ((message as { type?: string }).type === 'pong') {
+        if ((message as { type?: string }).type === "pong") {
           this.lastPongAt = performance.now();
         }
-        if ((message as { type?: string }).type === 'serverInit') {
-          this.controlSessionId = Number((message as { controlSessionId?: unknown }).controlSessionId ?? 0);
+        if ((message as { type?: string }).type === "serverInit") {
+          this.controlSessionId = Number(
+            (message as { controlSessionId?: unknown }).controlSessionId ?? 0,
+          );
           this.readyForControl = true;
-          console.info('[CastlaControl] serverInit', {
-            socketId: this.socketId,
-            connectAttempt: this.connectAttempt,
-            controlSessionId: this.controlSessionId
-          });
+          // console.info('[CastlaControl] serverInit', {
+          //   socketId: this.socketId,
+          //   connectAttempt: this.connectAttempt,
+          //   controlSessionId: this.controlSessionId
+          // });
         }
         this.listeners.forEach((listener) => listener(message));
-        if ((message as { type?: string }).type === 'serverInit') {
+        if ((message as { type?: string }).type === "serverInit") {
           this.connectionListeners.forEach((listener) => listener(true));
           this.flushPending();
         }
@@ -66,12 +68,12 @@ export class ControlTransport {
     this.socket.onclose = () => {
       window.clearInterval(this.heartbeatTimer);
       this.readyForControl = false;
-      console.warn('[CastlaControl] close', {
-        socketId: this.socketId,
-        connectAttempt: this.connectAttempt,
-        controlSessionId: this.controlSessionId,
-        pendingMessages: this.pendingMessages.length
-      });
+      // console.warn('[CastlaControl] close', {
+      //   socketId: this.socketId,
+      //   connectAttempt: this.connectAttempt,
+      //   controlSessionId: this.controlSessionId,
+      //   pendingMessages: this.pendingMessages.length
+      // });
       this.connectionListeners.forEach((listener) => listener(false));
       if (!this.manuallyClosed) {
         this.scheduleReconnect();
@@ -138,13 +140,18 @@ export class ControlTransport {
         this.reconnectNow();
         return;
       }
-      socket.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
+      socket.send(JSON.stringify({ type: "ping", ts: Date.now() }));
     }, 15000);
   }
 
   private flushPending(): void {
     const socket = this.socket;
-    if (!socket || socket.readyState !== WebSocket.OPEN || !this.readyForControl) return;
+    if (
+      !socket ||
+      socket.readyState !== WebSocket.OPEN ||
+      !this.readyForControl
+    )
+      return;
     const pending = this.pendingMessages.splice(0, this.pendingMessages.length);
     pending.forEach((payload) => socket.send(payload));
   }
@@ -165,7 +172,7 @@ export class ControlTransport {
       controlSessionId: this.controlSessionId,
       pendingMessages: this.pendingMessages.length,
       messageListeners: this.listeners.size,
-      connectionListeners: this.connectionListeners.size
+      connectionListeners: this.connectionListeners.size,
     };
   }
 }

@@ -39,7 +39,11 @@ export class BrowserCompositor {
     }
     if (message.type === 'diagnostics') {
       const diagnostics = message as DiagnosticsMessage;
-      this.store.update((state) => ({ ...state, diagnostics: diagnostics.displays ?? [] }));
+      this.store.update((state) => ({
+        ...state,
+        diagnostics: diagnostics.displays ?? state.diagnostics,
+        serverDiagnostics: diagnostics.server ?? state.serverDiagnostics
+      }));
     }
   }
 

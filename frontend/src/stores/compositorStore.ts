@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import type { DiagnosticsDisplay, PaneId } from '../protocol';
+import type { DiagnosticsDisplay, PaneId, ServerDiagnostics } from '../protocol';
 
 export interface ViewportModel {
   pane: PaneId;
@@ -13,6 +13,7 @@ export interface ViewportModel {
 export interface CompositorState {
   viewports: Map<PaneId, ViewportModel>;
   diagnostics: DiagnosticsDisplay[];
+  serverDiagnostics: ServerDiagnostics | null;
   layoutMode: 'single' | 'split';
   splitRatio: number;
   splitReversed: boolean;
@@ -31,6 +32,7 @@ export function createInitialCompositorState(): CompositorState {
       ['primary', { pane: 'primary', width: 1280, height: 720, committed: false, generation: 0, visible: true }]
     ]),
     diagnostics: [],
+    serverDiagnostics: null,
     layoutMode: 'single',
     splitRatio: readStoredSplitRatio(),
     splitReversed: false

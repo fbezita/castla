@@ -58,8 +58,9 @@ class PersistentVirtualDisplaySession(
         vdId = virtualDisplayController.getDisplayId()
         if (vdId >= 0) {
             lifecycle.transitionTo(SessionLifecycleState.VD_READY)
-            touchInjector?.updateController { event ->
+            touchInjector?.updateController { _, event ->
                 virtualDisplayController.injectMotionEvent(event)
+                true
             }
         }
     }
@@ -100,6 +101,7 @@ class PersistentVirtualDisplaySession(
             lifecycle.transitionTo(SessionLifecycleState.SUSPENDED)
         }
         mirrorServer.broadcastControlMessage(streamGeneration.toJson(vdId).toString())
+        mirrorServer.broadcastDiagnostics()
     }
 
     fun setViewportVisible(visible: Boolean) {

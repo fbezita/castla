@@ -310,3 +310,59 @@ Remaining follow-up work:
 2. reducing direct cross-layer recovery triggers
 3. promoting decoder recovery into explicit keyframe-first / rebuild-later policy
 4. formalizing input and display recovery state machines
+
+### 2026-05-26 Touch Fix Outcome
+
+The hardreset touch freeze is now resolved.
+
+Temporary hardreset tracing was used to isolate the real failure boundary and has since been
+trimmed back out of the runtime path.
+
+#### Root Cause Confirmed
+
+The key issue was not browser reconnect, control transport, app launch routing, or display
+focus drift.
+
+The real problem was that browser `pointerId` values were being passed straight through into
+Android `MotionEvent.PointerProperties.id`.
+
+After repeated reload/hardreset cycles, the browser could send larger ids such as `36`, while
+Android input injection remained happy with compact local ids such as `0`, `1`, `2`.
+
+That mismatch explained the observed behavior:
+
+- real user touches after hardreset could be rejected at `injectInputEvent(...)`
+- synthetic internal nudges using small local ids could still succeed
+- full reload often worked because the next browser pointer id happened to be small again
+
+#### Fix Kept In The Runtime
+
+`TouchInjector` now remaps browser pointer ids to Android-local pointer ids for the lifetime
+of the active gesture state.
+
+Current behavior:
+
+- browser ids remain the external protocol ids
+- Android injection uses compact local ids within the supported pointer range
+- local ids are released on `UP`, `CANCEL`, and injector reset/release paths
+
+This is the behavior-changing fix that should remain.
+
+#### Cleanup Applied After Confirmation
+
+The temporary hardreset investigation scaffolding is no longer considered part of the
+intended structure:
+
+- hardreset generation tagging on touch packets
+- first-packet hardreset tracing
+- dispatcher probe logging used during the hardreset investigation
+- inject source tagging used only for diagnosis
+
+The normal input and rebuild logs remain, but the special-case investigation logging has been
+reduced again.
+
+#### Current Touch Handoff
+
+If the next session starts from one sentence, it should be this:
+
+> The hardreset touch freeze was fixed by remapping browser pointer ids to Android-local pointer ids inside `TouchInjector`; the remaining touch protections worth keeping are the existing move dedup/throttle guard and the rebuild defer guard while touch is active.

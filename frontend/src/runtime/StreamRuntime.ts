@@ -1,25 +1,33 @@
-import type { EncodedFrame, PaneId, StreamMetadata } from '../protocol';
-import { ControlTransport } from '../transport/ControlTransport';
-import { VideoTransport } from '../transport/VideoTransport';
-import { GenerationTracker } from './GenerationTracker';
-import { StreamHealthMonitor } from './StreamHealthMonitor';
+import type { EncodedFrame, PaneId, StreamMetadata } from "../protocol";
+import { ControlTransport } from "../transport/ControlTransport";
+import { VideoTransport } from "../transport/VideoTransport";
+import { GenerationTracker } from "./GenerationTracker";
+import { StreamHealthMonitor } from "./StreamHealthMonitor";
 
 export class StreamRuntime {
   readonly control: ControlTransport;
   readonly generations = new GenerationTracker();
   readonly health = new StreamHealthMonitor();
-  private serverInstanceId = 'unknown';
+  private serverInstanceId = "unknown";
   private controlSessionId = 0;
   private videoTransports = new Map<PaneId, VideoTransport>();
-  private frameListeners = new Map<PaneId, Set<(frame: EncodedFrame) => void>>();
+  private frameListeners = new Map<
+    PaneId,
+    Set<(frame: EncodedFrame) => void>
+  >();
   private frameCounts = new Map<PaneId, number>();
   private connectionListeners = new Set<(connected: boolean) => void>();
   private sessionListeners = new Set<(epoch: number, reason: string) => void>();
   private touchStateListeners = new Set<(reason: string) => void>();
   private frontendResetListeners = new Set<(reason: string) => void>();
-  private lastLayout: Array<{ id: PaneId; width: number; height: number; visible?: boolean }> = [];
-  private lastLayoutVisibility = '';
-  private lastLayoutSignature = '';
+  private lastLayout: Array<{
+    id: PaneId;
+    width: number;
+    height: number;
+    visible?: boolean;
+  }> = [];
+  private lastLayoutVisibility = "";
+  private lastLayoutSignature = "";
   private layoutUpdateCount = 0;
   private layoutDedupedCount = 0;
   private lastKeyframeRequestAt = new Map<PaneId, number>();
@@ -32,45 +40,45 @@ export class StreamRuntime {
   private started = false;
   private controlMessageCleanup?: () => void;
   private static readonly noisyDecoderEvents = new Set([
-    'metadata',
-    'configFrame',
-    'keyFrame',
-    'frameSummary',
-    'jmuxerReady',
-    'jmuxerConfig',
-    'jmuxerCreated',
-    'jmuxerMseReady',
-    'jmuxerQueue',
-    'jmuxerFeedSummary',
-    'videoLoadedMetadata',
-    'videoLoadedData',
-    'videoCanPlay',
-    'videoPlaying',
-    'videoHasCurrentData'
+    "metadata",
+    "configFrame",
+    "keyFrame",
+    "frameSummary",
+    "jmuxerReady",
+    "jmuxerConfig",
+    "jmuxerCreated",
+    "jmuxerMseReady",
+    "jmuxerQueue",
+    "jmuxerFeedSummary",
+    "videoLoadedMetadata",
+    "videoLoadedData",
+    "videoCanPlay",
+    "videoPlaying",
+    "videoHasCurrentData",
   ]);
 
   constructor(private readonly host: string) {
     this.control = new ControlTransport(host);
     this.control.onConnectionChange((connected) => {
-      console.info('[CastlaSession] control_connection', {
-        connected,
-        sessionEpoch: this.sessionEpoch,
-        controlSessionId: this.controlSessionId,
-        appLaunchSequence: this.appLaunchSequence
-      });
+      // console.info("[CastlaSession] control_connection", {
+      //   connected,
+      //   sessionEpoch: this.sessionEpoch,
+      //   controlSessionId: this.controlSessionId,
+      //   appLaunchSequence: this.appLaunchSequence,
+      // });
       this.connectionListeners.forEach((listener) => listener(connected));
       if (!connected) {
         this.wasConnected = false;
         return;
       }
       this.wasConnected = true;
-      this.resetTouchState('control_connected');
+      this.resetTouchState("control_connected");
       if (this.lastLayout.length > 0) {
         this.sendLayout(this.lastLayout);
       }
       for (const [pane, listeners] of this.frameListeners) {
         if (listeners.size === 0) continue;
-        this.setCodec(pane, 'h264', 'High');
+        this.setCodec(pane, "h264", "High");
         this.requestKeyframe(pane);
       }
     });
@@ -81,14 +89,30 @@ export class StreamRuntime {
     this.started = true;
     this.control.connect();
     this.controlMessageCleanup = this.control.onMessage((message) => {
-      if ((message as { type?: string }).type === 'serverInit') {
-        this.serverInstanceId = String((message as { instanceId?: unknown }).instanceId ?? 'unknown');
-        this.controlSessionId = Number((message as { controlSessionId?: unknown }).controlSessionId ?? 0);
+      if ((message as { type?: string }).type === "serverInit") {
+        this.serverInstanceId = String(
+          (message as { instanceId?: unknown }).instanceId ?? "unknown",
+        );
+        this.controlSessionId = Number(
+          (message as { controlSessionId?: unknown }).controlSessionId ?? 0,
+        );
       }
-      if (message.type === 'streamMetadata') {
+      if (message.type === "streamMetadata") {
         const metadata = message as StreamMetadata;
         this.generations.update(metadata);
       }
+      /* ### 수정 시작 ### */
+      // Handle remote touchReset commands sent from the server watchdog to break client-side pointer locks
+      if (message.type === "touchReset") {
+        const reason =
+          (message as { reason?: string }).reason ?? "server_recovery";
+        console.warn(
+          "[CastlaSession] Received forced touchReset command from server",
+          { reason },
+        );
+        this.touchStateListeners.forEach((listener) => listener(reason));
+      }
+      /* ### 수정 끝 ### */
     });
   }
 
@@ -109,27 +133,27 @@ export class StreamRuntime {
 
   requestKeyframe(pane: PaneId): void {
     this.generations.resetForKeyframe(pane);
-    this.control.send({ type: 'requestKeyframe', pane });
+    this.control.send({ type: "requestKeyframe", pane });
   }
 
-  resetTouchState(reason = 'manual'): void {
-    console.info('[CastlaSession] touch_reset', {
+  resetTouchState(reason = "manual"): void {
+    console.info("[CastlaSession] touch_reset", {
       reason,
       sessionEpoch: this.sessionEpoch,
       controlSessionId: this.controlSessionId,
-      appLaunchSequence: this.appLaunchSequence
+      appLaunchSequence: this.appLaunchSequence,
     });
-    this.control.send({ type: 'touchReset' });
+    this.control.send({ type: "touchReset" });
     this.touchStateListeners.forEach((listener) => listener(reason));
   }
 
   resetTouchSession(reason: string): void {
     this.sessionEpoch += 1;
-    console.info('[CastlaSession] touch_session', {
+    console.info("[CastlaSession] touch_session", {
       reason,
       sessionEpoch: this.sessionEpoch,
       controlSessionId: this.controlSessionId,
-      appLaunchSequence: this.appLaunchSequence
+      appLaunchSequence: this.appLaunchSequence,
     });
     this.resetTouchState(`session:${reason}`);
   }
@@ -139,25 +163,35 @@ export class StreamRuntime {
     this.frontendResetListeners.forEach((listener) => listener(reason));
   }
 
-  setCodec(pane: PaneId, mode: 'h264' | 'mjpeg', profile = 'High'): void {
-    this.control.send({ type: 'codec', pane, mode, profile });
+  setCodec(pane: PaneId, mode: "h264" | "mjpeg", profile = "High"): void {
+    this.control.send({ type: "codec", pane, mode, profile });
   }
 
-  sendLayout(pipelines: Array<{ id: PaneId; width: number; height: number; visible?: boolean }>): void {
+  sendLayout(
+    pipelines: Array<{
+      id: PaneId;
+      width: number;
+      height: number;
+      visible?: boolean;
+    }>,
+  ): void {
     const normalized = pipelines.map((pipeline) => ({
       id: pipeline.id,
       width: Math.max(320, align16(pipeline.width)),
       height: Math.max(320, align16(pipeline.height)),
-      visible: pipeline.visible ?? true
+      visible: pipeline.visible ?? true,
     }));
     const signature = normalized
-      .map((pipeline) => `${pipeline.id}:${pipeline.width}x${pipeline.height}:${pipeline.visible ? 1 : 0}`)
+      .map(
+        (pipeline) =>
+          `${pipeline.id}:${pipeline.width}x${pipeline.height}:${pipeline.visible ? 1 : 0}`,
+      )
       .sort()
-      .join('|');
+      .join("|");
     const nextVisibility = normalized
       .map((pipeline) => `${pipeline.id}:${pipeline.visible ? 1 : 0}`)
       .sort()
-      .join('|');
+      .join("|");
     this.lastLayoutVisibility = nextVisibility;
     this.lastLayout = normalized.map((pipeline) => ({ ...pipeline }));
     if (signature === this.lastLayoutSignature) {
@@ -167,9 +201,15 @@ export class StreamRuntime {
     this.lastLayoutSignature = signature;
     this.layoutUpdateCount += 1;
     this.control.send({
-      type: 'layout_update',
-      pipelines: normalized
+      type: "layout_update",
+      pipelines: normalized,
     });
+  }
+
+  updateLayout() {
+    // if (this.lastLayout.length > 0) {
+    this.sendLayout(this.lastLayout);
+    // }
   }
 
   onConnectionChange(listener: (connected: boolean) => void): () => void {
@@ -177,7 +217,9 @@ export class StreamRuntime {
     return () => this.connectionListeners.delete(listener);
   }
 
-  onSessionChange(listener: (epoch: number, reason: string) => void): () => void {
+  onSessionChange(
+    listener: (epoch: number, reason: string) => void,
+  ): () => void {
     this.sessionListeners.add(listener);
     return () => this.sessionListeners.delete(listener);
   }
@@ -200,49 +242,57 @@ export class StreamRuntime {
     return this.appLaunchSequence;
   }
 
-  launchApp(pkg: string, pane: PaneId, componentName?: string, isVideoApp = false): void {
+  launchApp(
+    pkg: string,
+    pane: PaneId,
+    componentName?: string,
+    isVideoApp = false,
+  ): void {
     this.appLaunchSequence += 1;
-    console.info('[CastlaSession] app_launch', {
-      pkg,
-      pane,
-      componentName: componentName ?? null,
-      isVideoApp,
-      appLaunchSequence: this.appLaunchSequence,
-      sessionEpoch: this.sessionEpoch,
-      controlSessionId: this.controlSessionId
-    });
-    this.resetFrontendInteraction('app_launch');
+    // console.info("[CastlaSession] app_launch", {
+    //   pkg,
+    //   pane,
+    //   componentName: componentName ?? null,
+    //   isVideoApp,
+    //   appLaunchSequence: this.appLaunchSequence,
+    //   sessionEpoch: this.sessionEpoch,
+    //   controlSessionId: this.controlSessionId,
+    // });
+    this.resetFrontendInteraction("app_launch");
     this.control.send({
-      type: 'launchApp',
+      type: "launchApp",
       pkg,
       pane,
       componentName,
-      isVideoApp
+      isVideoApp,
     });
   }
 
   goHome(): void {
-    this.control.send({ type: 'goHome' });
+    this.control.send({ type: "goHome" });
   }
 
   setDisplayDensity(scale: number): void {
-    this.control.send({ type: 'displayDensity', scale });
+    this.control.send({ type: "displayDensity", scale });
   }
 
   setPlaybackProfile(profile: string): void {
-    this.control.send({ type: 'playbackProfile', profile });
+    this.control.send({ type: "playbackProfile", profile });
   }
 
-  reportDecoderStatus(pane: PaneId, event: string, detail = ''): void {
+  reportDecoderStatus(pane: PaneId, event: string, detail = ""): void {
     if (StreamRuntime.noisyDecoderEvents.has(event)) return;
     const key = `${pane}:${event}:${detail}`;
-    if (this.seenEvents.has(key) && !event.endsWith('summary')) return;
+    if (this.seenEvents.has(key) && !event.endsWith("summary")) return;
     this.seenEvents.add(key);
-    this.control.send({ type: 'decoderStatus', pane, event, detail });
+    this.control.send({ type: "decoderStatus", pane, event, detail });
     console.warn(`[CastlaDecoder:${pane}] ${event}`, detail);
   }
 
-  attachVideo(pane: PaneId, onFrame: (frame: EncodedFrame) => void): () => void {
+  attachVideo(
+    pane: PaneId,
+    onFrame: (frame: EncodedFrame) => void,
+  ): () => void {
     let listeners = this.frameListeners.get(pane);
     if (!listeners) {
       listeners = new Set();
@@ -250,7 +300,12 @@ export class StreamRuntime {
     }
     listeners.add(onFrame);
     if (!this.videoTransports.has(pane)) {
-      const transport = new VideoTransport(this.host, pane, (frame) => this.dispatchFrame(pane, frame), () => this.health.reconnect(pane));
+      const transport = new VideoTransport(
+        this.host,
+        pane,
+        (frame) => this.dispatchFrame(pane, frame),
+        () => this.health.reconnect(pane),
+      );
       this.videoTransports.set(pane, transport);
       transport.connect();
     }
@@ -265,7 +320,7 @@ export class StreamRuntime {
   }
 
   softReconnect(pane: PaneId): void {
-    this.reportDecoderStatus(pane, 'softReconnect');
+    this.reportDecoderStatus(pane, "softReconnect");
     this.resetSession(`softReconnect:${pane}`);
     this.generations.resetForKeyframe(pane);
     this.videoTransports.get(pane)?.reconnectNow();
@@ -273,7 +328,7 @@ export class StreamRuntime {
   }
 
   recoverPaneStream(pane: PaneId): void {
-    this.reportDecoderStatus(pane, 'paneRecover');
+    this.reportDecoderStatus(pane, "paneRecover");
     this.health.beginRecovery(pane);
     this.generations.resetForKeyframe(pane);
     this.requestKeyframe(pane);
@@ -283,16 +338,17 @@ export class StreamRuntime {
     if (!this.generations.acceptFrame(pane, frame)) {
       const now = performance.now();
       const lastRejectAt = this.lastFrameRejectAt.get(pane) ?? 0;
-      const nextRejectCount = now - lastRejectAt <= 500
-        ? (this.consecutiveFrameRejects.get(pane) ?? 0) + 1
-        : 1;
+      const nextRejectCount =
+        now - lastRejectAt <= 500
+          ? (this.consecutiveFrameRejects.get(pane) ?? 0) + 1
+          : 1;
       this.lastFrameRejectAt.set(pane, now);
       this.consecutiveFrameRejects.set(pane, nextRejectCount);
       if (nextRejectCount === 1 || nextRejectCount === 3) {
         this.reportDecoderStatus(
           pane,
-          'frameRejected',
-          `seq=${frame.sequence} key=${frame.keyFrame} config=${frame.config} count=${nextRejectCount}`
+          "frameRejected",
+          `seq=${frame.sequence} key=${frame.keyFrame} config=${frame.config} count=${nextRejectCount}`,
         );
       }
       this.recoverRejectedStream(pane, nextRejectCount);
@@ -300,8 +356,18 @@ export class StreamRuntime {
     }
     this.consecutiveFrameRejects.delete(pane);
     this.lastFrameRejectAt.delete(pane);
-    if (frame.config) this.reportDecoderStatus(pane, 'configFrame', `bytes=${frame.payload.byteLength}`);
-    else if (frame.keyFrame) this.reportDecoderStatus(pane, 'keyFrame', `seq=${frame.sequence} bytes=${frame.payload.byteLength}`);
+    if (frame.config)
+      this.reportDecoderStatus(
+        pane,
+        "configFrame",
+        `bytes=${frame.payload.byteLength}`,
+      );
+    else if (frame.keyFrame)
+      this.reportDecoderStatus(
+        pane,
+        "keyFrame",
+        `seq=${frame.sequence} bytes=${frame.payload.byteLength}`,
+      );
     this.health.frame(pane);
     const count = (this.frameCounts.get(pane) ?? 0) + 1;
     this.frameCounts.set(pane, count);
@@ -315,7 +381,11 @@ export class StreamRuntime {
     if (now - lastRequestAt < 1000) return;
     this.lastKeyframeRequestAt.set(pane, now);
     this.requestKeyframe(pane);
-    this.reportDecoderStatus(pane, 'requestKeyframeAfterReject', `count=${rejectCount}`);
+    this.reportDecoderStatus(
+      pane,
+      "requestKeyframeAfterReject",
+      `count=${rejectCount}`,
+    );
   }
 
   private resetSession(reason: string): void {
@@ -324,7 +394,9 @@ export class StreamRuntime {
     this.lastKeyframeRequestAt.clear();
     this.consecutiveFrameRejects.clear();
     this.lastFrameRejectAt.clear();
-    this.sessionListeners.forEach((listener) => listener(this.sessionEpoch, reason));
+    this.sessionListeners.forEach((listener) =>
+      listener(this.sessionEpoch, reason),
+    );
   }
 }
 

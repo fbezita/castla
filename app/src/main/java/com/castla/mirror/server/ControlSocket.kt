@@ -55,21 +55,16 @@ class ControlSocket(
     override fun onOpen() {
         openTimeElapsedMs = SystemClock.elapsedRealtime()
         val assignedSessionId = server.registerControlSocket(this)
-        Log.i(
-            TAG,
-            "[InputDebug] controlSocket#$debugId open sessionId=$assignedSessionId openTime=$openTimeElapsedMs " +
-                "active=$active registered=$registered"
-        )
+        /* ### 수정 시작 ### */
+        // Removed [InputDebug] onOpen log
+        /* ### 수정 끝 ### */
     }
 
     override fun onClose(code: NanoWSD.WebSocketFrame.CloseCode?, reason: String?, initiatedByRemote: Boolean) {
         closeTimeElapsedMs = SystemClock.elapsedRealtime()
-        Log.i(
-            TAG,
-            "[InputDebug] controlSocket#$debugId close sessionId=$sessionId code=$code reason=$reason remote=$initiatedByRemote " +
-                "openTime=$openTimeElapsedMs closeTime=$closeTimeElapsedMs active=$active registered=$registered " +
-                "messages=$messageCount touchMessages=$touchMessageCount"
-        )
+        /* ### 수정 시작 ### */
+        // Removed [InputDebug] onClose log
+        /* ### 수정 끝 ### */
         server.unregisterControlSocket(this)
     }
 
@@ -113,13 +108,9 @@ class ControlSocket(
                         clientTsMs = json.optLong("clientTs", 0L),
                         receivedAtElapsedMs = SystemClock.elapsedRealtime()
                     )
-                    if (event.action != "move") {
-                        Log.i(
-                            TAG,
-                            "[InputDebug] controlSocket#$debugId touch action=${event.action} pane=${event.pane} pointerId=${event.pointerId} " +
-                                "sessionId=$sessionId active=$active registered=$registered touchMessages=$touchMessageCount totalMessages=$messageCount"
-                        )
-                    }
+                    /* ### 수정 시작 ### */
+                    // Removed [InputDebug] touch event log
+                    /* ### 수정 끝 ### */
                     server.onTouchEvent(event)
                 }
                 "touchReset" -> {
@@ -136,7 +127,7 @@ class ControlSocket(
                 }
                 "requestKeyframe" -> {
                     val pane = json.optString("pane", "primary")
-                    server.onKeyframeRequest(pane)
+                    server.onKeyframeRequest(pane, "controlSocket#$debugId")
                 }
                 "ping" -> {
                     send(JSONObject().apply {
@@ -304,11 +295,9 @@ class ControlSocket(
 
     fun markInactive(reason: String) {
         active = false
-        Log.w(
-            TAG,
-            "[InputDebug] controlSocket#$debugId markInactive reason=$reason sessionId=$sessionId " +
-                "openTime=$openTimeElapsedMs closeTime=$closeTimeElapsedMs registered=$registered"
-        )
+        /* ### 수정 시작 ### */
+        // Removed [InputDebug] markInactive log
+        /* ### 수정 끝 ### */
     }
 
     fun markUnregistered(reason: String) {
@@ -317,11 +306,9 @@ class ControlSocket(
         if (closeTimeElapsedMs == 0L) {
             closeTimeElapsedMs = SystemClock.elapsedRealtime()
         }
-        Log.i(
-            TAG,
-            "[InputDebug] controlSocket#$debugId markUnregistered reason=$reason sessionId=$sessionId " +
-                "openTime=$openTimeElapsedMs closeTime=$closeTimeElapsedMs"
-        )
+        /* ### 수정 시작 ### */
+        // Removed [InputDebug] markUnregistered log
+        /* ### 수정 끝 ### */
     }
 
     fun debugSummary(): String {

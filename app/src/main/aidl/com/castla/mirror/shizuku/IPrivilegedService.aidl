@@ -199,4 +199,10 @@ interface IPrivilegedService {
      * Inject a full MotionEvent on the specified display and return whether InputManager accepted it.
      */
     boolean injectMotionEventWithResult(int displayId, in MotionEvent event) = 34;
+
+    /**
+     * Return the top activity flattened short string for the specified display, or empty string if unavailable.
+     */
+    String getTopActivityForDisplay(int displayId) = 35;
+
 }

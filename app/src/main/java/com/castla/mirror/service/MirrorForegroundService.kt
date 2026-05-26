@@ -239,11 +239,15 @@ class MirrorForegroundService : Service() {
     private var vdKeepAliveJob: Job? = null
     private var appExitMonitorJob: Job? = null
     private var pendingBrowserDisconnectJob: Job? = null
+    @Volatile private var browserTeardownPhase: String = "idle"
     private val inputDebugLaunchSeq = java.util.concurrent.atomic.AtomicInteger(0)
     @Volatile private var currentInputDebugLaunchSeq = 0
     private val inputDebugPacketCounts = java.util.concurrent.ConcurrentHashMap<Int, java.util.concurrent.atomic.AtomicInteger>()
     private val inputDebugMovePacketCounts = java.util.concurrent.ConcurrentHashMap<Int, java.util.concurrent.atomic.AtomicInteger>()
     private val inputDebugLaunchStartElapsedMs = java.util.concurrent.ConcurrentHashMap<Int, Long>()
+    private val recentServerTouchTrace = java.util.ArrayDeque<String>()
+    private val recentServerTouchTraceMutex = Any()
+    @Volatile private var lastRejectProbeSummary: String = ""
 
     @Volatile private var lastAppLaunchTime: Long = 0L
     private val paneLastLaunchTimes = java.util.concurrent.ConcurrentHashMap<String, Long>()
@@ -273,13 +277,9 @@ class MirrorForegroundService : Service() {
                 .incrementAndGet()
         }
         if (event.action != "move") {
-            val recentServiceAction = pipeline?.recentServiceActionSummary()
-            Log.i(
-                TAG,
-                "[InputTrace] packet launchSeq=$currentInputDebugLaunchSeq action=${event.action} pane=${event.pane} " +
-                    "pointerId=${event.pointerId} packetCount=$packetCount pipeline=${pipeline?.name ?: "none"} " +
-                    "recentServiceAction=${recentServiceAction ?: "none"}"
-            )
+            /* ### 수정 시작 ### */
+            // Removed [InputTrace] packet log for optimization
+            /* ### 수정 끝 ### */
             logInputDebugSnapshot("touch_${event.action}#$currentInputDebugLaunchSeq")
         }
     }
@@ -293,21 +293,9 @@ class MirrorForegroundService : Service() {
 //            val injectorState = try { pipeline.touchInjector?.debugState() ?: "injector=null" } catch (_: Exception) { "injector=error" }
 //            "${pipeline.name}:displayId=${pipeline.displayId},app=${pipeline.currentApp},requested=${pipeline.requestedWidth}x${pipeline.requestedHeight},${pipeline.inputDebugSummary()},$injectorState"
 //        }
-        Log.i(
-            TAG,
-            "[InputTrace] snapshot reason=$reason launchSeq=$currentInputDebugLaunchSeq " +
-                "serviceJobs=${countActiveServiceJobs()} vdWorkerActive=${vdWorkerJob?.isActive == true} reconnectJob=${reconnectJob?.isActive == true} " +
-                "pendingDisconnectJob=${pendingBrowserDisconnectJob?.isActive == true} vdKeepAliveJob=${vdKeepAliveJob?.isActive == true} appExitMonitorJob=${appExitMonitorJob?.isActive == true} " +
-                "controlSockets=${server?.controlSocketCount() ?: -1} primaryVideoSockets=${server?.videoSocketCount("primary") ?: -1} " +
-                "secondaryVideoSockets=${server?.videoSocketCount("secondary") ?: -1} audioSockets=${server?.audioSocketCount() ?: -1} " +
-                "socketSummary=${server?.socketDebugSummary() ?: "server=null"} layoutSummary=${server?.layoutDebugSummary() ?: "layout=unknown"} " +
-//                "vdSummary=${VirtualDisplayController.debugSummary()} activeInputSessions=${pipelines.values.count { it.touchInjector != null }} " +
-                "activeFallbackJobs=${pipelines.values.count { it.activeFallbackJob?.isActive == true }} resizeJobs=${pipelines.values.count { it.resizeJob?.isActive == true }} " +
-                "encoderInstances=${pipelines.values.count { it.videoEncoder != null || it.jpegEncoder != null }} packetCount=${inputDebugPacketCounts[currentInputDebugLaunchSeq]?.get() ?: 0} " +
-                "movePackets=$movePackets movePacketsPerSecond=${"%.2f".format(java.util.Locale.US, movePacketsPerSecond)} launchElapsedMs=$launchElapsedMs " +
-                ""
-//                "pipelines=$pipelineStates"
-        )
+        /* ### 수정 시작 ### */
+        // Removed [InputTrace] snapshot log for optimization
+        /* ### 수정 끝 ### */
     }
 
     private fun countActiveServiceJobs(): Int {
@@ -322,12 +310,107 @@ class MirrorForegroundService : Service() {
             } catch (_: Exception) {
                 "injector=error"
             }
-            "${pipeline.name}:displayId=${pipeline.displayId},app=${pipeline.currentApp},touchActive=${pipeline.isTouchInteractionActive()},$injectorState"
+            "${pipeline.name}:displayId=${pipeline.displayId},app=${pipeline.currentApp},touchActive=${pipeline.isTouchInteractionActive()}," +
+                "focusGate=${pipeline.focusGateSummary()},$injectorState"
+        }
+    }
+
+    private fun injectorTouchSnapshot(): String {
+        return pipelines.values.joinToString(" | ") { pipeline ->
+            val injectorState = try {
+                pipeline.touchInjector?.debugState() ?: "injector=null"
+            } catch (_: Exception) {
+                "injector=error"
+            }
+            "${pipeline.name}:$injectorState"
+        }
+    }
+
+    private fun appendRecentServerTouchTrace(line: String) {
+        synchronized(recentServerTouchTraceMutex) {
+            recentServerTouchTrace.addLast(line)
+            while (recentServerTouchTrace.size > 18) {
+                recentServerTouchTrace.removeFirst()
+            }
+        }
+    }
+
+    private fun recentServerTouchTraceSnapshot(): List<String> {
+        return synchronized(recentServerTouchTraceMutex) {
+            recentServerTouchTrace.toList()
+        }
+    }
+
+    private fun broadcastWebDiagnostics(reason: String) {
+        val server = mirrorServer ?: return
+        try {
+            server.broadcastControlMessage(
+                JSONObject().apply {
+                    put("type", "diagnostics")
+                    put(
+                        "server",
+                        JSONObject().apply {
+                            put("reason", reason)
+                            put("browserConnected", browserConnected)
+                            put("serverBrowserConnected", server.isBrowserConnected())
+                            put("pendingDisconnect", pendingBrowserDisconnectJob != null)
+                            put("disconnectGraceMs", DisconnectPolicy.graceMs(screenOffPolicy.isScreenOff))
+                            put("screenOff", screenOffPolicy.isScreenOff)
+                            put("teardownPhase", browserTeardownPhase)
+                            put("socketSummary", server.socketDebugSummary())
+                            put("pipelineSnapshot", pipelineTouchSnapshot())
+                            put("injectorSnapshot", injectorTouchSnapshot())
+                            put("launchSeq", currentInputDebugLaunchSeq)
+                            put("lastTouchPane", lastTouchPane)
+                            put("timestampMs", System.currentTimeMillis())
+                            put("touchTrace", JSONArray(recentServerTouchTraceSnapshot()))
+                            put("rejectProbe", lastRejectProbeSummary)
+                        }
+                    )
+                }.toString()
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to broadcast web diagnostics", e)
         }
     }
 
     private fun isAnyTouchInteractionActive(): Boolean {
         return pipelines.values.any { it.isTouchInteractionActive() }
+    }
+
+    private fun <T> runBlockingBinderSafe(timeoutMs: Long = 1000L, block: suspend () -> T): T? {
+        return try {
+            kotlinx.coroutines.runBlocking {
+                runBinderSafe(timeoutMs, block)
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun isLaunchLikeActivity(line: String, cleanPkg: String): Boolean {
+        if (line.isBlank()) return true
+        val normalized = line.lowercase(java.util.Locale.US)
+        if (!normalized.contains(cleanPkg.lowercase(java.util.Locale.US))) return true
+        return normalized.contains("launchactivity") ||
+            normalized.contains("introactivity") ||
+            normalized.contains("splash")
+    }
+
+    private fun extractTopResumedLineForDisplay(raw: String, displayId: Int): String {
+        if (raw.isBlank() || displayId < 0) return ""
+        val lines = raw.lineSequence().map { it.trim() }.toList()
+        var inTargetDisplay = false
+        for (line in lines) {
+            if (line.startsWith("Display #")) {
+                inTargetDisplay = line.contains("Display #$displayId", ignoreCase = true)
+            }
+            if (!inTargetDisplay) continue
+            if (line.contains("topResumedActivity", ignoreCase = true) || line.contains("mResumedActivity", ignoreCase = true)) {
+                return line
+            }
+        }
+        return ""
     }
 
     private fun mostRecentTouchAgeMs(now: Long = android.os.SystemClock.elapsedRealtime()): Long? {
@@ -345,6 +428,10 @@ class MirrorForegroundService : Service() {
             request.onComplete?.complete(Unit)
             return
         }
+
+        /* ### 수정 시작 ### */
+        // Removed [InputTrace] requestRebuild log for optimization
+        /* ### 수정 끝 ### */
 
         val now = android.os.SystemClock.elapsedRealtime()
         var coalesced = false
@@ -397,12 +484,9 @@ class MirrorForegroundService : Service() {
             }
         }
         if (deferredForTouch) {
-            Log.i(
-                TAG,
-                "[InputTrace] touch_guard pane=${request.pipelineName} reason=rebuild_defer source=${request.reason} deferredMs=" +
-                    (android.os.SystemClock.elapsedRealtime() - deferStart) +
-                    " priority=${request.priority} force=${request.force} forceSingle=${request.forceSingle} target=${request.width}x${request.height}"
-            )
+            /* ### 수정 시작 ### */
+            // Removed [InputTrace] touch_guard log for optimization
+            /* ### 수정 끝 ### */
         }
         if (skippedForTouchQuietWindow) {
             Log.i(
@@ -448,12 +532,18 @@ class MirrorForegroundService : Service() {
                             try {
                                 val pipeline = pipelines[request.pipelineName]
                                 if (pipeline != null) {
+                                    /* ### 수정 시작 ### */
+                                    // Removed [InputTrace] vd_worker_rebuild_begin log for optimization
+                                    /* ### 수정 끝 ### */
                                     pipeline.executeActualRebuild(
                                         request.targetWidth,
                                         request.targetHeight,
                                         request.force,
                                         request.forceSingle
                                     )
+                                    /* ### 수정 시작 ### */
+                                    // Removed [InputTrace] vd_worker_rebuild_end log for optimization
+                                    /* ### 수정 끝 ### */
                                 }
                             } finally {
                                 request.onComplete?.complete(Unit)
@@ -1013,12 +1103,32 @@ class MirrorForegroundService : Service() {
                 server.setNetworkCongestionListener { adaptiveBitrateManager.onNetworkCongestion() }
                 server.setTouchListener { event ->
                     val targetPipeline = pipelines[event.pane]
+                    if (targetPipeline?.shouldDeferTouchForFocusGate(event) == true) {
+                        appendRecentServerTouchTrace(
+                            "gate pane=${event.pane} action=${event.action} id=${event.pointerId} app=${targetPipeline.currentApp}"
+                        )
+                        if (event.action != "move") {
+                            broadcastWebDiagnostics("touch_gate:${event.pane}:${event.action}")
+                        }
+                        return@setTouchListener
+                    }
                     targetPipeline?.noteTouchEvent(event.action)
                     recordInputDebugPacket(event, targetPipeline)
+                    appendRecentServerTouchTrace(
+                        "rx seq=$currentInputDebugLaunchSeq pane=${event.pane} action=${event.action} id=${event.pointerId} " +
+                            "xy=${"%.3f".format(java.util.Locale.US, event.x)},${"%.3f".format(java.util.Locale.US, event.y)} " +
+                            "clientTs=${event.clientTsMs} recv=${event.receivedAtElapsedMs}"
+                    )
                     targetPipeline?.touchInjector?.onTouchEvent(event)
                     if (event.action == "up") { lastTouchPane = event.pane }
+                    if (event.action != "move") {
+                        broadcastWebDiagnostics("touch_${event.action}")
+                    }
                 }
                 server.setTouchResetListener {
+                    /* ### 수정 시작 ### */
+                    // Removed [InputTrace] browser_touch_reset_begin log for optimization
+                    /* ### 수정 끝 ### */
                     pipelines.values.forEach { pipeline ->
                         val shouldForceCancel =
                             pipeline.isTouchInteractionActive() ||
@@ -1028,7 +1138,9 @@ class MirrorForegroundService : Service() {
                         catch (_: Exception) {}
                     }
                     lastTouchPane = "primary"
-                    Log.i(TAG, "[InputTrace] browser_touch_reset pipelines=${pipelineTouchSnapshot()}")
+                    /* ### 수정 시작 ### */
+                    // Removed [InputTrace] browser_touch_reset log for optimization
+                    /* ### 수정 끝 ### */
                     logInputDebugSnapshot("touch_reset")
                 }
                 server.setCodecModeListener { onCodecModeRequest(it) }
@@ -1045,13 +1157,17 @@ class MirrorForegroundService : Service() {
                 server.setAudioSocketConnectedListener { audioOrchestrator?.onAudioSocketConnected() }
                 server.setBrowserRearmListener {
                     serviceScope.launch {
-                        Log.i(TAG, "[InputTrace] debug_browser_rearm pipelines=${pipelineTouchSnapshot()}")
+                        /* ### 수정 시작 ### */
+                        // Removed [InputTrace] debug_browser_rearm log for optimization
+                        /* ### 수정 끝 ### */
                         onBrowserConnected()
                     }
                 }
                 server.setBrowserTeardownListener {
                     serviceScope.launch {
-                        Log.i(TAG, "[InputTrace] debug_browser_teardown pipelines=${pipelineTouchSnapshot()}")
+                        /* ### 수정 시작 ### */
+                        // Removed [InputTrace] debug_browser_teardown log for optimization
+                        /* ### 수정 끝 ### */
                         onBrowserDisconnected()
                     }
                 }
@@ -1077,6 +1193,7 @@ class MirrorForegroundService : Service() {
                     serviceScope.launch {
                         try {
                             beginInputDebugLaunch(pane, pkg)
+                            pipelines[pane]?.armTouchFocusGate(cmp ?: pkg)
                             // pipelines[pane]?.isVideoApp = isVideoApp
                             // pipelines[pane]?.launchAppFromWebLauncher(pkg, cmp)
                             // 💡 바로 여기에 위치하여 패킷의 성격을 먼저 규정합니다!
@@ -1132,15 +1249,21 @@ class MirrorForegroundService : Service() {
                 }
                 server.setBrowserConnectionListener { connected ->
                     if (connected) {
-                        Log.i(TAG, "[InputTrace] browser_connection connected=true pipelines=${pipelineTouchSnapshot()}")
+                        /* ### 수정 시작 ### */
+                        // Removed [InputTrace] browser_connection log for optimization
+                        /* ### 수정 끝 ### */
                         cancelPendingBrowserDisconnect("browser_reconnected")
                         if (!browserConnected) { browserConnected = true; onBrowserConnected() }
                         browserConnectionListener?.invoke(true)
                     } else if (browserConnected) {
-                        Log.i(TAG, "[InputTrace] browser_connection connected=false pipelines=${pipelineTouchSnapshot()}")
+                        /* ### 수정 시작 ### */
+                        // Removed [InputTrace] browser_connection log for optimization
+                        /* ### 수정 끝 ### */
                         scheduleBrowserDisconnect()
                     } else {
-                        Log.i(TAG, "[InputTrace] browser_connection connected=false pipelines=${pipelineTouchSnapshot()}")
+                        /* ### 수정 시작 ### */
+                        // Removed [InputTrace] browser_connection log for optimization
+                        /* ### 수정 끝 ### */
                         browserConnectionListener?.invoke(false)
                     }
                 }
@@ -1176,6 +1299,9 @@ class MirrorForegroundService : Service() {
                 }
             }
         } catch (t: Throwable) { Log.e(TAG, "Failed onBrowserConnected", t); markTerminal(TerminalReason.BROWSER_ACTIVATION_FAILED) }
+
+        mirrorServer?.broadcastDiagnostics()
+        broadcastWebDiagnostics("browser_connected")
     }
 
     private var lastVisiblePaneCount = 1
@@ -1226,6 +1352,7 @@ class MirrorForegroundService : Service() {
     private fun onBrowserDisconnected() {
         Log.w(TAG, "onBrowserDisconnected() - Target web panel dropped connection link.")
         pendingBrowserDisconnectJob = null; browserConnected = false; isInitialRebuildTriggered = false
+        browserTeardownPhase = "begin"
         stopVdKeepAlive()
         
         val oldEncoders = pipelines.values.map {
@@ -1244,22 +1371,35 @@ class MirrorForegroundService : Service() {
         audioOrchestrator?.stop()
         adaptiveBitrateManager.stopAllLoops()
         powerLockManager.releaseWakeLocks()
+        broadcastWebDiagnostics("browser_disconnected_sync")
 
         serviceScope.launch(Dispatchers.IO) {
+            browserTeardownPhase = "releasing"
             oldEncoders.forEach { (v, j) -> try { v?.release() } catch (_: Exception) {}; try { j?.release() } catch (_: Exception) {} }
             pipelines.values.forEach { try { it.release() } catch (_: Exception) {} }
             try { removeAllVdTasks() } catch (_: Exception) {}
+            browserTeardownPhase = "released"
+            broadcastWebDiagnostics("browser_disconnected_async_done")
         }
+
+        mirrorServer?.broadcastDiagnostics()        
+        broadcastWebDiagnostics("browser_disconnected")
     }
 
-    private fun cancelPendingBrowserDisconnect(reason: String) { pendingBrowserDisconnectJob?.cancel(); pendingBrowserDisconnectJob = null }
+    private fun cancelPendingBrowserDisconnect(reason: String) {
+        pendingBrowserDisconnectJob?.cancel()
+        pendingBrowserDisconnectJob = null
+        broadcastWebDiagnostics("cancel_pending_disconnect:$reason")
+    }
 
     private fun scheduleBrowserDisconnect() {
         if (pendingBrowserDisconnectJob != null) return
         val screenOff = screenOffPolicy.isScreenOff
+        broadcastWebDiagnostics("schedule_disconnect")
         pendingBrowserDisconnectJob = serviceScope.launch {
             kotlinx.coroutines.delay(DisconnectPolicy.graceMs(screenOff))
             pendingBrowserDisconnectJob = null
+            broadcastWebDiagnostics("disconnect_grace_elapsed")
             if (mirrorServer?.isBrowserConnected() == true) return@launch
             if (!DisconnectPolicy.shouldTeardown(screenOff, isBrowserConnected = false)) return@launch
             if (browserConnected) { browserConnected = false; onBrowserDisconnected() }
@@ -1342,12 +1482,13 @@ class MirrorForegroundService : Service() {
                     if (pipeline.controller.hasVirtualDisplay()) {
                         displayId = pipeline.controller.getDisplayId()
                         generation = pipeline.markVdCreated(displayId, "shizuku_reconnect")
-                        pipeline.touchInjector?.updateController { event ->
+                        pipeline.touchInjector?.updateController { touchEvent, event ->
                             val accepted = pipeline.controller.injectMotionEventWithResult(event)
-                            pipeline.recordInjectionResult(event.actionMasked, accepted)
+                            pipeline.recordInjectionResult(event, accepted)
                             if (!accepted) {
                                 pipeline.handleInjectionRejected(event.actionMasked, event.pointerCount)
                             }
+                            accepted
                         }
                         hasVd = true
                     }
@@ -1435,12 +1576,13 @@ class MirrorForegroundService : Service() {
                     if (success) {
                         activeId = pipeline.controller.getDisplayId()
                         generation = pipeline.markVdCreated(activeId, "try_setup")
-                        pipeline.touchInjector?.updateController { event ->
+                        pipeline.touchInjector?.updateController { touchEvent, event ->
                             val accepted = pipeline.controller.injectMotionEventWithResult(event)
-                            pipeline.recordInjectionResult(event.actionMasked, accepted)
+                            pipeline.recordInjectionResult(event, accepted)
                             if (!accepted) {
                                 pipeline.handleInjectionRejected(event.actionMasked, event.pointerCount)
                             }
+                            accepted
                         }
                     }
                 }
@@ -1682,7 +1824,9 @@ class MirrorForegroundService : Service() {
             kotlinx.coroutines.delay(5500L)
             try {
                 if (pipeline.isTouchInteractionActive()) {
-                    Log.i(TAG, "[InputTrace] touch_guard pane=${pipeline.name} reason=fallback_skip displayId=$displayId app=$pkg")
+                    /* ### 수정 시작 ### */
+                    // Removed [InputTrace] touch_guard fallback_skip log for optimization
+                    /* ### 수정 끝 ### */
                     return@launch
                 }
                 val runningTasks = try { service.getRunningTasksOnDisplay(displayId) } catch (e: Exception) {
@@ -1747,6 +1891,7 @@ class MirrorForegroundService : Service() {
         @Volatile var isSelfHealingInProgress = false
         @Volatile var activeFallbackJob: kotlinx.coroutines.Job? = null
         @Volatile var lastFrameRenderedTime = 0L
+        @Volatile var lastMoveRejectLoggedAt = 0L
         /* ### 수정 끝 ### */
         
         private val encoderSession = java.util.concurrent.atomic.AtomicLong(0)
@@ -1783,6 +1928,15 @@ class MirrorForegroundService : Service() {
         @Volatile var lastServiceMutationReason = "init"
         @Volatile var activeTouchCount = 0
         @Volatile var lastTouchEventAt = 0L
+        @Volatile var touchFocusGateArmedAt = 0L
+        @Volatile var touchFocusGateTarget = ""
+        @Volatile var touchFocusGateLastProbe = ""
+        @Volatile var touchFocusGateEscalatedAt = 0L
+        @Volatile var touchFocusGateNudgedAt = 0L
+        @Volatile var touchFocusGateNudgeInFlight = false
+        @Volatile var touchFocusGateNudgeJob: Job? = null
+        @Volatile var consecutiveInjectionRejects = 0
+        private val gatedPointerIds = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
         var isVideoApp = false
         var autoResolution: Boolean = false
         var autoFps: Boolean = false
@@ -1820,6 +1974,7 @@ class MirrorForegroundService : Service() {
             debugMoveInjectAccepted = 0
             debugMoveInjectRejected = 0
             debugFirstInjectFailureProbeLogged = false
+            consecutiveInjectionRejects = 0
 //            touchInjector?.markDebugLaunch(launchSeq)
             Log.i(
                 TAG,
@@ -1827,9 +1982,13 @@ class MirrorForegroundService : Service() {
             )
         }
 
-        fun recordInjectionResult(action: Int, accepted: Boolean) {
+        fun recordInjectionResult(motionEvent: android.view.MotionEvent, accepted: Boolean) {
+            val action = motionEvent.actionMasked
             debugInjectAttempts += 1
             if (accepted) debugInjectAccepted += 1 else debugInjectRejected += 1
+            if (accepted && action != android.view.MotionEvent.ACTION_MOVE) {
+                consecutiveInjectionRejects = 0
+            }
 
             if (action == android.view.MotionEvent.ACTION_MOVE) {
                 debugMoveInjectAttempts += 1
@@ -1857,23 +2016,137 @@ class MirrorForegroundService : Service() {
             return android.os.SystemClock.elapsedRealtime() - lastAt <= 250L
         }
 
+        fun armTouchFocusGate(target: String) {
+            touchFocusGateArmedAt = android.os.SystemClock.elapsedRealtime()
+            touchFocusGateTarget = target
+            touchFocusGateLastProbe = "disabled:$target"
+            touchFocusGateEscalatedAt = 0L
+            touchFocusGateNudgedAt = 0L
+            touchFocusGateNudgeInFlight = false
+            touchFocusGateNudgeJob?.cancel()
+            touchFocusGateNudgeJob = null
+            gatedPointerIds.clear()
+            Log.i(TAG, "[FocusTrace] gate_disabled pane=$name target=$target displayId=$displayId")
+        }
+
+        private fun triggerInternalFocusNudge(
+            activeId: Int,
+            reason: String,
+        ) {
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (touchFocusGateNudgeInFlight) return
+            if (now - touchFocusGateNudgedAt < 250L) return
+
+            val targetWidth = when {
+                width > 0 -> width
+                requestedWidth > 0 -> requestedWidth
+                lastValidWidth > 0 -> lastValidWidth
+                else -> 0
+            }
+            val targetHeight = when {
+                height > 0 -> height
+                requestedHeight > 0 -> requestedHeight
+                lastValidHeight > 0 -> lastValidHeight
+                else -> 0
+            }
+            if (targetWidth <= 0 || targetHeight <= 0) return
+
+            touchFocusGateNudgeInFlight = true
+            touchFocusGateNudgedAt = now
+            val tapX = (targetWidth * 0.5f).coerceAtLeast(8f)
+            val tapY = (targetHeight * 0.5f).coerceAtLeast(8f)
+            val internalPointerId = 9001
+
+            serviceScope.launch {
+                var downAccepted = false
+                var upAccepted = false
+                try {
+                    Log.i(
+                        TAG,
+                        "[FocusTrace] inject_focus_nudge pane=$name displayId=$activeId reason=$reason x=${"%.1f".format(java.util.Locale.US, tapX)} y=${"%.1f".format(java.util.Locale.US, tapY)}"
+                    )
+                    controller.getPrivilegedService()?.wakeUpDisplay(activeId)
+                    val downTime = android.os.SystemClock.uptimeMillis()
+                    val downEvent = android.view.MotionEvent.obtain(
+                        downTime,
+                        downTime,
+                        android.view.MotionEvent.ACTION_DOWN,
+                        tapX,
+                        tapY,
+                        0
+                    )
+                    val upEvent = android.view.MotionEvent.obtain(
+                        downTime,
+                        downTime + 24L,
+                        android.view.MotionEvent.ACTION_UP,
+                        tapX,
+                        tapY,
+                        0
+                    )
+                    try {
+                        downAccepted = controller.injectMotionEventWithResult(downEvent)
+                        delay(24L)
+                        upAccepted = controller.injectMotionEventWithResult(upEvent)
+                    } finally {
+                        downEvent.recycle()
+                        upEvent.recycle()
+                    }
+                    Log.i(
+                        TAG,
+                        "[FocusTrace] inject_focus_nudge_result pane=$name displayId=$activeId pointerId=$internalPointerId down=$downAccepted up=$upAccepted reason=$reason"
+                    )
+                    
+                    // [FocusTrace] If regular binder injection fails or is rejected, 
+                    // execute raw "input" shell command as the ultimate fallback to force display focus!
+                    if (!downAccepted) {
+                        Log.w(TAG, "[FocusTrace] Binder nudge failed on display $activeId. Invoking fallback raw shell input tap.")
+                        try {
+                            controller.getPrivilegedService()?.execCommand("input -d $activeId tap $tapX $tapY")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Raw shell input nudge fallback failed", e)
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "[FocusTrace] inject_focus_nudge_failed pane=$name displayId=$activeId reason=$reason", e)
+                } finally {
+                    touchFocusGateNudgeInFlight = false
+                }
+            }
+        }
+
+        fun shouldDeferTouchForFocusGate(event: TouchEvent): Boolean {
+            touchFocusGateArmedAt = 0L
+            touchFocusGateNudgedAt = 0L
+            touchFocusGateNudgeInFlight = false
+            touchFocusGateNudgeJob?.cancel()
+            touchFocusGateNudgeJob = null
+            gatedPointerIds.clear()
+            touchFocusGateLastProbe = "disabled_passthrough"
+            return false
+        }
+
+        fun focusGateSummary(): String {
+            val armed = touchFocusGateArmedAt > 0L
+            return "armed=$armed gatedPointers=${gatedPointerIds.size} probe=${touchFocusGateLastProbe}"
+        }
+
         private fun cancelFallbackDuringTouch(reason: String) {
             val job = activeFallbackJob ?: return
             if (!job.isActive) return
             debugFallbackCancels += 1
             activeFallbackJob = null
             job.cancel()
-            Log.i(TAG, "[InputTrace] touch_guard pane=$name reason=$reason canceled=fallback displayId=$displayId app=$currentApp")
+            /* ### 수정 시작 ### */
+            // Removed [InputTrace] touch_guard fallback cancel log for optimization
+            /* ### 수정 끝 ### */
         }
 
         fun markServiceMutation(reason: String) {
             lastServiceMutationAt = android.os.SystemClock.elapsedRealtime()
             lastServiceMutationReason = reason
-            Log.i(
-                TAG,
-                "[InputTrace] service_mutation pane=$name reason=$reason displayId=$displayId app=$currentApp " +
-                    "requested=${requestedWidth}x${requestedHeight} actual=${width}x${height}"
-            )
+            /* ### 수정 시작 ### */
+            // Removed [InputTrace] service_mutation log for optimization
+            /* ### 수정 끝 ### */
         }
 
         fun recentServiceActionSummary(): String {
@@ -1895,7 +2168,10 @@ class MirrorForegroundService : Service() {
                         requestRebuild("tier_resume", RebuildPriority.HIGH, targetW, targetH, force = true)
                     }
                 }
-                DisplayTier.SUSPENDED, DisplayTier.PARKED -> suspendEncoder(reason)
+                DisplayTier.SUSPENDED, DisplayTier.PARKED -> {
+                    suspendEncoder(reason)
+                    mirrorServer?.broadcastDiagnostics()
+                }
             }
         }
 
@@ -1999,7 +2275,9 @@ class MirrorForegroundService : Service() {
             val w = alignedWidth; val h = alignedHeight; val dpi = computeVirtualDisplayDpi(w, h)
             val calculatedBitrate = adaptiveBitrateManager.getSharedBitrateForPipeline(this)
 
-            Log.i(TAG, "[$name Pipeline] Rebuilding hardware layout canvas context to ${w}x${h} (DPI=$dpi, Bitrate=${calculatedBitrate/1000}kbps)")
+            /* ### 수정 시작 ### */
+            // Removed [InputTrace] Rebuilding hardware layout log for optimization
+            /* ### 수정 끝 ### */
 
             // Reset frame indicator on viewport/encoder layout reconstruction to guarantee correct watchdog operation
             lastFrameRenderedTime = 0L
@@ -2138,12 +2416,13 @@ class MirrorForegroundService : Service() {
                 if (success && activeId >= 0) {
                     touchInjector = (touchInjector ?: TouchInjector(w, h)).also { injector ->
                         injector.updateDimensions(w, h)
-                        injector.updateController { event ->
+                        injector.updateController { touchEvent, event ->
                             val accepted = controller.injectMotionEventWithResult(event)
-                            recordInjectionResult(event.actionMasked, accepted)
+                            recordInjectionResult(event, accepted)
                             if (!accepted) {
                                 handleInjectionRejected(event.actionMasked, event.pointerCount)
                             }
+                            accepted
                         }
                     }
                     startEncoderTask?.invoke()
@@ -2197,9 +2476,23 @@ class MirrorForegroundService : Service() {
                 }
                 /* ### 수정 끝 ### */
             }
+
+            mirrorServer?.broadcastDiagnostics()
         }
 
         fun invalidateVd(reason: String): Long { Log.w(TAG, "[$name Pipeline] Invalidating display channel cache token. Reason: $reason"); displayId = -1; return vdGeneration.incrementAndGet() }
+
+        private fun summarizeProbeDump(raw: String, needles: List<String>): String {
+            if (raw.isBlank()) return "none"
+            val matched = raw
+                .lineSequence()
+                .map { it.trim() }
+                .filter { line -> line.isNotEmpty() && needles.any { needle -> needle.isNotBlank() && line.contains(needle, ignoreCase = true) } }
+                .take(12)
+                .map { line -> line.replace(Regex("\\s+"), " ") }
+                .toList()
+            return if (matched.isEmpty()) "none" else matched.joinToString(" || ")
+        }
         
         /* ### 수정 시작 ### */
         // Periodically monitors task residency on the virtual display to inject layout wakeup events adaptively as soon as the app mounts.
@@ -2246,6 +2539,16 @@ class MirrorForegroundService : Service() {
             if (activeId < 0) return
             if (isTouchInteractionActive()) return
             val targetApp = currentApp
+            
+            // [FocusTrace] Skip focus recovery to prevent splash loop if the target app is a splash/launcher activity
+            val normalizedTarget = targetApp.lowercase(java.util.Locale.US)
+            if (normalizedTarget.contains("launchactivity") || 
+                normalizedTarget.contains("introactivity") || 
+                normalizedTarget.contains("splash")) {
+                Log.i(TAG, "[FocusTrace] Skip touch focus recovery to prevent splash loop for $targetApp")
+                return
+            }
+
             val cleanPkg = targetApp.substringBefore('/').substringBefore('?').substringBefore(' ').trim()
             if (cleanPkg.isBlank() || cleanPkg == "HOME" || cleanPkg == "com.android.settings" || cleanPkg == packageName) return
 
@@ -2283,6 +2586,7 @@ class MirrorForegroundService : Service() {
                 markServiceMutation("touch_focus_recovery:$trigger")
 
                 try { service.wakeUpDisplay(activeId) } catch (_: Exception) {}
+                try { service.execCommand("wm dismiss-keyguard") } catch (_: Exception) {}
 
                 val taskIds = try {
                     runBinderSafe(1000L) { service.getTaskIdsForPackage(cleanPkg).toList() } ?: emptyList()
@@ -2329,22 +2633,154 @@ class MirrorForegroundService : Service() {
             }
         }
 
+        /* ### 수정 시작 ### */
+        // Safely detach and re-attach the virtual display's Surface to break WindowManagerService transition locks.
+        suspend fun resetSurfaceToBreakWmsLock() {
+            val activeId = displayId
+            val surface = currentEncoderSurface
+            if (activeId >= 0 && surface != null) {
+                Log.w(TAG, "[$name Pipeline] Initiating Surface reset sequence to clear WMS transition stagnation on display $activeId")
+                try {
+                    controller.setSurface(null)
+                    delay(80L)
+                    controller.setSurface(surface)
+                    Log.i(TAG, "[$name Pipeline] Surface reset sequence successfully completed on display $activeId")
+                } catch (e: Exception) {
+                    Log.e(TAG, "[$name Pipeline] Failed to execute Surface reset recovery", e)
+                }
+            }
+        }
+        /* ### 수정 끝 ### */
+
         fun handleInjectionRejected(action: Int, pointerCount: Int) {
             debugInjectionRejects += 1
             val activeId = displayId
             if (activeId < 0) return
-            if (action == android.view.MotionEvent.ACTION_MOVE) return
+            
+            /* ### 수정 시작 ### */
+            // Allow ACTION_MOVE to accumulate reject counts with a 200ms throttle interval 
+            // to detect stagnation during drag gestures without flooding recovery calls.
+            val isMove = action == android.view.MotionEvent.ACTION_MOVE
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (isMove) {
+                if (now - lastMoveRejectLoggedAt < 200L) {
+                    return
+                }
+                lastMoveRejectLoggedAt = now
+            }
+            
+            consecutiveInjectionRejects += 1
+            /* ### 수정 끝 ### */
+            
+            appendRecentServerTouchTrace(
+                "reject pane=$name displayId=$activeId action=$action pointerCount=$pointerCount app=$currentApp"
+            )
+            broadcastWebDiagnostics("inject_reject:$name:$action")
             if (!debugFirstInjectFailureProbeLogged) {
                 debugFirstInjectFailureProbeLogged = true
                 logInjectionFailureProbe(activeId, action, pointerCount)
             }
-            val now = android.os.SystemClock.elapsedRealtime()
             if (now - lastInjectionRecoveryAt >= 2000L) {
                 lastInjectionRecoveryAt = now
+                debugInjectionRecoveries += 1
                 Log.w(
                     TAG,
-                    "[InputTrace] inject_reject pane=$name displayId=$activeId action=$action pointerCount=$pointerCount app=$currentApp"
+                    "[FocusTrace] inject_reject pane=$name displayId=$activeId action=$action pointerCount=$pointerCount app=$currentApp"
                 )
+                val relaunchTarget = recoveryLaunchTarget().ifBlank { touchFocusGateTarget.ifBlank { currentApp } }
+                serviceScope.launch {
+                    try {
+                        touchInjector?.release(forceFallbackCancel = false, reason = "inject_reject")
+                        Log.w(
+                            TAG,
+                            "[FocusTrace] inject_input_session_reset pane=$name displayId=$activeId action=$action app=$currentApp consecutive=$consecutiveInjectionRejects"
+                        )
+                    } catch (e: Exception) {
+                        Log.w(TAG, "[$name Pipeline] inject reject input-session reset failed", e)
+                    }
+                    Log.w(
+                        TAG,
+                        "[FocusTrace] inject_realign pane=$name displayId=$activeId action=$action app=$currentApp target=$relaunchTarget consecutive=$consecutiveInjectionRejects"
+                    )
+                    try {
+                        /* ### 수정 시작 ### */
+                        launchComponent(
+                            relaunchTarget,
+                            forceColdStart = false,
+                            forceDisplayId = true,
+                            forceTaskRealign = true
+                        )
+                        /* ### 수정 끝 ### */
+                    } catch (_: Exception) {}
+                    try {
+                        controller.getPrivilegedService()?.wakeUpDisplay(activeId)
+                        controller.getPrivilegedService()?.execCommand("wm dismiss-keyguard")
+                    } catch (_: Exception) {}
+                    delay(60L)
+                    triggerInternalFocusNudge(activeId, "inject_reject")
+                    delay(120L)
+                    try {
+                        if (currentCodecMode != "mjpeg") {
+                            videoEncoder?.requestKeyFrame()
+                        } else {
+                            restoreContent()
+                        }
+                    } catch (_: Exception) {}
+                    Log.w(
+                        TAG,
+                        "[FocusTrace] inject_recover pane=$name displayId=$activeId action=$action app=$currentApp target=$relaunchTarget"
+                    )
+                    // if (consecutiveInjectionRejects >= 3) {
+                    //     try {
+                    //         // [FocusTrace] Force release all active pointers to clear session lock when failures pile up
+                    //         touchInjector?.release(forceFallbackCancel = true, reason = "inject_stuck_recover")
+                    //         consecutiveInjectionRejects = 0
+                            
+                    //         // Re-target to clean package to prevent redundant launch-like activity loop
+                    //         val cleanRelaunchTarget = relaunchTarget.substringBefore('/').ifBlank { relaunchTarget }
+                            
+                    //         /* ### 수정 시작 ### */
+                    //         // Detach and re-attach Surface to force WMS redraw and break focus locks
+                    //         resetSurfaceToBreakWmsLock()
+                    //         delay(40L)
+
+                    //         // WMS Stagnation Recovery: Force a full virtual display hardware rebuild 
+                    //         // to break heavy WMS transition locks and completely refresh DisplayManager bindings.
+                    //         // This replicates the exact recovery effect of browser F5 fullReload without page refresh.
+                    //         val rebuildDeferred = kotlinx.coroutines.CompletableDeferred<Unit>()
+                    //         requestRebuild(
+                    //             reason = "inject_stuck_rebuild",
+                    //             priority = RebuildPriority.HIGH,
+                    //             newWidth = if (requestedWidth > 0) requestedWidth else 720,
+                    //             newHeight = if (requestedHeight > 0) requestedHeight else 720,
+                    //             force = true,
+                    //             forceSingle = true,
+                    //             onComplete = rebuildDeferred
+                    //         )
+                    //         try {
+                    //             rebuildDeferred.await()
+                    //         } catch (_: Exception) {
+                    //             delay(300L)
+                    //         }
+                    //         /* ### 수정 끝 ### */
+                            
+                    //         /* ### 수정 시작 ### */
+                    //         launchComponent(
+                    //             cleanRelaunchTarget,
+                    //             forceColdStart = false, // Prevent redundant app force-stop and cold-start disruptions
+                    //             forceDisplayId = true,
+                    //             forceTaskRealign = true
+                    //         )
+                    //         /* ### 수정 끝 ### */
+                    //         Log.w(
+                    //             TAG,
+                    //             "[FocusTrace] inject_soft_rearm pane=$name displayId=$activeId action=$action app=$currentApp target=$cleanRelaunchTarget consecutive=$consecutiveInjectionRejects"
+                    //         )
+                    //     } catch (e: Exception) {
+                    //         Log.w(TAG, "[$name Pipeline] inject recovery relaunch failed", e)
+                    //     }
+                    // }
+                }
             }
         }
 
@@ -2354,7 +2790,7 @@ class MirrorForegroundService : Service() {
                 if (service == null) {
                     Log.w(
                         TAG,
-                        "[InputTrace] inject_false_probe pane=$name displayId=$activeId action=$action pointerCount=$pointerCount app=$currentApp service=unavailable recentServiceAction=${recentServiceActionSummary()}"
+                        "[FocusTrace] inject_false_probe pane=$name displayId=$activeId action=$action pointerCount=$pointerCount app=$currentApp service=unavailable recentServiceAction=${recentServiceActionSummary()}"
                     )
                     return@launch
                 }
@@ -2380,23 +2816,14 @@ class MirrorForegroundService : Service() {
                     windowsDump,
                     listOf("mCurrentFocus", "mFocusedApp", "mTopFocusedDisplayId", "Display #$activeId", "mDisplayId=$activeId", cleanPkg)
                 )
+                lastRejectProbeSummary =
+                    "pane=$name displayId=$activeId app=$targetApp activities=$activitySummary windows=$windowSummary recent=${recentServiceActionSummary()}"
                 Log.w(
                     TAG,
-                    "[InputTrace] inject_false_probe pane=$name displayId=$activeId action=$action pointerCount=$pointerCount app=$targetApp activities=$activitySummary windows=$windowSummary recentServiceAction=${recentServiceActionSummary()}"
+                    "[FocusTrace] inject_false_probe pane=$name displayId=$activeId action=$action pointerCount=$pointerCount app=$targetApp activities=$activitySummary windows=$windowSummary recentServiceAction=${recentServiceActionSummary()}"
                 )
+                broadcastWebDiagnostics("inject_false_probe:$name:$action")
             }
-        }
-
-        private fun summarizeProbeDump(raw: String, needles: List<String>): String {
-            if (raw.isBlank()) return "none"
-            val matched = raw
-                .lineSequence()
-                .map { it.trim() }
-                .filter { line -> line.isNotEmpty() && needles.any { needle -> needle.isNotBlank() && line.contains(needle, ignoreCase = true) } }
-                .take(12)
-                .map { line -> line.replace(Regex("\\s+"), " ") }
-                .toList()
-            return if (matched.isEmpty()) "none" else matched.joinToString(" || ")
         }
 
         fun markVdCreated(activeId: Int, reason: String): Long { displayId = activeId; return vdGeneration.incrementAndGet() }
@@ -2411,9 +2838,16 @@ class MirrorForegroundService : Service() {
                 "fallbackCancels=$debugFallbackCancels encoderCreates=$debugEncoderCreates encoderReleases=$debugEncoderReleases " +
                 "injectRejects=$debugInjectionRejects injectRecoveries=$debugInjectionRecoveries " +
                 "resizeJobActive=${resizeJob?.isActive == true} fallbackJobActive=${activeFallbackJob?.isActive == true} " +
-                "encoderActive=${videoEncoder != null || jpegEncoder != null}"
+                "encoderActive=${videoEncoder != null || jpegEncoder != null} " +
+                "focusGateArmed=${touchFocusGateArmedAt > 0L} gatedPointers=${gatedPointerIds.size} focusGateProbe=${touchFocusGateLastProbe}"
 
         private fun internalComponentName(activityClassName: String): String = if (activityClassName.contains('/')) activityClassName else "$packageName/$activityClassName"
+        private fun recoveryLaunchTarget(): String {
+            val active = currentApp.trim()
+            if (active.isBlank() || active == "HOME" || active == "com.android.settings") return active
+            if (active.startsWith("$packageName/") || active.contains("WebBrowserActivity")) return active
+            return active.substringBefore('/').ifBlank { active }
+        }
 
         fun launchOwnActivity(activityClassName: String, url: String) {
             val targetDisplayId = this.displayId
@@ -2453,17 +2887,9 @@ class MirrorForegroundService : Service() {
             }
             /* ### 수정 끝 ### */
 
-            if (
-                isNewApp &&
-                previousPkg.isNotBlank() &&
-                previousPkg != "HOME" &&
-                previousPkg != "com.android.settings" &&
-                previousPkg != cleanPkg
-            ) {
-                markServiceMutation("launch_component_cleanup_previous($previousPkg)")
-                forceStopAppIfNeeded(previousPkg)
-                delay(120L)
-            }
+            /* ### 수정 시작 ### */
+            // Bypassed: Do not force stop the previous app on application switching to support warm start
+            /* ### 수정 끝 ### */
 
             // Command Equivalence Guard: If target app is already active and rendering on this virtual display, skip redundant window displacement commands.
             // However, if the screen streaming has stagnated or has not yet rendered its first frame, bypass this safeguard to enforce visual recovery.
@@ -2550,7 +2976,9 @@ class MirrorForegroundService : Service() {
                 // Prevent redundant 'am start' shell command execution immediately following async task migration command.
                 // Re-launching via 'am start' in parallel with active task displacement commands causes Android OS task stack conflict,
                 // frequently forcing the primary Display 0 (MainActivity) to recede to the background Recents view.
-                if (isWarmStart && !forceColdStart && !forceTaskRealign) {
+                /* ### 수정 시작 ### */
+                if (isWarmStart && !forceColdStart) {
+                /* ### 수정 끝 ### */
                     markServiceMutation("launch_component_warm_start")
                     // Trigger adaptive task residency-aware wakeup asynchronously instead of waiting on hardcoded timings
                     executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
@@ -2570,6 +2998,23 @@ class MirrorForegroundService : Service() {
                     currentApp = packageOrComponent
                     return@withContext true
                 }
+
+                /* ### 수정 시작 ### */
+                // WMS Transition Lock Prevention Guard:
+                // If this is a realign/recovery request (forceTaskRealign = true) for the ALREADY ACTIVE application
+                // (i.e. cleanPkg is already currentApp and we are currently streaming/encoder is running),
+                // we MUST NOT execute native launchAppOnDisplayV2 or buildShellLaunchCommand.
+                // Doing so forces Android OS to initiate a new Window Manager transition state,
+                // which locks display focus and causes a perpetual touch injection rejection loop.
+                val isAlreadyActiveApp = cleanPkg == currentApp.substringBefore('/')
+                val isEncoderActive = if (currentCodecMode == "mjpeg") jpegEncoder != null else videoEncoder != null
+                if (forceTaskRealign && isAlreadyActiveApp && isEncoderActive) {
+                    Log.w(TAG, "[$name Pipeline] Realignment requested for active app $cleanPkg. Bypassing native cold start to prevent WMS focus transition lock.")
+                    executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
+                    currentApp = packageOrComponent
+                    return@withContext true
+                }
+                /* ### 수정 끝 ### */
 
                 // 1. Try native binder launchAppOnDisplayV2 first (only for Standard package without complex query strings)
                 var nativeStarted = false
@@ -2671,7 +3116,9 @@ class MirrorForegroundService : Service() {
             if (browser != null) {
                 try {
                     controller.getPrivilegedService()?.execCommand(buildExternalBrowserCommand(displayId, url, browser.componentFlat))
-                    if (currentApp.substringBefore('/') != browser.packageName) forceStopAppIfNeeded(currentApp)
+                    /* ### 수정 시작 ### */
+                    // Bypassed: Do not force stop the previous app to support warm start
+                    /* ### 수정 끝 ### */
                     currentApp = browser.componentFlat; currentWebUrl = url; isVideoApp = true
                     adaptiveBitrateManager.rebalanceBitrates(); return
                 } catch (_: Exception) {}
@@ -2728,7 +3175,9 @@ class MirrorForegroundService : Service() {
                 }
                 return
             }
-            if (currentApp != targetComponent) forceStopAppIfNeeded(currentApp)
+            /* ### 수정 시작 ### */
+            // Bypassed: Do not force stop the previous app to support warm start
+            /* ### 수정 끝 ### */
             launchOwnActivity(activityClassName, url)
             currentApp = targetComponent; currentWebUrl = url; isVideoApp = false
             adaptiveBitrateManager.rebalanceBitrates()

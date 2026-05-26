@@ -33,7 +33,14 @@
     sendCurrentLayout();
   });
 
-  onDestroy(() => resizeObserver?.disconnect());
+  onDestroy(() => {
+    resizeObserver?.disconnect();
+    resizing = false;
+    activeTouchPanes.clear();
+    window.removeEventListener('pointermove', resizeMove);
+    window.removeEventListener('pointerup', endResize);
+    window.removeEventListener('pointercancel', endResize);
+  });
 
   $: visibleViewports = Array.from($compositorStore.viewports.values()).filter((viewport) => viewport.visible);
   $: splitActive = $compositorStore.layoutMode === 'split' && visibleViewports.length >= 2;
@@ -177,11 +184,17 @@
     if (resizing) return;
     const target = event.target as HTMLElement | null;
     if (target?.closest('.split-resizer') || target?.closest('.split-controls')) return;
+    
+    /* ### 수정 시작 ### */
+    // Map pointerdown to 'down', pointermove to 'move', and pointerup/pointercancel/lostpointercapture to 'up' 
+    // to guarantee all active states are gracefully finalized if the browser strips pointer control.
     const action = event.type === 'pointerdown'
       ? 'down'
       : event.type === 'pointermove'
         ? 'move'
         : 'up';
+    /* ### 수정 끝 ### */
+        
     const paneElement = target?.closest<HTMLElement>('.viewport-pane');
     const pointerKey = event.pointerId & 0xff;
     const pane = (paneElement?.dataset.pane as PaneId | undefined) ?? activeTouchPanes.get(pointerKey);
@@ -255,6 +268,7 @@
   }
 </script>
 
+<!-- ### 수정 시작 ### -->
 <div
   bind:this={host}
   class="viewport-host"
@@ -262,7 +276,9 @@
   on:pointermove={handlePointer}
   on:pointerup={handlePointer}
   on:pointercancel={handlePointer}
+  on:lostpointercapture={handlePointer}
 >
+<!-- ### 수정 끝 ### -->
   {#each visibleViewports as viewport (viewport.pane)}
     <ViewportPane {viewport} {runtime} paneStyle={paneStyle(viewport.pane)} fitMode={splitActive ? 'fill' : 'contain'} />
   {/each}

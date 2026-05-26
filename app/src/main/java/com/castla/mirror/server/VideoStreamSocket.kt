@@ -76,7 +76,7 @@ class VideoStreamSocket(
     override fun onMessage(message: NanoWSD.WebSocketFrame) {
         val text = message.textPayload
         if (text == "requestKeyframe") {
-            server.onKeyframeRequest(channel)
+            server.onKeyframeRequest(channel, "videoSocket:${debugSummary()}")
         }
     }
 
@@ -150,10 +150,15 @@ class VideoStreamSocket(
                     val now = System.currentTimeMillis()
                     if (now - lastKeyframeRequestTime >= MIN_KEYFRAME_REQUEST_INTERVAL_MS) {
                         lastKeyframeRequestTime = now
-                        server.onKeyframeRequest(channel)
+                        server.onKeyframeRequest(channel, "video_queue_flush")
                     }
                 }
             }
         }
+    }
+
+    fun debugSummary(): String {
+        return "channel=$channel profile=$profile closed=$closed sent=$framesSent dropped=$framesDropped " +
+            "flushes=$queueFlushCount queueSize=${sendQueue.size}"
     }
 }

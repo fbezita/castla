@@ -28,9 +28,28 @@ export interface DiagnosticsDisplay {
   generationMismatch: number;
 }
 
+export interface ServerDiagnostics {
+  reason: string;
+  browserConnected: boolean;
+  serverBrowserConnected: boolean;
+  pendingDisconnect: boolean;
+  disconnectGraceMs: number;
+  screenOff: boolean;
+  teardownPhase: string;
+  socketSummary: string;
+  pipelineSnapshot: string;
+  launchSeq: number;
+  lastTouchPane: string;
+  timestampMs: number;
+  touchTrace?: string[];
+  injectorSnapshot?: string;
+  rejectProbe?: string;
+}
+
 export interface DiagnosticsMessage {
   type: 'diagnostics';
-  displays: DiagnosticsDisplay[];
+  displays?: DiagnosticsDisplay[];
+  server?: ServerDiagnostics;
 }
 
 export interface ServerInitMessage {

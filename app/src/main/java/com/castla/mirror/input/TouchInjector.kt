@@ -21,7 +21,7 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
 
     // Replaces setVirtualDisplayInjector().
     // This can be updated whenever controller changes without counting as a re-bind.
-    private var controllerInjector: ((MotionEvent) -> Unit)? = null
+    private var controllerInjector: ((TouchEvent, MotionEvent) -> Boolean)? = null
 
     private val injectorId = nextInjectorId++
     private var inputSessionId = 0
@@ -55,30 +55,24 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
     private val activePointers = mutableMapOf<Int, PointerState>()
     private val pointerOrder = mutableListOf<Int>()
     private val lastInjectedMovePositions = mutableMapOf<Int, PointerState>()
+    private val browserToAndroidPointerId = mutableMapOf<Int, Int>()
+    private val androidPointerIdsInUse = mutableSetOf<Int>()
 
     private val pointerProperties = Array(MAX_POINTERS) { MotionEvent.PointerProperties() }
     private val pointerCoords = Array(MAX_POINTERS) { MotionEvent.PointerCoords() }
 
     init {
+        // Initialize Shizuku binder connection
         tryInitShizuku()
     }
 
-    fun updateController(injector: ((MotionEvent) -> Unit)?) {
+    fun updateController(injector: ((TouchEvent, MotionEvent) -> Boolean)?) {
         controllerInjector = injector
         controllerUpdateCount += 1
-        Log.i(
-            TAG,
-            "[InputDebug] injector#$injectorId updateController count=$controllerUpdateCount " +
-                "attached=${injector != null} state=${debugState()}"
-        )
     }
 
     fun detachController(reason: String = "manual") {
         controllerInjector = null
-        Log.i(
-            TAG,
-            "[InputDebug] injector#$injectorId detachController reason=$reason state=${debugState()}"
-        )
     }
 
     fun updateDimensions(width: Int, height: Int) {
@@ -87,11 +81,11 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
         displayHeight = height
         activePointers.clear()
         pointerOrder.clear()
+        clearPointerIdMappings()
         activeGestureDownTimeMs = 0L
         droppedMoveSamples = 0
         lastInjectedMoveAtMs = 0L
         lastInjectedMovePositions.clear()
-        Log.i(TAG, "[InputDebug] injector#$injectorId updateDimensions ${width}x${height} state=${debugState()}")
     }
 
     private fun tryInitShizuku() {
@@ -126,7 +120,6 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
         droppedMoveSamples = 0
         lastInjectedMoveAtMs = 0L
         lastInjectedMovePositions.clear()
-        Log.i(TAG, "[InputDebug] injector#$injectorId markDebugLaunch launchSeq=$launchSeq state=${debugState()}")
     }
 
     fun onTouchEvent(event: TouchEvent) {
@@ -156,6 +149,7 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
             injectCancelForActivePointers(forceFallback = false)
             activePointers.clear()
             pointerOrder.clear()
+            clearPointerIdMappings()
             activeGestureDownTimeMs = 0L
             return
         }
@@ -173,24 +167,27 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
 
         val absX = event.x * displayWidth
         val absY = event.y * displayHeight
-        val pointerId = event.pointerId
+        val browserPointerId = event.pointerId
 
         val beforeCount = activePointers.size
+        var androidPointerId = browserToAndroidPointerId[browserPointerId] ?: -1
 
         when (event.action) {
             "down" -> {
-                if (activePointers.containsKey(pointerId)) {
+                if (activePointers.containsKey(browserPointerId)) {
                     injectCancelForActivePointers(forceFallback = false)
                     activePointers.clear()
                     pointerOrder.clear()
+                    clearPointerIdMappings()
                     activeGestureDownTimeMs = 0L
-                    Log.w(TAG, "Cleared stale touch state before DOWN for pointerId=$pointerId")
+                    Log.w(TAG, "Cleared stale touch state before DOWN for pointerId=$browserPointerId")
                 }
 
                 if (activePointers.size >= MAX_POINTERS) {
                     injectCancelForActivePointers(forceFallback = false)
                     activePointers.clear()
                     pointerOrder.clear()
+                    clearPointerIdMappings()
                     activeGestureDownTimeMs = 0L
                 }
 
@@ -198,21 +195,28 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
                     activeGestureDownTimeMs = SystemClock.uptimeMillis()
                 }
 
-                activePointers[pointerId] = PointerState(absX, absY)
-                lastInjectedMovePositions.remove(pointerId)
+                androidPointerId = allocateAndroidPointerId(browserPointerId)
+                if (androidPointerId < 0) {
+                    Log.w(TAG, "Failed to allocate android pointer id for browserPointerId=$browserPointerId")
+                    return
+                }
 
-                if (!pointerOrder.contains(pointerId)) {
-                    pointerOrder.add(pointerId)
+                activePointers[browserPointerId] = PointerState(absX, absY)
+                lastInjectedMovePositions.remove(browserPointerId)
+
+                if (!pointerOrder.contains(browserPointerId)) {
+                    pointerOrder.add(browserPointerId)
                 }
             }
 
             "move" -> {
-                val state = activePointers[pointerId]
+                val state = activePointers[browserPointerId]
                 if (state != null) {
                     state.x = absX
                     state.y = absY
+                    androidPointerId = browserToAndroidPointerId[browserPointerId] ?: -1
                     val nowUptime = SystemClock.uptimeMillis()
-                    val lastInjected = lastInjectedMovePositions[pointerId]
+                    val lastInjected = lastInjectedMovePositions[browserPointerId]
                     val duplicateMove =
                         lastInjected != null &&
                             kotlin.math.abs(lastInjected.x - absX) < MOVE_POSITION_EPSILON_PX &&
@@ -220,13 +224,6 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
                     val throttledMove = lastInjectedMoveAtMs > 0L && (nowUptime - lastInjectedMoveAtMs) < MOVE_THROTTLE_MS
                     if (duplicateMove || throttledMove) {
                         droppedMoveSamples += 1
-                        if (droppedMoveSamples % 120 == 0) {
-                            Log.i(
-                                TAG,
-                                "[InputTrace] move_drop_android pane=${event.pane} pointerId=$pointerId reason=${if (duplicateMove) "dedup" else "throttle"} " +
-                                    "queueLagMs=$queueLagMs droppedMoves=$droppedMoveSamples sinceLastMoveMs=${if (lastInjectedMoveAtMs > 0L) nowUptime - lastInjectedMoveAtMs else -1L}"
-                            )
-                        }
                         return
                     }
                 } else {
@@ -234,28 +231,19 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
                     // Creating implicit DOWN here can leave stale pointer state.
                     orphanMoveEvents += 1
                     launchOrphanMoveEvents += 1
-                    if (queueLagMs >= 120L) {
-                        Log.w(
-                            TAG,
-                            "[InputDebug] injector#$injectorId ignored orphan MOVE pointerId=$pointerId state=${debugState()}"
-                        )
-                    }
                     return
                 }
             }
 
             "up" -> {
-                val state = activePointers[pointerId]
+                val state = activePointers[browserPointerId]
                 if (state != null) {
                     state.x = absX
                     state.y = absY
+                    androidPointerId = browserToAndroidPointerId[browserPointerId] ?: -1
                 } else {
                     orphanUpEvents += 1
                     launchOrphanUpEvents += 1
-                    Log.w(
-                        TAG,
-                        "[InputDebug] injector#$injectorId ignored orphan UP pointerId=$pointerId state=${debugState()}"
-                    )
                     return
                 }
             }
@@ -270,13 +258,7 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
         val downTime = when {
             activeGestureDownTimeMs > 0L -> activeGestureDownTimeMs
             event.action == "down" -> eventTime
-            else -> {
-                Log.w(
-                    TAG,
-                    "[InputDebug] injector#$injectorId missing gesture downTime for action=${event.action} pointerId=$pointerId state=${debugState()}"
-                )
-                eventTime
-            }
+            else -> eventTime
         }
 
         var targetIndex = -1
@@ -284,33 +266,28 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
         for (i in 0 until pointerCount) {
             val pid = pointerOrder.getOrNull(i) ?: continue
             val state = activePointers[pid] ?: continue
+            val mappedAndroidPointerId = browserToAndroidPointerId[pid] ?: continue
 
             pointerProperties[i].apply {
-                id = pid
+                id = mappedAndroidPointerId
                 toolType = MotionEvent.TOOL_TYPE_FINGER
             }
 
             pointerCoords[i].apply {
                 x = state.x
                 y = state.y
-                pressure = if (event.action == "up" && pid == pointerId) 0.0f else 1.0f
+                pressure = if (event.action == "up" && pid == browserPointerId) 0.0f else 1.0f
                 size = 1.0f
             }
 
-            if (pid == pointerId) {
+            if (pid == browserPointerId) {
                 targetIndex = i
             }
         }
 
-        if (targetIndex < 0) {
-            Log.w(
-                TAG,
-                "[InputDebug] injector#$injectorId target pointer missing pointerId=$pointerId state=${debugState()}"
-            )
-            return
-        }
+        if (targetIndex < 0) return
 
-        val hasOtherPointers = activePointers.keys.any { it != pointerId }
+        val hasOtherPointers = activePointers.keys.any { it != browserPointerId }
 
         val actionCode = when (event.action) {
             "down" -> {
@@ -351,10 +328,9 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
             InputDevice.SOURCE_TOUCHSCREEN,
             0
         )
-
-        val injectStartNs = SystemClock.elapsedRealtimeNanos()
+        var accepted = false
         try {
-            injectMotionEvent(motionEvent)
+            accepted = injectMotionEvent(event, motionEvent)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to inject event", e)
             activePointers.clear()
@@ -362,42 +338,27 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
         } finally {
             motionEvent.recycle()
         }
-        val injectDurationMs = (SystemClock.elapsedRealtimeNanos() - injectStartNs) / 1_000_000.0
 
         if (event.action == "up") {
-            activePointers.remove(pointerId)
-            pointerOrder.remove(pointerId)
+            activePointers.remove(browserPointerId)
+            pointerOrder.remove(browserPointerId)
+            lastInjectedMovePositions.remove(browserPointerId)
+            releaseAndroidPointerId(browserPointerId)
 
             if (!hasOtherPointers) {
                 activePointers.clear()
                 pointerOrder.clear()
+                clearPointerIdMappings()
                 activeGestureDownTimeMs = 0L
             }
         }
 
         if (event.action == "move") {
             lastInjectedMoveAtMs = SystemClock.uptimeMillis()
-            val injectedState = lastInjectedMovePositions.getOrPut(pointerId) { PointerState(absX, absY) }
+            val injectedState = lastInjectedMovePositions.getOrPut(browserPointerId) { PointerState(absX, absY) }
             injectedState.x = absX
             injectedState.y = absY
             moveTimingSamples += 1
-            val totalSinceReceiveMs =
-                if (event.receivedAtElapsedMs > 0L) SystemClock.elapsedRealtime() - event.receivedAtElapsedMs else -1L
-            if (injectDurationMs >= 8.0 || queueLagMs >= 32L || moveTimingSamples % 120 == 0) {
-                Log.i(
-                    TAG,
-                    "[InputTrace] move_path pane=${event.pane} pointerId=$pointerId queueLagMs=$queueLagMs injectMs=${"%.2f".format(java.util.Locale.US, injectDurationMs)} totalSinceReceiveMs=$totalSinceReceiveMs before=$beforeCount after=${activePointers.size} session=$inputSessionId"
-                )
-            }
-        }
-
-        if (event.action != "move" || queueLagMs >= 120L) {
-            Log.i(
-                TAG,
-                "[InputDebug] injector#$injectorId onTouch action=${event.action} pane=${event.pane} " +
-                    "pointerId=$pointerId queueLagMs=$queueLagMs before=$beforeCount after=${activePointers.size} " +
-                    "session=$inputSessionId state=${debugState()}"
-            )
         }
     }
 
@@ -406,18 +367,13 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
         injectCancelForActivePointers(forceFallback = forceFallbackCancel)
         activePointers.clear()
         pointerOrder.clear()
+        clearPointerIdMappings()
         activeGestureDownTimeMs = 0L
         moveTimingSamples = 0
         droppedMoveSamples = 0
         lastInjectedMoveAtMs = 0L
         lastInjectedMovePositions.clear()
         inputSessionId += 1
-
-        Log.i(
-            TAG,
-            "[InputDebug] injector#$injectorId release releaseCount=$releaseCount " +
-                "nextSession=$inputSessionId reason=$reason forceFallbackCancel=$forceFallbackCancel state=${debugState()}"
-        )
     }
 
     fun hasTrackedPointers(): Boolean {
@@ -471,7 +427,16 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
         )
 
         try {
-            injectMotionEvent(motionEvent)
+            injectMotionEvent(
+                TouchEvent(
+                    action = "cancel",
+                    x = 0f,
+                    y = 0f,
+                    pointerId = 0,
+                    pane = "primary"
+                ),
+                motionEvent
+            )
             Log.i(
                 TAG,
                 "Injected ACTION_CANCEL for $cancelPointerCount pointer(s), " +
@@ -484,14 +449,35 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
         }
     }
 
-    private fun injectMotionEvent(motionEvent: MotionEvent) {
+    private fun injectMotionEvent(event: TouchEvent, motionEvent: MotionEvent): Boolean {
         val injector = controllerInjector
 
-        if (injector != null) {
-            injector.invoke(motionEvent)
+        return if (injector != null) {
+            injector.invoke(event, motionEvent)
         } else {
-            injectMethod?.invoke(inputManagerInstance, motionEvent, 0)
+            (injectMethod?.invoke(inputManagerInstance, motionEvent, 0) as? Boolean) ?: true
         }
+    }
+
+    private fun allocateAndroidPointerId(browserPointerId: Int): Int {
+        browserToAndroidPointerId[browserPointerId]?.let { return it }
+        for (candidate in 0 until MAX_POINTERS) {
+            if (androidPointerIdsInUse.add(candidate)) {
+                browserToAndroidPointerId[browserPointerId] = candidate
+                return candidate
+            }
+        }
+        return -1
+    }
+
+    private fun releaseAndroidPointerId(browserPointerId: Int) {
+        val androidPointerId = browserToAndroidPointerId.remove(browserPointerId) ?: return
+        androidPointerIdsInUse.remove(androidPointerId)
+    }
+
+    private fun clearPointerIdMappings() {
+        browserToAndroidPointerId.clear()
+        androidPointerIdsInUse.clear()
     }
 
     fun debugState(): String {
@@ -503,6 +489,7 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
             "launchSeq=$debugLaunchSeq launchEvents=$launchEvents launchDown=$launchDownEvents launchMove=$launchMoveEvents " +
             "launchUp=$launchUpEvents launchCancel=$launchCancelEvents launchOrphanMove=$launchOrphanMoveEvents " +
             "launchOrphanUp=$launchOrphanUpEvents launchQueueLagAvgMs=$avgLaunchQueueLagMs launchQueueLagMaxMs=$launchQueueLagMaxMs " +
+            "pointerMaps=${browserToAndroidPointerId.size} " +
             "controllerUpdates=$controllerUpdateCount releases=$releaseCount " +
             "controllerAttached=${controllerInjector != null}"
     }

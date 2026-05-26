@@ -25,7 +25,6 @@ import java.util.concurrent.ConcurrentHashMap
  * Creates virtual displays and injects input events for the mirroring pipeline.
  */
 class PrivilegedService : IPrivilegedService.Stub() {
-
     private val tetheringExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
     companion object {
@@ -60,6 +59,11 @@ class PrivilegedService : IPrivilegedService.Stub() {
     private var setForcedDisplayDensityForUserMethod: Method? = null
     private var clearForcedDisplaySizeMethod: Method? = null
     private var clearForcedDisplayDensityForUserMethod: Method? = null
+    private var registerDisplayWindowListenerMethod: Method? = null
+    private var unregisterDisplayWindowListenerMethod: Method? = null
+    private var displayWindowListenerProxy: Any? = null
+    private var displayWindowListenerDescriptor: String = "android.view.IDisplayWindowListener"
+    @Volatile private var displayWindowListenerRegistered = false
     
     private var activityTaskManagerInstance: Any? = null
     private var startActivityMethod: Method? = null
@@ -68,8 +72,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
     private var inputManagerInstance: Any? = null
     private var injectMethod: Method? = null
     private var shellContext: android.content.Context? = null
-
-    // Cached objects for injectInput — avoids allocation per touch event
+    // Cached objects for injectInput — avoids allocation per touch event
     private val cachedProps = arrayOf(
         MotionEvent.PointerProperties().apply { toolType = MotionEvent.TOOL_TYPE_FINGER }
     )
@@ -77,10 +80,12 @@ class PrivilegedService : IPrivilegedService.Stub() {
         MotionEvent.PointerCoords().apply { pressure = 1.0f; size = 1.0f }
     )
     private var setDisplayIdMethod: Method? = null
-    @Volatile private var debugMoveInjectCounter: Int = 0
     
     private var setKeyEventDisplayIdMethod: Method? = null
-    
+    private val displayTopActivityCache = ConcurrentHashMap<Int, String>()
+    private val displayTopActivityUpdatedAt = ConcurrentHashMap<Int, Long>()
+    private val displayWindowListenerTransactions = ConcurrentHashMap<Int, String>()
+    private val displayFocusExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
     init {
         /* ### 수정 시작 ### */
@@ -446,7 +451,14 @@ class PrivilegedService : IPrivilegedService.Stub() {
                         Int::class.javaPrimitiveType,
                         Int::class.javaPrimitiveType
                     )
+                    registerDisplayWindowListenerMethod = wmInterface?.methods?.firstOrNull {
+                        it.name == "registerDisplayWindowListener"
+                    }
+                    unregisterDisplayWindowListenerMethod = wmInterface?.methods?.firstOrNull {
+                        it.name == "unregisterDisplayWindowListener"
+                    }
                     Log.i(TAG, "IWindowManager reflection binder successfully prepared")
+                    ensureDisplayWindowListenerRegistered()
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to prepare IWindowManager binder interface", e)
@@ -582,7 +594,8 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 val displayId = display.display.displayId
                 virtualDisplays[displayId] = display
                 virtualDisplayNames[displayId] = name
-                Log.i(TAG, "Virtual display created: id=$displayId, ${width}x${height}, flags=$flags")
+                Log.i(TAG, "[FocusTrace] vd_created displayId=$displayId size=${width}x${height} flags=$flags")
+                scheduleDisplayFocusRefresh(displayId, "createVirtualDisplay")
 
                 // Keep the display explicitly powered on with multiple delayed triggers to secure power state
                 val delays = longArrayOf(0L, 200L, 500L, 1000L)
@@ -679,8 +692,8 @@ class PrivilegedService : IPrivilegedService.Stub() {
     }
 
     override fun injectMotionEventWithResult(displayId: Int, event: MotionEvent): Boolean {
-        val action = event.actionMasked
-        val pointerCount = event.pointerCount
+        /* ### 수정 시작 ### */
+        // Inject motion event into the input subsystem natively on the specific virtual display without hidden API warnings and trace logging
         try {
             if (setDisplayIdMethod == null) {
                 setDisplayIdMethod = MotionEvent::class.java.getMethod(
@@ -691,27 +704,171 @@ class PrivilegedService : IPrivilegedService.Stub() {
         } catch (_: Exception) {}
 
         return try {
-            val startedAt = SystemClock.elapsedRealtimeNanos()
-            val result = (injectMethod?.invoke(inputManagerInstance, event, 0) as? Boolean) ?: false
-            val durationMs = (SystemClock.elapsedRealtimeNanos() - startedAt) / 1_000_000.0
-            if (action != MotionEvent.ACTION_MOVE) {
-                Log.i(
-                    TAG,
-                    "[InputTrace] inject_privileged displayId=$displayId action=$action pointerCount=$pointerCount result=$result durationMs=${"%.2f".format(java.util.Locale.US, durationMs)} downTime=${event.downTime} eventTime=${event.eventTime}"
-                )
-            } else {
-                debugMoveInjectCounter += 1
-                if (!result || durationMs >= 8.0 || debugMoveInjectCounter % 120 == 0) {
-                    Log.i(
-                        TAG,
-                        "[InputTrace] inject_privileged_move displayId=$displayId result=$result durationMs=${"%.2f".format(java.util.Locale.US, durationMs)} pointerCount=$pointerCount sampleIndex=$debugMoveInjectCounter eventTime=${event.eventTime}"
-                    )
-                }
-            }
-            result
+            (injectMethod?.invoke(inputManagerInstance, event, 0) as? Boolean) ?: false
         } catch (e: Exception) {
             Log.e(TAG, "Input event injection failed on display $displayId", e)
             false
+        }
+        /* ### 수정 끝 ### */
+    }
+
+    private fun ensureDisplayWindowListenerRegistered() {
+        if (displayWindowListenerRegistered) return
+        val wm = windowManagerInstance ?: return
+        val registerMethod = registerDisplayWindowListenerMethod ?: run {
+            Log.w(TAG, "[FocusTrace] listener_register_missing_method wmImpl=${wm.javaClass.name}")
+            return
+        }
+        var proxyClassName = "uninitialized"
+        try {
+            val listenerClass = Class.forName("android.view.IDisplayWindowListener")
+            primeDisplayWindowListenerMetadata(listenerClass)
+            val listenerBinder = createDisplayWindowListenerBinder()
+            val proxy = java.lang.reflect.Proxy.newProxyInstance(
+                listenerClass.classLoader,
+                arrayOf(listenerClass, android.os.IInterface::class.java)
+            ) { _, method, args ->
+                when (method.name) {
+                    "asBinder" -> listenerBinder
+                    "toString" -> "CastlaDisplayWindowListenerProxy(displayBinder=${listenerBinder.hashCode()})"
+                    "hashCode" -> System.identityHashCode(listenerBinder)
+                    "equals" -> args?.firstOrNull() === listenerBinder
+                    else -> handleDisplayWindowListenerCallback(method.name, args)
+                }
+            }
+            proxyClassName = proxy.javaClass.name
+            val result = registerMethod.invoke(wm, proxy)
+            displayWindowListenerProxy = proxy
+            displayWindowListenerRegistered = true
+            Log.i(TAG, "[FocusTrace] listener_registered wmImpl=${wm.javaClass.name} listenerProxy=$proxyClassName")
+            when (result) {
+                is IntArray -> result.forEach { scheduleDisplayFocusRefresh(it, "wm_register_seed") }
+                is Array<*> -> result.filterIsInstance<Int>().forEach { scheduleDisplayFocusRefresh(it, "wm_register_seed") }
+            }
+        } catch (e: Exception) {
+            val signature = buildString {
+                append(registerMethod.name)
+                append("(")
+                append(registerMethod.parameterTypes.joinToString(",") { it.name })
+                append("):")
+                append(registerMethod.returnType.name)
+            }
+            val cause = if (e is java.lang.reflect.InvocationTargetException) e.targetException ?: e.cause else e.cause
+            Log.w(
+                TAG,
+                "[FocusTrace] listener_register_failed method=$signature wmImpl=${wm.javaClass.name} listenerProxy=$proxyClassName cause=${cause?.javaClass?.name}:${cause?.message}",
+                e
+            )
+        }
+    }
+
+    private fun primeDisplayWindowListenerMetadata(listenerClass: Class<*>) {
+        try {
+            val stubClass = Class.forName("android.view.IDisplayWindowListener\$Stub")
+            try {
+                val descriptorField = stubClass.getDeclaredField("DESCRIPTOR")
+                descriptorField.isAccessible = true
+                (descriptorField.get(null) as? String)?.takeIf { it.isNotBlank() }?.let {
+                    displayWindowListenerDescriptor = it
+                }
+            } catch (_: Exception) {}
+
+            stubClass.declaredFields
+                .filter { it.name.startsWith("TRANSACTION_") }
+                .forEach { field ->
+                    try {
+                        field.isAccessible = true
+                        val code = field.getInt(null)
+                        val methodName = field.name.removePrefix("TRANSACTION_")
+                        displayWindowListenerTransactions[code] = methodName
+                    } catch (_: Exception) {}
+                }
+
+            if (displayWindowListenerTransactions.isEmpty()) {
+                listenerClass.methods.forEachIndexed { index, method ->
+                    displayWindowListenerTransactions[index + 1] = method.name
+                }
+            }
+            Log.i(
+                TAG,
+                "[FocusTrace] listener_metadata descriptor=$displayWindowListenerDescriptor transactions=$displayWindowListenerTransactions"
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "[FocusTrace] listener_metadata_failed", e)
+        }
+    }
+
+    private fun createDisplayWindowListenerBinder(): Binder {
+        val descriptor = displayWindowListenerDescriptor
+        val transactionMap = java.util.HashMap(displayWindowListenerTransactions)
+        return object : Binder() {
+            override fun onTransact(code: Int, data: android.os.Parcel, reply: android.os.Parcel?, flags: Int): Boolean {
+                if (code == INTERFACE_TRANSACTION) {
+                    reply?.writeString(descriptor)
+                    return true
+                }
+                val methodName = transactionMap[code]
+                if (methodName != null) {
+                    return try {
+                        data.enforceInterface(descriptor)
+                        val displayId = try { data.readInt() } catch (_: Exception) { -1 }
+                        handleDisplayWindowListenerCallback(methodName, arrayOf(displayId))
+                        true
+                    } catch (e: Exception) {
+                        Log.w(TAG, "[FocusTrace] listener_onTransact_failed code=$code method=$methodName", e)
+                        false
+                    }
+                }
+                return super.onTransact(code, data, reply, flags)
+            }
+        }
+    }
+
+    private fun handleDisplayWindowListenerCallback(methodName: String, args: Array<out Any?>?): Any? {
+        try {
+            val displayId = args?.firstOrNull() as? Int ?: -1
+            if (displayId >= 0) {
+                Log.i(TAG, "[FocusTrace] listener_callback method=$methodName displayId=$displayId args=${args?.joinToString() ?: "none"}")
+            } else {
+                Log.i(TAG, "[FocusTrace] listener_callback method=$methodName args=${args?.joinToString() ?: "none"}")
+            }
+            when (methodName) {
+                "onDisplayRemoved" -> {
+                    if (displayId >= 0) {
+                        displayTopActivityCache.remove(displayId)
+                        displayTopActivityUpdatedAt.remove(displayId)
+                        Log.i(TAG, "[FocusTrace] cache_cleared displayId=$displayId reason=display_removed")
+                    }
+                }
+                else -> {
+                    if (displayId >= 0) {
+                        scheduleDisplayFocusRefresh(displayId, methodName)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed handling display window listener callback method=$methodName", e)
+        }
+        return null
+    }
+
+    private fun scheduleDisplayFocusRefresh(displayId: Int, reason: String) {
+        if (displayId < 0) return
+        displayFocusExecutor.execute {
+            try {
+                val top = queryTopActivityForDisplayRaw(displayId)
+                if (top.isNotBlank()) {
+                    displayTopActivityCache[displayId] = top
+                    displayTopActivityUpdatedAt[displayId] = SystemClock.elapsedRealtime()
+                    Log.i(TAG, "[FocusTrace] cache_update displayId=$displayId reason=$reason top=$top")
+                } else {
+                    displayTopActivityCache.remove(displayId)
+                    displayTopActivityUpdatedAt[displayId] = SystemClock.elapsedRealtime()
+                    Log.i(TAG, "[FocusTrace] cache_cleared displayId=$displayId reason=$reason")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "[FocusTrace] cache_refresh_failed displayId=$displayId reason=$reason", e)
+            }
         }
     }
 
@@ -2157,6 +2314,107 @@ class PrivilegedService : IPrivilegedService.Stub() {
             Log.e(TAG, "Failed to get task IDs for package $packageName natively", e)
         }
         return taskIds.toIntArray()
+    }
+
+    private fun queryTopActivityForDisplayRaw(displayId: Int): String {
+        try {
+            val atmClass = Class.forName("android.app.ActivityTaskManager")
+            val getService = atmClass.getMethod("getService")
+            val service = getService.invoke(null)
+
+            try {
+                val focusedRootTaskMethod = service.javaClass.getMethod("getFocusedRootTaskInfo")
+                val focusedTaskInfo = focusedRootTaskMethod.invoke(service)
+                if (focusedTaskInfo != null) {
+                    val focusedClass = focusedTaskInfo.javaClass
+                    val focusedDisplayField = try {
+                        focusedClass.getField("displayId")
+                    } catch (_: Exception) {
+                        focusedClass.getSuperclass()?.getField("displayId")
+                    }
+                    val focusedDisplayId = focusedDisplayField?.getInt(focusedTaskInfo) ?: -1
+                    if (focusedDisplayId == displayId) {
+                        val topActField = try {
+                            focusedClass.getField("topActivity")
+                        } catch (_: Exception) {
+                            focusedClass.getSuperclass()?.getField("topActivity")
+                        }
+                        val topActivity = topActField?.get(focusedTaskInfo) as? ComponentName
+                        if (topActivity != null) {
+                            return topActivity.flattenToShortString()
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "[FocusTrace] focused_root_failed displayId=$displayId", e)
+            }
+
+            val getTasksMethod = service.javaClass.methods.firstOrNull { it.name == "getTasks" }
+                ?: throw NoSuchMethodException("No getTasks method found on ATM")
+
+            val params = getTasksMethod.parameterTypes
+            val args = Array(params.size) { index ->
+                val type = params[index]
+                when {
+                    type == Int::class.javaPrimitiveType -> if (index == 0) 100 else 0
+                    type == Boolean::class.javaPrimitiveType -> false
+                    else -> null
+                }
+            }
+            val tasks = getTasksMethod.invoke(service, *args) as List<*>
+
+            for (task in tasks) {
+                if (task == null) continue
+                val taskClass = task.javaClass
+                val displayIdField = try {
+                    taskClass.getField("displayId")
+                } catch (_: Exception) {
+                    try {
+                        taskClass.getSuperclass()?.getField("displayId")
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+                val taskDisplayId = displayIdField?.getInt(task) ?: -1
+                if (taskDisplayId != displayId) continue
+
+                val topActField = try {
+                    taskClass.getField("topActivity")
+                } catch (_: Exception) {
+                    try {
+                        taskClass.getSuperclass()?.getField("topActivity")
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+                val topActivity = topActField?.get(task) as? ComponentName
+                if (topActivity != null) {
+                    return topActivity.flattenToShortString()
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "[FocusTrace] top_activity_failed displayId=$displayId", e)
+        }
+        return ""
+    }
+
+    override fun getTopActivityForDisplay(displayId: Int): String {
+        if (displayId < 0) return ""
+        ensureDisplayWindowListenerRegistered()
+
+        val cached = displayTopActivityCache[displayId]?.trim().orEmpty()
+        val cachedAt = displayTopActivityUpdatedAt[displayId] ?: 0L
+        val cacheAgeMs = if (cachedAt > 0L) (SystemClock.elapsedRealtime() - cachedAt).coerceAtLeast(0L) else Long.MAX_VALUE
+        if (cached.isNotBlank() && cacheAgeMs <= 5_000L) {
+            return cached
+        }
+
+        val top = queryTopActivityForDisplayRaw(displayId)
+        if (top.isNotBlank()) {
+            displayTopActivityCache[displayId] = top
+            displayTopActivityUpdatedAt[displayId] = SystemClock.elapsedRealtime()
+        }
+        return top
     }
 
     override fun getDisplayIdForPackage(packageName: String): Int {

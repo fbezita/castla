@@ -152,6 +152,8 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     private val audioSockets = mutableSetOf<AudioStreamSocket>()
     private val controlSocketLock = Any()
     private val activeControlSessionId = AtomicInteger(0)
+    private val browserConnectionEpoch = AtomicInteger(0)
+    private val keyframeRequestCount = AtomicInteger(0)
     @Volatile private var activeControlSocket: ControlSocket? = null
     private val staleControlLogTimes = ConcurrentHashMap<Int, Long>()
     @Volatile private var lastSkippedBroadcastLogAt = 0L
@@ -311,7 +313,6 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     fun registerVideoSocket(channel: String, socket: VideoStreamSocket) {
         val sockets = if (channel == "secondary") secondaryVideoSockets else primaryVideoSockets
         sockets.add(socket)
-        Log.i(TAG, "[InputDebug] $channel video client connected (total: ${sockets.size}) control=${controlSockets.size} audio=${audioSockets.size}")
 
         /* ### 수정 시작 ### */
         // Playback cached H.264 SPS/PPS parameters ONLY if the display channel is not configured for MJPEG fallback mode.
@@ -328,21 +329,22 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         /* ### 수정 끝 ### */
 
         updateConnectionState()
-        onKeyframeRequest(channel)
+        onKeyframeRequest(channel, "video_open")
     }
 
     fun unregisterVideoSocket(channel: String, socket: VideoStreamSocket) {
         val sockets = if (channel == "secondary") secondaryVideoSockets else primaryVideoSockets
         sockets.remove(socket)
-        Log.i(TAG, "[InputDebug] $channel video client disconnected (total: ${sockets.size}) control=${controlSockets.size} audio=${audioSockets.size}")
         updateConnectionState()
     }
 
     fun registerControlSocket(socket: ControlSocket): Int {
         val staleSockets = mutableListOf<ControlSocket>()
         val sessionId: Int
+        val epoch: Int
         synchronized(controlSocketLock) {
             sessionId = activeControlSessionId.incrementAndGet()
+            epoch = browserConnectionEpoch.incrementAndGet()
             socket.attachSession(sessionId)
             controlSockets.remove(socket)
             controlSockets.add(socket)
@@ -366,8 +368,7 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         }
         Log.i(
             TAG,
-            "[InputDebug] Control client connected ${socket.debugSummary()} activeSessionId=${activeControlSessionId.get()} " +
-                "total=${controlSocketCount()} primaryVideo=${primaryVideoSockets.size} secondaryVideo=${secondaryVideoSockets.size} audio=${audioSockets.size}"
+            "Control client connected total=${controlSocketCount()} primaryVideo=${primaryVideoSockets.size} secondaryVideo=${secondaryVideoSockets.size} audio=${audioSockets.size}"
         )
 
         // Send serverInit greeting with unique instanceId
@@ -412,15 +413,13 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         }
         Log.i(
             TAG,
-            "[InputDebug] Control client disconnected ${socket.debugSummary()} activeSessionId=${activeControlSessionId.get()} " +
-                "total=${controlSocketCount()} primaryVideo=${primaryVideoSockets.size} secondaryVideo=${secondaryVideoSockets.size} audio=${audioSockets.size}"
+            "Control client disconnected total=${controlSocketCount()} primaryVideo=${primaryVideoSockets.size} secondaryVideo=${secondaryVideoSockets.size} audio=${audioSockets.size}"
         )
         updateConnectionState()
     }
 
     fun registerAudioSocket(socket: AudioStreamSocket) {
         audioSockets.add(socket)
-        Log.i(TAG, "[InputDebug] Audio client connected total=${audioSockets.size} control=${controlSockets.size}")
         onAudioSocketConnectedListener?.invoke()
         cachedAudioConfig?.let {
             socket.sendBinary(it)
@@ -430,7 +429,6 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
 
     fun unregisterAudioSocket(socket: AudioStreamSocket) {
         audioSockets.remove(socket)
-        Log.i(TAG, "[InputDebug] Audio client disconnected total=${audioSockets.size} control=${controlSockets.size}")
     }
 
     private var primaryFrameSeqNum: Int = 0
@@ -620,7 +618,7 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     fun audioSocketCount(): Int = audioSockets.size
     fun controlSocketRegistrySize(): Int = synchronized(controlSocketLock) { controlSockets.size }
     fun socketDebugSummary(): String =
-        "controlActive=${controlSocketCount()} controlRegistry=${controlSocketRegistrySize()} " +
+        "epoch=${browserConnectionEpoch.get()} controlActive=${controlSocketCount()} controlRegistry=${controlSocketRegistrySize()} " +
             "primaryVideo=${primaryVideoSockets.size} secondaryVideo=${secondaryVideoSockets.size} audio=${audioSockets.size}"
     fun layoutDebugSummary(): String =
         "layoutReceived=${layoutUpdateReceivedCount.get()} layoutRelayed=${layoutUpdateRelayedCount.get()} layoutDeduped=${layoutUpdateDedupedCount.get()}"
@@ -654,10 +652,9 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
                 controlSockets.remove(socket)
                 controlSockets.add(socket)
                 activeControlSocket = socket
-                Log.w(
-                    TAG,
-                    "[InputDebug] Recovered orphan control socket ${socket.debugSummary()} adoptedSessionId=$adoptedSessionId"
-                )
+                /* ### 수정 시작 ### */
+                // Removed [InputDebug] Recovered orphan control socket log
+                /* ### 수정 끝 ### */
                 try {
                     val initMsg = JSONObject().apply {
                         put("type", "serverInit")
@@ -682,12 +679,9 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         staleControlLogTimes[socket.debugId] = now
         val activeSocket = synchronized(controlSocketLock) { activeControlSocket }
         val activeSession = activeControlSessionId.get()
-        Log.w(
-            TAG,
-            "[InputDebug] Rejecting control message from ${socket.debugSummary()} activeSessionId=$activeSession " +
-                "activeSocketId=${activeSocket?.debugId ?: -1} registrySize=${synchronized(controlSocketLock) { controlSockets.size }} " +
-                "messageCount=$messageCount"
-        )
+        /* ### 수정 시작 ### */
+        // Removed [InputDebug] Rejecting control message log
+        /* ### 수정 끝 ### */
     }
 
     fun broadcastControlMessage(json: String) {
@@ -700,7 +694,9 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
             val now = android.os.SystemClock.elapsedRealtime()
             if (now - lastSkippedBroadcastLogAt >= 2000L) {
                 lastSkippedBroadcastLogAt = now
-                Log.w(TAG, "[InputDebug] broadcastControlMessage skipped activeSocket=${socket?.debugSummary() ?: "null"}")
+                /* ### 수정 시작 ### */
+                // Removed [InputDebug] broadcastControlMessage skipped log
+                /* ### 수정 끝 ### */
             }
             return
         }
@@ -710,6 +706,12 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
             Log.w(TAG, "Failed to send control message to active socket ${socket.debugId}", e)
             unregisterControlSocket(socket)
         }
+    }
+
+    fun broadcastDiagnostics() {
+        broadcastControlMessage(JSONObject().apply {
+            put("type", "diagnostics")
+        }.toString())
     }
     
     // Callbacks from ControlSocket
@@ -721,7 +723,11 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         onTouchResetListener?.invoke()
     }
     
-    fun onKeyframeRequest(channel: String = "primary") {
+    fun onKeyframeRequest(channel: String = "primary", source: String = "unknown") {
+        val requestCount = keyframeRequestCount.incrementAndGet()
+        /* ### 수정 시작 ### */
+        // Removed [InputTrace] keyframe_request log
+        /* ### 수정 끝 ### */
         /* ### 수정 시작 ### */
         // Replay cached SPS/PPS parameters to all active video stream sockets on keyframe request.
         // This ensures the decoder recovering from a browser hot-refresh gets the required parameters.
@@ -789,8 +795,7 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
             }
         }
         if (summary == lastLayoutUpdateSignature) {
-            val deduped = layoutUpdateDedupedCount.incrementAndGet()
-            Log.i(TAG, "[InputDebug] layout_update deduped count=$deduped summary=$summary")
+            layoutUpdateDedupedCount.incrementAndGet()
             return
         }
         lastLayoutUpdateSignature = summary
@@ -839,11 +844,9 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         primaryToClose = primaryVideoSockets.toList()
         secondaryToClose = secondaryVideoSockets.toList()
         audioToClose = audioSockets.toList()
-        Log.w(
-            TAG,
-            "[InputDebug] debugCycleSockets control=${controlToClose?.debugId ?: -1} " +
-                "primaryVideo=${primaryToClose.size} secondaryVideo=${secondaryToClose.size} audio=${audioToClose.size}"
-        )
+        /* ### 수정 시작 ### */
+        // Removed [InputDebug] debugCycleSockets log
+        /* ### 수정 끝 ### */
         primaryToClose.forEach { socket ->
             try {
                 socket.close(
