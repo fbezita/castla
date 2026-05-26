@@ -23,10 +23,14 @@ export class StreamRuntime {
   private layoutUpdateCount = 0;
   private layoutDedupedCount = 0;
   private lastKeyframeRequestAt = new Map<PaneId, number>();
+  private consecutiveFrameRejects = new Map<PaneId, number>();
+  private lastFrameRejectAt = new Map<PaneId, number>();
   private seenEvents = new Set<string>();
   private sessionEpoch = 0;
   private appLaunchSequence = 0;
   private wasConnected = false;
+  private started = false;
+  private controlMessageCleanup?: () => void;
   private static readonly noisyDecoderEvents = new Set([
     'metadata',
     'configFrame',
@@ -48,12 +52,11 @@ export class StreamRuntime {
   constructor(private readonly host: string) {
     this.control = new ControlTransport(host);
     this.control.onConnectionChange((connected) => {
-      console.info('[CastlaRuntime] control connection', {
+      console.info('[CastlaSession] control_connection', {
         connected,
         sessionEpoch: this.sessionEpoch,
-        appLaunchSequence: this.appLaunchSequence,
         controlSessionId: this.controlSessionId,
-        control: this.control.debugSnapshot()
+        appLaunchSequence: this.appLaunchSequence
       });
       this.connectionListeners.forEach((listener) => listener(connected));
       if (!connected) {
@@ -74,16 +77,13 @@ export class StreamRuntime {
   }
 
   start(): void {
+    if (this.started) return;
+    this.started = true;
     this.control.connect();
-    this.control.onMessage((message) => {
+    this.controlMessageCleanup = this.control.onMessage((message) => {
       if ((message as { type?: string }).type === 'serverInit') {
         this.serverInstanceId = String((message as { instanceId?: unknown }).instanceId ?? 'unknown');
         this.controlSessionId = Number((message as { controlSessionId?: unknown }).controlSessionId ?? 0);
-        console.info('[CastlaRuntime] serverInit', {
-          serverInstanceId: this.serverInstanceId,
-          controlSessionId: this.controlSessionId,
-          control: this.control.debugSnapshot()
-        });
       }
       if (message.type === 'streamMetadata') {
         const metadata = message as StreamMetadata;
@@ -92,18 +92,32 @@ export class StreamRuntime {
     });
   }
 
+  dispose(): void {
+    this.controlMessageCleanup?.();
+    this.controlMessageCleanup = undefined;
+    this.started = false;
+    this.control.close();
+    this.videoTransports.forEach((transport) => transport.close());
+    this.videoTransports.clear();
+    this.frameListeners.clear();
+    this.frameCounts.clear();
+    this.lastKeyframeRequestAt.clear();
+    this.consecutiveFrameRejects.clear();
+    this.lastFrameRejectAt.clear();
+    this.seenEvents.clear();
+  }
+
   requestKeyframe(pane: PaneId): void {
     this.generations.resetForKeyframe(pane);
     this.control.send({ type: 'requestKeyframe', pane });
   }
 
   resetTouchState(reason = 'manual'): void {
-    console.info('[CastlaRuntime] resetTouchState', {
+    console.info('[CastlaSession] touch_reset', {
       reason,
       sessionEpoch: this.sessionEpoch,
-      appLaunchSequence: this.appLaunchSequence,
       controlSessionId: this.controlSessionId,
-      control: this.control.debugSnapshot()
+      appLaunchSequence: this.appLaunchSequence
     });
     this.control.send({ type: 'touchReset' });
     this.touchStateListeners.forEach((listener) => listener(reason));
@@ -111,6 +125,12 @@ export class StreamRuntime {
 
   resetTouchSession(reason: string): void {
     this.sessionEpoch += 1;
+    console.info('[CastlaSession] touch_session', {
+      reason,
+      sessionEpoch: this.sessionEpoch,
+      controlSessionId: this.controlSessionId,
+      appLaunchSequence: this.appLaunchSequence
+    });
     this.resetTouchState(`session:${reason}`);
   }
 
@@ -142,17 +162,10 @@ export class StreamRuntime {
     this.lastLayout = normalized.map((pipeline) => ({ ...pipeline }));
     if (signature === this.lastLayoutSignature) {
       this.layoutDedupedCount += 1;
-      console.info('[CastlaLayout] dedup layout_update', {
-        appLaunchSequence: this.appLaunchSequence,
-        sessionEpoch: this.sessionEpoch,
-        layoutDedupedCount: this.layoutDedupedCount,
-        signature
-      });
       return;
     }
     this.lastLayoutSignature = signature;
     this.layoutUpdateCount += 1;
-    console.info('[CastlaLayout] sendLayout', normalized);
     this.control.send({
       type: 'layout_update',
       pipelines: normalized
@@ -189,16 +202,14 @@ export class StreamRuntime {
 
   launchApp(pkg: string, pane: PaneId, componentName?: string, isVideoApp = false): void {
     this.appLaunchSequence += 1;
-    console.info('[CastlaRuntime] launchApp', {
-      appLaunchSequence: this.appLaunchSequence,
+    console.info('[CastlaSession] app_launch', {
       pkg,
       pane,
-      componentName: componentName ?? '',
+      componentName: componentName ?? null,
       isVideoApp,
+      appLaunchSequence: this.appLaunchSequence,
       sessionEpoch: this.sessionEpoch,
-      serverInstanceId: this.serverInstanceId,
-      controlSessionId: this.controlSessionId,
-      control: this.control.debugSnapshot()
+      controlSessionId: this.controlSessionId
     });
     this.resetFrontendInteraction('app_launch');
     this.control.send({
@@ -270,10 +281,25 @@ export class StreamRuntime {
 
   private dispatchFrame(pane: PaneId, frame: EncodedFrame): void {
     if (!this.generations.acceptFrame(pane, frame)) {
-      this.reportDecoderStatus(pane, 'frameRejected', `seq=${frame.sequence} key=${frame.keyFrame} config=${frame.config}`);
-      this.recoverRejectedStream(pane);
+      const now = performance.now();
+      const lastRejectAt = this.lastFrameRejectAt.get(pane) ?? 0;
+      const nextRejectCount = now - lastRejectAt <= 500
+        ? (this.consecutiveFrameRejects.get(pane) ?? 0) + 1
+        : 1;
+      this.lastFrameRejectAt.set(pane, now);
+      this.consecutiveFrameRejects.set(pane, nextRejectCount);
+      if (nextRejectCount === 1 || nextRejectCount === 3) {
+        this.reportDecoderStatus(
+          pane,
+          'frameRejected',
+          `seq=${frame.sequence} key=${frame.keyFrame} config=${frame.config} count=${nextRejectCount}`
+        );
+      }
+      this.recoverRejectedStream(pane, nextRejectCount);
       return;
     }
+    this.consecutiveFrameRejects.delete(pane);
+    this.lastFrameRejectAt.delete(pane);
     if (frame.config) this.reportDecoderStatus(pane, 'configFrame', `bytes=${frame.payload.byteLength}`);
     else if (frame.keyFrame) this.reportDecoderStatus(pane, 'keyFrame', `seq=${frame.sequence} bytes=${frame.payload.byteLength}`);
     this.health.frame(pane);
@@ -282,26 +308,22 @@ export class StreamRuntime {
     this.frameListeners.get(pane)?.forEach((listener) => listener(frame));
   }
 
-  private recoverRejectedStream(pane: PaneId): void {
+  private recoverRejectedStream(pane: PaneId, rejectCount: number): void {
+    if (rejectCount < 3) return;
     const now = performance.now();
     const lastRequestAt = this.lastKeyframeRequestAt.get(pane) ?? 0;
-    if (now - lastRequestAt < 400) return;
+    if (now - lastRequestAt < 1000) return;
     this.lastKeyframeRequestAt.set(pane, now);
     this.requestKeyframe(pane);
-    this.reportDecoderStatus(pane, 'requestKeyframeAfterReject');
+    this.reportDecoderStatus(pane, 'requestKeyframeAfterReject', `count=${rejectCount}`);
   }
 
   private resetSession(reason: string): void {
     this.sessionEpoch += 1;
     this.seenEvents.clear();
     this.lastKeyframeRequestAt.clear();
-    console.info('[CastlaRuntime] resetSession', {
-      reason,
-      sessionEpoch: this.sessionEpoch,
-      appLaunchSequence: this.appLaunchSequence,
-      serverInstanceId: this.serverInstanceId,
-      controlSessionId: this.controlSessionId
-    });
+    this.consecutiveFrameRejects.clear();
+    this.lastFrameRejectAt.clear();
     this.sessionListeners.forEach((listener) => listener(this.sessionEpoch, reason));
   }
 }

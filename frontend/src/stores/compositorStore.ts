@@ -25,12 +25,20 @@ function readStoredSplitRatio(): number {
   return Math.min(0.78, Math.max(0.22, value));
 }
 
-export const compositorStore = writable<CompositorState>({
-  viewports: new Map([
-    ['primary', { pane: 'primary', width: 1280, height: 720, committed: false, generation: 0, visible: true }]
-  ]),
-  diagnostics: [],
-  layoutMode: 'single',
-  splitRatio: readStoredSplitRatio(),
-  splitReversed: false
-});
+export function createInitialCompositorState(): CompositorState {
+  return {
+    viewports: new Map([
+      ['primary', { pane: 'primary', width: 1280, height: 720, committed: false, generation: 0, visible: true }]
+    ]),
+    diagnostics: [],
+    layoutMode: 'single',
+    splitRatio: readStoredSplitRatio(),
+    splitReversed: false
+  };
+}
+
+export const compositorStore = writable<CompositorState>(createInitialCompositorState());
+
+export function resetCompositorStore(): void {
+  compositorStore.set(createInitialCompositorState());
+}

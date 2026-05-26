@@ -5,20 +5,16 @@ import android.os.Build
 import android.os.PowerManager
 import android.util.Log
 import com.castla.mirror.R
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.launch
 import org.json.JSONObject
 import com.castla.mirror.server.MirrorServer
 
 class ThermalThrottleManager(
     private val context: Context,
-    private val serviceScope: CoroutineScope,
     private val mainExecutor: java.util.concurrent.Executor,
     private val getPipelines: () -> Map<String, MirrorForegroundService.MirroringPipeline>,
     private val getAudioOrchestrator: () -> AudioCaptureOrchestrator?,
-    private val getBrowserConnected: () -> Boolean,
     private val getMirrorServer: () -> MirrorServer?,
     private val onThermalThrottled: () -> Unit
 ) {
@@ -80,8 +76,9 @@ class ThermalThrottleManager(
                 thermalMaxHeight = 720
                 onThermalThrottled()
                 
-                // 2단계: 상태가 '변화한 시점'에만 딱 한 번 최소한의 Rebuild를 수행합니다.
-                if (isStatusChanged) triggerGlobalSymmetricRebuild()
+                if (isStatusChanged) {
+                    Log.i(TAG, "Thermal SEVERE state changed -> rebuild skipped; soft throttle only")
+                }
             }
             PowerManager.THERMAL_STATUS_MODERATE -> {
                 Log.i(TAG, "Thermal MODERATE -> 비트레이트 중등도 압착")
@@ -94,7 +91,9 @@ class ThermalThrottleManager(
                 thermalMaxHeight = null
                 onThermalThrottled()
                 
-                if (isStatusChanged) triggerGlobalSymmetricRebuild()
+                if (isStatusChanged) {
+                    Log.i(TAG, "Thermal MODERATE state changed -> rebuild skipped; soft throttle only")
+                }
             }
             PowerManager.THERMAL_STATUS_LIGHT -> {
                 Log.i(TAG, "Thermal LIGHT -> 경량 가이드 압착")
@@ -112,25 +111,12 @@ class ThermalThrottleManager(
                 thermalMaxHeight = null
                 onThermalThrottled()
                 
-                if (isStatusChanged) triggerGlobalSymmetricRebuild()
+                if (isStatusChanged) {
+                    Log.i(TAG, "Thermal NONE state changed -> rebuild skipped; existing encoders recover on normal lifecycle")
+                }
             }
         }
         broadcastThermalStatus(status)
-    }
-
-    // 구동 상태가 유효한 N개의 파이프라인 전체를 차별 없이 공평하게 리빌딩 연계 처리 수행
-    private fun triggerGlobalSymmetricRebuild() {
-        if (!getBrowserConnected()) return
-        serviceScope.launch {
-            getPipelines().values
-                .filter { it.width > 0 && it.height > 0 }
-                .forEach { pipeline ->
-                    // 가상 디스플레이 내부의 동기화 락(pipelineMutex)을 타고 안전하게 실행됨
-                    pipeline.rebuild(pipeline.width, pipeline.height, force = true)
-                    // 🔴 무거운 바인더 연산이 한 번에 겹치지 않도록 파이프라인 사이에 미세한 쿨타임(시차) 부여
-                    kotlinx.coroutines.delay(150L)
-                }
-        }
     }
 
     fun broadcastThermalStatus(status: Int) {

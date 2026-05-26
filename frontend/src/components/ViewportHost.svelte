@@ -17,6 +17,7 @@
   let hostRect = new DOMRect();
   let layoutTrigger = '';
   let layoutFlushScheduled = false;
+  const activeTouchPanes = new Map<number, PaneId>();
 
   onMount(() => {
     resizeObserver = new ResizeObserver(() => {
@@ -68,6 +69,7 @@
 
   function beginResize(event: PointerEvent) {
     event.preventDefault();
+    activeTouchPanes.clear();
     touchRouter.reset();
     resizing = true;
     updateSplitChrome();
@@ -97,6 +99,7 @@
   }
 
   function expand(pane: PaneId) {
+    activeTouchPanes.clear();
     touchRouter.reset();
     compositorStore.update((state) => {
       const viewports = new Map(state.viewports);
@@ -116,6 +119,7 @@
   }
 
   function swap() {
+    activeTouchPanes.clear();
     touchRouter.reset();
     compositorStore.update((state) => ({ ...state, splitReversed: !state.splitReversed }));
     updateSplitChrome();
@@ -167,6 +171,30 @@
         visible: true
       }
     ]);
+  }
+
+  function handlePointer(event: PointerEvent) {
+    if (resizing) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest('.split-resizer') || target?.closest('.split-controls')) return;
+    const action = event.type === 'pointerdown'
+      ? 'down'
+      : event.type === 'pointermove'
+        ? 'move'
+        : 'up';
+    const paneElement = target?.closest<HTMLElement>('.viewport-pane');
+    const pointerKey = event.pointerId & 0xff;
+    const pane = (paneElement?.dataset.pane as PaneId | undefined) ?? activeTouchPanes.get(pointerKey);
+    if (!pane) return;
+    const viewport = visibleViewports.find((entry) => entry.pane === pane);
+    if (!viewport) return;
+    if (action === 'down') {
+      activeTouchPanes.set(pointerKey, pane);
+    }
+    touchRouter.pointer(event, viewport, splitActive ? 'fill' : 'contain', paneElement ?? undefined);
+    if (action === 'up') {
+      activeTouchPanes.delete(pointerKey);
+    }
   }
 
   async function scheduleLayoutFlush() {
@@ -227,9 +255,16 @@
   }
 </script>
 
-<div bind:this={host} class="viewport-host">
+<div
+  bind:this={host}
+  class="viewport-host"
+  on:pointerdown={handlePointer}
+  on:pointermove={handlePointer}
+  on:pointerup={handlePointer}
+  on:pointercancel={handlePointer}
+>
   {#each visibleViewports as viewport (viewport.pane)}
-    <ViewportPane {viewport} {touchRouter} {runtime} paneStyle={paneStyle(viewport.pane)} fitMode={splitActive ? 'fill' : 'contain'} />
+    <ViewportPane {viewport} {runtime} paneStyle={paneStyle(viewport.pane)} fitMode={splitActive ? 'fill' : 'contain'} />
   {/each}
 
   {#if splitActive}

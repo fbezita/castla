@@ -11,6 +11,8 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
     companion object {
         private const val TAG = "TouchInjector"
         private const val MAX_POINTERS = 10
+        private const val MOVE_THROTTLE_MS = 12L
+        private const val MOVE_POSITION_EPSILON_PX = 2.0f
         private var nextInjectorId = 1
     }
 
@@ -44,11 +46,15 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
     private var launchQueueLagTotalMs = 0L
     private var launchQueueLagMaxMs = 0L
     private var activeGestureDownTimeMs = 0L
+    private var moveTimingSamples = 0
+    private var droppedMoveSamples = 0
+    private var lastInjectedMoveAtMs = 0L
 
     private data class PointerState(var x: Float, var y: Float)
 
     private val activePointers = mutableMapOf<Int, PointerState>()
     private val pointerOrder = mutableListOf<Int>()
+    private val lastInjectedMovePositions = mutableMapOf<Int, PointerState>()
 
     private val pointerProperties = Array(MAX_POINTERS) { MotionEvent.PointerProperties() }
     private val pointerCoords = Array(MAX_POINTERS) { MotionEvent.PointerCoords() }
@@ -82,6 +88,9 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
         activePointers.clear()
         pointerOrder.clear()
         activeGestureDownTimeMs = 0L
+        droppedMoveSamples = 0
+        lastInjectedMoveAtMs = 0L
+        lastInjectedMovePositions.clear()
         Log.i(TAG, "[InputDebug] injector#$injectorId updateDimensions ${width}x${height} state=${debugState()}")
     }
 
@@ -113,6 +122,10 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
         launchQueueLagSamples = 0
         launchQueueLagTotalMs = 0L
         launchQueueLagMaxMs = 0L
+        moveTimingSamples = 0
+        droppedMoveSamples = 0
+        lastInjectedMoveAtMs = 0L
+        lastInjectedMovePositions.clear()
         Log.i(TAG, "[InputDebug] injector#$injectorId markDebugLaunch launchSeq=$launchSeq state=${debugState()}")
     }
 
@@ -186,6 +199,7 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
                 }
 
                 activePointers[pointerId] = PointerState(absX, absY)
+                lastInjectedMovePositions.remove(pointerId)
 
                 if (!pointerOrder.contains(pointerId)) {
                     pointerOrder.add(pointerId)
@@ -197,6 +211,24 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
                 if (state != null) {
                     state.x = absX
                     state.y = absY
+                    val nowUptime = SystemClock.uptimeMillis()
+                    val lastInjected = lastInjectedMovePositions[pointerId]
+                    val duplicateMove =
+                        lastInjected != null &&
+                            kotlin.math.abs(lastInjected.x - absX) < MOVE_POSITION_EPSILON_PX &&
+                            kotlin.math.abs(lastInjected.y - absY) < MOVE_POSITION_EPSILON_PX
+                    val throttledMove = lastInjectedMoveAtMs > 0L && (nowUptime - lastInjectedMoveAtMs) < MOVE_THROTTLE_MS
+                    if (duplicateMove || throttledMove) {
+                        droppedMoveSamples += 1
+                        if (droppedMoveSamples % 120 == 0) {
+                            Log.i(
+                                TAG,
+                                "[InputTrace] move_drop_android pane=${event.pane} pointerId=$pointerId reason=${if (duplicateMove) "dedup" else "throttle"} " +
+                                    "queueLagMs=$queueLagMs droppedMoves=$droppedMoveSamples sinceLastMoveMs=${if (lastInjectedMoveAtMs > 0L) nowUptime - lastInjectedMoveAtMs else -1L}"
+                            )
+                        }
+                        return
+                    }
                 } else {
                     // Ignore orphan MOVE.
                     // Creating implicit DOWN here can leave stale pointer state.
@@ -320,6 +352,7 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
             0
         )
 
+        val injectStartNs = SystemClock.elapsedRealtimeNanos()
         try {
             injectMotionEvent(motionEvent)
         } catch (e: Exception) {
@@ -329,6 +362,7 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
         } finally {
             motionEvent.recycle()
         }
+        val injectDurationMs = (SystemClock.elapsedRealtimeNanos() - injectStartNs) / 1_000_000.0
 
         if (event.action == "up") {
             activePointers.remove(pointerId)
@@ -338,6 +372,22 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
                 activePointers.clear()
                 pointerOrder.clear()
                 activeGestureDownTimeMs = 0L
+            }
+        }
+
+        if (event.action == "move") {
+            lastInjectedMoveAtMs = SystemClock.uptimeMillis()
+            val injectedState = lastInjectedMovePositions.getOrPut(pointerId) { PointerState(absX, absY) }
+            injectedState.x = absX
+            injectedState.y = absY
+            moveTimingSamples += 1
+            val totalSinceReceiveMs =
+                if (event.receivedAtElapsedMs > 0L) SystemClock.elapsedRealtime() - event.receivedAtElapsedMs else -1L
+            if (injectDurationMs >= 8.0 || queueLagMs >= 32L || moveTimingSamples % 120 == 0) {
+                Log.i(
+                    TAG,
+                    "[InputTrace] move_path pane=${event.pane} pointerId=$pointerId queueLagMs=$queueLagMs injectMs=${"%.2f".format(java.util.Locale.US, injectDurationMs)} totalSinceReceiveMs=$totalSinceReceiveMs before=$beforeCount after=${activePointers.size} session=$inputSessionId"
+                )
             }
         }
 
@@ -351,19 +401,27 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
         }
     }
 
-    fun release() {
+    fun release(forceFallbackCancel: Boolean = false, reason: String = "manual") {
         releaseCount += 1
-        injectCancelForActivePointers(forceFallback = false)
+        injectCancelForActivePointers(forceFallback = forceFallbackCancel)
         activePointers.clear()
         pointerOrder.clear()
         activeGestureDownTimeMs = 0L
+        moveTimingSamples = 0
+        droppedMoveSamples = 0
+        lastInjectedMoveAtMs = 0L
+        lastInjectedMovePositions.clear()
         inputSessionId += 1
 
         Log.i(
             TAG,
             "[InputDebug] injector#$injectorId release releaseCount=$releaseCount " +
-                "nextSession=$inputSessionId state=${debugState()}"
+                "nextSession=$inputSessionId reason=$reason forceFallbackCancel=$forceFallbackCancel state=${debugState()}"
         )
+    }
+
+    fun hasTrackedPointers(): Boolean {
+        return activePointers.isNotEmpty() || pointerOrder.isNotEmpty() || activeGestureDownTimeMs > 0L
     }
 
     private fun injectCancelForActivePointers(forceFallback: Boolean) {

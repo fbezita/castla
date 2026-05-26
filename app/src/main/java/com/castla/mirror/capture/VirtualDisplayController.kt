@@ -16,12 +16,27 @@ class VirtualDisplayController(private val displayName: String) {
 
     companion object {
         private const val TAG = "VirtualDisplayController"
+        private val liveInstanceCount = java.util.concurrent.atomic.AtomicInteger(0)
+        private val activeVirtualDisplayCount = java.util.concurrent.atomic.AtomicInteger(0)
+        private val totalCreateCount = java.util.concurrent.atomic.AtomicInteger(0)
+        private val totalReleaseVirtualDisplayCount = java.util.concurrent.atomic.AtomicInteger(0)
+        private val totalReleaseCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+        fun debugSummary(): String =
+            "controllerInstances=${liveInstanceCount.get()} activeVirtualDisplays=${activeVirtualDisplayCount.get()} " +
+                "totalCreates=${totalCreateCount.get()} totalReleaseVirtualDisplays=${totalReleaseVirtualDisplayCount.get()} " +
+                "totalReleases=${totalReleaseCount.get()}"
     }
 
     private var virtualDisplay: VirtualDisplay? = null
     private var privilegedService: IPrivilegedService? = null
     @Volatile private var displayId: Int = -1
     @Volatile private var isBound = false
+
+    init {
+        liveInstanceCount.incrementAndGet()
+        Log.i(TAG, "[$displayName] Controller created ${debugSummary()}")
+    }
 
     /**
      * Mirror the latest IPrivilegedService reference owned by ShizukuSetup.
@@ -72,6 +87,8 @@ class VirtualDisplayController(private val displayName: String) {
                     return null
                 }
                 displayId = id
+                totalCreateCount.incrementAndGet()
+                activeVirtualDisplayCount.incrementAndGet()
                 Log.i(TAG, "[$displayName] Virtual display created via Shizuku: id=$id, ${width}x${height}, surface attached")
                 MirrorDiagnostics.log(DiagnosticEvent.VD_CREATED, "id=$id ${width}x${height}")
                 null
@@ -182,28 +199,40 @@ class VirtualDisplayController(private val displayName: String) {
 
     /** Inject a multi-touch MotionEvent on this virtual display. */
     fun injectMotionEvent(event: android.view.MotionEvent) {
+        injectMotionEventWithResult(event)
+    }
+
+    fun injectMotionEventWithResult(event: android.view.MotionEvent): Boolean {
         val id = displayId
         if (id < 0) {
             Log.w(TAG, "[$displayName] injectMotionEvent skipped: displayId=$id")
-            return
+            return false
         }
         val svc = privilegedService
         if (svc == null) {
             Log.w(TAG, "[$displayName] injectMotionEvent skipped: privilegedService is null")
-            return
+            return false
         }
         try {
-            
-            // Wake up display instantly upon touch down to strictly guarantee wake state while preventing ACTION_MOVE bottleneck.
             val action = event.actionMasked
+            val pointerCount = event.pointerCount
+            if (action != android.view.MotionEvent.ACTION_MOVE) {
+                Log.i(
+                    TAG,
+                    "[InputTrace] inject_controller pane=$displayName displayId=$id action=$action pointerCount=$pointerCount downTime=${event.downTime} eventTime=${event.eventTime}"
+                )
+            }
+
+            // Wake up display instantly upon touch down to strictly guarantee wake state while preventing ACTION_MOVE bottleneck.
             if (action == android.view.MotionEvent.ACTION_DOWN || 
                 action == android.view.MotionEvent.ACTION_POINTER_DOWN) {
                 svc.wakeUpDisplay(id)
             }
             
-            svc.injectMotionEvent(id, event)
+            return svc.injectMotionEventWithResult(id, event)
         } catch (e: Exception) {
             Log.e(TAG, "[$displayName] Failed to inject motion event on display $id", e)
+            return false
         }
     }
 
@@ -303,6 +332,8 @@ class VirtualDisplayController(private val displayName: String) {
             } catch (e: Exception) {
                 Log.w(TAG, "[$displayName] Failed to release virtual display", e)
             }
+            totalReleaseVirtualDisplayCount.incrementAndGet()
+            activeVirtualDisplayCount.updateAndGet { count -> (count - 1).coerceAtLeast(0) }
             MirrorDiagnostics.log(DiagnosticEvent.VD_STOPPED, "id=$releasedId")
         }
         virtualDisplay?.release()
@@ -321,8 +352,10 @@ class VirtualDisplayController(private val displayName: String) {
             } catch (e: Exception) {
                 Log.w(TAG, "[$displayName] Failed to release virtual display", e)
             }
+            activeVirtualDisplayCount.updateAndGet { count -> (count - 1).coerceAtLeast(0) }
             MirrorDiagnostics.log(DiagnosticEvent.VD_STOPPED, "id=$releasedId (full release)")
         }
+        totalReleaseCount.incrementAndGet()
         privilegedService = null
         isBound = false
         virtualDisplay?.release()

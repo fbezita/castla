@@ -1,14 +1,12 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
   import type { ViewportModel } from '../stores/compositorStore';
-  import type { TouchRouter } from '../touch/TouchRouter';
   import type { StreamRuntime } from '../runtime/StreamRuntime';
   import type { DecoderBackend } from '../decoder/DecoderBackend';
   import { WebCodecsBackend } from '../decoder/WebCodecsBackend';
   import { JMuxerBackend } from '../decoder/JMuxerBackend';
 
   export let viewport: ViewportModel;
-  export let touchRouter: TouchRouter;
   export let runtime: StreamRuntime;
   export let paneStyle = '';
   export let fitMode: 'contain' | 'fill' = 'contain';
@@ -30,14 +28,6 @@
   let lastDecoderRecoveryAt = 0;
 
   onMount(async () => {
-    const debug = ((window as Window & { __castlaInputDebug?: Record<string, unknown> }).__castlaInputDebug ??= {});
-    const livePanes = ((debug.liveViewportPanes as Record<string, number> | undefined) ??= {});
-    livePanes[viewport.pane] = (livePanes[viewport.pane] ?? 0) + 1;
-    console.info('[CastlaTouch] viewport pane mount', {
-      pane: viewport.pane,
-      livePaneInstances: livePanes[viewport.pane],
-      estimatedPointerListeners: livePanes[viewport.pane] * 4
-    });
     await tick();
     detachConnection = runtime.onConnectionChange(async (connected) => {
       if (!connected) {
@@ -56,16 +46,6 @@
   });
 
   onDestroy(() => {
-    const debug = (window as Window & { __castlaInputDebug?: Record<string, unknown> }).__castlaInputDebug;
-    const livePanes = debug?.liveViewportPanes as Record<string, number> | undefined;
-    if (livePanes) {
-      livePanes[viewport.pane] = Math.max(0, (livePanes[viewport.pane] ?? 1) - 1);
-      console.info('[CastlaTouch] viewport pane destroy', {
-        pane: viewport.pane,
-        livePaneInstances: livePanes[viewport.pane],
-        estimatedPointerListeners: livePanes[viewport.pane] * 4
-      });
-    }
     window.clearInterval(stallTimer);
     detachConnection?.();
     detachSession?.();
@@ -176,10 +156,6 @@
   class="viewport-pane"
   style={paneStyle}
   data-pane={viewport.pane}
-  on:pointerdown={(event) => touchRouter.pointer(event, viewport, fitMode)}
-  on:pointermove={(event) => touchRouter.pointer(event, viewport, fitMode)}
-  on:pointerup={(event) => touchRouter.pointer(event, viewport, fitMode)}
-  on:pointercancel={(event) => touchRouter.pointer(event, viewport, fitMode)}
 >
   <video class:hidden={backend !== 'jmuxer'} class:fill-mode={fitMode === 'fill'} bind:this={video} id={`video-${viewport.pane}`} playsinline muted autoplay></video>
   <canvas class:hidden={backend !== 'webcodecs'} class:fill-mode={fitMode === 'fill'} bind:this={canvas} id={`canvas-${viewport.pane}`}></canvas>

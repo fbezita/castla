@@ -10,20 +10,39 @@ type PendingMove = {
   epoch: number;
 };
 
+type SentMove = {
+  x: number;
+  y: number;
+  sentAt: number;
+};
+
+type GestureStats = {
+  rawMoveEvents: number;
+  emittedMovePackets: number;
+  observedDistance: number;
+  lastObservedX: number;
+  lastObservedY: number;
+};
+
 export class TouchRouter {
+  private static readonly MOVE_FLUSH_INTERVAL_MS = 40;
+  private static readonly MOVE_EPSILON = 0.0025;
   private static nextRouterId = 1;
   private static liveRouterCount = 0;
   private hostRect = new DOMRect();
   private activePointers = new Map<number, { browserPointerId: number; target: HTMLElement }>();
   private pendingMoves = new Map<number, PendingMove>();
+  private lastSentMoves = new Map<number, SentMove>();
   private moveFlushScheduled = false;
   private sessionEpoch = 0;
   private readonly cleanupFns: Array<() => void> = [];
   private readonly routerId = TouchRouter.nextRouterId++;
   private sentPackets = 0;
   private coalescedMoveFrames = 0;
+  private droppedMoveCount = 0;
   private packetCounts = { down: 0, move: 0, up: 0 };
   private gesturePacketCounts = new Map<number, number>();
+  private gestureStats = new Map<number, GestureStats>();
   private lastMoveFlushAt = 0;
   private movePacketsThisSecond = 0;
   private movePacketsPerSecond = 0;
@@ -32,7 +51,6 @@ export class TouchRouter {
   constructor(private readonly runtime: StreamRuntime) {
     TouchRouter.liveRouterCount += 1;
     this.sessionEpoch = runtime.currentSessionEpoch();
-    console.info('[CastlaTouch] router created', this.debugSnapshot());
     this.cleanupFns.push(runtime.onSessionChange((epoch) => {
       this.sessionEpoch = epoch;
       this.reset();
@@ -43,7 +61,6 @@ export class TouchRouter {
   }
 
   dispose(): void {
-    console.info('[CastlaTouch] router dispose', this.debugSnapshot());
     this.clearAll();
     this.cleanupFns.splice(0).forEach((cleanup) => cleanup());
     TouchRouter.liveRouterCount = Math.max(0, TouchRouter.liveRouterCount - 1);
@@ -53,9 +70,14 @@ export class TouchRouter {
     this.hostRect = rect;
   }
 
-  pointer(event: PointerEvent, viewport: ViewportModel, fitMode: 'contain' | 'fill' = 'contain'): void {
-    const target = event.currentTarget as HTMLElement;
-    const rect = target.getBoundingClientRect();
+  pointer(
+    event: PointerEvent,
+    viewport: ViewportModel,
+    fitMode: 'contain' | 'fill' = 'contain',
+    surface?: HTMLElement
+  ): void {
+    const captureTarget = event.currentTarget as HTMLElement;
+    const rect = (surface ?? captureTarget).getBoundingClientRect();
     const pointerId = event.pointerId & 0xff;
     const action = pointerAction(event.type);
     const mapped = mapViewportPoint(event.clientX, event.clientY, rect, viewport.width, viewport.height, fitMode, action !== 'down');
@@ -71,6 +93,18 @@ export class TouchRouter {
 
     event.preventDefault();
     if (action === 'move') {
+      const stats = this.gestureStats.get(pointerId);
+      if (stats) {
+        stats.rawMoveEvents += 1;
+        stats.observedDistance += Math.hypot(mapped.x - stats.lastObservedX, mapped.y - stats.lastObservedY);
+        stats.lastObservedX = mapped.x;
+        stats.lastObservedY = mapped.y;
+      }
+      const pending = this.pendingMoves.get(pointerId);
+      if (pending && this.isSameMove(pending.x, pending.y, mapped.x, mapped.y)) {
+        this.droppedMoveCount += 1;
+        return;
+      }
       this.pendingMoves.set(pointerId, {
         pane: viewport.pane,
         id: pointerId,
@@ -82,9 +116,17 @@ export class TouchRouter {
       return;
     }
     if (action === 'down') {
-      this.capturePointer(pointerId, event.pointerId, target);
+      this.capturePointer(pointerId, event.pointerId, captureTarget);
+      this.gestureStats.set(pointerId, {
+        rawMoveEvents: 0,
+        emittedMovePackets: 0,
+        observedDistance: 0,
+        lastObservedX: mapped.x,
+        lastObservedY: mapped.y
+      });
     } else if (action === 'up') {
       this.pendingMoves.delete(pointerId);
+      this.lastSentMoves.delete(pointerId);
       this.clearPointer(event.pointerId);
     }
 
@@ -119,11 +161,11 @@ export class TouchRouter {
     }
     this.activePointers.clear();
     this.pendingMoves.clear();
+    this.lastSentMoves.clear();
     this.moveFlushScheduled = false;
   }
 
   reset(): void {
-    console.info('[CastlaTouch] router reset', this.debugSnapshot());
     this.clearAll();
     this.runtime.resetTouchState('router_reset');
   }
@@ -142,28 +184,29 @@ export class TouchRouter {
     requestAnimationFrame(() => {
       const now = performance.now();
       const sinceLastFlush = now - this.lastMoveFlushAt;
-      if (sinceLastFlush < 16) {
+      if (sinceLastFlush < TouchRouter.MOVE_FLUSH_INTERVAL_MS) {
         window.setTimeout(() => {
           this.moveFlushScheduled = false;
           this.scheduleMoveFlush();
-        }, Math.max(1, Math.ceil(16 - sinceLastFlush)));
+        }, Math.max(1, Math.ceil(TouchRouter.MOVE_FLUSH_INTERVAL_MS - sinceLastFlush)));
         return;
       }
       this.moveFlushScheduled = false;
       this.lastMoveFlushAt = now;
       const moves = Array.from(this.pendingMoves.values());
       this.pendingMoves.clear();
-      if (moves.length > 1) {
-        this.coalescedMoveFrames += 1;
-        console.info('[CastlaTouch] move coalesced', {
-          routerId: this.routerId,
-          moves: moves.length,
-          coalescedMoveFrames: this.coalescedMoveFrames,
-          launchSequence: this.runtime.currentAppLaunchSequence(),
-          sessionEpoch: this.sessionEpoch
-        });
-      }
+      if (moves.length > 1) this.coalescedMoveFrames += 1;
       for (const move of moves) {
+        const lastSent = this.lastSentMoves.get(move.id);
+        if (lastSent && this.isSameMove(lastSent.x, lastSent.y, move.x, move.y)) {
+          this.droppedMoveCount += 1;
+          continue;
+        }
+        this.lastSentMoves.set(move.id, { x: move.x, y: move.y, sentAt: now });
+        const stats = this.gestureStats.get(move.id);
+        if (stats) {
+          stats.emittedMovePackets += 1;
+        }
         this.sendTouch({
           type: 'touch',
           pane: move.pane,
@@ -197,40 +240,32 @@ export class TouchRouter {
         this.movePacketsPerSecond = this.movePacketsThisSecond;
         this.movePacketsThisSecond = 0;
         this.movePpsWindowStartedAt = now;
-        console.info('[CastlaTouch] move pps', {
-          routerId: this.routerId,
-          launchSequence: this.runtime.currentAppLaunchSequence(),
-          sessionEpoch: this.sessionEpoch,
-          movePacketsPerSecond: this.movePacketsPerSecond,
-          pendingMoves: this.pendingMoves.size,
-          activePointers: this.activePointers.size
-        });
       }
     }
     const gesturePackets = (this.gesturePacketCounts.get(message.id) ?? 0) + 1;
     this.gesturePacketCounts.set(message.id, gesturePackets);
-    if (message.action === 'down') {
-      console.info('[CastlaTouch] gesture start', {
-        routerId: this.routerId,
-        pointerId: message.id,
-        launchSequence: this.runtime.currentAppLaunchSequence(),
-        sessionEpoch: message.epoch,
-        control: this.runtime.control.debugSnapshot()
-      });
-    }
     if (message.action === 'up') {
+      const stats = this.gestureStats.get(message.id);
       console.info('[CastlaTouch] gesture complete', {
         routerId: this.routerId,
         pointerId: message.id,
         launchSequence: this.runtime.currentAppLaunchSequence(),
         sessionEpoch: message.epoch,
         gesturePackets,
+        rawMoveEvents: stats?.rawMoveEvents ?? 0,
+        emittedMovePackets: stats?.emittedMovePackets ?? 0,
+        observedDistance: Number((stats?.observedDistance ?? 0).toFixed(4)),
+        emittedMovesPerUnitDistance: stats && stats.observedDistance > 0
+          ? Number((stats.emittedMovePackets / stats.observedDistance).toFixed(2))
+          : 0,
         packetCounts: { ...this.packetCounts },
         activePointers: this.activePointers.size,
         pendingMoves: this.pendingMoves.size,
-        coalescedMoveFrames: this.coalescedMoveFrames
+        coalescedMoveFrames: this.coalescedMoveFrames,
+        droppedMoveCount: this.droppedMoveCount
       });
       this.gesturePacketCounts.delete(message.id);
+      this.gestureStats.delete(message.id);
     }
     this.runtime.control.send({
       ...message,
@@ -256,8 +291,14 @@ export class TouchRouter {
       sentPackets: this.sentPackets,
       packetCounts: { ...this.packetCounts },
       coalescedMoveFrames: this.coalescedMoveFrames,
+      droppedMoveCount: this.droppedMoveCount,
       movePacketsPerSecond: this.movePacketsPerSecond
     };
+  }
+
+  private isSameMove(prevX: number, prevY: number, nextX: number, nextY: number): boolean {
+    return Math.abs(prevX - nextX) < TouchRouter.MOVE_EPSILON &&
+      Math.abs(prevY - nextY) < TouchRouter.MOVE_EPSILON;
   }
 }
 

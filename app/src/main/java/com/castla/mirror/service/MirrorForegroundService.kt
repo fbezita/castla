@@ -202,7 +202,28 @@ class MirrorForegroundService : Service() {
     
 
     enum class PipelineState { IDLE, REBUILDING }
-    data class RebuildRequest(val width: Int, val height: Int, val force: Boolean, val forceSingle: Boolean)
+    enum class RebuildPriority { LOW, NORMAL, HIGH, IMMEDIATE }
+    data class RebuildRequest(
+        val pipelineName: String,
+        val reason: String,
+        val priority: RebuildPriority,
+        val width: Int,
+        val height: Int,
+        val force: Boolean,
+        val forceSingle: Boolean,
+        val onComplete: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+    )
+    private data class RebuildRequestSnapshot(
+        val width: Int,
+        val height: Int,
+        val force: Boolean,
+        val forceSingle: Boolean,
+        val reason: String,
+        val requestedAt: Long
+    )
+
+    private val rebuildRequestMutex = Mutex()
+    private val lastRebuildRequestByPane = java.util.concurrent.ConcurrentHashMap<String, RebuildRequestSnapshot>()
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var dpiScale: Float = 0.7f
@@ -252,10 +273,12 @@ class MirrorForegroundService : Service() {
                 .incrementAndGet()
         }
         if (event.action != "move") {
+            val recentServiceAction = pipeline?.recentServiceActionSummary()
             Log.i(
                 TAG,
-                "[InputDebug] packet launchSeq=$currentInputDebugLaunchSeq action=${event.action} pane=${event.pane} " +
-                    "pointerId=${event.pointerId} packetCount=$packetCount pipeline=${pipeline?.name ?: "none"}"
+                "[InputTrace] packet launchSeq=$currentInputDebugLaunchSeq action=${event.action} pane=${event.pane} " +
+                    "pointerId=${event.pointerId} packetCount=$packetCount pipeline=${pipeline?.name ?: "none"} " +
+                    "recentServiceAction=${recentServiceAction ?: "none"}"
             )
             logInputDebugSnapshot("touch_${event.action}#$currentInputDebugLaunchSeq")
         }
@@ -272,7 +295,7 @@ class MirrorForegroundService : Service() {
 //        }
         Log.i(
             TAG,
-            "[InputDebug] snapshot reason=$reason launchSeq=$currentInputDebugLaunchSeq " +
+            "[InputTrace] snapshot reason=$reason launchSeq=$currentInputDebugLaunchSeq " +
                 "serviceJobs=${countActiveServiceJobs()} vdWorkerActive=${vdWorkerJob?.isActive == true} reconnectJob=${reconnectJob?.isActive == true} " +
                 "pendingDisconnectJob=${pendingBrowserDisconnectJob?.isActive == true} vdKeepAliveJob=${vdKeepAliveJob?.isActive == true} appExitMonitorJob=${appExitMonitorJob?.isActive == true} " +
                 "controlSockets=${server?.controlSocketCount() ?: -1} primaryVideoSockets=${server?.videoSocketCount("primary") ?: -1} " +
@@ -290,6 +313,126 @@ class MirrorForegroundService : Service() {
     private fun countActiveServiceJobs(): Int {
         val rootJob = serviceScope.coroutineContext[Job] ?: return -1
         return rootJob.children.count { it.isActive }
+    }
+
+    private fun pipelineTouchSnapshot(): String {
+        return pipelines.values.joinToString(" | ") { pipeline ->
+            val injectorState = try {
+                pipeline.touchInjector?.debugState() ?: "injector=null"
+            } catch (_: Exception) {
+                "injector=error"
+            }
+            "${pipeline.name}:displayId=${pipeline.displayId},app=${pipeline.currentApp},touchActive=${pipeline.isTouchInteractionActive()},$injectorState"
+        }
+    }
+
+    private fun isAnyTouchInteractionActive(): Boolean {
+        return pipelines.values.any { it.isTouchInteractionActive() }
+    }
+
+    private fun mostRecentTouchAgeMs(now: Long = android.os.SystemClock.elapsedRealtime()): Long? {
+        val lastTouchAt = pipelines.values
+            .map { it.lastTouchEventAt }
+            .filter { it > 0L }
+            .maxOrNull()
+            ?: return null
+        return (now - lastTouchAt).coerceAtLeast(0L)
+    }
+
+    private suspend fun requestRebuild(request: RebuildRequest) {
+        val pipeline = pipelines[request.pipelineName]
+        if (pipeline == null || isAppLaunchingContext || request.width <= 0 || request.height <= 0) {
+            request.onComplete?.complete(Unit)
+            return
+        }
+
+        val now = android.os.SystemClock.elapsedRealtime()
+        var coalesced = false
+        rebuildRequestMutex.withLock {
+            val last = lastRebuildRequestByPane[request.pipelineName]
+            val duplicate = last != null &&
+                last.width == request.width &&
+                last.height == request.height &&
+                last.force == request.force &&
+                last.forceSingle == request.forceSingle &&
+                now - last.requestedAt <= 120L
+
+            if (duplicate && request.onComplete == null && request.priority != RebuildPriority.IMMEDIATE) {
+                coalesced = true
+            } else {
+                lastRebuildRequestByPane[request.pipelineName] = RebuildRequestSnapshot(
+                    request.width,
+                    request.height,
+                    request.force,
+                    request.forceSingle,
+                    request.reason,
+                    now
+                )
+            }
+        }
+        if (coalesced) {
+            Log.d(
+                TAG,
+                "[RebuildCoordinator] coalesced pane=${request.pipelineName} reason=${request.reason} " +
+                    "target=${request.width}x${request.height}"
+            )
+            return
+        }
+
+        val deferStart = android.os.SystemClock.elapsedRealtime()
+        var deferredForTouch = false
+        var skippedForTouchQuietWindow = false
+        while (request.priority != RebuildPriority.IMMEDIATE) {
+            val recentTouchAgeMs = mostRecentTouchAgeMs()
+            val requiresQuietWindow = request.priority == RebuildPriority.LOW
+            val touchBlocked = isAnyTouchInteractionActive() ||
+                (requiresQuietWindow && recentTouchAgeMs != null && recentTouchAgeMs < 2500L)
+            if (!touchBlocked) break
+
+            deferredForTouch = true
+            delay(60L)
+            if (android.os.SystemClock.elapsedRealtime() - deferStart >= 1500L) {
+                if (requiresQuietWindow) skippedForTouchQuietWindow = true
+                break
+            }
+        }
+        if (deferredForTouch) {
+            Log.i(
+                TAG,
+                "[InputTrace] touch_guard pane=${request.pipelineName} reason=rebuild_defer source=${request.reason} deferredMs=" +
+                    (android.os.SystemClock.elapsedRealtime() - deferStart) +
+                    " priority=${request.priority} force=${request.force} forceSingle=${request.forceSingle} target=${request.width}x${request.height}"
+            )
+        }
+        if (skippedForTouchQuietWindow) {
+            Log.i(
+                TAG,
+                "[RebuildCoordinator] skipped pane=${request.pipelineName} reason=${request.reason} priority=${request.priority} " +
+                    "source=touch_quiet_window recentTouchAgeMs=${mostRecentTouchAgeMs() ?: -1L} target=${request.width}x${request.height}"
+            )
+            request.onComplete?.complete(Unit)
+            return
+        }
+
+        pipeline.debugRebuildRequests += 1
+        val enqueueResult = vdRequestChannel.trySend(
+            VdHardwareRequest.Rebuild(
+                request.pipelineName,
+                request.width,
+                request.height,
+                request.force,
+                request.forceSingle,
+                request.onComplete
+            )
+        )
+        if (enqueueResult.isFailure) {
+            val error = enqueueResult.exceptionOrNull()
+            if (error != null) {
+                request.onComplete?.completeExceptionally(error)
+                throw error
+            }
+            request.onComplete?.complete(Unit)
+        }
     }
 
     
@@ -383,11 +526,9 @@ class MirrorForegroundService : Service() {
         
         thermalThrottleManager = ThermalThrottleManager(
             context = this@MirrorForegroundService,
-            serviceScope = serviceScope,
             mainExecutor = androidx.core.content.ContextCompat.getMainExecutor(this@MirrorForegroundService),
             getPipelines = { pipelines },
             getAudioOrchestrator = { audioOrchestrator },
-            getBrowserConnected = { browserConnected },
             onThermalThrottled = { adaptiveBitrateManager.resetTiers() },
             getMirrorServer = { mirrorServer },
         )
@@ -486,7 +627,13 @@ class MirrorForegroundService : Service() {
 
                 Log.i(TAG, "[AppLaunchBus Observer] Event Captured! Processing pipeline architecture setup for: ${request.packageName} ($pane pane)")
                 try {
-                    targetPipeline.touchInjector?.release();
+                    val shouldForceCancel =
+                        targetPipeline.isTouchInteractionActive() ||
+                            (targetPipeline.touchInjector?.hasTrackedPointers() == true)
+                    targetPipeline.touchInjector?.release(
+                        forceFallbackCancel = shouldForceCancel,
+                        reason = "app_launch_transition"
+                    );
                     lastTouchPane = "primary"
                     Log.i(TAG, "[Touch] Cleared pane touch state before app launch pane=$pane pkg=${request.packageName}")
                 } catch (_: Exception) {}
@@ -504,7 +651,14 @@ class MirrorForegroundService : Service() {
                     targetPipeline.setTier(DisplayTier.VISIBLE, "secondary_launch_requested")
                     if (!targetPipeline.isEncoderRunning() || targetPipeline.width <= 1 || targetPipeline.height <= 1) {
                         val rebuildDeferred = kotlinx.coroutines.CompletableDeferred<Unit>()
-                        targetPipeline.rebuild(fallbackW, fallbackH, force = true, onComplete = rebuildDeferred)
+                        targetPipeline.requestRebuild(
+                            reason = "secondary_launch_prepare",
+                            priority = RebuildPriority.HIGH,
+                            newWidth = fallbackW,
+                            newHeight = fallbackH,
+                            force = true,
+                            onComplete = rebuildDeferred
+                        )
                         withTimeoutOrNull(2500L) { rebuildDeferred.await() }
                     }
                 } else {
@@ -859,18 +1013,22 @@ class MirrorForegroundService : Service() {
                 server.setNetworkCongestionListener { adaptiveBitrateManager.onNetworkCongestion() }
                 server.setTouchListener { event ->
                     val targetPipeline = pipelines[event.pane]
+                    targetPipeline?.noteTouchEvent(event.action)
                     recordInputDebugPacket(event, targetPipeline)
                     targetPipeline?.touchInjector?.onTouchEvent(event)
                     if (event.action == "up") { lastTouchPane = event.pane }
                 }
                 server.setTouchResetListener {
                     pipelines.values.forEach { pipeline ->
-                        try { pipeline.touchInjector?.release() 
+                        val shouldForceCancel =
+                            pipeline.isTouchInteractionActive() ||
+                                (pipeline.touchInjector?.hasTrackedPointers() == true)
+                        try { pipeline.touchInjector?.release(forceFallbackCancel = shouldForceCancel, reason = "browser_touch_reset") 
                         } 
                         catch (_: Exception) {}
                     }
                     lastTouchPane = "primary"
-                    Log.i(TAG, "[Touch] Reset all browser touch state")
+                    Log.i(TAG, "[InputTrace] browser_touch_reset pipelines=${pipelineTouchSnapshot()}")
                     logInputDebugSnapshot("touch_reset")
                 }
                 server.setCodecModeListener { onCodecModeRequest(it) }
@@ -885,6 +1043,18 @@ class MirrorForegroundService : Service() {
                 server.setCompositionUpdateListener { bs, text -> injectCompositionUpdate(bs, text) }
                 server.setAudioCodecListener { codec -> serviceScope.launch(Dispatchers.IO) { ensureAudioCaptureState(codec) } }
                 server.setAudioSocketConnectedListener { audioOrchestrator?.onAudioSocketConnected() }
+                server.setBrowserRearmListener {
+                    serviceScope.launch {
+                        Log.i(TAG, "[InputTrace] debug_browser_rearm pipelines=${pipelineTouchSnapshot()}")
+                        onBrowserConnected()
+                    }
+                }
+                server.setBrowserTeardownListener {
+                    serviceScope.launch {
+                        Log.i(TAG, "[InputTrace] debug_browser_teardown pipelines=${pipelineTouchSnapshot()}")
+                        onBrowserDisconnected()
+                    }
+                }
                 server.setGoHomeListener {
                     serviceScope.launch(Dispatchers.IO) {
                         Log.i(TAG, "[MirrorServer] GoHome received. Forcing home stack on all active displays.")
@@ -939,7 +1109,15 @@ class MirrorForegroundService : Service() {
                     dpiScale = scale
                     pipelines.values.forEach { pipeline ->
                         if (pipeline.controller.hasVirtualDisplay() && pipeline.width > 0 && pipeline.height > 0) {
-                            serviceScope.launch { pipeline.rebuild(pipeline.width, pipeline.height, force = true) }
+                            serviceScope.launch {
+                                pipeline.requestRebuild(
+                                    reason = "display_density_change",
+                                    priority = RebuildPriority.HIGH,
+                                    newWidth = pipeline.width,
+                                    newHeight = pipeline.height,
+                                    force = true
+                                )
+                            }
                         }
                     }
                 }
@@ -954,10 +1132,17 @@ class MirrorForegroundService : Service() {
                 }
                 server.setBrowserConnectionListener { connected ->
                     if (connected) {
+                        Log.i(TAG, "[InputTrace] browser_connection connected=true pipelines=${pipelineTouchSnapshot()}")
                         cancelPendingBrowserDisconnect("browser_reconnected")
                         if (!browserConnected) { browserConnected = true; onBrowserConnected() }
                         browserConnectionListener?.invoke(true)
-                    } else if (browserConnected) { scheduleBrowserDisconnect() } else { browserConnectionListener?.invoke(false) }
+                    } else if (browserConnected) {
+                        Log.i(TAG, "[InputTrace] browser_connection connected=false pipelines=${pipelineTouchSnapshot()}")
+                        scheduleBrowserDisconnect()
+                    } else {
+                        Log.i(TAG, "[InputTrace] browser_connection connected=false pipelines=${pipelineTouchSnapshot()}")
+                        browserConnectionListener?.invoke(false)
+                    }
                 }
                 server.start(0)
             }
@@ -1158,11 +1343,11 @@ class MirrorForegroundService : Service() {
                         displayId = pipeline.controller.getDisplayId()
                         generation = pipeline.markVdCreated(displayId, "shizuku_reconnect")
                         pipeline.touchInjector?.updateController { event ->
-                            val accepted = pipeline.controller.injectMotionEvent(event)
-//                            pipeline.recordInjectionResult(event.actionMasked, accepted)
-//                            if (!accepted) {
-//                                pipeline.handleInjectionRejected(event.actionMasked, event.pointerCount)
-//                            }
+                            val accepted = pipeline.controller.injectMotionEventWithResult(event)
+                            pipeline.recordInjectionResult(event.actionMasked, accepted)
+                            if (!accepted) {
+                                pipeline.handleInjectionRejected(event.actionMasked, event.pointerCount)
+                            }
                         }
                         hasVd = true
                     }
@@ -1251,11 +1436,11 @@ class MirrorForegroundService : Service() {
                         activeId = pipeline.controller.getDisplayId()
                         generation = pipeline.markVdCreated(activeId, "try_setup")
                         pipeline.touchInjector?.updateController { event ->
-                            val accepted = pipeline.controller.injectMotionEvent(event)
-//                            pipeline.recordInjectionResult(event.actionMasked, accepted)
-//                            if (!accepted) {
-//                                pipeline.handleInjectionRejected(event.actionMasked, event.pointerCount)
-//                            }
+                            val accepted = pipeline.controller.injectMotionEventWithResult(event)
+                            pipeline.recordInjectionResult(event.actionMasked, accepted)
+                            if (!accepted) {
+                                pipeline.handleInjectionRejected(event.actionMasked, event.pointerCount)
+                            }
                         }
                     }
                 }
@@ -1280,7 +1465,14 @@ class MirrorForegroundService : Service() {
         val pipeline = pipelines[name] ?: return
         serviceScope.launch {
             try {
-                pipeline.rebuild(w, h, force, forceSingle)
+                pipeline.requestRebuild(
+                    reason = "orchestrator_policy",
+                    priority = RebuildPriority.HIGH,
+                    newWidth = w,
+                    newHeight = h,
+                    force = force,
+                    forceSingle = forceSingle
+                )
             } catch (t: Throwable) {
                 Log.e(TAG, "[Orchestrator] Symmetrical system caught failure during rebuild from pane: $name", t)
                 
@@ -1489,6 +1681,10 @@ class MirrorForegroundService : Service() {
             // Increase stabilization grace period to 5.5s to comfortably accommodate heavy apps like Google Maps on cold start.
             kotlinx.coroutines.delay(5500L)
             try {
+                if (pipeline.isTouchInteractionActive()) {
+                    Log.i(TAG, "[InputTrace] touch_guard pane=${pipeline.name} reason=fallback_skip displayId=$displayId app=$pkg")
+                    return@launch
+                }
                 val runningTasks = try { service.getRunningTasksOnDisplay(displayId) } catch (e: Exception) {
                     Log.w(TAG, "[Fallback] Failed to retrieve running tasks on Display $displayId: ${e.message}")
                     null
@@ -1581,7 +1777,12 @@ class MirrorForegroundService : Service() {
         @Volatile var debugMoveInjectAttempts = 0
         @Volatile var debugMoveInjectAccepted = 0
         @Volatile var debugMoveInjectRejected = 0
+        @Volatile var debugFirstInjectFailureProbeLogged = false
         @Volatile var lastInjectionRecoveryAt = 0L
+        @Volatile var lastServiceMutationAt = 0L
+        @Volatile var lastServiceMutationReason = "init"
+        @Volatile var activeTouchCount = 0
+        @Volatile var lastTouchEventAt = 0L
         var isVideoApp = false
         var autoResolution: Boolean = false
         var autoFps: Boolean = false
@@ -1618,6 +1819,7 @@ class MirrorForegroundService : Service() {
             debugMoveInjectAttempts = 0
             debugMoveInjectAccepted = 0
             debugMoveInjectRejected = 0
+            debugFirstInjectFailureProbeLogged = false
 //            touchInjector?.markDebugLaunch(launchSeq)
             Log.i(
                 TAG,
@@ -1635,6 +1837,52 @@ class MirrorForegroundService : Service() {
             }
         }
 
+        fun noteTouchEvent(action: String) {
+            lastTouchEventAt = android.os.SystemClock.elapsedRealtime()
+            when (action) {
+                "down" -> {
+                    activeTouchCount += 1
+                    cancelFallbackDuringTouch("touch_down")
+                }
+                "up", "cancel" -> {
+                    activeTouchCount = (activeTouchCount - 1).coerceAtLeast(0)
+                }
+            }
+        }
+
+        fun isTouchInteractionActive(): Boolean {
+            if (activeTouchCount > 0) return true
+            val lastAt = lastTouchEventAt
+            if (lastAt <= 0L) return false
+            return android.os.SystemClock.elapsedRealtime() - lastAt <= 250L
+        }
+
+        private fun cancelFallbackDuringTouch(reason: String) {
+            val job = activeFallbackJob ?: return
+            if (!job.isActive) return
+            debugFallbackCancels += 1
+            activeFallbackJob = null
+            job.cancel()
+            Log.i(TAG, "[InputTrace] touch_guard pane=$name reason=$reason canceled=fallback displayId=$displayId app=$currentApp")
+        }
+
+        fun markServiceMutation(reason: String) {
+            lastServiceMutationAt = android.os.SystemClock.elapsedRealtime()
+            lastServiceMutationReason = reason
+            Log.i(
+                TAG,
+                "[InputTrace] service_mutation pane=$name reason=$reason displayId=$displayId app=$currentApp " +
+                    "requested=${requestedWidth}x${requestedHeight} actual=${width}x${height}"
+            )
+        }
+
+        fun recentServiceActionSummary(): String {
+            val at = lastServiceMutationAt
+            if (at <= 0L) return "none"
+            val age = (android.os.SystemClock.elapsedRealtime() - at).coerceAtLeast(0L)
+            return "$lastServiceMutationReason@${age}ms"
+        }
+
         suspend fun setTier(next: DisplayTier, reason: String) {
             if (displayTier == next && (next == DisplayTier.ACTIVE || next == DisplayTier.VISIBLE)) return
             displayTier = next
@@ -1644,7 +1892,7 @@ class MirrorForegroundService : Service() {
                     val targetW = requestedWidth.takeIf { it > 1 } ?: lastValidWidth.coerceAtLeast(720)
                     val targetH = requestedHeight.takeIf { it > 1 } ?: lastValidHeight.coerceAtLeast(720)
                     if (!isEncoderRunning() && displayId >= 0 && browserConnected) {
-                        rebuild(targetW, targetH, force = true)
+                        requestRebuild("tier_resume", RebuildPriority.HIGH, targetW, targetH, force = true)
                     }
                 }
                 DisplayTier.SUSPENDED, DisplayTier.PARKED -> suspendEncoder(reason)
@@ -1693,7 +1941,14 @@ class MirrorForegroundService : Service() {
                     kotlinx.coroutines.delay(120L) 
                 }
                 val forceResume = !isEncoderRunning()
-                rebuild(w, h, force = forceResume, forceSingle = forceLayoutRealign)
+                requestRebuild(
+                    reason = "viewport_change",
+                    priority = if (isFirstSetup || forceResume) RebuildPriority.HIGH else RebuildPriority.NORMAL,
+                    newWidth = w,
+                    newHeight = h,
+                    force = forceResume,
+                    forceSingle = forceLayoutRealign
+                )
             }
             /* ### 수정 끝 ### */
         }
@@ -1704,6 +1959,20 @@ class MirrorForegroundService : Service() {
         // hardware worker. We intentionally do not collapse requests behind an active rebuild,
         // because split-ratio drags and fullscreen promotion depend on the final viewport size
         // being applied after any in-flight rebuild completes.
+        suspend fun requestRebuild(
+            reason: String,
+            priority: RebuildPriority = RebuildPriority.NORMAL,
+            newWidth: Int,
+            newHeight: Int,
+            force: Boolean = false,
+            forceSingle: Boolean = false,
+            onComplete: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+        ) {
+            this@MirrorForegroundService.requestRebuild(
+                RebuildRequest(name, reason, priority, newWidth, newHeight, force, forceSingle, onComplete)
+            )
+        }
+
         suspend fun rebuild(
             newWidth: Int,
             newHeight: Int,
@@ -1711,27 +1980,13 @@ class MirrorForegroundService : Service() {
             forceSingle: Boolean = false,
             onComplete: kotlinx.coroutines.CompletableDeferred<Unit>? = null
         ) {
-            if (isAppLaunchingContext || newWidth <= 0 || newHeight <= 0) {
-                onComplete?.complete(Unit)
-                return
-            }
-            debugRebuildRequests += 1
-            val enqueueResult = vdRequestChannel.trySend(
-                VdHardwareRequest.Rebuild(name, newWidth, newHeight, force, forceSingle, onComplete)
-            )
-            if (enqueueResult.isFailure) {
-                val error = enqueueResult.exceptionOrNull()
-                if (error != null) {
-                    onComplete?.completeExceptionally(error)
-                    throw error
-                }
-                onComplete?.complete(Unit)
-            }
+            requestRebuild("legacy_direct", RebuildPriority.NORMAL, newWidth, newHeight, force, forceSingle, onComplete)
         }
         /* ### 수정 끝 ### */
 
         suspend fun executeActualRebuild(targetWidth: Int, targetHeight: Int, force: Boolean = false, forceSingle: Boolean = false) {
             debugRebuildExecutions += 1
+            markServiceMutation("rebuild_begin(force=$force,forceSingle=$forceSingle,target=${targetWidth}x${targetHeight})")
             val sessionId = encoderSession.incrementAndGet()
             val effectiveMaxHeight = targetHeight.coerceAtMost(currentMaxHeight)
             var targetW = targetWidth; var targetH = targetHeight
@@ -1884,11 +2139,11 @@ class MirrorForegroundService : Service() {
                     touchInjector = (touchInjector ?: TouchInjector(w, h)).also { injector ->
                         injector.updateDimensions(w, h)
                         injector.updateController { event ->
-                            val accepted = controller.injectMotionEvent(event)
-//                            recordInjectionResult(event.actionMasked, accepted)
-//                            if (!accepted) {
-//                                handleInjectionRejected(event.actionMasked, event.pointerCount)
-//                            }
+                            val accepted = controller.injectMotionEventWithResult(event)
+                            recordInjectionResult(event.actionMasked, accepted)
+                            if (!accepted) {
+                                handleInjectionRejected(event.actionMasked, event.pointerCount)
+                            }
                         }
                     }
                     startEncoderTask?.invoke()
@@ -1906,10 +2161,13 @@ class MirrorForegroundService : Service() {
 
                     if (currentApp.isBlank()) {
                         currentApp = "HOME"
+                        markServiceMutation("launch_home_after_rebuild")
                         runBinderSafe { controller.launchHomeOnDisplay() }
                     } else if (isNewVd || forceSingle) {
+                        markServiceMutation("restore_content_after_rebuild")
                         restoreContentLocked(gen, activeId)
                     }
+                    markServiceMutation("rebuild_end(newVd=$isNewVd,activeId=$activeId)")
                     Log.i(TAG, "[$name Pipeline] VirtualDisplay configured successfully. ID: $activeId (New VD: $isNewVd)")
                 } else {
                     throw IllegalStateException("VirtualDisplay allocation completely failed via binder server.")
@@ -1926,8 +2184,10 @@ class MirrorForegroundService : Service() {
                 serviceScope.launch {
                     try {
                         delay(150)
+                        markServiceMutation("post_rebuild_wakeup")
                         controller.getPrivilegedService()?.wakeUpDisplay(displayId)
                         if (currentCodecMode != "mjpeg") {
+                            markServiceMutation("post_rebuild_keyframe")
                             videoEncoder?.requestKeyFrame()
                         }
                         Log.i(TAG, "[$name Pipeline] Requested post-rebuild wakeup/keyframe (codec: $currentCodecMode)")
@@ -1984,6 +2244,7 @@ class MirrorForegroundService : Service() {
         fun recoverTouchFocusIfNeeded(topTask: String?, trigger: String) {
             val activeId = displayId
             if (activeId < 0) return
+            if (isTouchInteractionActive()) return
             val targetApp = currentApp
             val cleanPkg = targetApp.substringBefore('/').substringBefore('?').substringBefore(' ').trim()
             if (cleanPkg.isBlank() || cleanPkg == "HOME" || cleanPkg == "com.android.settings" || cleanPkg == packageName) return
@@ -2019,6 +2280,7 @@ class MirrorForegroundService : Service() {
                     TAG,
                     "[$name Pipeline] Touch focus recovery triggered ($trigger) displayId=$activeId app=$targetApp topTask=${topTask ?: "none"}"
                 )
+                markServiceMutation("touch_focus_recovery:$trigger")
 
                 try { service.wakeUpDisplay(activeId) } catch (_: Exception) {}
 
@@ -2071,14 +2333,70 @@ class MirrorForegroundService : Service() {
             debugInjectionRejects += 1
             val activeId = displayId
             if (activeId < 0) return
+            if (action == android.view.MotionEvent.ACTION_MOVE) return
+            if (!debugFirstInjectFailureProbeLogged) {
+                debugFirstInjectFailureProbeLogged = true
+                logInjectionFailureProbe(activeId, action, pointerCount)
+            }
             val now = android.os.SystemClock.elapsedRealtime()
             if (now - lastInjectionRecoveryAt >= 2000L) {
                 lastInjectionRecoveryAt = now
                 Log.w(
                     TAG,
-                    "[InputProbe][$name][inject-reject] observed displayId=$activeId action=$action pointerCount=$pointerCount app=$currentApp"
+                    "[InputTrace] inject_reject pane=$name displayId=$activeId action=$action pointerCount=$pointerCount app=$currentApp"
                 )
             }
+        }
+
+        private fun logInjectionFailureProbe(activeId: Int, action: Int, pointerCount: Int) {
+            serviceScope.launch(vdDispatcher) {
+                val service = controller.getPrivilegedService()
+                if (service == null) {
+                    Log.w(
+                        TAG,
+                        "[InputTrace] inject_false_probe pane=$name displayId=$activeId action=$action pointerCount=$pointerCount app=$currentApp service=unavailable recentServiceAction=${recentServiceActionSummary()}"
+                    )
+                    return@launch
+                }
+
+                val targetApp = currentApp
+                val cleanPkg = targetApp.substringBefore('/').substringBefore('?').substringBefore(' ').trim()
+                val activitiesDump = try {
+                    runBinderSafe(1500L) { service.execCommand("dumpsys activity activities") } ?: ""
+                } catch (_: Exception) {
+                    ""
+                }
+                val windowsDump = try {
+                    runBinderSafe(1500L) { service.execCommand("dumpsys window windows") } ?: ""
+                } catch (_: Exception) {
+                    ""
+                }
+
+                val activitySummary = summarizeProbeDump(
+                    activitiesDump,
+                    listOf("Display #$activeId", "topResumedActivity", "mResumedActivity", "ResumedActivity", cleanPkg)
+                )
+                val windowSummary = summarizeProbeDump(
+                    windowsDump,
+                    listOf("mCurrentFocus", "mFocusedApp", "mTopFocusedDisplayId", "Display #$activeId", "mDisplayId=$activeId", cleanPkg)
+                )
+                Log.w(
+                    TAG,
+                    "[InputTrace] inject_false_probe pane=$name displayId=$activeId action=$action pointerCount=$pointerCount app=$targetApp activities=$activitySummary windows=$windowSummary recentServiceAction=${recentServiceActionSummary()}"
+                )
+            }
+        }
+
+        private fun summarizeProbeDump(raw: String, needles: List<String>): String {
+            if (raw.isBlank()) return "none"
+            val matched = raw
+                .lineSequence()
+                .map { it.trim() }
+                .filter { line -> line.isNotEmpty() && needles.any { needle -> needle.isNotBlank() && line.contains(needle, ignoreCase = true) } }
+                .take(12)
+                .map { line -> line.replace(Regex("\\s+"), " ") }
+                .toList()
+            return if (matched.isEmpty()) "none" else matched.joinToString(" || ")
         }
 
         fun markVdCreated(activeId: Int, reason: String): Long { displayId = activeId; return vdGeneration.incrementAndGet() }
@@ -2120,6 +2438,7 @@ class MirrorForegroundService : Service() {
             forceDisplayId: Boolean = false,
             forceTaskRealign: Boolean = false
         ): Boolean = withContext(vdDispatcher) {
+            markServiceMutation("launch_component_begin(target=$packageOrComponent,cold=$forceColdStart,realign=$forceTaskRealign)")
             /* ### 수정 시작 ### */
             // Ensure lastFrameRenderedTime is reset only when actually switching to a different application package
             // or when a clean cold start is explicitly requested. This preserves frame rendering timestamps for 
@@ -2127,11 +2446,24 @@ class MirrorForegroundService : Service() {
             val cleanPkg = packageOrComponent.substringBefore('/').substringBefore('?').substringBefore(' ').trim()
             if (cleanPkg.isBlank() || cleanPkg == packageName || cleanPkg.contains("com.castla.mirror")) return@withContext false
 
+            val previousPkg = currentApp.substringBefore('/').substringBefore('?').substringBefore(' ').trim()
             val isNewApp = currentApp.substringBefore('/') != cleanPkg
             if (isNewApp || forceColdStart) {
                 lastFrameRenderedTime = 0L
             }
             /* ### 수정 끝 ### */
+
+            if (
+                isNewApp &&
+                previousPkg.isNotBlank() &&
+                previousPkg != "HOME" &&
+                previousPkg != "com.android.settings" &&
+                previousPkg != cleanPkg
+            ) {
+                markServiceMutation("launch_component_cleanup_previous($previousPkg)")
+                forceStopAppIfNeeded(previousPkg)
+                delay(120L)
+            }
 
             // Command Equivalence Guard: If target app is already active and rendering on this virtual display, skip redundant window displacement commands.
             // However, if the screen streaming has stagnated or has not yet rendered its first frame, bypass this safeguard to enforce visual recovery.
@@ -2173,7 +2505,13 @@ class MirrorForegroundService : Service() {
                     // Awaiting the CompletableDeferred guarantees the virtual display surfaces are fully bound 
                     // natively by the sequential worker before moving forward to launch components.
                     val rebuildDeferred = kotlinx.coroutines.CompletableDeferred<Unit>()
-                    rebuild(targetW, targetH, onComplete = rebuildDeferred)
+                    requestRebuild(
+                        reason = "launch_self_heal",
+                        priority = RebuildPriority.HIGH,
+                        newWidth = targetW,
+                        newHeight = targetH,
+                        onComplete = rebuildDeferred
+                    )
                     try {
                         rebuildDeferred.await()
                     } catch (e: Exception) {
@@ -2213,6 +2551,7 @@ class MirrorForegroundService : Service() {
                 // Re-launching via 'am start' in parallel with active task displacement commands causes Android OS task stack conflict,
                 // frequently forcing the primary Display 0 (MainActivity) to recede to the background Recents view.
                 if (isWarmStart && !forceColdStart && !forceTaskRealign) {
+                    markServiceMutation("launch_component_warm_start")
                     // Trigger adaptive task residency-aware wakeup asynchronously instead of waiting on hardcoded timings
                     executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
                     
@@ -2245,6 +2584,7 @@ class MirrorForegroundService : Service() {
 
                 // 2. Fallback to buildShellLaunchCommand if native launch is inapplicable or failed
                 if (!nativeStarted) {
+                    markServiceMutation("launch_component_shell_start")
                     Log.i(TAG, "[$name Pipeline] Executing fallback shell launch command for $packageOrComponent")
                     /* ### 수정 시작 ### */
                     // Introduce a 150ms delay for stabilization of window manager and focus subsystems.
@@ -2270,8 +2610,10 @@ class MirrorForegroundService : Service() {
                 /* ### 수정 시작 ### */
                 // Force an immediate graphics wakeup sequence and request encoder keyframe for Cold-Start apps to prevent early stream corruption.
                 if (!isWarmStart || forceColdStart) {
+                    markServiceMutation("launch_component_cold_start")
                     executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
                     if (currentCodecMode != "mjpeg") {
+                        markServiceMutation("launch_component_keyframe")
                         videoEncoder?.requestKeyFrame()
                     }
                 }
@@ -2312,7 +2654,12 @@ class MirrorForegroundService : Service() {
                         // Dynamically fallback to the last valid system screen resolution to prevent layout squishing (720x720) during early startup.
                         val fallbackW = if (lastValidWidth > 0) lastValidWidth else 720
                         val fallbackH = if (lastValidHeight > 0) lastValidHeight else 720
-                        rebuild(if (requestedWidth > 0) requestedWidth else fallbackW, if (requestedHeight > 0) requestedHeight else fallbackH)
+                        requestRebuild(
+                            reason = "browser_launch_missing_display",
+                            priority = RebuildPriority.HIGH,
+                            newWidth = if (requestedWidth > 0) requestedWidth else fallbackW,
+                            newHeight = if (requestedHeight > 0) requestedHeight else fallbackH
+                        )
                         if (displayId >= 0) {
                             if (browser != null) controller.getPrivilegedService()?.execCommand(buildExternalBrowserCommand(displayId, url, browser.componentFlat))
                             else launchOwnActivity("com.castla.mirror.ui.WebBrowserActivity", url)
@@ -2346,7 +2693,12 @@ class MirrorForegroundService : Service() {
                         // Dynamically fallback to the last valid system screen resolution to prevent layout squishing (720x720) during early startup.
                         val fallbackW = if (lastValidWidth > 0) lastValidWidth else 720
                         val fallbackH = if (lastValidHeight > 0) lastValidHeight else 720
-                        rebuild(if (requestedWidth > 0) requestedWidth else fallbackW, if (requestedHeight > 0) requestedHeight else fallbackH)
+                        requestRebuild(
+                            reason = "standard_launch_missing_display",
+                            priority = RebuildPriority.HIGH,
+                            newWidth = if (requestedWidth > 0) requestedWidth else fallbackW,
+                            newHeight = if (requestedHeight > 0) requestedHeight else fallbackH
+                        )
                         if (displayId >= 0) launchComponent(resolvedTarget, forceDisplayId = forceDisplayId)
                     } catch (_: Exception) {}
                 }
@@ -2365,7 +2717,12 @@ class MirrorForegroundService : Service() {
                         // Dynamically fallback to the last valid system screen resolution to prevent layout squishing (720x720) during early startup.
                         val fallbackW = if (lastValidWidth > 0) lastValidWidth else 720
                         val fallbackH = if (lastValidHeight > 0) lastValidHeight else 720
-                        rebuild(if (requestedWidth > 0) requestedWidth else fallbackW, if (requestedHeight > 0) requestedHeight else fallbackH)
+                        requestRebuild(
+                            reason = "web_launch_missing_display",
+                            priority = RebuildPriority.HIGH,
+                            newWidth = if (requestedWidth > 0) requestedWidth else fallbackW,
+                            newHeight = if (requestedHeight > 0) requestedHeight else fallbackH
+                        )
                         if (displayId >= 0) launchOwnActivity(activityClassName, url)
                     } catch (_: Exception) {}
                 }
@@ -2399,9 +2756,14 @@ class MirrorForegroundService : Service() {
         suspend fun restoreContentLocked(expectedGeneration: Long, expectedDisplayId: Int) {
             if (!isCurrentVd(expectedGeneration, expectedDisplayId)) return
             val activeId = if (displayId >= 0) displayId else controller.getDisplayId()
+            markServiceMutation("restore_content_begin(activeId=$activeId)")
 
             when (currentApp) {
-                "HOME", "", "com.android.settings" -> { currentApp = "HOME"; controller.launchHomeOnDisplay() }
+                "HOME", "", "com.android.settings" -> {
+                    currentApp = "HOME"
+                    markServiceMutation("restore_content_home")
+                    controller.launchHomeOnDisplay()
+                }
                 else -> {
                     if (currentWebUrl != null && !currentApp.contains("WebBrowserActivity")) {
                         val browser = BrowserResolver.resolve(this@MirrorForegroundService, currentWebUrl!!)
@@ -2409,8 +2771,10 @@ class MirrorForegroundService : Service() {
                         val launched = try { if (cmd != null && isCurrentVd(vdGeneration.get(), activeId)) { controller.getPrivilegedService()?.execCommand(cmd); true } else false } catch (_: Exception) { false }
                         if (!launched) launchOwnActivity("com.castla.mirror.ui.WebBrowserActivity", currentWebUrl!!)
                     } else if (currentApp.contains("WebBrowserActivity")) {
+                        markServiceMutation("restore_content_browser_activity")
                         launchOwnActivity(currentApp.substringAfter('/'), currentWebUrl ?: "https://m.youtube.com")
                     } else {
+                        markServiceMutation("restore_content_launch_component")
                         launchComponent(currentApp, forceColdStart = false, forceTaskRealign = true)
                     }
                 }

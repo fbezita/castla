@@ -187,6 +187,8 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     // Track active connection status
     private var isBrowserConnected = false
     private var onBrowserConnectionListener: ((Boolean) -> Unit)? = null
+    private var onBrowserRearmListener: (() -> Unit)? = null
+    private var onBrowserTeardownListener: (() -> Unit)? = null
     private var onAudioSocketConnectedListener: (() -> Unit)? = null
 
     // Cached thermal status JSON — sent immediately to new control sockets
@@ -253,6 +255,14 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         onBrowserConnectionListener = listener
         // Fire immediately if already connected
         if (isBrowserConnected) listener?.invoke(true)
+    }
+
+    fun setBrowserRearmListener(listener: (() -> Unit)?) {
+        onBrowserRearmListener = listener
+    }
+
+    fun setBrowserTeardownListener(listener: (() -> Unit)?) {
+        onBrowserTeardownListener = listener
     }
 
     fun setAudioSocketConnectedListener(listener: (() -> Unit)?) {
@@ -808,6 +818,74 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     
     fun onGoHomeRequest() {
         onGoHomeListener?.invoke()
+    }
+
+    fun onBrowserRearmRequest() {
+        onBrowserRearmListener?.invoke()
+    }
+
+    fun onBrowserTeardownRequest() {
+        onBrowserTeardownListener?.invoke()
+    }
+
+    fun debugCycleSockets() {
+        val controlToClose: ControlSocket?
+        val primaryToClose: List<VideoStreamSocket>
+        val secondaryToClose: List<VideoStreamSocket>
+        val audioToClose: List<AudioStreamSocket>
+        synchronized(controlSocketLock) {
+            controlToClose = activeControlSocket
+        }
+        primaryToClose = primaryVideoSockets.toList()
+        secondaryToClose = secondaryVideoSockets.toList()
+        audioToClose = audioSockets.toList()
+        Log.w(
+            TAG,
+            "[InputDebug] debugCycleSockets control=${controlToClose?.debugId ?: -1} " +
+                "primaryVideo=${primaryToClose.size} secondaryVideo=${secondaryToClose.size} audio=${audioToClose.size}"
+        )
+        primaryToClose.forEach { socket ->
+            try {
+                socket.close(
+                    NanoWSD.WebSocketFrame.CloseCode.NormalClosure,
+                    "Debug socket cycle",
+                    false
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to close primary video socket during debug cycle", e)
+            }
+        }
+        secondaryToClose.forEach { socket ->
+            try {
+                socket.close(
+                    NanoWSD.WebSocketFrame.CloseCode.NormalClosure,
+                    "Debug socket cycle",
+                    false
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to close secondary video socket during debug cycle", e)
+            }
+        }
+        audioToClose.forEach { socket ->
+            try {
+                socket.close(
+                    NanoWSD.WebSocketFrame.CloseCode.NormalClosure,
+                    "Debug socket cycle",
+                    false
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to close audio socket during debug cycle", e)
+            }
+        }
+        try {
+            controlToClose?.close(
+                NanoWSD.WebSocketFrame.CloseCode.NormalClosure,
+                "Debug socket cycle",
+                false
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to close control socket during debug cycle", e)
+        }
     }
     
     fun onAudioCodecRequest(codec: String) {

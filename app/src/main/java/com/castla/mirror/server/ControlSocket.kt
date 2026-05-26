@@ -125,6 +125,15 @@ class ControlSocket(
                 "touchReset" -> {
                     server.onTouchReset()
                 }
+                "debugBrowserRearm" -> {
+                    server.onBrowserRearmRequest()
+                }
+                "debugBrowserTeardown" -> {
+                    server.onBrowserTeardownRequest()
+                }
+                "debugSocketCycle" -> {
+                    server.debugCycleSockets()
+                }
                 "requestKeyframe" -> {
                     val pane = json.optString("pane", "primary")
                     server.onKeyframeRequest(pane)

@@ -195,7 +195,15 @@ class AdaptiveBitrateManager(
         )
 
         if (isResolutionChanging && getBrowserConnected()) {
-            serviceScope.launch { pipeline.rebuild(pipeline.width, pipeline.height, force = true) }
+            serviceScope.launch {
+                pipeline.requestRebuild(
+                    reason = "adaptive_scale_resolution",
+                    priority = MirrorForegroundService.RebuildPriority.LOW,
+                    newWidth = pipeline.width,
+                    newHeight = pipeline.height,
+                    force = true
+                )
+            }
         }
     }
 

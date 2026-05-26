@@ -20,6 +20,7 @@ export class JMuxerBackend implements DecoderBackend {
   private fedFrames = 0;
   private rendered = false;
   private destroyed = false;
+  private detachVideoListeners: Array<() => void> = [];
 
   constructor(onFrame?: () => void, onStatus?: (event: string, detail?: string) => void) {
     this.onFrame = onFrame;
@@ -39,11 +40,13 @@ export class JMuxerBackend implements DecoderBackend {
     target.style.display = 'block';
     target.style.opacity = '1';
     target.style.backgroundColor = '#000';
-    target.addEventListener('loadedmetadata', () => this.reportVideoState('videoLoadedMetadata'));
-    target.addEventListener('loadeddata', () => this.reportVideoState('videoLoadedData'));
-    target.addEventListener('canplay', () => this.reportVideoState('videoCanPlay'));
-    target.addEventListener('playing', () => this.reportVideoState('videoPlaying'));
-    target.addEventListener('error', () => this.onStatus?.('videoElementError', target.error ? `${target.error.code}:${target.error.message}` : 'unknown'));
+    this.detachVideoListeners = [
+      bindEvent(target, 'loadedmetadata', () => this.reportVideoState('videoLoadedMetadata')),
+      bindEvent(target, 'loadeddata', () => this.reportVideoState('videoLoadedData')),
+      bindEvent(target, 'canplay', () => this.reportVideoState('videoCanPlay')),
+      bindEvent(target, 'playing', () => this.reportVideoState('videoPlaying')),
+      bindEvent(target, 'error', () => this.onStatus?.('videoElementError', target.error ? `${target.error.code}:${target.error.message}` : 'unknown'))
+    ];
     this.onStatus?.('jmuxerReady', `hasJMuxer=${Boolean(window.JMuxer)}`);
   }
 
@@ -92,6 +95,16 @@ export class JMuxerBackend implements DecoderBackend {
     this.muxer = undefined;
     this.pendingPayloads = [];
     this.mseReady = false;
+    this.configPayload = undefined;
+    this.fedFrames = 0;
+    this.rendered = false;
+    this.detachVideoListeners.splice(0).forEach((detach) => detach());
+    if (this.video) {
+      try { this.video.pause(); } catch {}
+      try { this.video.removeAttribute('src'); } catch {}
+      try { this.video.load(); } catch {}
+    }
+    this.video = undefined;
   }
 
   private enqueueOrFeed(payload: Uint8Array): void {
@@ -150,4 +163,13 @@ function concat(a: ArrayBuffer, b: ArrayBuffer): ArrayBuffer {
   out.set(new Uint8Array(a), 0);
   out.set(new Uint8Array(b), a.byteLength);
   return out.buffer;
+}
+
+function bindEvent<K extends keyof HTMLMediaElementEventMap>(
+  target: HTMLVideoElement,
+  type: K,
+  listener: (event: HTMLMediaElementEventMap[K]) => void
+): () => void {
+  target.addEventListener(type, listener as EventListener);
+  return () => target.removeEventListener(type, listener as EventListener);
 }

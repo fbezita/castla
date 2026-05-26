@@ -4,6 +4,8 @@ import type { CompositorState } from '../stores/compositorStore';
 import { StreamRuntime } from '../runtime/StreamRuntime';
 
 export class BrowserCompositor {
+  private cleanupFns: Array<() => void> = [];
+
   constructor(
     private readonly runtime: StreamRuntime,
     private readonly store: Writable<CompositorState>
@@ -11,10 +13,14 @@ export class BrowserCompositor {
 
   start(): void {
     this.runtime.start();
-    this.runtime.control.onMessage((message) => this.handleControl(message));
-    this.runtime.onSessionChange(() => {
+    this.cleanupFns.push(this.runtime.control.onMessage((message) => this.handleControl(message)));
+    this.cleanupFns.push(this.runtime.onSessionChange(() => {
       this.resetCommittedState();
-    });
+    }));
+  }
+
+  dispose(): void {
+    this.cleanupFns.splice(0).forEach((cleanup) => cleanup());
   }
 
   private resetCommittedState(): void {

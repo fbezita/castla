@@ -77,6 +77,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
         MotionEvent.PointerCoords().apply { pressure = 1.0f; size = 1.0f }
     )
     private var setDisplayIdMethod: Method? = null
+    @Volatile private var debugMoveInjectCounter: Int = 0
     
     private var setKeyEventDisplayIdMethod: Method? = null
     
@@ -690,12 +691,22 @@ class PrivilegedService : IPrivilegedService.Stub() {
         } catch (_: Exception) {}
 
         return try {
+            val startedAt = SystemClock.elapsedRealtimeNanos()
             val result = (injectMethod?.invoke(inputManagerInstance, event, 0) as? Boolean) ?: false
+            val durationMs = (SystemClock.elapsedRealtimeNanos() - startedAt) / 1_000_000.0
             if (action != MotionEvent.ACTION_MOVE) {
                 Log.i(
                     TAG,
-                    "[InputProbe][privileged][inject] displayId=$displayId action=$action pointerCount=$pointerCount result=$result downTime=${event.downTime} eventTime=${event.eventTime}"
+                    "[InputTrace] inject_privileged displayId=$displayId action=$action pointerCount=$pointerCount result=$result durationMs=${"%.2f".format(java.util.Locale.US, durationMs)} downTime=${event.downTime} eventTime=${event.eventTime}"
                 )
+            } else {
+                debugMoveInjectCounter += 1
+                if (!result || durationMs >= 8.0 || debugMoveInjectCounter % 120 == 0) {
+                    Log.i(
+                        TAG,
+                        "[InputTrace] inject_privileged_move displayId=$displayId result=$result durationMs=${"%.2f".format(java.util.Locale.US, durationMs)} pointerCount=$pointerCount sampleIndex=$debugMoveInjectCounter eventTime=${event.eventTime}"
+                    )
+                }
             }
             result
         } catch (e: Exception) {
