@@ -9,7 +9,6 @@ import java.io.IOException
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
-/* ### 수정 시작 ### */
 class VideoStreamSocket(
     handshake: NanoHTTPD.IHTTPSession,
     private val server: MirrorServer,
@@ -17,7 +16,6 @@ class VideoStreamSocket(
 ) : NanoWSD.WebSocket(handshake) {
 
     val profile: String = handshake.parameters["profile"]?.firstOrNull() ?: "High"
-/* ### 수정 끝 ### */
 
     companion object {
         private const val TAG = "VideoStreamSocket"

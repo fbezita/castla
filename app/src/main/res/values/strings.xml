@@ -113,4 +113,17 @@
     <string name="settings_webcodecs">WebCodecs Decoder</string>
     <string name="settings_webcodecs_title">Enable WebCodecs decoder</string>
     <string name="settings_webcodecs_description">Use browser hardware-accelerated WebCodecs. Requires secure context (HTTPS/wss) and pairing on the specific URL.</string>
+
+    <!-- TextInput & IME Permissions Guide -->
+    <string name="title_text_input_setup">Remote Text Input Setup</string>
+    <string name="desc_text_input_setup">To type English and Korean text in real-time on your Tesla, both settings below must be enabled.</string>
+    <string name="status_ime_active">Virtual Keyboard: Enabled</string>
+    <string name="status_ime_inactive">Virtual Keyboard: Disabled</string>
+    <string name="status_accessibility_active">Accessibility Service: Enabled</string>
+    <string name="status_accessibility_inactive">Accessibility Service: Disabled</string>
+    <string name="btn_enable_ime">Enable Keyboard</string>
+    <string name="btn_select_ime">Select Keyboard</string>
+    <string name="btn_enable_accessibility">Enable Accessibility</string>
+    <string name="toast_ime_already_enabled">Virtual keyboard is already enabled.</string>
+    <string name="toast_accessibility_already_enabled">Accessibility service is already enabled.</string>
 </resources>

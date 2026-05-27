@@ -11,7 +11,6 @@ import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
 
-/* ### 수정 시작 ### */
 class VideoEncoder(
     private val width: Int,
     private val height: Int,
@@ -19,13 +18,13 @@ class VideoEncoder(
     private val fps: Int = 30,
     val preferredProfile: String = "High"
 ) {
-/* ### 수정 끝 ### */
     companion object {
         private const val TAG = "VideoEncoder"
         private const val MIME_TYPE = "video/avc"
         private const val KEYFRAME_INTERVAL = 1
     }
 
+    private val released = java.util.concurrent.atomic.AtomicBoolean(false)
     private var codec: MediaCodec? = null
     private var encoderThread: HandlerThread? = null
     private var encoderHandler: Handler? = null
@@ -72,7 +71,6 @@ class VideoEncoder(
         }
     }
 
-    /* ### 수정 시작 ### */
     fun createInputSurface(): Surface {
         if (preferredProfile.equals("Baseline", ignoreCase = true)) {
             Log.i(TAG, "Enforcing Baseline H.264 profile for software decoder compatibility.")
@@ -97,9 +95,7 @@ class VideoEncoder(
             )
         }
     }
-    /* ### 수정 끝 ### */
 
-    /* ### 수정 시작 ### */
     private fun createEncoderWithProfile(profile: Int, level: Int, profileName: String): Surface {
         val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
@@ -137,11 +133,11 @@ class VideoEncoder(
         Log.i(TAG, "Encoder created ($profileName): ${width}x${height} @ ${bitrate / 1000}kbps, ${fps}fps")
         return surface
     }
-    /* ### 수정 끝 ### */
 
     var onSpsPps: ((ByteArray) -> Unit)? = null
 
     fun start(onEncodedFrame: (data: ByteArray, isKeyFrame: Boolean) -> Unit) {
+        if (released.get()) return
         val encoder = codec ?: throw IllegalStateException("Call createInputSurface() first")
         encoderThread = HandlerThread("VideoEncoder").also { it.start() }
         encoderHandler = Handler(encoderThread!!.looper)
@@ -151,7 +147,7 @@ class VideoEncoder(
             override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {}
 
             override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-                if (!isRunning) return
+                if (released.get() || !isRunning) return
                 try {
                     val buffer = codec.getOutputBuffer(index) ?: return
                     if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
@@ -180,10 +176,12 @@ class VideoEncoder(
             }
 
             override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
+                if (released.get()) return
                 Log.e(TAG, "Encoder error", e)
             }
 
             override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
+                if (released.get()) return
                 Log.i(TAG, "Output format changed: $format")
             }
         }, encoderHandler)
@@ -253,18 +251,55 @@ class VideoEncoder(
 
     fun stop() {
         isRunning = false
-        try { codec?.stop() } catch (_: Exception) {}
     }
 
-    fun release() {
-        stop()
-        try { codec?.release() } catch (_: Exception) {}
+    fun unregisterCallbacks() {
+        try {
+            // no-op
+            // MediaCodec.setCallback(null)는 Running 상태에서
+            // Exynos CCodec에서 "Invalid to call at Running state"를 유발할 수 있음.
+            // late callback은 callback 내부의 released flag로 무시한다.            
+            // codec?.setCallback(null)
+        } catch (_: Exception) {}
+    }
+
+    fun join() {
+        val threadToJoin = encoderThread
+        if (threadToJoin != null) {
+            try {
+                threadToJoin.quitSafely()
+                threadToJoin.join(2000L)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed joining encoder thread", e)
+            }
+            encoderThread = null
+            encoderHandler = null
+        }
+    }
+
+    fun stopCodecOnly() {
+        try {
+            codec?.stop()
+        } catch (_: Exception) {}
+    }
+
+    fun releaseCodecOnly() {
+        try {
+            codec?.release()
+        } catch (_: Exception) {}
         codec = null
         lastAppliedBitrate = null
         lastAppliedTextMode = null
         lastAppliedQpOffset = null
-        encoderThread?.quitSafely()
-        encoderThread = null
-        encoderHandler = null
+    }
+
+    fun release() {
+        if (released.compareAndSet(false, true)) {
+            stop()
+            join()            
+            unregisterCallbacks()
+            stopCodecOnly()
+            releaseCodecOnly()
+        }
     }
 }

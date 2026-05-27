@@ -323,7 +323,6 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(20.dp))
 
-            /* ### 수정 시작 ### */
             // WebCodecs (Hardware Decoding) Switch UI
             SettingSection(title = stringResource(R.string.settings_webcodecs)) {
                 Row(
@@ -363,8 +362,6 @@ fun SettingsScreen(
             }
 
             Spacer(modifier = Modifier.height(20.dp))
-            /* ### 수정 끝 ### */
-
             // Language
             run {
                 val languages = listOf(

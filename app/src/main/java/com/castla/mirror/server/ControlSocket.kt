@@ -55,16 +55,12 @@ class ControlSocket(
     override fun onOpen() {
         openTimeElapsedMs = SystemClock.elapsedRealtime()
         val assignedSessionId = server.registerControlSocket(this)
-        /* ### 수정 시작 ### */
         // Removed [InputDebug] onOpen log
-        /* ### 수정 끝 ### */
     }
 
     override fun onClose(code: NanoWSD.WebSocketFrame.CloseCode?, reason: String?, initiatedByRemote: Boolean) {
         closeTimeElapsedMs = SystemClock.elapsedRealtime()
-        /* ### 수정 시작 ### */
         // Removed [InputDebug] onClose log
-        /* ### 수정 끝 ### */
         server.unregisterControlSocket(this)
     }
 
@@ -108,9 +104,6 @@ class ControlSocket(
                         clientTsMs = json.optLong("clientTs", 0L),
                         receivedAtElapsedMs = SystemClock.elapsedRealtime()
                     )
-                    /* ### 수정 시작 ### */
-                    // Removed [InputDebug] touch event log
-                    /* ### 수정 끝 ### */
                     server.onTouchEvent(event)
                 }
                 "touchReset" -> {
@@ -135,15 +128,12 @@ class ControlSocket(
                         put("ts", json.optLong("ts", System.currentTimeMillis()))
                     }.toString())
                 }
-                /* ### 수정 시작 ### */
                 "codec" -> {
                     val mode = json.optString("mode", "h264")
                     val profile = json.optString("profile", "High")
                     val pane = json.optString("pane", "primary")
                     server.onCodecModeRequest(mode, profile, pane)
                 }
-                /* ### 수정 끝 ### */
-                /* ### 수정 시작 ### */
                 "layout_update" -> {
                     val pipelinesArray = json.optJSONArray("pipelines")
                     if (pipelinesArray != null) {
@@ -151,10 +141,6 @@ class ControlSocket(
                         server.onLayoutUpdate(pipelinesArray)
                     }
                 }
-                /* ### 수정 끝 ### */
-                /* ### 수정 시작 ### */
-                // Legacy "viewport" protocol has been completely removed.
-                /* ### 수정 끝 ### */
                 "textInput" -> {
                     val text = json.optString("text", "")
                     if (text.isNotEmpty()) {
@@ -187,7 +173,16 @@ class ControlSocket(
                             val beforeLength = json.optInt("beforeLength", 1).coerceAtLeast(0)
                             repeat(beforeLength) { server.onKeyEvent(67) }
                         }
+                        "sendKeyEvent" -> {
+                            val keyCode = json.optInt("keyCode", -1)
+                            if (keyCode >= 0) {
+                                server.onKeyEvent(keyCode)
+                            }
+                        }                        
                         "finishComposingText" -> server.onCompositionUpdate(0, "")
+                        "tapOutside" -> {
+                            server.onTapOutside()
+                        }
                     }
                 }
                 "goHome" -> {
@@ -208,9 +203,6 @@ class ControlSocket(
                     }
                 }
 
-                /* ### 수정 시작 ### */
-                // Legacy "closeSecondary" and "closeSplit" protocols have been completely removed.
-                /* ### 수정 끝 ### */
                 "displayDensity" -> {
                     val scale = json.optDouble("scale", 1.0).toFloat()
                     if (scale in 0.4f..1.5f) {
@@ -295,9 +287,6 @@ class ControlSocket(
 
     fun markInactive(reason: String) {
         active = false
-        /* ### 수정 시작 ### */
-        // Removed [InputDebug] markInactive log
-        /* ### 수정 끝 ### */
     }
 
     fun markUnregistered(reason: String) {
@@ -306,9 +295,6 @@ class ControlSocket(
         if (closeTimeElapsedMs == 0L) {
             closeTimeElapsedMs = SystemClock.elapsedRealtime()
         }
-        /* ### 수정 시작 ### */
-        // Removed [InputDebug] markUnregistered log
-        /* ### 수정 끝 ### */
     }
 
     fun debugSummary(): String {

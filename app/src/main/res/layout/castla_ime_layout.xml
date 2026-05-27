@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="1dp"
+    android:background="@android:color/transparent"
+    android:clickable="false"
+    android:focusable="false"
+    android:focusableInTouchMode="false">
+    
+    <!-- 1dp minimal invisible view to keep system IME listener fully active on remote VD -->
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="@android:color/transparent"/>
+</FrameLayout>

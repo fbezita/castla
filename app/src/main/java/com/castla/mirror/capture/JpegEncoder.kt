@@ -25,6 +25,7 @@ class JpegEncoder(
         private const val TAG = "JpegEncoder"
     }
 
+    private val released = java.util.concurrent.atomic.AtomicBoolean(false)
     private var imageReader: ImageReader? = null
     private var thread: HandlerThread? = null
     private var handler: Handler? = null
@@ -65,6 +66,7 @@ class JpegEncoder(
     }
 
     fun start(onFrame: (data: ByteArray, isKeyFrame: Boolean) -> Unit) {
+        if (released.get()) return
         val reader = imageReader ?: throw IllegalStateException("Call createInputSurface() first")
 
         thread = HandlerThread("JpegEncoder").also { it.start() }
@@ -72,7 +74,7 @@ class JpegEncoder(
         isRunning = true
 
         reader.setOnImageAvailableListener({ ir ->
-            if (!isRunning) return@setOnImageAvailableListener
+            if (released.get() || !isRunning) return@setOnImageAvailableListener
 
             val now = System.currentTimeMillis()
             
@@ -151,12 +153,31 @@ class JpegEncoder(
         Log.i(TAG, "JPEG encoder started")
     }
 
-    fun release() {
+    fun stop() {
         isRunning = false
-        thread?.quitSafely()
-        thread = null
-        handler = null
-        
+    }
+
+    fun unregisterCallbacks() {
+        try {
+            imageReader?.setOnImageAvailableListener(null, null)
+        } catch (_: Exception) {}
+    }
+
+    fun join() {
+        val threadToJoin = thread
+        if (threadToJoin != null) {
+            try {
+                threadToJoin.quitSafely()
+                threadToJoin.join(2000L)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed joining jpeg encoder thread", e)
+            }
+            thread = null
+            handler = null
+        }
+    }
+
+    fun releaseReaderOnly() {
         imageReader?.close()
         imageReader = null
         
@@ -166,7 +187,15 @@ class JpegEncoder(
         croppedBitmap?.recycle()
         croppedBitmap = null
         cropCanvas = null
+    }
 
-        Log.i(TAG, "JPEG encoder released")
+    fun release() {
+        if (released.compareAndSet(false, true)) {
+            stop()
+            unregisterCallbacks()
+            join()
+            releaseReaderOnly()
+            Log.i(TAG, "JPEG encoder released")
+        }
     }
 }

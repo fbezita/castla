@@ -117,4 +117,17 @@
     <string name="settings_webcodecs">WebCodecs 디코더</string>
     <string name="settings_webcodecs_title">WebCodecs 하드웨어 디코더 사용</string>
     <string name="settings_webcodecs_description">브라우저의 하드웨어 가속 WebCodecs를 사용합니다. 보안 컨텍스트(HTTPS/wss) 환경 및 지정된 URL 페어링이 필요합니다.</string>
+
+    <!-- TextInput & IME Permissions Guide -->
+    <string name="title_text_input_setup">원격 텍스트 입력 설정</string>
+    <string name="desc_text_input_setup">테슬라 화면에서 한글/영어 텍스트를 실시간으로 입력하려면 아래 두 설정이 모두 켜져 있어야 합니다.</string>
+    <string name="status_ime_active">가상 키보드: 활성화됨</string>
+    <string name="status_ime_inactive">가상 키보드: 비활성화됨</string>
+    <string name="status_accessibility_active">접근성 서비스: 활성화됨</string>
+    <string name="status_accessibility_inactive">접근성 서비스: 비활성화됨</string>
+    <string name="btn_enable_ime">가상 키보드 켜기</string>
+    <string name="btn_select_ime">키보드 선택</string>
+    <string name="btn_enable_accessibility">접근성 서비스 켜기</string>
+    <string name="toast_ime_already_enabled">가상 키보드가 이미 활성화되어 있습니다.</string>
+    <string name="toast_accessibility_already_enabled">접근성 서비스가 이미 허용되어 있습니다.</string>
 </resources>

@@ -50,10 +50,8 @@ fun gitCommitCount(): Int = try {
 
 android {
     namespace = "com.castla.mirror"
-    /* ### 수정 시작 ### */
     // Raised compileSdk to 36 to satisfy requirement of androidx.core:core:1.18.0 and other dependencies
     compileSdk = 36
-    /* ### 수정 끝 ### */
 
     if (keystorePropertiesFile.exists()) {
         signingConfigs {
@@ -121,7 +119,6 @@ android {
         variant.outputs.all {
             val output = this as com.android.build.gradle.api.ApkVariantOutput
             val dateStr = SimpleDateFormat("yyyyMMddHHmmss").format(Date())
-            // 프로젝트명-버전-날짜-시간.apk 형식으로 출력 파일명 커스텀 정의
             output.outputFileName = "castla-${variant.versionName}-$dateStr.apk"
         }
     }
@@ -134,7 +131,6 @@ androidComponents {
             val nameProvider = output.versionName
             val codeProvider = output.versionCode
             
-            // 🌟 defaultConfig에 기재된 versionName("1.4.4" 등)을 실시간으로 참조합니다!
             val baseVersion = android.defaultConfig.versionName ?: "1.0.0"
             nameProvider.set("$baseVersion-debug")
             
@@ -184,7 +180,7 @@ dependencies {
     testImplementation("androidx.test:core:1.7.0")
     testImplementation("androidx.test.ext:junit:1.3.0")
 
-    // Android Instrumented Tests (스크린샷 자동화용)
+    // Android Instrumented Tests
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test:runner:1.7.0")
     androidTestImplementation("androidx.test:rules:1.7.0")

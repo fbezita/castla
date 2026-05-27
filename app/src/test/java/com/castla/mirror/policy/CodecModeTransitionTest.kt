@@ -6,7 +6,6 @@ import org.junit.Test
 
 class CodecModeTransitionTest {
 
-    /* ### 수정 시작 ### */
     @Test
     fun `invalid codec request is rejected regardless of state`() {
         assertFalse(CodecModeTransition.shouldApply("", "h264", jpegEncoderActive = false))
@@ -22,7 +21,6 @@ class CodecModeTransitionTest {
     fun `h264 request when already h264 with active video encoder is a no-op`() {
         assertFalse(CodecModeTransition.shouldApply("h264", "h264", jpegEncoderActive = false))
     }
-    /* ### 수정 끝 ### */
 
     @Test
     fun `mjpeg request from h264 applies`() {

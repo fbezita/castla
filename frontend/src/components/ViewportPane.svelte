@@ -1,15 +1,15 @@
 <script lang="ts">
-  import { onDestroy, onMount, tick } from 'svelte';
-  import type { ViewportModel } from '../stores/compositorStore';
-  import type { StreamRuntime } from '../runtime/StreamRuntime';
-  import type { DecoderBackend } from '../decoder/DecoderBackend';
-  import { WebCodecsBackend } from '../decoder/WebCodecsBackend';
-  import { JMuxerBackend } from '../decoder/JMuxerBackend';
+  import { onDestroy, onMount, tick } from "svelte";
+  import type { ViewportModel } from "../stores/compositorStore";
+  import type { StreamRuntime } from "../runtime/StreamRuntime";
+  import type { DecoderBackend } from "../decoder/DecoderBackend";
+  import { WebCodecsBackend } from "../decoder/WebCodecsBackend";
+  import { JMuxerBackend } from "../decoder/JMuxerBackend";
 
   export let viewport: ViewportModel;
   export let runtime: StreamRuntime;
-  export let paneStyle = '';
-  export let fitMode: 'contain' | 'fill' = 'contain';
+  export let paneStyle = "";
+  export let fitMode: "contain" | "fill" = "contain";
 
   let canvas: HTMLCanvasElement;
   let video: HTMLVideoElement;
@@ -18,8 +18,8 @@
   let detachVideo: (() => void) | undefined;
   let detachConnection: (() => void) | undefined;
   let detachSession: (() => void) | undefined;
-  let decoderError = '';
-  let backend: 'jmuxer' | 'webcodecs' = 'jmuxer';
+  let decoderError = "";
+  let backend: "jmuxer" | "webcodecs" = "jmuxer";
   let currentGeneration = -1;
   let decoderSession = 0;
   let stallTimer = 0;
@@ -66,34 +66,40 @@
   }
 
   function markReady() {
-    canvas.style.opacity = '1';
-    video.style.opacity = '1';
+    canvas.style.opacity = "1";
+    video.style.opacity = "1";
   }
 
   function hideSurface() {
-    if (canvas) canvas.style.opacity = '0';
-    if (video) video.style.opacity = '0';
+    if (canvas) canvas.style.opacity = "0";
+    if (video) video.style.opacity = "0";
   }
 
   async function initializeDecoder(session: number) {
     try {
-      decoderError = '';
-      const wantsWebCodecs = new URLSearchParams(location.search).get('decoder') === 'webcodecs';
-      const canUseWebCodecs = wantsWebCodecs && window.isSecureContext && 'VideoDecoder' in window;
+      decoderError = "";
+      const wantsWebCodecs =
+        new URLSearchParams(location.search).get("decoder") === "webcodecs";
+      const canUseWebCodecs =
+        wantsWebCodecs && window.isSecureContext && "VideoDecoder" in window;
       let nextDecoder: DecoderBackend | undefined;
       if (canUseWebCodecs) {
-        backend = 'webcodecs';
-        nextDecoder = new WebCodecsBackend(() => markReady(), () => runtime.requestKeyframe(viewport.pane));
+        backend = "webcodecs";
+        nextDecoder = new WebCodecsBackend(
+          () => markReady(),
+          () => runtime.requestKeyframe(viewport.pane),
+        );
         await nextDecoder.initialize(canvas);
-        runtime.setCodec(viewport.pane, 'h264', 'High');
+        runtime.setCodec(viewport.pane, "h264", "High");
       } else {
-        backend = 'jmuxer';
+        backend = "jmuxer";
         nextDecoder = new JMuxerBackend(
           () => markReady(),
-          (event, detail) => runtime.reportDecoderStatus(viewport.pane, event, detail)
+          (event, detail) =>
+            runtime.reportDecoderStatus(viewport.pane, event, detail),
         );
         await nextDecoder.initialize(video);
-        runtime.setCodec(viewport.pane, 'h264', 'High');
+        runtime.setCodec(viewport.pane, "h264", "High");
       }
 
       if (session !== decoderSession) {
@@ -102,7 +108,9 @@
       }
 
       decoder = nextDecoder;
-      detachVideo = runtime.attachVideo(viewport.pane, (frame) => decoder?.decode(frame));
+      detachVideo = runtime.attachVideo(viewport.pane, (frame) =>
+        decoder?.decode(frame),
+      );
       runtime.requestKeyframe(viewport.pane);
     } catch (error) {
       if (session === decoderSession) {
@@ -118,10 +126,10 @@
     decoder?.destroy();
     decoder = undefined;
     hideSurface();
-    decoderError = '';
+    decoderError = "";
     if (video) {
       video.pause();
-      video.removeAttribute('src');
+      video.removeAttribute("src");
       video.load();
     }
     await tick();
@@ -141,7 +149,11 @@
     lastRecoveryAt = now;
     recoveryAttempt += 1;
     runtime.health.beginRecovery(viewport.pane, 5000);
-    runtime.reportDecoderStatus(viewport.pane, 'stallRecover', `generation=${currentGeneration} attempt=${recoveryAttempt}`);
+    runtime.reportDecoderStatus(
+      viewport.pane,
+      "stallRecover",
+      `generation=${currentGeneration} attempt=${recoveryAttempt}`,
+    );
     if (recoveryAttempt >= 3 && now - lastDecoderRecoveryAt > 20000) {
       lastDecoderRecoveryAt = now;
       await refreshDecoder();
@@ -157,8 +169,21 @@
   style={paneStyle}
   data-pane={viewport.pane}
 >
-  <video class:hidden={backend !== 'jmuxer'} class:fill-mode={fitMode === 'fill'} bind:this={video} id={`video-${viewport.pane}`} playsinline muted autoplay></video>
-  <canvas class:hidden={backend !== 'webcodecs'} class:fill-mode={fitMode === 'fill'} bind:this={canvas} id={`canvas-${viewport.pane}`}></canvas>
+  <video
+    class:hidden={backend !== "jmuxer"}
+    class:fill-mode={fitMode === "fill"}
+    bind:this={video}
+    id={`video-${viewport.pane}`}
+    playsinline
+    muted
+    autoplay
+  ></video>
+  <canvas
+    class:hidden={backend !== "webcodecs"}
+    class:fill-mode={fitMode === "fill"}
+    bind:this={canvas}
+    id={`canvas-${viewport.pane}`}
+  ></canvas>
   {#if decoderError}
     <div class="decoder-error">{decoderError}</div>
   {/if}

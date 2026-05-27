@@ -101,6 +101,12 @@ class MainActivity : AppCompatActivity() {
     private var isPanelOff by mutableStateOf(false)
     private var teslaBleScanner: TeslaBleScanner? = null
 
+    // Text Input & IME states
+    private var isImeEnabled by mutableStateOf(false)
+    private var isImeSelected by mutableStateOf(false)
+    private var isAccessibilityEnabled by mutableStateOf(false)
+    private var isCastlaImeActive by mutableStateOf(false)
+
     // Shizuku download state
     private var shizukuDownloadId: Long = -1L
     private var shizukuDownloadProgress by mutableFloatStateOf(-1f) // -1 = not downloading
@@ -286,6 +292,21 @@ class MainActivity : AppCompatActivity() {
                         val ok = shizukuSetup.ensureShizukuHardened()
                         Log.i(TAG, "ensureShizukuHardened (MainActivity): $ok")
                         evaluateUsbConfigAdvisory()
+
+                        // Programmatically enable CastlaFocusAccessibilityService silently at launch if permitted
+                        try {
+                            if (!com.castla.mirror.input.TextInputSettingsHelper.isAccessibilityEnabled(this@MainActivity)) {
+                                com.castla.mirror.input.TextInputSettingsHelper.enableAccessibilityServiceSilently(this@MainActivity) { cmd ->
+                                    shizukuSetup.exec(cmd)
+                                }
+                                Log.i(TAG, "Successfully pre-activated accessibility service silently.")
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                    refreshTextInputPermissions()
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed pre-activating accessibility service silently", e)
+                        }
                     }
                 }
             }
@@ -318,12 +339,40 @@ class MainActivity : AppCompatActivity() {
                         shizukuInstalled = shizukuInstalled,
                         shizukuRunning = shizukuRunning,
                         shizukuPermitted = shizukuPermitted,
+                        isImeEnabled = isImeEnabled,
+                        isImeSelected = isImeSelected,
+                        isAccessibilityEnabled = isAccessibilityEnabled,
+                        isCastlaImeActive = isCastlaImeActive,
+                        onRestoreIme = {
+                            lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                try {
+                                    com.castla.mirror.input.ImeSwitchManager.restorePreviousIme(this@MainActivity) { cmd ->
+                                        shizukuSetup.exec(cmd)
+                                    }
+                                    Log.i(TAG, "User manually requested keyboard restore.")
+                                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                        refreshTextInputPermissions()
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Failed user manually restoring keyboard", e)
+                                }
+                            }
+                        },
                         onStartClick = { onStartMirroring() },
                         onStopClick = { stopMirrorService() },
                         onSettingsClick = { showSettings = true },
                         onInstallShizuku = { downloadAndInstallShizuku() },
                         onOpenShizuku = { openShizukuApp() },
                         onGrantShizukuPermission = { shizukuSetup.requestPermission() },
+                        onEnableIme = {
+                            com.castla.mirror.input.TextInputSettingsHelper.navigateToEnableImeSettings(this@MainActivity)
+                        },
+                        onSelectIme = {
+                            com.castla.mirror.input.TextInputSettingsHelper.showInputMethodPicker(this@MainActivity)
+                        },
+                        onEnableAccessibility = {
+                            com.castla.mirror.input.TextInputSettingsHelper.navigateToAccessibilitySettings(this@MainActivity)
+                        },
                         shizukuDownloadProgress = shizukuDownloadProgress,
                         isHotspotActive = isHotspotActive,
                         onToggleHotspot = { toggleHotspot() },
@@ -483,6 +532,14 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         updateManager.onResume(this)
         refreshShizukuBatteryOptimizationState()
+        refreshTextInputPermissions()
+    }
+
+    private fun refreshTextInputPermissions() {
+        isImeEnabled = com.castla.mirror.input.TextInputSettingsHelper.isImeEnabled(this)
+        isImeSelected = com.castla.mirror.input.TextInputSettingsHelper.isImeSelected(this)
+        isAccessibilityEnabled = com.castla.mirror.input.TextInputSettingsHelper.isAccessibilityEnabled(this)
+        isCastlaImeActive = com.castla.mirror.input.ImeSwitchManager.isCastlaImeActive(this)
     }
 
     private fun refreshShizukuBatteryOptimizationState() {
@@ -1238,12 +1295,20 @@ fun CastlaScreen(
     shizukuInstalled: Boolean,
     shizukuRunning: Boolean,
     shizukuPermitted: Boolean = false,
+    isImeEnabled: Boolean,
+    isImeSelected: Boolean,
+    isAccessibilityEnabled: Boolean,
+    isCastlaImeActive: Boolean = false,
+    onRestoreIme: () -> Unit = {},
     onStartClick: () -> Unit,
     onStopClick: () -> Unit,
     onSettingsClick: () -> Unit,
     onInstallShizuku: () -> Unit,
     onOpenShizuku: () -> Unit,
     onGrantShizukuPermission: () -> Unit = {},
+    onEnableIme: () -> Unit,
+    onSelectIme: () -> Unit,
+    onEnableAccessibility: () -> Unit,
     shizukuDownloadProgress: Float = -1f,
     isHotspotActive: Boolean = false,
     onToggleHotspot: () -> Unit = {},
@@ -1341,6 +1406,55 @@ fun CastlaScreen(
             }
 
             Spacer(modifier = Modifier.height(32.dp))
+
+            androidx.compose.animation.AnimatedVisibility(visible = isCastlaImeActive) {
+                Column {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(24.dp))
+                            .background(Color(0xFF2E1A1A).copy(alpha = 0.85f))
+                            .border(BorderStroke(1.dp, Color(0xFFFF5252).copy(alpha = 0.4f)), RoundedCornerShape(24.dp))
+                            .padding(16.dp)
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFFFF5252))
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Remote Keyboard Active",
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFFF5252),
+                                    fontSize = 15.sp
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Button(
+                                onClick = onRestoreIme,
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252)),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.height(36.dp)
+                            ) {
+                                Text(
+                                    text = "Restore Phone Keyboard",
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White,
+                                    fontSize = 13.sp
+                                )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(24.dp))
+                }
+            }
 
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -1505,6 +1619,86 @@ fun CastlaScreen(
             }
 
             if (isStreaming) {
+                Spacer(modifier = Modifier.height(24.dp))
+            }
+
+            AnimatedVisibility(visible = !isAccessibilityEnabled && !(shizukuInstalled && shizukuRunning && shizukuPermitted)) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(Color(0xFF1E2638).copy(alpha = 0.85f))
+                        .border(1.dp, Color(0xFF4A90E2).copy(alpha = 0.3f), RoundedCornerShape(24.dp))
+                        .padding(20.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = stringResource(id = R.string.title_text_input_setup),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF4A90E2)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = stringResource(id = R.string.desc_text_input_setup),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.7f),
+                            lineHeight = 18.sp
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // Accessibility service item
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .clip(CircleShape)
+                                        .background(if (isAccessibilityEnabled) Color(0xFF69F0AE) else Color(0xFFFF5252))
+                                
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (isAccessibilityEnabled)
+                                        stringResource(id = R.string.status_accessibility_active)
+                                    else
+                                        stringResource(id = R.string.status_accessibility_inactive),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (isAccessibilityEnabled) Color(0xFF69F0AE) else Color(0xFFFF5252),
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            if (!isAccessibilityEnabled) {
+                                Button(
+                                    onClick = onEnableAccessibility,
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4A90E2)),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                    modifier = Modifier.height(32.dp)
+                                ) {
+                                    Text(
+                                        text = stringResource(id = R.string.btn_enable_accessibility),
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!isAccessibilityEnabled && !(shizukuInstalled && shizukuRunning && shizukuPermitted)) {
                 Spacer(modifier = Modifier.height(24.dp))
             }
 

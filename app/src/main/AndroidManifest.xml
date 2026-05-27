@@ -140,6 +140,33 @@
                 android:value="true" />
         </service>
 
+        <!-- Castla virtual ime register-->
+        <service
+            android:name=".input.CastlaImeService"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_INPUT_METHOD"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.view.InputMethod" />
+            </intent-filter>
+            <meta-data
+                android:name="android.view.im"
+                android:resource="@xml/method" />
+        </service>
+
+        <!-- Castla focus tracking-->
+        <service
+            android:name=".input.CastlaFocusAccessibilityService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
         <!-- Home screen widget -->
         <receiver
             android:name=".widget.MirrorWidgetProvider"

@@ -72,7 +72,8 @@ class PrivilegedService : IPrivilegedService.Stub() {
     private var inputManagerInstance: Any? = null
     private var injectMethod: Method? = null
     private var shellContext: android.content.Context? = null
-    // Cached objects for injectInput — avoids allocation per touch event
+
+    // Cached objects for injectInput — avoids allocation per touch event
     private val cachedProps = arrayOf(
         MotionEvent.PointerProperties().apply { toolType = MotionEvent.TOOL_TYPE_FINGER }
     )
@@ -88,10 +89,8 @@ class PrivilegedService : IPrivilegedService.Stub() {
     private val displayFocusExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
     init {
-        /* ### 수정 시작 ### */
         // Bypass Hidden API limits immediately before initializing any system service binders
         bypassHiddenApiRestrictions()
-        /* ### 수정 끝 ### */
         tryInitInputManager()
         tryInitShellContext()
         
@@ -114,7 +113,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
      *
      * Reference: genymobile/scrcpy server/src/.../Workarounds.java#fillAppInfo
      */
-    /* ### 수정 시작 ### */
     // Bypass Android Hidden API constraints to allow stable system binder reflections
     private fun bypassHiddenApiRestrictions() {
         try {
@@ -130,7 +128,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
             Log.w(TAG, "Failed to bypass Android Hidden API restrictions", e)
         }
     }
-    /* ### 수정 끝 ### */
 
     private fun fillShellAppInfo() {
         try {
@@ -320,7 +317,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
                         Log.w(TAG, "IActivityTaskManager.startActivity method not found")
                     }
 
-                    /* ### 수정 시작 ### */
                     // Search for moveTaskToDisplay in IActivityTaskManager first
                     try {
                         val atmTargetClass = Class.forName("android.app.IActivityTaskManager")
@@ -414,7 +410,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
                             }
                         }
                     }
-                    /* ### 수정 끝 ### */
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to prepare IActivityTaskManager binder interface", e)
@@ -692,7 +687,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
     }
 
     override fun injectMotionEventWithResult(displayId: Int, event: MotionEvent): Boolean {
-        /* ### 수정 시작 ### */
         // Inject motion event into the input subsystem natively on the specific virtual display without hidden API warnings and trace logging
         try {
             if (setDisplayIdMethod == null) {
@@ -709,7 +703,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
             Log.e(TAG, "Input event injection failed on display $displayId", e)
             false
         }
-        /* ### 수정 끝 ### */
     }
 
     private fun ensureDisplayWindowListenerRegistered() {
@@ -2203,7 +2196,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
                         packages.add(baseActivity.flattenToShortString())
                     }
 
-                    /* ### 수정 시작 ### */
                     val baseIntentField = try {
                         taskClass.getField("baseIntent")
                     } catch (_: Exception) {
@@ -2219,7 +2211,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
                         packages.add(baseIntentPkg)
                         baseIntentObj?.component?.flattenToShortString()?.let { packages.add(it) }
                     }
-                    /* ### 수정 끝 ### */
                 }
             }
         } catch (e: Exception) {
@@ -2272,7 +2263,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 val realStr = realActivityObj?.toString() ?: ""
                 val origStr = origActivityObj?.toString() ?: ""
 
-                /* ### 수정 시작 ### */
                 val baseIntentField = try { taskClass.getField("baseIntent") } catch (_: Exception) { null }
                 val baseIntentObj = baseIntentField?.get(task) as? android.content.Intent
                 val baseIntentPkg = baseIntentObj?.`package` ?: baseIntentObj?.component?.packageName ?: ""
@@ -2282,7 +2272,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
  realStr.contains(packageName) ||
                               origStr.contains(packageName) ||
                               (baseIntentPkg.isNotEmpty() && baseIntentPkg.contains(packageName))
-                /* ### 수정 끝 ### */
 
                 if (matches) {
                     // 안드로이드 API 29+ 에서는 taskId 필드가 표준이며, 이전 버전은 id 필드를 사용함
@@ -2458,7 +2447,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 val realStr = realActivityObj?.toString() ?: ""
                 val origStr = origActivityObj?.toString() ?: ""
 
-                /* ### 수정 시작 ### */
                 val baseIntentField = try { taskClass.getField("baseIntent") } catch (_: Exception) { null }
                 val baseIntentObj = baseIntentField?.get(task) as? android.content.Intent
                 val baseIntentPkg = baseIntentObj?.`package` ?: baseIntentObj?.component?.packageName ?: ""
@@ -2468,7 +2456,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
  realStr.contains(packageName) ||
                               origStr.contains(packageName) ||
                               (baseIntentPkg.isNotEmpty() && baseIntentPkg.contains(packageName))
-                /* ### 수정 끝 ### */
 
                 if (matches) {
                     val displayIdField = try {

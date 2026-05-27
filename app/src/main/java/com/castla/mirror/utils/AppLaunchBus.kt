@@ -10,7 +10,6 @@ enum class LaunchMode {
     INTERNAL_WEBVIEW
 }
 
-/* ### 수정 시작 ### */
 data class AppLaunchRequest(
     val packageName: String,
     val className: String? = null,
@@ -40,4 +39,3 @@ object AppLaunchBus {
         _events.tryEmit(request)
     }
 }
-/* ### 수정 끝 ### */

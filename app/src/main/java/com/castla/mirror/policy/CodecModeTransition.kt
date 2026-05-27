@@ -14,7 +14,6 @@ object CodecModeTransition {
     const val MODE_H264 = "h264"
     const val MODE_MJPEG = "mjpeg"
 
-    /* ### 수정 시작 ### */
     /**
      * Decides whether a client codec-mode request should trigger a pipeline rebuild.
      * Supports symmetric bi-directional transitions between H.264 and MJPEG.
@@ -43,5 +42,4 @@ object CodecModeTransition {
         
         return true
     }
-    /* ### 수정 끝 ### */
 }

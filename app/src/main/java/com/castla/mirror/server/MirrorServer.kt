@@ -36,7 +36,7 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     val instanceId: String = java.util.UUID.randomUUID().toString()
 
     init {
-        // [기존 코드] NanoHTTPD 소켓 닫힘 예외 로그 필터링
+        // [Legacy Code] Filtering NanoHTTPD socket closed exception logs
         try {
             val nanoLogger = java.util.logging.Logger.getLogger("fi.iki.elonen.NanoHTTPD")
             nanoLogger.filter = object : java.util.logging.Filter {
@@ -54,18 +54,18 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
             Log.w(TAG, "Failed to configure NanoHTTPD log filter", e)
         }
 
-        // 🔐 [개선된 100% 자동화 SSL 로드 로직]
-        // 주서버(NAS 등)에서 인증서를 받아오는 비동기 작업 선행 후 SSL 컨텍스트 구성
+        // 🔐 [Improved 100% Automated SSL Loading Logic]
+        // Configure SSL context after asynchronously fetching certificates from the primary server (NAS, etc.)
         configureSecureContext()
     }
 
     private var serverIp: String = "0.0.0.0"
 
     /**
-     * 동적 인증서 파일 검증 및 SSL 설정 적용
+     * Dynamic certificate file validation and SSL configuration application
      */
     private fun configureSecureContext() {
-        // 1단계에서 구축한 오라클 백엔드 다운로드 트리거
+        // Trigger certificate download in background
         triggerCertDownloadInBackground()
 
         // Load settings to check if WebCodecs hardware accelerated decoding is enabled
@@ -79,7 +79,7 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
                 val dynamicKeyStoreFile = File(context.filesDir, "dynamic_castla.p12")
                 
                 val keystoreStream: InputStream = if (dynamicKeyStoreFile.exists() && dynamicKeyStoreFile.length() > 0) {
-                    Log.i(TAG, "🔓 [성공] WebCodecs 활성화: 공인 인증서 로드")
+                    Log.i(TAG, "🔓 [Success] WebCodecs enabled: loaded public certificate")
                     FileInputStream(dynamicKeyStoreFile)
                 } else {
                     context.assets.open("castla.p12")
@@ -92,20 +92,20 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
                 val sslContext = SSLContext.getInstance("TLS")
                 sslContext.init(keyManagerFactory.keyManagers, null, null)
 
-                // ✅ SSL 소켓 바인딩 (HTTPS)
+                // ✅ SSL socket binding (HTTPS)
                 makeSecure(sslContext.serverSocketFactory, null)
-                Log.i(TAG, "🚀 [🚀 HTTPS 모드] Let's Encrypt 공인 SSL 서버 가동")
+                Log.i(TAG, "🚀 [HTTPS Mode] Let's Encrypt public SSL server started")
                 return
             } catch (e: Exception) {
-                Log.e(TAG, "❌ SSL 로드 실패, HTTP 모드로 폴백합니다.", e)
+                Log.e(TAG, "❌ SSL load failed, falling back to HTTP mode", e)
             }
         }
 
-        // 🌐 WebCodecs가 꺼져 있으면 makeSecure()를 호출하지 않으므로 자동으로 [순수 HTTP 모드]로 동작합니다.
-        Log.w(TAG, "⚠️ [🌐 HTTP 모드] WebCodecs 비활성화 상태이므로 일반 HTTP 서버로 구동합니다.")
+        // 🌐 When WebCodecs is disabled, makeSecure() is bypassed so the server automatically runs in HTTP mode.
+        Log.w(TAG, "⚠️ [HTTP Mode] WebCodecs is disabled; running as a standard HTTP server.")
     }
     /**
-     * 외부 내 개인 서버(NAS/클라우드)에서 최신 .p12 인증서를 다운로드하는 함수
+     * Function to download the latest .p12 certificate from a remote cloud or NAS server
      */
     fun triggerCertDownloadInBackground() {
         Thread {
@@ -120,15 +120,15 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
                 if (connection.responseCode == HttpURLConnection.HTTP_OK) {
                     val targetFile = File(context.filesDir, "dynamic_castla.p12")
                     
-                    // 다운로드 받아서 내부 저장소에 덮어쓰기
+                    // Download and overwrite inside internal storage
                     connection.inputStream.use { input ->
                         FileOutputStream(targetFile).use { output ->
                             input.copyTo(output)
                         }
                     }
-                    Log.i(TAG, "✨ [인증서 동기화 완료] 서버로부터 최신 SSL 인증서를 다운로드했습니다.")
+                    Log.i(TAG, "✨ [Certificate Sync Complete] Downloaded the latest SSL certificate from the server.")
                 } else {
-                    Log.w(TAG, "서버 연결 실패 (HTTP 코드: ${connection.responseCode}). 기존 파일 유지.")
+                    Log.w(TAG, "Server connection failed (HTTP code: ${connection.responseCode}). Keeping the existing file.")
                 }
                 connection.disconnect()
             } catch (e: Exception) {
@@ -162,19 +162,40 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     private val layoutUpdateDedupedCount = AtomicInteger(0)
     @Volatile private var lastLayoutUpdateSignature: String = ""
 
+    // NanoWSD WebSocket.send() writes to a socket OutputStream. Never call it
+    // from the Android main thread, otherwise StrictMode can throw
+    // NetworkOnMainThreadException. Keep control messages serialized to preserve
+    // ordering for the browser frontend.
+    private val controlSendExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "MirrorControlSender").apply { isDaemon = true }
+    }
+
+    private fun sendControlSocketAsync(
+        socket: ControlSocket,
+        json: String,
+        reason: String = "control_message"
+    ) {
+        controlSendExecutor.execute {
+            try {
+                if (shouldAcceptControlMessage(socket)) {
+                    socket.send(json)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to send $reason to control socket ${socket.debugId}", e)
+                unregisterControlSocket(socket)
+            }
+        }
+    }
+
     private var onTouchListener: ((TouchEvent) -> Unit)? = null
     private var onTouchResetListener: (() -> Unit)? = null
     private var onCodecModeListener: ((String) -> Unit)? = null
-    /* ### 수정 시작 ### */
-    // Redundant onViewportChangeListener declaration has been completely removed.
-    /* ### 수정 끝 ### */
     private var onTextInputListener: ((String) -> Unit)? = null
     private var onKeyEventListener: ((Int) -> Unit)? = null
     private var onCompositionUpdateListener: ((Int, String) -> Unit)? = null
     private var onAudioCodecListener: ((String) -> Unit)? = null
-    /* ### 수정 시작 ### */
     private var onLayoutUpdateListener: ((org.json.JSONArray) -> Unit)? = null
-    /* ### 수정 끝 ### */
+    private var onTapOutsideListener: (() -> Unit)? = null
     private var onPrimaryKeyframeRequest: (() -> Unit)? = null
     private var onSecondaryKeyframeRequest: (() -> Unit)? = null
     private var networkCongestionListener: (() -> Unit)? = null
@@ -197,21 +218,17 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     // to prevent race where browser connects before thermal broadcast arrives.
     @Volatile private var cachedThermalJson: String? = null
 
-    /* ### 수정 시작 ### */
     @Volatile private var primaryCodecMode: String = "h264"
     @Volatile private var secondaryCodecMode: String = "h264"
-    /* ### 수정 끝 ### */
 
     private var cachedSpsPps: ByteArray? = null
     private val streamGenerations = ConcurrentHashMap<String, AtomicInteger>()
     private val firstFrameReady = ConcurrentHashMap<String, Boolean>()
     private val latestStreamMetadata = ConcurrentHashMap<String, String>()
 
-    /* ### 수정 시작 ### */
     fun setLayoutUpdateListener(listener: (org.json.JSONArray) -> Unit) {
         onLayoutUpdateListener = listener
     }
-    /* ### 수정 끝 ### */
 
     fun setTouchListener(listener: (TouchEvent) -> Unit) {
         onTouchListener = listener
@@ -225,12 +242,12 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         onCodecModeListener = listener
     }
 
-    /* ### 수정 시작 ### */
-    // Redundant setViewportChangeListener has been completely removed.
-    /* ### 수정 끝 ### */
-
     fun setTextInputListener(listener: (String) -> Unit) {
         onTextInputListener = listener
+    }
+
+    fun setOnTapOutsideListener(listener: () -> Unit) {
+        onTapOutsideListener = listener
     }
 
     fun setKeyEventListener(listener: (Int) -> Unit) {
@@ -314,7 +331,6 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         val sockets = if (channel == "secondary") secondaryVideoSockets else primaryVideoSockets
         sockets.add(socket)
 
-        /* ### 수정 시작 ### */
         // Playback cached H.264 SPS/PPS parameters ONLY if the display channel is not configured for MJPEG fallback mode.
         val codecMode = if (channel == "secondary") secondaryCodecMode else primaryCodecMode
         if (!codecMode.equals("mjpeg", ignoreCase = true)) {
@@ -326,7 +342,6 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         } else {
             Log.i(TAG, "Skipped playback of cached H.264 SPS/PPS for $channel channel due to active MJPEG mode")
         }
-        /* ### 수정 끝 ### */
 
         updateConnectionState()
         onKeyframeRequest(channel, "video_open")
@@ -371,28 +386,23 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
             "Control client connected total=${controlSocketCount()} primaryVideo=${primaryVideoSockets.size} secondaryVideo=${secondaryVideoSockets.size} audio=${audioSockets.size}"
         )
 
-        // Send serverInit greeting with unique instanceId
-        try {
-            val initMsg = JSONObject().apply {
-                put("type", "serverInit")
-                put("instanceId", instanceId)
-                put("controlSessionId", sessionId)
-            }
-            socket.send(initMsg.toString())
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to send serverInit message", e)
+        // Send serverInit greeting with unique instanceId. WebSocket.send() is
+        // always dispatched off the main thread.
+        val initMsg = JSONObject().apply {
+            put("type", "serverInit")
+            put("instanceId", instanceId)
+            put("controlSessionId", sessionId)
         }
+        sendControlSocketAsync(socket, initMsg.toString(), "serverInit")
 
         // Replay cached thermal status to new client immediately
         cachedThermalJson?.let { json ->
-            try { socket.send(json) }
-            catch (e: Exception) { Log.w(TAG, "Failed to send cached thermal status", e) }
+            sendControlSocketAsync(socket, json, "cached thermal status")
         }
 
         var replayedMetadata = 0
         latestStreamMetadata.values.forEach { json ->
-            try { socket.send(json) }
-            catch (e: Exception) { Log.w(TAG, "Failed to replay stream metadata", e) }
+            sendControlSocketAsync(socket, json, "stream metadata replay")
             replayedMetadata++
         }
         if (replayedMetadata > 0) {
@@ -527,7 +537,6 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         deadSockets.forEach { unregisterVideoSocket(channel, it) }
     }
 
-    /* ### 수정 시작 ### */
     // Explicitly clear cached SPS/PPS buffers during codec mode switches to prevent stale H.264 packets leaking.
     fun clearCachedSpsPps(channel: String = "primary") {
         if (channel == "secondary") {
@@ -537,7 +546,6 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         }
         Log.i(TAG, "Cleared cached SPS/PPS for $channel channel")
     }
-    /* ### 수정 끝 ### */
 
     fun broadcastFrame(data: ByteArray, isKeyFrame: Boolean, channel: String = "primary") {
         val normalized = normalizeChannel(channel)
@@ -593,7 +601,6 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         deadSockets.forEach { unregisterAudioSocket(it) }
     }
 
-    /* ### 수정 시작 ### */
     @Volatile private var preferredPrimaryProfile: String = "High"
     @Volatile private var preferredSecondaryProfile: String = "High"
 
@@ -609,7 +616,6 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         val sockets = if (channel == "secondary") secondaryVideoSockets else primaryVideoSockets
         return sockets.isNotEmpty()
     }
-    /* ### 수정 끝 ### */
 
     fun controlSocketCount(): Int = synchronized(controlSocketLock) {
         controlSockets.count { it.registered && it.active && it.sessionId == activeControlSessionId.get() }
@@ -652,19 +658,12 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
                 controlSockets.remove(socket)
                 controlSockets.add(socket)
                 activeControlSocket = socket
-                /* ### 수정 시작 ### */
-                // Removed [InputDebug] Recovered orphan control socket log
-                /* ### 수정 끝 ### */
-                try {
-                    val initMsg = JSONObject().apply {
-                        put("type", "serverInit")
-                        put("instanceId", instanceId)
-                        put("controlSessionId", adoptedSessionId)
-                    }
-                    socket.send(initMsg.toString())
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to resend serverInit during orphan control recovery", e)
+                val initMsg = JSONObject().apply {
+                    put("type", "serverInit")
+                    put("instanceId", instanceId)
+                    put("controlSessionId", adoptedSessionId)
                 }
+                sendControlSocketAsync(socket, initMsg.toString(), "orphan serverInit")
                 updateConnectionState()
                 return true
             }
@@ -679,9 +678,6 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         staleControlLogTimes[socket.debugId] = now
         val activeSocket = synchronized(controlSocketLock) { activeControlSocket }
         val activeSession = activeControlSessionId.get()
-        /* ### 수정 시작 ### */
-        // Removed [InputDebug] Rejecting control message log
-        /* ### 수정 끝 ### */
     }
 
     fun broadcastControlMessage(json: String) {
@@ -694,18 +690,10 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
             val now = android.os.SystemClock.elapsedRealtime()
             if (now - lastSkippedBroadcastLogAt >= 2000L) {
                 lastSkippedBroadcastLogAt = now
-                /* ### 수정 시작 ### */
-                // Removed [InputDebug] broadcastControlMessage skipped log
-                /* ### 수정 끝 ### */
             }
             return
         }
-        try {
-            socket.send(json)
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to send control message to active socket ${socket.debugId}", e)
-            unregisterControlSocket(socket)
-        }
+        sendControlSocketAsync(socket, json, "broadcast control message")
     }
 
     fun broadcastDiagnostics() {
@@ -719,16 +707,16 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         onTouchListener?.invoke(event)
     }
 
+    fun onTapOutside() {
+        onTapOutsideListener?.invoke()
+    }
+
     fun onTouchReset() {
         onTouchResetListener?.invoke()
     }
     
     fun onKeyframeRequest(channel: String = "primary", source: String = "unknown") {
         val requestCount = keyframeRequestCount.incrementAndGet()
-        /* ### 수정 시작 ### */
-        // Removed [InputTrace] keyframe_request log
-        /* ### 수정 끝 ### */
-        /* ### 수정 시작 ### */
         // Replay cached SPS/PPS parameters to all active video stream sockets on keyframe request.
         // This ensures the decoder recovering from a browser hot-refresh gets the required parameters.
         val codecMode = if (channel == "secondary") secondaryCodecMode else primaryCodecMode
@@ -748,7 +736,6 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
                 deadSockets.forEach { unregisterVideoSocket(channel, it) }
             }
         }
-        /* ### 수정 끝 ### */
         if (channel == "secondary") onSecondaryKeyframeRequest?.invoke() else onPrimaryKeyframeRequest?.invoke()
     }
     
@@ -756,9 +743,7 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         networkCongestionListener?.invoke()
     }
     
-    /* ### 수정 시작 ### */
     fun onCodecModeRequest(mode: String, profile: String = "High", pane: String = "primary") {
-        /* ### 수정 시작 ### */
         if (pane.equals("secondary", ignoreCase = true)) {
             preferredSecondaryProfile = profile
             secondaryCodecMode = mode
@@ -772,12 +757,9 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
                 clearCachedSpsPps("primary")
             }
         }
-        /* ### 수정 끝 ### */
         onCodecModeListener?.invoke(mode)
     }
-    /* ### 수정 끝 ### */
     
-    /* ### 수정 시작 ### */
     fun onLayoutUpdate(pipelines: org.json.JSONArray) {
         layoutUpdateReceivedCount.incrementAndGet()
         val summary = buildString {
@@ -803,11 +785,6 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         Log.i(TAG, summary)
         onLayoutUpdateListener?.invoke(pipelines)
     }
-    /* ### 수정 끝 ### */
-
-    /* ### 수정 시작 ### */
-    // Redundant onViewportChange relay helper has been completely removed.
-    /* ### 수정 끝 ### */
     
     fun onTextInput(text: String) {
         onTextInputListener?.invoke(text)
@@ -844,9 +821,6 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         primaryToClose = primaryVideoSockets.toList()
         secondaryToClose = secondaryVideoSockets.toList()
         audioToClose = audioSockets.toList()
-        /* ### 수정 시작 ### */
-        // Removed [InputDebug] debugCycleSockets log
-        /* ### 수정 끝 ### */
         primaryToClose.forEach { socket ->
             try {
                 socket.close(

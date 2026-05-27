@@ -156,7 +156,6 @@ class WebBrowserActivity : Activity() {
             webView.setInitialScale(100)
         }
 
-        // 쿠키 허용
         android.webkit.CookieManager.getInstance().setAcceptCookie(true)
         android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
 
@@ -164,13 +163,12 @@ class WebBrowserActivity : Activity() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val url = request.url.toString()
                 
-                // 앱 링크 차단 (유튜브, 넷플릭스 등 앱으로 넘어가는 것을 차단)
                 if (url.startsWith("http://") || url.startsWith("https://")) {
-                    return false // 정상적인 웹 페이지는 웹뷰가 처리하도록 통과
+                    return false 
                 }
                 
                 Log.i(TAG, "Blocked app link redirect: $url")
-                return true // 그 외 스킴(intent:// 등)은 차단
+                return true
             }
 
             override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
@@ -180,7 +178,7 @@ class WebBrowserActivity : Activity() {
         }
 
         webView.webChromeClient = object : WebChromeClient() {
-            // HTML5 동영상 전체화면(Full Screen) 진입 시 호출
+            // HTML5 movie Full Screen
             override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
                 Log.i(TAG, "Entering full screen video mode")
                 if (customView != null) {
@@ -194,7 +192,7 @@ class WebBrowserActivity : Activity() {
                 fullScreenContainer.addView(view)
             }
 
-            // 전체화면 종료 시 호출
+            // close fullscreen
             override fun onHideCustomView() {
                 Log.i(TAG, "Exiting full screen video mode")
                 if (customView == null) return

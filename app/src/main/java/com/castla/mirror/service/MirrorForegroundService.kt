@@ -36,6 +36,9 @@ import com.castla.mirror.capture.VideoEncoder
 import com.castla.mirror.capture.VirtualDisplayController
 import com.castla.mirror.compositor.DisplayTier
 import com.castla.mirror.input.TouchInjector
+import com.castla.mirror.input.RemoteImeBridge
+import com.castla.mirror.input.ImeCommand
+import com.castla.mirror.input.CastlaTextInputRouter
 import com.castla.mirror.server.MirrorServer
 import com.castla.mirror.server.TouchEvent
 import com.castla.mirror.shizuku.BinderConnectionTracker
@@ -90,6 +93,7 @@ class MirrorForegroundService : Service() {
         private const val CHANNEL_ID = "castla_mirror"
         private const val NOTIFICATION_ID = 1
         const val ACTION_STOP = "com.castla.mirror.ACTION_STOP"
+        const val ACTION_RESTORE_IME = "com.castla.mirror.ACTION_RESTORE_IME"
         const val EXTRA_MAX_RESOLUTION = "max_resolution"
         const val EXTRA_FPS = "fps"
         const val EXTRA_AUDIO = "audio_enabled"
@@ -128,8 +132,77 @@ class MirrorForegroundService : Service() {
 
     private val binder = LocalBinder()
     private var mirrorServer: MirrorServer? = null
+    fun getMirrorServer(): MirrorServer? = mirrorServer
+
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val imeTimeoutRunnable = Runnable {
+        Log.i(TAG, "IME input inactivity timeout (30 seconds) reached. Triggering FSM Timeout.")
+        val svc = shizukuSetup?.privilegedService
+        if (svc != null) {
+            serviceScope.launch {
+                try {
+                    com.castla.mirror.input.ImeSwitchManager.sendEvent(
+                        this@MirrorForegroundService,
+                        com.castla.mirror.input.ImeEvent.Timeout
+                    ) { cmd ->
+                        svc.execCommand(cmd)
+                    }
+                } catch (e: java.lang.Exception) {
+                    Log.e(TAG, "FSM Timeout event failed", e)
+                }
+            }
+        }
+    }
+
+    fun resetImeTimeoutTimer() {
+        mainHandler.removeCallbacks(imeTimeoutRunnable)
+        // Switch to Castla IME dynamically if not already active when remote input occurs
+        ensureCastlaImeActiveDynamically()
+        mainHandler.postDelayed(imeTimeoutRunnable, 30000L) // 30 seconds
+    }
+
+    fun ensureCastlaImeActiveDynamically() {
+        val svc = shizukuSetup?.privilegedService
+        if (svc != null) {
+            serviceScope.launch {
+                try {
+                    com.castla.mirror.input.ImeSwitchManager.sendEvent(
+                        this@MirrorForegroundService,
+                        com.castla.mirror.input.ImeEvent.RemoteTextFocus
+                    ) { cmd ->
+                        svc.execCommand(cmd)
+                    }
+                } catch (e: java.lang.Exception) {
+                    Log.e(TAG, "FSM remote text focus event failed", e)
+                }
+            }
+        }
+    }
+
+    fun restoreUserKeyboardSilently() {
+        val svc = shizukuSetup?.privilegedService
+        if (svc != null) {
+            serviceScope.launch {
+                try {
+                    com.castla.mirror.input.ImeSwitchManager.sendEvent(
+                        this@MirrorForegroundService,
+                        com.castla.mirror.input.ImeEvent.RemoteTextBlur
+                    ) { cmd ->
+                        svc.execCommand(cmd)
+                    }
+                } catch (e: java.lang.Exception) {
+                    Log.e(TAG, "FSM remote text blur event failed", e)
+                }
+            }
+        }
+    }
+
+    fun onRemoteFocusLost() {
+        mainHandler.removeCallbacks(imeTimeoutRunnable)
+        restoreUserKeyboardSilently()
+    }
     
-    // N개 파이프라인 대칭 확장을 위한 핵심 맵 컬렉션
+    // Core map collection for symmetric pipeline extension
     val pipelines = java.util.concurrent.ConcurrentHashMap<String, MirroringPipeline>()
 
     private lateinit var powerLockManager: PowerLockManager
@@ -164,6 +237,7 @@ class MirrorForegroundService : Service() {
     private var audioCapture: AudioCapture? = null
     private var audioOrchestrator: AudioCaptureOrchestrator? = null
     private var shizukuSetup: ShizukuSetup? = null
+    private var remoteImeBridge: RemoteImeBridge? = null
     private var mirroringMode: String = "FULL_SCREEN"
     private var targetPackage: String = ""
     private var browserConnectionListener: ((Boolean) -> Unit)? = null
@@ -225,7 +299,6 @@ class MirrorForegroundService : Service() {
     private val rebuildRequestMutex = Mutex()
     private val lastRebuildRequestByPane = java.util.concurrent.ConcurrentHashMap<String, RebuildRequestSnapshot>()
 
-    private val mainHandler = Handler(Looper.getMainLooper())
     private var dpiScale: Float = 0.7f
     private val shizukuSetupMutex = Mutex()
     private var shizukuBindRetryCount = 0
@@ -277,9 +350,6 @@ class MirrorForegroundService : Service() {
                 .incrementAndGet()
         }
         if (event.action != "move") {
-            /* ### 수정 시작 ### */
-            // Removed [InputTrace] packet log for optimization
-            /* ### 수정 끝 ### */
             logInputDebugSnapshot("touch_${event.action}#$currentInputDebugLaunchSeq")
         }
     }
@@ -293,9 +363,6 @@ class MirrorForegroundService : Service() {
 //            val injectorState = try { pipeline.touchInjector?.debugState() ?: "injector=null" } catch (_: Exception) { "injector=error" }
 //            "${pipeline.name}:displayId=${pipeline.displayId},app=${pipeline.currentApp},requested=${pipeline.requestedWidth}x${pipeline.requestedHeight},${pipeline.inputDebugSummary()},$injectorState"
 //        }
-        /* ### 수정 시작 ### */
-        // Removed [InputTrace] snapshot log for optimization
-        /* ### 수정 끝 ### */
     }
 
     private fun countActiveServiceJobs(): Int {
@@ -429,10 +496,6 @@ class MirrorForegroundService : Service() {
             return
         }
 
-        /* ### 수정 시작 ### */
-        // Removed [InputTrace] requestRebuild log for optimization
-        /* ### 수정 끝 ### */
-
         val now = android.os.SystemClock.elapsedRealtime()
         var coalesced = false
         rebuildRequestMutex.withLock {
@@ -484,9 +547,6 @@ class MirrorForegroundService : Service() {
             }
         }
         if (deferredForTouch) {
-            /* ### 수정 시작 ### */
-            // Removed [InputTrace] touch_guard log for optimization
-            /* ### 수정 끝 ### */
         }
         if (skippedForTouchQuietWindow) {
             Log.i(
@@ -532,18 +592,12 @@ class MirrorForegroundService : Service() {
                             try {
                                 val pipeline = pipelines[request.pipelineName]
                                 if (pipeline != null) {
-                                    /* ### 수정 시작 ### */
-                                    // Removed [InputTrace] vd_worker_rebuild_begin log for optimization
-                                    /* ### 수정 끝 ### */
                                     pipeline.executeActualRebuild(
                                         request.targetWidth,
                                         request.targetHeight,
                                         request.force,
                                         request.forceSingle
                                     )
-                                    /* ### 수정 시작 ### */
-                                    // Removed [InputTrace] vd_worker_rebuild_end log for optimization
-                                    /* ### 수정 끝 ### */
                                 }
                             } finally {
                                 request.onComplete?.complete(Unit)
@@ -608,6 +662,10 @@ class MirrorForegroundService : Service() {
         
         instance = this
         isServiceRunning = true
+        remoteImeBridge = RemoteImeBridge(
+            privilegedServiceProvider = { shizukuSetup?.privilegedService },
+            displayIdProvider = { activeInputDisplayId() }
+        )
         isCleanupInProgress = false
         createNotificationChannel()
         observeAppLaunchRequests()
@@ -636,8 +694,8 @@ class MirrorForegroundService : Service() {
         )
 
         contentAwareQualityEngine = ContentAwareQualityEngine(
-            getGlobalBudget = { adaptiveBitrateManager.globalBitrateBudget }, // ABR 버젯 연동
-            broadcastControlMessage = { json -> mirrorServer?.broadcastControlMessage(json) } // 웹소켓 연동
+            getGlobalBudget = { adaptiveBitrateManager.globalBitrateBudget }, // ABR budget linkage
+            broadcastControlMessage = { json -> mirrorServer?.broadcastControlMessage(json) } // WebSocket linkage
         )
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -683,8 +741,7 @@ class MirrorForegroundService : Service() {
         }
 
         if (!cleanupCompleted) {
-            val cleanupThread = Thread { performCleanup("service_ondestroy") }
-            cleanupThread.start()
+            performCleanup("service_ondestroy")
         }
         super.onDestroy()
     }
@@ -693,7 +750,7 @@ class MirrorForegroundService : Service() {
 
     private fun observeAppLaunchRequests() {
         serviceScope.launch {
-            // AppLaunchBus.requestLaunch() 또는 emitEvent()를 통해 주입된 패킷을 상시 감시
+            // Continuously monitor packets injected via AppLaunchBus.requestLaunch() or emitEvent()
             com.castla.mirror.utils.AppLaunchBus.events.collect { request ->
                 val pane = request.pane ?: "primary"
                 val targetPipeline = pipelines[pane] ?: return@collect
@@ -756,52 +813,49 @@ class MirrorForegroundService : Service() {
                 }
 
                 // ─────────────────────────────────────────────────────────────────
-                // 💡 [개선 1] 인코더 그릇 최적화 선제 집행 (앱이 켜지기 "전"에 실행해야 함)
+                // 💡 [Optimization 1] Proactive execution of encoder profile optimization (must run *before* app starts)
                 // ─────────────────────────────────────────────────────────────────
 
-                // 1-1. 앱이 켜지기 전, 기존 파이프라인의 프로파일 상태를 먼저 백업합니다.
+                // 1-1. Before the app starts, first backup the profile state of the existing pipeline.
                 val oldProfile = contentAwareQualityEngine.resolveContentProfile(
                     targetPipeline.currentApp,
                     targetPipeline.isVideoApp
                 )
 
-                // 1-2. 티켓에 적혀있는 신규 가이드라인(isVideoApp)을 파이프라인 컨텍스트에 즉시 선반영합니다.
+                // 1-2. Reflected the new guideline (isVideoApp) written in the ticket immediately to the pipeline context.
                 targetPipeline.isVideoApp = request.isVideoApp
 
-                // 1-3. 기동 예정인 새로운 앱의 식별 정보를 바탕으로 타깃 프로파일을 산출합니다.
+                // 1-3. Calculate the target profile based on the identification info of the app scheduled to start.
                 val newProfile = contentAwareQualityEngine.resolveContentProfile(
-                    request.packageName, // targetPipeline.currentApp은 아직 옛날 앱이므로 request에서 가져옵니다.
+                    request.packageName, // targetPipeline.currentApp is still the old app, so we retrieve it from the request.
                     request.isVideoApp
                 )
 
-                // 1-4. 단순히 비디오 플래그 변경 여부만 보는 것이 아니라,
-                // 텍스트 모드 ➔ 모션 모드 등의 "실질적 화질 엔진 프로파일 변경"을 인지하여 스케줄링합니다.
+                // 1-4. Realizes and schedules substantial image quality engine profile transitions (e.g. text mode -> motion mode)
                 val profileChanged = oldProfile != newProfile
 
                 if (profileChanged && now - lastBitrateChangeMs > 500) {
                     lastBitrateChangeMs = now
                     Log.d(TAG, "[Architecture Sync] Profile shift detected (${oldProfile.name} -> ${newProfile.name}). Rebalancing bandwidth ahead of app launch.")
 
-                    // 💥 앱이 가상 화면에 첫 픽셀 버퍼를 쏟아붓기 전에 비트레이트 분배 및 QP 범위 조정을 "완벽히 선제 집행"합니다!
+                    // 💥 Proactively execute bitrate distribution and QP range tuning completely before the app pours its first pixel buffer!
                     contentAwareQualityEngine.rebalanceMultiDisplayBitrates(pipelines.values.toList())
                 }
 
                 // ─────────────────────────────────────────────────────────────────
-                // 💡 [개선 2] 인코더 그릇이 완벽히 고정된 안전 타이밍에 최종 하드웨어 기동 집행
+                // 💡 [Optimization 2] Execute final hardware startup at a secure timing when the encoder parameters are perfectly locked
                 // ─────────────────────────────────────────────────────────────────
 
-                // 2-1. 복잡한 외부 브라우저 우회, 패키지 검증 등이 내장된 통합 함수를 이 타이밍에 호출합니다.
-                /* ### 수정 시작 ### */
+                // 2-1. Call the integrated helper function that handles complex external browser redirection, package validation, etc.
                 // Pass forceDisplayId constraint dynamically from the launch request.
                 targetPipeline.launchAppFromWebLauncher(request.packageName, request.className, forceDisplayId = request.forceDisplayId)
-                /* ### 수정 끝 ### */
 
-                // 2-2. 후속 오토스케일러(해상도 및 FPS 티어링) 평가 연계
+                // 2-2. Link subsequent autoscale (resolution and FPS tiering) evaluations
                 if (targetPipeline.autoResolution || targetPipeline.autoFps) {
                     adaptiveBitrateManager.evaluateSinglePipelineScale(targetPipeline)
                 }
 
-                // 2-3. 웹 프론트엔드 OTT 수신 레이어 상태 연동 힌트 전송 유지
+                // 2-3. Maintain OTT profile hint synchronization transmission to the web frontend receiver
                 mirrorServer?.broadcastControlMessage(JSONObject().apply {
                     put("type", "ottProfileHint")
                     put("pane", pane)
@@ -815,6 +869,22 @@ class MirrorForegroundService : Service() {
         if (intent?.action == ACTION_STOP) {
             Log.i(TAG, "onStartCommand() - Stop action broadcast received via notification panel")
             requestStopAsync("notification_action")
+            return START_NOT_STICKY
+        }
+        if (intent?.action == ACTION_RESTORE_IME) {
+            Log.i(TAG, "onStartCommand() - Restore IME action received via notification panel")
+            val svc = shizukuSetup?.privilegedService
+            if (svc != null) {
+                serviceScope.launch {
+                    try {
+                        com.castla.mirror.input.ImeSwitchManager.restorePreviousIme(this@MirrorForegroundService) { cmd ->
+                            svc.execCommand(cmd)
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Notification restore keyboard action failed", e)
+                    }
+                }
+            }
             return START_NOT_STICKY
         }
 
@@ -849,9 +919,15 @@ class MirrorForegroundService : Service() {
     private fun requestStopAsync(reason: String) {
         if (stopRequested) return
         stopRequested = true
-        Log.i(TAG, "requestStopAsync() - Tearing down foreground service loop execution gracefully. Reason: $reason")
+        Log.i(TAG, "requestStopAsync() - Gracefully tearing down foreground service loop. Reason: $reason")
         try { ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
-        mainHandler.post { MirrorWidgetProvider.updateAllWidgets(this); stopSelf() }
+        serviceScope.launch(Dispatchers.IO) {
+            performCleanup("request_stop:$reason")
+            mainHandler.post { 
+                MirrorWidgetProvider.updateAllWidgets(this@MirrorForegroundService)
+                stopSelf() 
+            }
+        }
     }
 
     private fun onPhoneScreenOff() {
@@ -1037,6 +1113,20 @@ class MirrorForegroundService : Service() {
                 try { pipeline.touchInjector?.detachController("perform_cleanup") } catch (_: Exception) {}
                 try { kotlinx.coroutines.withTimeoutOrNull(1000L) { pipeline.controller.release() } } catch (_: Exception) {}
             }
+            
+            try {
+                val svc = shizukuSetup?.privilegedService
+                if (svc != null) {
+                    // Directly restore the IME synchronously during cleanup to bypass FSM locks and prevent deadlocks
+                    com.castla.mirror.input.TextInputSettingsHelper.restorePreviousIme(this@MirrorForegroundService) { cmd ->
+                        try { svc.execCommand(cmd) } catch (_: Exception) { null }
+                    }
+                    Log.i(TAG, "Directly restored previous IME during performCleanup (Accessibility preserved).")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed programmatically restoring previous IME during performCleanup", e)
+            }
+
             try { kotlinx.coroutines.withTimeoutOrNull(1000L) { shizukuSetup?.release() } } catch (_: Exception) {}
             
             shizukuSetup = null
@@ -1070,7 +1160,6 @@ class MirrorForegroundService : Service() {
             width = (width + 15) and 15.inv()
             height = (height + 15) and 15.inv()
 
-            /* ### 수정 시작 ### */
             // Initialize target viewport dimensions with screen default landscape or portrait layout to 
             // prevent square (720x720) or uninitialized display sizing anomalies during cold start launches.
             pipelines.values.forEach {
@@ -1081,7 +1170,6 @@ class MirrorForegroundService : Service() {
                 it.lastValidWidth = width
                 it.lastValidHeight = height
             }
-            /* ### 수정 끝 ### */
             
             pendingAudioEnabled = audioEnabled
             audioOrchestrator = AudioCaptureOrchestrator(object : AudioCaptureOrchestrator.Actions {
@@ -1126,9 +1214,6 @@ class MirrorForegroundService : Service() {
                     }
                 }
                 server.setTouchResetListener {
-                    /* ### 수정 시작 ### */
-                    // Removed [InputTrace] browser_touch_reset_begin log for optimization
-                    /* ### 수정 끝 ### */
                     pipelines.values.forEach { pipeline ->
                         val shouldForceCancel =
                             pipeline.isTouchInteractionActive() ||
@@ -1138,36 +1223,70 @@ class MirrorForegroundService : Service() {
                         catch (_: Exception) {}
                     }
                     lastTouchPane = "primary"
-                    /* ### 수정 시작 ### */
-                    // Removed [InputTrace] browser_touch_reset log for optimization
-                    /* ### 수정 끝 ### */
                     logInputDebugSnapshot("touch_reset")
                 }
                 server.setCodecModeListener { onCodecModeRequest(it) }
-                /* ### 수정 시작 ### */
                 // Handle dynamic screen layout updates declaratively to update pane viewports.
                 server.setLayoutUpdateListener { pipelinesArray ->
                     applyBrowserLayoutUpdate(pipelinesArray)
                 }
-                /* ### 수정 끝 ### */
                 server.setTextInputListener { injectText(it) }
+                server.setOnTapOutsideListener {
+                    serviceScope.launch(Dispatchers.IO) {
+                        val router = CastlaTextInputRouter.getInstance()
+                        val pipeline = pipelines["primary"]
+
+                        if (pipeline == null) {
+                            Log.w(TAG, "[tapOutside] No primary pipeline found.")
+                            return@launch
+                        }
+
+                        // 1. Check if editable focus existed recently (within 1.5 seconds) right before tapOutside detection
+                        val wasRecentlyEditable = router.isEditableFocusedRecently(1500L)
+
+                        Log.i(
+                            TAG,
+                            "[tapOutside] Received. wasRecentlyEditable=$wasRecentlyEditable (tap injection bypassed)."
+                        )
+
+                        // 2. Restore user keyboard silently and broadcast ime_active=false
+                        restoreUserKeyboardSilently()
+                        mirrorServer?.broadcastControlMessage(
+                            JSONObject().apply {
+                                put("type", "ime_active")
+                                put("focused", false)
+                                put("source", "tapOutside")
+                            }.toString()
+                        )
+
+                        // 3. Inject KEYCODE_BACK as fallback after delay to dismiss overlay
+                        if (wasRecentlyEditable) {
+                            kotlinx.coroutines.delay(250L)
+                            Log.i(TAG, "[tapOutside] Injecting KEYCODE_BACK as fallback to dismiss overlay for recently focused editor.")
+                            val displayId = pipeline.displayId
+                            runBinderSafe {
+                                val cmd =
+                                    if (displayId > 0) "input -d $displayId keyevent 4"
+                                    else "input keyevent 4"
+                                shizukuSetup?.privilegedService?.execCommand(cmd)
+                            }
+                            router.waitUntilEditableFocusCleared(timeoutMs = 350L)
+                        } else {
+                            Log.i(TAG, "[tapOutside] Skipped BACK key fallback (no recent editable focus).")
+                        }
+                    }
+                }
                 server.setKeyEventListener { injectKeyEvent(it) }
                 server.setCompositionUpdateListener { bs, text -> injectCompositionUpdate(bs, text) }
                 server.setAudioCodecListener { codec -> serviceScope.launch(Dispatchers.IO) { ensureAudioCaptureState(codec) } }
                 server.setAudioSocketConnectedListener { audioOrchestrator?.onAudioSocketConnected() }
                 server.setBrowserRearmListener {
                     serviceScope.launch {
-                        /* ### 수정 시작 ### */
-                        // Removed [InputTrace] debug_browser_rearm log for optimization
-                        /* ### 수정 끝 ### */
                         onBrowserConnected()
                     }
                 }
                 server.setBrowserTeardownListener {
                     serviceScope.launch {
-                        /* ### 수정 시작 ### */
-                        // Removed [InputTrace] debug_browser_teardown log for optimization
-                        /* ### 수정 끝 ### */
                         onBrowserDisconnected()
                     }
                 }
@@ -1175,7 +1294,6 @@ class MirrorForegroundService : Service() {
                     serviceScope.launch(Dispatchers.IO) {
                         Log.i(TAG, "[MirrorServer] GoHome received. Forcing home stack on all active displays.")
                         pipelines.values.forEach { pipeline ->
-                            /* ### 수정 시작 ### */
                             // Avoid calling binder launchHomeOnDisplay inside virtualDisplayHardwareMutex lock.
                             var hasToken = false
                             virtualDisplayHardwareMutex.withLock {
@@ -1184,7 +1302,6 @@ class MirrorForegroundService : Service() {
                             if (hasToken) {
                                 pipeline.controller.launchHomeOnDisplay()
                             }
-                            /* ### 수정 끝 ### */
                             pipeline.currentApp = "HOME"; pipeline.currentWebUrl = null
                         }
                     }
@@ -1196,25 +1313,25 @@ class MirrorForegroundService : Service() {
                             pipelines[pane]?.armTouchFocusGate(cmp ?: pkg)
                             // pipelines[pane]?.isVideoApp = isVideoApp
                             // pipelines[pane]?.launchAppFromWebLauncher(pkg, cmp)
-                            // 💡 바로 여기에 위치하여 패킷의 성격을 먼저 규정합니다!
+                            // 💡 Proactively categorize the nature of the launch request here
                            val mode = if (pkg.startsWith("http")) {
                                LaunchMode.EXTERNAL_BROWSER_URL
                            } else {
                                LaunchMode.STANDARD_APP
                            }
                            val rawLaunchTarget = cmp ?: pkg
-                           // 정제된 데이터를 기반으로 버스용 이벤트 객체(Envelope)를 조립합니다.
+                           // Assemble the bus event envelope based on refined target details
                            val requestEvent = AppLaunchRequest(
                                packageName = pkg,
                                className = cmp,
                                pane = pane,
-                               launchMode = mode, // 판별된 모드 주입
+                               launchMode = mode, // Inject resolved launch mode
                                isVideoApp = isVideoApp
                            )
 
                            Log.i(TAG, "[Server Bridge] Routing request packed directly: pkg=$pkg, cmp=$cmp")
 
-                           // 단일 이벤트 버스 채널(Flow)에 티켓 분사 (옵저버를 깨우는 스위치)
+                           // Emit to the single event bus channel (Flow) to wake up observers
                            com.castla.mirror.utils.AppLaunchBus.requestLaunch(requestEvent)
 
                         } catch (e: Exception) {
@@ -1249,21 +1366,12 @@ class MirrorForegroundService : Service() {
                 }
                 server.setBrowserConnectionListener { connected ->
                     if (connected) {
-                        /* ### 수정 시작 ### */
-                        // Removed [InputTrace] browser_connection log for optimization
-                        /* ### 수정 끝 ### */
                         cancelPendingBrowserDisconnect("browser_reconnected")
                         if (!browserConnected) { browserConnected = true; onBrowserConnected() }
                         browserConnectionListener?.invoke(true)
                     } else if (browserConnected) {
-                        /* ### 수정 시작 ### */
-                        // Removed [InputTrace] browser_connection log for optimization
-                        /* ### 수정 끝 ### */
                         scheduleBrowserDisconnect()
                     } else {
-                        /* ### 수정 시작 ### */
-                        // Removed [InputTrace] browser_connection log for optimization
-                        /* ### 수정 끝 ### */
                         browserConnectionListener?.invoke(false)
                     }
                 }
@@ -1416,15 +1524,75 @@ class MirrorForegroundService : Service() {
         return targetPipeline?.displayId ?: -1
     }
 
-    private fun injectText(text: String) { serviceScope.launch(compositionDispatcher) { try { shizukuSetup?.privilegedService?.injectText(text, activeInputDisplayId()) } catch (_: Exception) {} } }
+    private fun injectText(text: String) {
+        resetImeTimeoutTimer()
+        val displayId = activeInputDisplayId()
+        val router = CastlaTextInputRouter.getInstance()
+        val (isValid, _) = router.validateConnectionForTarget(displayId)
+        if (isValid) {
+            val nextGenId = System.currentTimeMillis()
+            remoteImeBridge?.dispatch(ImeCommand.CommitText(nextGenId, text))
+        } else {
+            serviceScope.launch(compositionDispatcher) {
+                try {
+                    shizukuSetup?.privilegedService?.injectText(text, displayId)
+                } catch (_: Exception) {}
+            }
+        }
+    }
 
     private var lastTouchPane = "primary"
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private val compositionDispatcher = kotlinx.coroutines.newSingleThreadContext("composition")
 
-    private fun injectCompositionUpdate(backspaces: Int, text: String) { serviceScope.launch(compositionDispatcher) { try { shizukuSetup?.privilegedService?.injectComposingText(backspaces, text, activeInputDisplayId()) } catch (_: Exception) {} } }
-    private fun injectKeyEvent(keyCode: Int) { serviceScope.launch(compositionDispatcher) { try { val id = activeInputDisplayId(); shizukuSetup?.privilegedService?.execCommand(if (id > 0) "input -d $id keyevent $keyCode" else "input keyevent $keyCode") } catch (_: Exception) {} } }
+    private fun injectCompositionUpdate(backspaces: Int, text: String) {
+        resetImeTimeoutTimer()
+        val displayId = activeInputDisplayId()
+        val router = CastlaTextInputRouter.getInstance()
+        val (isValid, _) = router.validateConnectionForTarget(displayId)
+        if (isValid) {
+            if (text.isEmpty() && backspaces == 0) {
+                remoteImeBridge?.dispatch(ImeCommand.FinishComposingText)
+            } else {
+                val nextGenId = System.currentTimeMillis()
+                remoteImeBridge?.dispatch(
+                    ImeCommand.SetComposingText(
+                        compositionId = nextGenId,
+                        text = text,
+                        selectionStart = -1,
+                        selectionEnd = -1
+                    )
+                )
+            }
+        } else {
+            serviceScope.launch(compositionDispatcher) {
+                try {
+                    shizukuSetup?.privilegedService?.injectComposingText(backspaces, text, displayId)
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    private fun injectKeyEvent(keyCode: Int) {
+        resetImeTimeoutTimer()
+        val displayId = activeInputDisplayId()
+        val router = CastlaTextInputRouter.getInstance()
+        val (isValid, _) = router.validateConnectionForTarget(displayId)
+        if (isValid && keyCode == 67) {
+            remoteImeBridge?.dispatch(ImeCommand.DeleteSurroundingText(beforeLength = 1, afterLength = 0))
+        } else if (isValid && keyCode == 66) {
+            remoteImeBridge?.dispatch(ImeCommand.PerformEnter)
+        } else {
+            serviceScope.launch(compositionDispatcher) {
+                try {
+                    shizukuSetup?.privilegedService?.execCommand(
+                        if (displayId > 0) "input -d $displayId keyevent $keyCode" else "input keyevent $keyCode"
+                    )
+                } catch (_: Exception) {}
+            }
+        }
+    }
     
     private fun buildExternalBrowserCommand(displayId: Int, url: String, browserComponent: String): String =
         "am start --display $displayId -f 0x18000000 -a android.intent.action.VIEW -d ${escapeShellArg(url)} -n ${escapeShellArg(browserComponent)}".trim()
@@ -1439,6 +1607,34 @@ class MirrorForegroundService : Service() {
         reconnectJob = serviceScope.launch {
             val tracker = BinderConnectionTracker()
             setup.serviceConnected.collect { connected ->
+                if (connected) {
+                    val svc = setup.privilegedService
+                    if (svc != null) {
+                        try {
+                            // Self-healing: recover any pending crashes safely via FSM startup recovery
+                            com.castla.mirror.input.ImeSwitchManager.sendEvent(
+                                this@MirrorForegroundService,
+                                com.castla.mirror.input.ImeEvent.AppStartupRecovery
+                            ) { cmd ->
+                                svc.execCommand(cmd)
+                            }
+                            // Silent prep: ensure Castla IME is enabled in systems list silently via FSM ShizukuReady
+                            com.castla.mirror.input.ImeSwitchManager.sendEvent(
+                                this@MirrorForegroundService,
+                                com.castla.mirror.input.ImeEvent.ShizukuReady
+                            ) { cmd ->
+                                svc.execCommand(cmd)
+                            }
+                            // Accessibility is fine to pre-activate silently to capture remote focuses
+                            com.castla.mirror.input.TextInputSettingsHelper.enableAccessibilityServiceSilently(this@MirrorForegroundService) { cmd ->
+                                svc.execCommand(cmd)
+                            }
+                            Log.i(TAG, "Programmatically prepared Castla IME and Accessibility silently on service connected.")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed programmatically preparing IME and Accessibility settings", e)
+                        }
+                    }
+                }
                 when (if (connected) tracker.onConnected() else tracker.onDisconnected()) {
                     BinderConnectionTracker.Transition.Disconnect -> {
                         pipelines.values.forEach {
@@ -1472,7 +1668,6 @@ class MirrorForegroundService : Service() {
             val surf = pipeline.currentEncoderSurface ?: return@forEach
             if (pipeline.width <= 0 || pipeline.height <= 0) return@forEach
             serviceScope.launch(Dispatchers.IO) {
-                /* ### 수정 시작 ### */
                 // Minimize lock scope to prevent blocking coroutine threads while restoring content via binder.
                 var generation: Long = -1L
                 var displayId = -1
@@ -1496,7 +1691,6 @@ class MirrorForegroundService : Service() {
                 if (hasVd && generation != -1L && displayId >= 0) {
                     pipeline.restoreContentLocked(generation, displayId)
                 }
-                /* ### 수정 끝 ### */
             }
         }
     }
@@ -1563,7 +1757,6 @@ class MirrorForegroundService : Service() {
                 val w = if (pipeline.width > 0) pipeline.width else width
                 val h = if (pipeline.height > 0) pipeline.height else height
                 val dpi = computeVirtualDisplayDpi(w, h)
-                /* ### 수정 시작 ### */
                 // Minimize lock scope to prevent blocking binder calls like restoreContentLocked within the mutex.
                 var activeId = -1
                 var generation = -1L
@@ -1593,7 +1786,6 @@ class MirrorForegroundService : Service() {
                     Log.e(TAG, "[VDRebuild] Failed to create virtual display for pane (${pipeline.name})")
                     globalSuccess = false
                 }
-                /* ### 수정 끝 ### */
             }
             if (globalSuccess) { startVdKeepAlive(); serviceScope.launch(Dispatchers.IO) { setup.ensureShizukuHardened() } }
             globalSuccess
@@ -1601,7 +1793,7 @@ class MirrorForegroundService : Service() {
     }
 
     /**
-     * 🔴 [의존성 격리 완료] 비즈니스 룰 예외 감지 및 전체 Teardown 집행 제어부 (Orchestrator Layer)
+     * [Orchestrator Layer] Business rule exception detection and full teardown execution control
      */
     fun triggerPipelineRebuildWithPolicy(name: String, w: Int, h: Int, force: Boolean = false, forceSingle: Boolean = false) {
         val pipeline = pipelines[name] ?: return
@@ -1618,14 +1810,14 @@ class MirrorForegroundService : Service() {
             } catch (t: Throwable) {
                 Log.e(TAG, "[Orchestrator] Symmetrical system caught failure during rebuild from pane: $name", t)
                 
-                // 전역에 실제로 살아 움직이는 가상화면 디바이스 하드웨어 개수 취합 계산
+                // Count the number of active VirtualDisplay hardware devices running globally
                 val totalActiveVdCount = pipelines.values.count { it.displayId >= 0 && it.controller.hasVirtualDisplay() }
 
                 if (totalActiveVdCount > 0) {
                     Log.w(TAG, "[Orchestrator] Active hardware count ($totalActiveVdCount) survives. Releasing failed loop: $name")
                     pipeline.release(forcePhysical = true)
                 } else {
-                    Log.e(TAG, "[Orchestrator] FATAL: Zero active VirtualDisplay frames exist in total map풀. Evicting service context.")
+                    Log.e(TAG, "[Orchestrator] FATAL: Zero active VirtualDisplay frames exist in total map pool. Evicting service context.")
                     markTerminal(TerminalReason.VD_RECREATE_FAILED)
                 }
             }
@@ -1635,7 +1827,6 @@ class MirrorForegroundService : Service() {
     private fun onCodecModeRequest(mode: String) {
         val anyJpegEncoderActive = pipelines.values.any { it.jpegEncoder != null }
 
-        /* ### 수정 시작 ### */
         // Check for encoder profile mismatch between active VideoEncoder and cached preferredProfile.
         // We evaluate profile mismatches regardless of video socket existence since the profile
         // preference is now cached persistently via control channel messages.
@@ -1659,7 +1850,6 @@ class MirrorForegroundService : Service() {
         val isCodecSwitch = CodecModeTransition.shouldApply(mode, currentCodecMode, anyJpegEncoderActive)
         currentCodecMode = mode
         Log.i(TAG, "Codec transmission mode request processed. mode=$mode, isCodecSwitch=$isCodecSwitch, hasProfileMismatch=$hasProfileMismatch")
-        /* ### 수정 끝 ### */
 
         val allDimensionsUnset = pipelines.values.all { it.width == 0 || it.height == 0 }
         if (allDimensionsUnset) {
@@ -1670,7 +1860,6 @@ class MirrorForegroundService : Service() {
         Log.i(TAG, "Delegating to dynamic pipeline rebuild loop chain")
         serviceScope.launch {
             pipelines.values.forEach { pipeline ->
-                /* ### 수정 시작 ### */
                 // We rebuild a pipeline if:
                 // 1. It is a global codec switch (which affects all pipelines)
                 // 2. OR this specific pipeline has a profile mismatch
@@ -1678,7 +1867,6 @@ class MirrorForegroundService : Service() {
                 if (needsRebuild && pipeline.width > 0 && pipeline.height > 0) {
                     triggerPipelineRebuildWithPolicy(pipeline.name, pipeline.width, pipeline.height, force = true)
                 }
-                /* ### 수정 끝 ### */
             }
         }
     }
@@ -1727,6 +1915,11 @@ class MirrorForegroundService : Service() {
             Intent(ACTION_STOP).apply { setPackage(packageName) },
             PendingIntent.FLAG_IMMUTABLE
         )
+        val restoreImePending = PendingIntent.getService(
+            this, 2,
+            Intent(this, MirrorForegroundService::class.java).apply { action = ACTION_RESTORE_IME },
+            PendingIntent.FLAG_IMMUTABLE
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Castla")
             .setContentText("Streaming to Tesla")
@@ -1734,6 +1927,7 @@ class MirrorForegroundService : Service() {
             .setOngoing(true)
             .setContentIntent(openPending)
             .addAction(android.R.drawable.ic_media_pause, "Stop Mirroring", stopPending)
+            .addAction(android.R.drawable.ic_menu_edit, "Restore Keyboard", restoreImePending)
             .build()
     }
 
@@ -1805,7 +1999,6 @@ class MirrorForegroundService : Service() {
         }.trim()
     }
 
-    /* ### 수정 시작 ### */
     private fun verifySurfaceAndFallback(pipeline: MirroringPipeline, service: IPrivilegedService, displayId: Int, pkg: String, taskIds: List<Int>, packageOrComponent: String, extraKey: String?, extraValue: String?) {
         if (pkg.contains("com.castla.mirror") || pkg == "HOME" || pkg.isBlank()) return
         
@@ -1824,9 +2017,6 @@ class MirrorForegroundService : Service() {
             kotlinx.coroutines.delay(5500L)
             try {
                 if (pipeline.isTouchInteractionActive()) {
-                    /* ### 수정 시작 ### */
-                    // Removed [InputTrace] touch_guard fallback_skip log for optimization
-                    /* ### 수정 끝 ### */
                     return@launch
                 }
                 val runningTasks = try { service.getRunningTasksOnDisplay(displayId) } catch (e: Exception) {
@@ -1869,13 +2059,14 @@ class MirrorForegroundService : Service() {
             }
         }
     }
-    /* ### 수정 끝 ### */
 
     // ==========================================
     // ENCAPSULATED VIRTUAL DISPLAY PIPELINE
     // ==========================================
     inner class MirroringPipeline(val name: String, val displayName: String) {
         val controller = VirtualDisplayController(displayName)
+        private val released = java.util.concurrent.atomic.AtomicBoolean(false)
+        private val releasing = java.util.concurrent.atomic.AtomicBoolean(false)
 
         var width = 0; var height = 0; var displayId = -1
         val vdGeneration = java.util.concurrent.atomic.AtomicLong(0)
@@ -1886,13 +2077,11 @@ class MirrorForegroundService : Service() {
         @Volatile var lastValidWidth: Int = 384
         @Volatile var lastValidHeight: Int = 672
         
-        /* ### 수정 시작 ### */
         // State guards to prevent concurrent self-healing re-entry which triggers duplicate am start shell command floods
         @Volatile var isSelfHealingInProgress = false
         @Volatile var activeFallbackJob: kotlinx.coroutines.Job? = null
         @Volatile var lastFrameRenderedTime = 0L
         @Volatile var lastMoveRejectLoggedAt = 0L
-        /* ### 수정 끝 ### */
         
         private val encoderSession = java.util.concurrent.atomic.AtomicLong(0)
 
@@ -2136,17 +2325,11 @@ class MirrorForegroundService : Service() {
             debugFallbackCancels += 1
             activeFallbackJob = null
             job.cancel()
-            /* ### 수정 시작 ### */
-            // Removed [InputTrace] touch_guard fallback cancel log for optimization
-            /* ### 수정 끝 ### */
         }
 
         fun markServiceMutation(reason: String) {
             lastServiceMutationAt = android.os.SystemClock.elapsedRealtime()
             lastServiceMutationReason = reason
-            /* ### 수정 시작 ### */
-            // Removed [InputTrace] service_mutation log for optimization
-            /* ### 수정 끝 ### */
         }
 
         fun recentServiceActionSummary(): String {
@@ -2199,7 +2382,6 @@ class MirrorForegroundService : Service() {
                 resizeJob?.cancel(); serviceScope.launch { setTier(DisplayTier.SUSPENDED, "viewport_invalid") }; return
             }
             
-            /* ### 수정 시작 ### */
             // Check if this is the initial setup phase. If so, bypass the 500ms debounce delay 
             // to instantly rebuild virtual display surface layout, preventing unaligned viewports during app startup.
             val isFirstSetup = requestedWidth <= 0 || displayId < 0
@@ -2226,11 +2408,9 @@ class MirrorForegroundService : Service() {
                     forceSingle = forceLayoutRealign
                 )
             }
-            /* ### 수정 끝 ### */
         }
 
         
-        /* ### 수정 시작 ### */
         // Rebuild is non-blocking and always enqueues the latest request to the sequential
         // hardware worker. We intentionally do not collapse requests behind an active rebuild,
         // because split-ratio drags and fullscreen promotion depend on the final viewport size
@@ -2258,7 +2438,6 @@ class MirrorForegroundService : Service() {
         ) {
             requestRebuild("legacy_direct", RebuildPriority.NORMAL, newWidth, newHeight, force, forceSingle, onComplete)
         }
-        /* ### 수정 끝 ### */
 
         suspend fun executeActualRebuild(targetWidth: Int, targetHeight: Int, force: Boolean = false, forceSingle: Boolean = false) {
             debugRebuildExecutions += 1
@@ -2275,10 +2454,6 @@ class MirrorForegroundService : Service() {
             val w = alignedWidth; val h = alignedHeight; val dpi = computeVirtualDisplayDpi(w, h)
             val calculatedBitrate = adaptiveBitrateManager.getSharedBitrateForPipeline(this)
 
-            /* ### 수정 시작 ### */
-            // Removed [InputTrace] Rebuilding hardware layout log for optimization
-            /* ### 수정 끝 ### */
-
             // Reset frame indicator on viewport/encoder layout reconstruction to guarantee correct watchdog operation
             lastFrameRenderedTime = 0L
             mirrorServer?.beginStreamGeneration(name, displayId, w, h)
@@ -2291,7 +2466,6 @@ class MirrorForegroundService : Service() {
 
             var startEncoderTask: (() -> Unit)? = null
             val surface = if (currentCodecMode == "mjpeg") {
-                /* ### 수정 시작 ### */
                 // Clear cached H.264 SPS/PPS packet to prevent leaking obsolete configurations to the new client socket.
                 mirrorServer?.clearCachedSpsPps(name)
                 val jpeg = JpegEncoder(w, h, fps = 15, quality = 65); val inputSurface = jpeg.createInputSurface(); jpegEncoder = jpeg
@@ -2328,17 +2502,13 @@ class MirrorForegroundService : Service() {
                         }
                     }
                 }
-                /* ### 수정 끝 ### */
-                
                 inputSurface
             } else {
-                /* ### 수정 시작 ### */
                 val preferredProfile = mirrorServer?.getPreferredProfile(name) ?: "High"
                 val encoder = VideoEncoder(w, h, calculatedBitrate, thermalFpsOverride ?: targetFps, preferredProfile)
                 val inputSurface = encoder.createInputSurface()
                 videoEncoder = encoder
                 debugEncoderCreates += 1
-                /* ### 수정 끝 ### */
                 encoder.onSpsPps = { mirrorServer?.broadcastSpsPps(it, name) }
                 startEncoderTask = {
                     if (encoderSession.get() != sessionId || videoEncoder !== encoder || currentEncoderSurface !== inputSurface) {
@@ -2385,7 +2555,6 @@ class MirrorForegroundService : Service() {
                 var isNewVd = false
                 var gen = -1L
 
-                /* ### 수정 시작 ### */
                 // Minimize mutex scope to exclude binder activity launches and delay suspends, preventing deadlocks.
                 vdOperationGlobalMutex.withLock {
                     virtualDisplayHardwareMutex.withLock {
@@ -2451,13 +2620,11 @@ class MirrorForegroundService : Service() {
                 } else {
                     throw IllegalStateException("VirtualDisplay allocation completely failed via binder server.")
                 }
-                /* ### 수정 끝 ### */
             } else {
                 if (trySetupVirtualDisplay(w, h, surface)) startEncoderTask?.invoke()
             }
             if (displayId >= 0) {
                 try { mirrorServer?.broadcastControlMessage(org.json.JSONObject().apply { put("type", "resolutionChanged"); put("pane", name); put("width", w); put("height", h) }.toString()) } catch (_: Exception) {}
-                /* ### 수정 시작 ### */
                 // Wake the display and request a fresh frame without injecting synthetic touches
                 // that can affect apps like maps during repeated split/expand cycles.
                 serviceScope.launch {
@@ -2474,7 +2641,6 @@ class MirrorForegroundService : Service() {
                         Log.w(TAG, "[$name Pipeline] Failed to force graphics wakeup post rebuild", e)
                     }
                 }
-                /* ### 수정 끝 ### */
             }
 
             mirrorServer?.broadcastDiagnostics()
@@ -2494,7 +2660,6 @@ class MirrorForegroundService : Service() {
             return if (matched.isEmpty()) "none" else matched.joinToString(" || ")
         }
         
-        /* ### 수정 시작 ### */
         // Periodically monitors task residency on the virtual display to inject layout wakeup events adaptively as soon as the app mounts.
         private fun executeAdaptiveWakeup(targetDisplayId: Int, cleanPkg: String, service: IPrivilegedService) {
             if (targetDisplayId < 0) return
@@ -2532,7 +2697,6 @@ class MirrorForegroundService : Service() {
                 }
             }
         }
-        /* ### 수정 끝 ### */
 
         fun recoverTouchFocusIfNeeded(topTask: String?, trigger: String) {
             val activeId = displayId
@@ -2633,7 +2797,6 @@ class MirrorForegroundService : Service() {
             }
         }
 
-        /* ### 수정 시작 ### */
         // Safely detach and re-attach the virtual display's Surface to break WindowManagerService transition locks.
         suspend fun resetSurfaceToBreakWmsLock() {
             val activeId = displayId
@@ -2650,14 +2813,12 @@ class MirrorForegroundService : Service() {
                 }
             }
         }
-        /* ### 수정 끝 ### */
 
         fun handleInjectionRejected(action: Int, pointerCount: Int) {
             debugInjectionRejects += 1
             val activeId = displayId
             if (activeId < 0) return
             
-            /* ### 수정 시작 ### */
             // Allow ACTION_MOVE to accumulate reject counts with a 200ms throttle interval 
             // to detect stagnation during drag gestures without flooding recovery calls.
             val isMove = action == android.view.MotionEvent.ACTION_MOVE
@@ -2670,7 +2831,6 @@ class MirrorForegroundService : Service() {
             }
             
             consecutiveInjectionRejects += 1
-            /* ### 수정 끝 ### */
             
             appendRecentServerTouchTrace(
                 "reject pane=$name displayId=$activeId action=$action pointerCount=$pointerCount app=$currentApp"
@@ -2703,14 +2863,12 @@ class MirrorForegroundService : Service() {
                         "[FocusTrace] inject_realign pane=$name displayId=$activeId action=$action app=$currentApp target=$relaunchTarget consecutive=$consecutiveInjectionRejects"
                     )
                     try {
-                        /* ### 수정 시작 ### */
                         launchComponent(
                             relaunchTarget,
                             forceColdStart = false,
                             forceDisplayId = true,
                             forceTaskRealign = true
                         )
-                        /* ### 수정 끝 ### */
                     } catch (_: Exception) {}
                     try {
                         controller.getPrivilegedService()?.wakeUpDisplay(activeId)
@@ -2730,56 +2888,6 @@ class MirrorForegroundService : Service() {
                         TAG,
                         "[FocusTrace] inject_recover pane=$name displayId=$activeId action=$action app=$currentApp target=$relaunchTarget"
                     )
-                    // if (consecutiveInjectionRejects >= 3) {
-                    //     try {
-                    //         // [FocusTrace] Force release all active pointers to clear session lock when failures pile up
-                    //         touchInjector?.release(forceFallbackCancel = true, reason = "inject_stuck_recover")
-                    //         consecutiveInjectionRejects = 0
-                            
-                    //         // Re-target to clean package to prevent redundant launch-like activity loop
-                    //         val cleanRelaunchTarget = relaunchTarget.substringBefore('/').ifBlank { relaunchTarget }
-                            
-                    //         /* ### 수정 시작 ### */
-                    //         // Detach and re-attach Surface to force WMS redraw and break focus locks
-                    //         resetSurfaceToBreakWmsLock()
-                    //         delay(40L)
-
-                    //         // WMS Stagnation Recovery: Force a full virtual display hardware rebuild 
-                    //         // to break heavy WMS transition locks and completely refresh DisplayManager bindings.
-                    //         // This replicates the exact recovery effect of browser F5 fullReload without page refresh.
-                    //         val rebuildDeferred = kotlinx.coroutines.CompletableDeferred<Unit>()
-                    //         requestRebuild(
-                    //             reason = "inject_stuck_rebuild",
-                    //             priority = RebuildPriority.HIGH,
-                    //             newWidth = if (requestedWidth > 0) requestedWidth else 720,
-                    //             newHeight = if (requestedHeight > 0) requestedHeight else 720,
-                    //             force = true,
-                    //             forceSingle = true,
-                    //             onComplete = rebuildDeferred
-                    //         )
-                    //         try {
-                    //             rebuildDeferred.await()
-                    //         } catch (_: Exception) {
-                    //             delay(300L)
-                    //         }
-                    //         /* ### 수정 끝 ### */
-                            
-                    //         /* ### 수정 시작 ### */
-                    //         launchComponent(
-                    //             cleanRelaunchTarget,
-                    //             forceColdStart = false, // Prevent redundant app force-stop and cold-start disruptions
-                    //             forceDisplayId = true,
-                    //             forceTaskRealign = true
-                    //         )
-                    //         /* ### 수정 끝 ### */
-                    //         Log.w(
-                    //             TAG,
-                    //             "[FocusTrace] inject_soft_rearm pane=$name displayId=$activeId action=$action app=$currentApp target=$cleanRelaunchTarget consecutive=$consecutiveInjectionRejects"
-                    //         )
-                    //     } catch (e: Exception) {
-                    //         Log.w(TAG, "[$name Pipeline] inject recovery relaunch failed", e)
-                    //     }
-                    // }
                 }
             }
         }
@@ -2873,7 +2981,6 @@ class MirrorForegroundService : Service() {
             forceTaskRealign: Boolean = false
         ): Boolean = withContext(vdDispatcher) {
             markServiceMutation("launch_component_begin(target=$packageOrComponent,cold=$forceColdStart,realign=$forceTaskRealign)")
-            /* ### 수정 시작 ### */
             // Ensure lastFrameRenderedTime is reset only when actually switching to a different application package
             // or when a clean cold start is explicitly requested. This preserves frame rendering timestamps for 
             // the active app, allowing the Command Equivalence Guard to accurately prevent duplicate launch floods.
@@ -2885,12 +2992,8 @@ class MirrorForegroundService : Service() {
             if (isNewApp || forceColdStart) {
                 lastFrameRenderedTime = 0L
             }
-            /* ### 수정 끝 ### */
 
-            /* ### 수정 시작 ### */
             // Bypassed: Do not force stop the previous app on application switching to support warm start
-            /* ### 수정 끝 ### */
-
             // Command Equivalence Guard: If target app is already active and rendering on this virtual display, skip redundant window displacement commands.
             // However, if the screen streaming has stagnated or has not yet rendered its first frame, bypass this safeguard to enforce visual recovery.
             val isAlreadyActive = currentApp == packageOrComponent || currentApp.substringBefore('/') == cleanPkg
@@ -2911,7 +3014,6 @@ class MirrorForegroundService : Service() {
             
             
             // Self-healing: restore released graphics pipelines and realign to requested viewport before shifting app focus
-            /* ### 수정 시작 ### */
             // Account for active JpegEncoder in MJPEG mode to prevent redundant self-healing loops.
             // Also enforce isSelfHealingInProgress state lock to prevent recursive rebuild requests.
             val isEncoderReleased = if (currentCodecMode == "mjpeg") jpegEncoder == null else videoEncoder == null
@@ -2950,8 +3052,6 @@ class MirrorForegroundService : Service() {
             } else if (isSelfHealingInProgress) {
                 Log.d(TAG, "[$name Pipeline] Self-healing is already in progress. Skipping redundant trigger.")
             }
-            /* ### 수정 끝 ### */
-            
 
             val correctedDisplayId = if (displayId >= 0) displayId else controller.getDisplayId()
             if (correctedDisplayId < 0) return@withContext false
@@ -2968,7 +3068,6 @@ class MirrorForegroundService : Service() {
                 val matchingTaskIds = try { runBinderSafe(1000L) { service.getTaskIdsForPackage(cleanPkg).toList() } ?: emptyList() } catch (_: Exception) { emptyList() }
                 val isWarmStart = matchingTaskIds.isNotEmpty()
 
-                /* ### 수정 시작 ### */
                 for (taskId in matchingTaskIds) {
                     try { runBinderSafe { service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId"); service.execCommand("cmd activity task move-to-front $taskId") } } catch (_: Exception) {}
                 }
@@ -2976,9 +3075,7 @@ class MirrorForegroundService : Service() {
                 // Prevent redundant 'am start' shell command execution immediately following async task migration command.
                 // Re-launching via 'am start' in parallel with active task displacement commands causes Android OS task stack conflict,
                 // frequently forcing the primary Display 0 (MainActivity) to recede to the background Recents view.
-                /* ### 수정 시작 ### */
                 if (isWarmStart && !forceColdStart) {
-                /* ### 수정 끝 ### */
                     markServiceMutation("launch_component_warm_start")
                     // Trigger adaptive task residency-aware wakeup asynchronously instead of waiting on hardcoded timings
                     executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
@@ -2999,7 +3096,6 @@ class MirrorForegroundService : Service() {
                     return@withContext true
                 }
 
-                /* ### 수정 시작 ### */
                 // WMS Transition Lock Prevention Guard:
                 // If this is a realign/recovery request (forceTaskRealign = true) for the ALREADY ACTIVE application
                 // (i.e. cleanPkg is already currentApp and we are currently streaming/encoder is running),
@@ -3014,7 +3110,6 @@ class MirrorForegroundService : Service() {
                     currentApp = packageOrComponent
                     return@withContext true
                 }
-                /* ### 수정 끝 ### */
 
                 // 1. Try native binder launchAppOnDisplayV2 first (only for Standard package without complex query strings)
                 var nativeStarted = false
@@ -3031,10 +3126,8 @@ class MirrorForegroundService : Service() {
                 if (!nativeStarted) {
                     markServiceMutation("launch_component_shell_start")
                     Log.i(TAG, "[$name Pipeline] Executing fallback shell launch command for $packageOrComponent")
-                    /* ### 수정 시작 ### */
                     // Introduce a 150ms delay for stabilization of window manager and focus subsystems.
                     delay(150L)
-                    /* ### 수정 끝 ### */
                     val command = buildShellLaunchCommand(targetDisplayId, packageOrComponent, extraKey, extraValue, reorderToFront = isWarmStart)
                     val result = runBinderSafe { service.execCommand(command) } ?: ""
                     if (result.contains("SecurityException") || result.contains("Permission Denial")) {
@@ -3052,7 +3145,6 @@ class MirrorForegroundService : Service() {
                     }
                 }
                 
-                /* ### 수정 시작 ### */
                 // Force an immediate graphics wakeup sequence and request encoder keyframe for Cold-Start apps to prevent early stream corruption.
                 if (!isWarmStart || forceColdStart) {
                     markServiceMutation("launch_component_cold_start")
@@ -3076,7 +3168,6 @@ class MirrorForegroundService : Service() {
                 )
 
                 currentApp = packageOrComponent; return@withContext true
-                /* ### 수정 끝 ### */
             } catch (e: Exception) { Log.e(TAG, "[$name Pipeline] Component push crashed inside system shell launcher layer.", e); return@withContext false }
         }
 
@@ -3088,7 +3179,6 @@ class MirrorForegroundService : Service() {
                 append("-n ${escapeShellArg(browserComponent)} ")
             }.trim()
         }
-        /* ### 수정 시작 ### */
         suspend fun launchBrowser(url: String, sourceAppPackage: String? = null, allowFallback: Boolean = true) {
             val browser = BrowserResolver.resolve(this@MirrorForegroundService, url)
             val targetComponent = browser?.componentFlat ?: internalComponentName("com.castla.mirror.ui.WebBrowserActivity")
@@ -3116,9 +3206,7 @@ class MirrorForegroundService : Service() {
             if (browser != null) {
                 try {
                     controller.getPrivilegedService()?.execCommand(buildExternalBrowserCommand(displayId, url, browser.componentFlat))
-                    /* ### 수정 시작 ### */
                     // Bypassed: Do not force stop the previous app to support warm start
-                    /* ### 수정 끝 ### */
                     currentApp = browser.componentFlat; currentWebUrl = url; isVideoApp = true
                     adaptiveBitrateManager.rebalanceBitrates(); return
                 } catch (_: Exception) {}
@@ -3175,16 +3263,12 @@ class MirrorForegroundService : Service() {
                 }
                 return
             }
-            /* ### 수정 시작 ### */
             // Bypassed: Do not force stop the previous app to support warm start
-            /* ### 수정 끝 ### */
             launchOwnActivity(activityClassName, url)
             currentApp = targetComponent; currentWebUrl = url; isVideoApp = false
             adaptiveBitrateManager.rebalanceBitrates()
         }
-        /* ### 수정 끝 ### */
 
-        /* ### 수정 시작 ### */
         suspend fun launchAppFromWebLauncher(pkgName: String, componentName: String? = null, forceDisplayId: Boolean = true) {
             if (pkgName.isBlank()) return
             val isAppInstalled = try {
@@ -3200,7 +3284,6 @@ class MirrorForegroundService : Service() {
                 controller.getPrivilegedService()?.wakeUpDisplay(displayId)
             }
         }
-        /* ### 수정 끝 ### */
 
         suspend fun restoreContentLocked(expectedGeneration: Long, expectedDisplayId: Int) {
             if (!isCurrentVd(expectedGeneration, expectedDisplayId)) return
@@ -3246,25 +3329,70 @@ class MirrorForegroundService : Service() {
         }
 
         private suspend fun executeReleaseInternal(forcePhysical: Boolean) {
-            Log.w(TAG, "[$name Pipeline] Release sequence triggered. ForcePhysical=$forcePhysical")
-            logInputDebugSnapshot("pipeline_release_begin:$name")
-            videoEncoder?.release(); videoEncoder = null
-            jpegEncoder?.release(); jpegEncoder = null
-            currentEncoderSurface = null
-            try { touchInjector?.detachController("pipeline_release") } catch (_: Exception) {}
-            touchInjector?.release();
-            isVideoApp = false
-            
-            if (displayId >= 0) {
-                cleanupDisplay(displayId)
-                if (forcePhysical) { runBinderSafe { controller.releaseVirtualDisplay() }; displayId = -1 }
-                else { try { runBinderSafe { controller.resizeDisplay(1, 1, 160) }; width = 1; height = 1 } catch (_: Exception) {} }
+            if (released.get()) return
+            if (!released.compareAndSet(false, true)) return
+
+            try {
+                withContext(Dispatchers.IO) {
+                    Log.i(TAG, "[CLEANUP_START] [$name Pipeline] Initiating hardware display shutdown. ForcePhysical=$forcePhysical")
+                    logInputDebugSnapshot("pipeline_release_begin:$name")
+                    
+                    Log.i(TAG, "[CLEANUP_STOP_LOOPS]")
+                    videoEncoder?.stop()
+                    jpegEncoder?.stop()
+                    
+                    Log.i(TAG, "[CLEANUP_CALLBACKS_UNREGISTERED]")
+                    videoEncoder?.unregisterCallbacks()
+                    jpegEncoder?.unregisterCallbacks()
+
+                    Log.i(TAG, "[CLEANUP_VD_RELEASED]")
+                    if (displayId >= 0) {
+                        cleanupDisplay(displayId)
+                        if (forcePhysical) { runBinderSafe { controller.releaseVirtualDisplay() }; displayId = -1 }
+                        else { try { runBinderSafe { controller.resizeDisplay(1, 1, 160) }; width = 1; height = 1 } catch (_: Exception) {} }
+                    }
+
+                    
+                    Log.i(TAG, "[CLEANUP_CODEC_STOPPED]")
+                    videoEncoder?.stopCodecOnly()
+                    
+                    Log.i(TAG, "[CLEANUP_CODEC_RELEASED]")
+                    videoEncoder?.releaseCodecOnly()
+                    jpegEncoder?.releaseReaderOnly()
+
+                    Log.i(TAG, "[CLEANUP_JOIN_ENCODERS]")
+                    videoEncoder?.join()
+                    jpegEncoder?.join()
+
+                    videoEncoder = null                    
+                    jpegEncoder = null                                        
+                    
+                    try {
+                        resizeJob?.cancel()
+                        resizeJob?.join()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to join resizeJob", e)
+                    }
+                    resizeJob = null
+                    
+                    Log.i(TAG, "[CLEANUP_SURFACE_RELEASED]")
+                    currentEncoderSurface = null
+                    
+                    try { touchInjector?.detachController("pipeline_release") } catch (_: Exception) {}
+                    touchInjector?.release()
+                    isVideoApp = false
+                    mirrorServer?.setKeyframeRequester(name) {}
+                    width = 0; height = 0; requestedWidth = 0; requestedHeight = 0
+                    currentApp = ""; currentWebUrl = null
+                    adaptiveBitrateManager.rebalanceBitrates()
+                    
+                    released.set(true)
+                    logInputDebugSnapshot("pipeline_release_end:$name")
+                    Log.i(TAG, "[CLEANUP_DONE] [$name Pipeline] Display shutdown completed.")
+                }
+            } finally {
+                releasing.set(false)
             }
-            mirrorServer?.setKeyframeRequester(name) {}
-            width = 0; height = 0; requestedWidth = 0; requestedHeight = 0
-            currentApp = ""; currentWebUrl = null
-            adaptiveBitrateManager.rebalanceBitrates()
-            logInputDebugSnapshot("pipeline_release_end:$name")
         }
     }
 }

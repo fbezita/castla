@@ -75,7 +75,7 @@ class PlayStoreScreenshotTest {
         }
     }
 
-    // Individual locale tests — 특정 언어만 돌리고 싶을 때
+    // Individual locale tests
     @Test fun screenshots_en() = captureLocale("en", Locale("en", "US"))
     @Test fun screenshots_ko() = captureLocale("ko", Locale("ko", "KR"))
     @Test fun screenshots_zhCN() = captureLocale("zh-CN", Locale("zh", "CN"))

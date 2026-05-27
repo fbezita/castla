@@ -428,7 +428,7 @@ function pointerAction(type: string): "down" | "move" | "up" {
   return "up";
 }
 
-function mapViewportPoint(
+export function mapViewportPoint(
   clientX: number,
   clientY: number,
   rect: DOMRect,

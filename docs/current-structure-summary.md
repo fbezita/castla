@@ -366,3 +366,24 @@ reduced again.
 If the next session starts from one sentence, it should be this:
 
 > The hardreset touch freeze was fixed by remapping browser pointer ids to Android-local pointer ids inside `TouchInjector`; the remaining touch protections worth keeping are the existing move dedup/throttle guard and the rebuild defer guard while touch is active.
+
+### 2026-05-27 IME & Service Cleanup Handoff
+
+The virtual IME lifecycle stabilization and native binder thread crashes are now fully resolved.
+
+#### 1) Virtual IME & Google Maps Search Overlay Dismiss Fix
+- **Sender Unification**: `tapOutside` is now sent solely from `gestureFocusListener` on the frontend (`App.svelte`) upon viewport touch `pointerdown` inside a user gesture context. Sending `tapOutside` during `on:blur` was removed to prevent duplicate triggers.
+- **Coordinates Reversion**: The `tapOutside` WebSocket protocol has been reverted to a plain, coordinate-less message `{ type: "ime", op: "tapOutside" }` to guarantee complete interface compatibility and prevent compile-time type mismatches on Android.
+- **Stale-Proof Focus Check & Back Fallback Nudge**:
+  - Tapping outside the search box immediately blurs the hidden `imeProxy` and sends `tapOutside`.
+  - On the Android backend, since the focus clears before the message is received, `AccessibilityFocusState` is queried to check if the editor had editable focus within the last `1.5 seconds` (`isEditableFocusedRecently(1500L)`).
+  - If so, it restores the user's default keyboard silently and injects `KEYCODE_BACK` (`input keyevent 4`) after a `250ms` delay, cleanly dismissing custom/translucent search overlays like Google Maps. Normal map scrolls do not trigger this.
+- **Svelte Compile Restored**: Corrected Vite production compile block inside `App.svelte` by resolving mismatched curly braces inside the `blur` event handler's `setTimeout` scope.
+
+#### 2) Synchronous Service onDestroy() Cleanup & Mutex Crash Prevention
+- **Synchronous Cleanup Execution**: Refactored the asynchronous thread dispatch inside `onDestroy()` into a **synchronous sequential cleanup** (`performCleanup("service_ondestroy")`). This guarantees all native resource tear-downs are completed before the Android system terminates (SIGKILL) the service process.
+- **Released Flag Recovery**: Encapsulated `executeReleaseInternal()` in a `try-finally` block ensuring that the `released` AtomicBoolean flag is reset back to `false` when release finishes. This prevents the pipeline from freezing in a stale released state upon hot reload, rebuild, or task restarts.
+- **Codec / Encoder Thread Join**: 
+  - Equipped `VideoEncoder` and `JpegEncoder` with delicate Atomic released flag boundaries and structured thread joins (`HandlerThread.join(2000)`).
+  - This ensures that native MediaCodec and ImageReader resources are only destroyed *after* the async binder loop/drain threads have fully exited, permanently eliminating the `FORTIFY pthread_mutex_lock on destroyed mutex` signal crashes.
+

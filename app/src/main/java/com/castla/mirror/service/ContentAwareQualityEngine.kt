@@ -9,7 +9,7 @@ import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * 콘텐츠 인지형 화질 최적화 및 런타임 파라미터 튜닝 엔진
+ * Content-aware image quality optimization and runtime parameter tuning engine
  */
 class ContentAwareQualityEngine(
     private val getGlobalBudget: () -> Int,
@@ -17,27 +17,27 @@ class ContentAwareQualityEngine(
 ) {
     private val TAG = "ContentAwareQualityEngine"
 
-    // 콘텐츠 프로파일 정의
+    // Define content profiles
     enum class ContentProfile {
-        TEXT_HEAVY,   // 지도, 내비게이션, 브라우저 (가독성/선명도 우선)
-        MOTION_HEAVY, // 유튜브, Netflix 등 OTT (부드러운 프레임/정크 억제 우선)
-        BALANCED      // 일반 UI, 설정 등
+        TEXT_HEAVY,   // Maps, navigators, browsers (prioritizes readability and sharpness)
+        MOTION_HEAVY, // YouTube, Netflix and other OTT apps (prioritizes smooth frames and jitter suppression)
+        BALANCED      // General UI, settings, etc.
     }
 
-    // 파이프라인별 동적 튜닝 파라미터 상태 관리 데이터 구조
+    // Dynamic tuning parameter state management data structure per pipeline
     data class TuningState(
         val pipelineName: String,
         var currentProfile: ContentProfile = ContentProfile.BALANCED,
         var currentBitrateFloor: Int = 1_500_000,
         var targetBitrate: Int = 2_500_000,
-        var qpOffset: Int = 0,               // 피드백 루프로 제어되는 자율 QP 오프셋
+        var qpOffset: Int = 0,               // Autonomous QP offset controlled by the feedback loop
         var consecutiveUnhealthyCount: Int = 0
     )
 
     private val tuningRegistry = ConcurrentHashMap<String, TuningState>()
 
     companion object {
-        // 주요 내비게이션 및 지도 앱 패키지 시그니처 맵
+        // Key navigation and map app package signature map
         private val TEXT_HEAVY_PACKAGES = setOf(
             "com.google.android.apps.maps",
             "com.skt.tmap.ku",
@@ -48,7 +48,7 @@ class ContentAwareQualityEngine(
     }
 
     /**
-     * [Task 1] 앱 패키지 기반 실시간 콘텐츠 프로파일 판별
+     * [Task 1] Real-time content profile determination based on app package name
      */
     fun resolveContentProfile(packageName: String, isVideoApp: Boolean): ContentProfile {
         val cleanPkg = packageName.substringBefore('/').trim()
@@ -60,12 +60,8 @@ class ContentAwareQualityEngine(
     }
 
     /**
-     * N개의 가상 디스플레이 구동 상황에 맞춰 콘텐츠 가중치 기반 대역폭을
-     * 물리적 하한선(Floor)과 잔여 파이 비율에 따라 유연하게 다중 분배합니다.
-     */
-    /**
-     * N개의 가상 디스플레이 구동 상황에 맞춰 콘텐츠 가중치 기반 대역폭을
-     * 물리적 하한선(Floor)과 잔여 파이 비율에 따라 유연하게 다중 분배합니다.
+     * Flexibly distributes content-weight-based bandwidth matching N virtual displays
+     * according to the physical lower limit (Floor) and the remaining budget ratio.
      */
     fun rebalanceMultiDisplayBitrates(
         activePipelines: List<MirrorForegroundService.MirroringPipeline>
@@ -73,35 +69,35 @@ class ContentAwareQualityEngine(
         val validPipelines = activePipelines.filter { it.width > 0 && it.height > 0 }
         if (validPipelines.isEmpty()) return
 
-        // N개 화면 상태에 따른 동적 프로파일 및 물리 하한선 매핑
+        // Dynamic profile and physical floor mapping based on N screen states
         val profileMap = validPipelines.associateWith {
             resolveContentProfile(it.currentApp, it.isVideoApp)
         }
 
         val floorMap = validPipelines.associateWith { pipeline ->
             when (profileMap[pipeline]) {
-                ContentProfile.TEXT_HEAVY -> 2_200_000 // 지도 가독성 하한선
+                ContentProfile.TEXT_HEAVY -> 2_200_000 // Map readability floor
                 ContentProfile.MOTION_HEAVY -> 1_200_000
                 ContentProfile.BALANCED -> 1_000_000
                 else -> 1_000_000
             }
         }
 
-        // N개 디스플레이 구동에 필요한 최소 대역폭 총합을 기준으로 안전 대역폭 확보
+        // Secure safe bandwidth based on the sum of minimum bandwidth required to drive N displays
         val requiredTotalFloor = floorMap.values.sum()
         val totalBudget = getGlobalBudget().coerceAtLeast(requiredTotalFloor).coerceAtLeast(3_000_000)
 
         val allocations = mutableMapOf<MirrorForegroundService.MirroringPipeline, Int>()
 
         // ─────────────────────────────────────────────────────────────────
-        // 1단계: [분기 제어] 단일 화면과 N개 다중 화면 상황에 맞는 비트레이트 분배 계산
+        // Step 1: [Branch Control] Calculate bitrate distribution for single or multi-screen
         // ─────────────────────────────────────────────────────────────────
         if (validPipelines.size == 1) {
             allocations[validPipelines.first()] = totalBudget
         } else {
             var remainingBudget = totalBudget
 
-            // 프로파일별 물리 하한선 우선 안심 배정
+            // Securely allocate the physical floor for each profile first
             validPipelines.forEach { pipeline ->
                 val floor = floorMap[pipeline] ?: 1_000_000
                 val state = tuningRegistry.getOrPut(pipeline.name) { TuningState(pipeline.name) }
@@ -113,25 +109,25 @@ class ContentAwareQualityEngine(
                 remainingBudget -= floor
             }
 
-            // 남은 잔여 버젯을 N개 앱 가중치 비율에 맞춰 분배
+            // Distribute remaining budget according to the weight ratios of N apps
             if (remainingBudget > 0) {
-                // 💡 [수정 구간 1] 컴파일러 안정성을 위해 else 브랜치 추가
+                // 💡 Add else branch for compiler safety
                 val totalWeight = validPipelines.sumOf { pipeline ->
                     when (profileMap[pipeline]) {
                         ContentProfile.MOTION_HEAVY -> 1.5
                         ContentProfile.TEXT_HEAVY -> 1.2
                         ContentProfile.BALANCED -> 1.0
-                        else -> 1.0 // ◀ 런타임 Null 방어용 else 추가
+                        else -> 1.0 // ◀ Add else for runtime null safety
                     }
                 }
 
                 validPipelines.forEach { pipeline ->
-                    // 💡 [수정 구간 2] 컴파일러 안정성을 위해 else 브랜치 추가
+                    // 💡 Add else branch for compiler safety
                     val weight = when (profileMap[pipeline]) {
                         ContentProfile.MOTION_HEAVY -> 1.5
                         ContentProfile.TEXT_HEAVY -> 1.2
                         ContentProfile.BALANCED -> 1.0
-                        else -> 1.0 // ◀ 런타임 Null 방어용 else 추가
+                        else -> 1.0 // ◀ Add else for runtime null safety
                     }
                     val bonus = (remainingBudget * (weight / totalWeight)).toInt()
                     allocations[pipeline] = allocations[pipeline]!! + bonus
@@ -139,7 +135,7 @@ class ContentAwareQualityEngine(
             }
         }
         // ─────────────────────────────────────────────────────────────────
-        // 2단계: [공통 단일 루프] 기존 applyEncoderParams 기능을 그대로 재사용하여 직분사
+        // Step 2: [Common Single Loop] Reuse existing applyEncoderParams to apply directly
         // ─────────────────────────────────────────────────────────────────
         validPipelines.forEach { pipeline ->
             val targetBitrate = allocations[pipeline] ?: totalBudget
@@ -148,7 +144,7 @@ class ContentAwareQualityEngine(
 
             state.targetBitrate = targetBitrate
 
-            // 💡 중복 코드를 완벽히 제거하고 기존 applyEncoderParams에 연산을 위임합니다.
+            // 💡 Eliminate duplicate code and delegate logic to applyEncoderParams
             applyEncoderParams(
                 pipeline = pipeline,
                 bitrate = targetBitrate,
@@ -159,8 +155,8 @@ class ContentAwareQualityEngine(
     }
 
     /**
-     * [Task 4] 5% 마이크로 피드백 루프 자율 동적 튜닝 루프 (Self-Tuning Loop)
-     * 주기적으로 수집된 프레임 유실률과 지연시간 추이를 기반으로 인코더를 파인튜닝합니다.
+     * [Task 4] 5% micro-feedback autonomous self-tuning loop
+     * Fine-tunes the encoder based on periodically collected frame loss rates and latency trends.
      */
     fun executeSelfTuningFeedback(
         pipelineName: String,
@@ -171,25 +167,25 @@ class ContentAwareQualityEngine(
         val state = tuningRegistry[pipelineName] ?: return
         val encoder = pipeline.videoEncoder ?: return
 
-        // 네트워크 안정성 및 디코더 백로그 결합 평가 지표
+        // Combined metrics for network health and decoder backlog
         val isUnhealthy = droppedFrames > 4 || avgDelayMs > 180.0
         val isExtremelyHealthy = droppedFrames == 0 && avgDelayMs < 70.0
 
         if (isUnhealthy) {
             state.consecutiveUnhealthyCount++
             if (state.consecutiveUnhealthyCount >= 2) {
-                // 혼잡 감지: 즉시 대역폭 5% 압착 조절 및 매크로블록 QP 상한 완화 (프레임 드롭 탈출 우선)
+                // Congestion detected: instantly compress bandwidth by 5% and ease macroblock QP upper limits (prioritize recovering from dropped frames)
                 state.targetBitrate = (state.targetBitrate * 0.95).toInt()
                     .coerceAtLeast(state.currentBitrateFloor)
 
-                // TEXT_HEAVY의 경우 가독성 방어를 위해 전역 예외 최소 하한값 상향 유지
+                // Keep global minimum floor higher for TEXT_HEAVY to protect readability
                 if (state.currentProfile == ContentProfile.TEXT_HEAVY) {
                     state.targetBitrate = state.targetBitrate.coerceAtLeast(2_000_000)
                 }
 
                 state.qpOffset = (state.qpOffset + 1).coerceAtMost(6)
 
-                // 💡 [수정 핵심] 새로 정의한 VideoEncoder.setQualityProfile 규격에 맞게 인자 매핑 호출
+                // 💡 Call parameters matching the newly defined VideoEncoder.setQualityProfile interface
                 encoder.setQualityProfile(
                     bps = state.targetBitrate,
                     isTextHeavy = (state.currentProfile == ContentProfile.TEXT_HEAVY),
@@ -201,13 +197,13 @@ class ContentAwareQualityEngine(
             }
         } else if (isExtremelyHealthy) {
             state.consecutiveUnhealthyCount = 0
-            // 고품질 여유 상태: 비트레이트를 5%씩 점진적 복구하고 QP 오프셋을 낮춰 디테일 선명도 회복
+            // Extremely healthy state: gradually restore bitrate by 5% and lower QP offset to recover detail and sharpness
             val maxBudgetCap = getGlobalBudget()
             if (state.targetBitrate < maxBudgetCap) {
                 state.targetBitrate = (state.targetBitrate * 1.05).toInt().coerceAtMost(maxBudgetCap)
                 state.qpOffset = (state.qpOffset - 1).coerceAtLeast(-4)
 
-                // 💡 [수정 핵심] 동일하게 VideoEncoder 인터페이스 규격에 맞춰 호출
+                // 💡 Call matching the VideoEncoder interface signature
                 encoder.setQualityProfile(
                     bps = state.targetBitrate,
                     isTextHeavy = (state.currentProfile == ContentProfile.TEXT_HEAVY),
@@ -227,20 +223,20 @@ class ContentAwareQualityEngine(
         profile: ContentProfile,
         qpOffset: Int
     ) {
-        // 1. 파이프라인 전역 비트레이트 상태 캐싱 업데이트
+        // 1. Update cached pipeline-wide bitrate state
         pipeline.currentBitrate = bitrate
         val encoder = pipeline.videoEncoder ?: return
 
-        // 2. 텍스트 선명도 모드 여부 판별
+        // 2. Determine if text-heavy mode is active
         val isTextHeavy = (profile == ContentProfile.TEXT_HEAVY)
 
-        // 💡 [수정 핵심] 하드코딩된 Bundle 조립을 걷어내고, 인자들을 encoder 함수로 정직하게 패스합니다.
+        // 💡 Remove hardcoded Bundle assembly and pass arguments directly to the encoder function
         encoder.setQualityProfile(
             bps = bitrate,
             isTextHeavy = isTextHeavy,
             qpOffset = qpOffset
         )
-        // 3. 브라우저 프론트엔드 수신단 대응 피드백 알림
+        // 3. Send feedback notification to the browser frontend receiver
         broadcastControlMessage(JSONObject().apply {
             put("type", "encoderProfileChanged")
             put("pane", pipeline.name)

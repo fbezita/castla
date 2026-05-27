@@ -101,7 +101,6 @@ export class StreamRuntime {
         const metadata = message as StreamMetadata;
         this.generations.update(metadata);
       }
-      /* ### 수정 시작 ### */
       // Handle remote touchReset commands sent from the server watchdog to break client-side pointer locks
       if (message.type === "touchReset") {
         const reason =
@@ -112,7 +111,6 @@ export class StreamRuntime {
         );
         this.touchStateListeners.forEach((listener) => listener(reason));
       }
-      /* ### 수정 끝 ### */
     });
   }
 
@@ -137,24 +135,24 @@ export class StreamRuntime {
   }
 
   resetTouchState(reason = "manual"): void {
-    console.info("[CastlaSession] touch_reset", {
-      reason,
-      sessionEpoch: this.sessionEpoch,
-      controlSessionId: this.controlSessionId,
-      appLaunchSequence: this.appLaunchSequence,
-    });
+    // console.info("[CastlaSession] touch_reset", {
+    //   reason,
+    //   sessionEpoch: this.sessionEpoch,
+    //   controlSessionId: this.controlSessionId,
+    //   appLaunchSequence: this.appLaunchSequence,
+    // });
     this.control.send({ type: "touchReset" });
     this.touchStateListeners.forEach((listener) => listener(reason));
   }
 
   resetTouchSession(reason: string): void {
     this.sessionEpoch += 1;
-    console.info("[CastlaSession] touch_session", {
-      reason,
-      sessionEpoch: this.sessionEpoch,
-      controlSessionId: this.controlSessionId,
-      appLaunchSequence: this.appLaunchSequence,
-    });
+    // console.info("[CastlaSession] touch_session", {
+    //   reason,
+    //   sessionEpoch: this.sessionEpoch,
+    //   controlSessionId: this.controlSessionId,
+    //   appLaunchSequence: this.appLaunchSequence,
+    // });
     this.resetTouchState(`session:${reason}`);
   }
 

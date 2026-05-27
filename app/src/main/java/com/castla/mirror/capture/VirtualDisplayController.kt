@@ -217,9 +217,7 @@ class VirtualDisplayController(private val displayName: String) {
             val action = event.actionMasked
             val pointerCount = event.pointerCount
             if (action != android.view.MotionEvent.ACTION_MOVE) {
-                /* ### 수정 시작 ### */
                 // Removed [InputTrace] inject_controller log for optimization
-                /* ### 수정 끝 ### */
             }
 
             // Wake up display instantly upon touch down to strictly guarantee wake state while preventing ACTION_MOVE bottleneck.
