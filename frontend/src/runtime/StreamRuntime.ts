@@ -336,8 +336,9 @@ export class StreamRuntime {
     if (!this.generations.acceptFrame(pane, frame)) {
       const now = performance.now();
       const lastRejectAt = this.lastFrameRejectAt.get(pane) ?? 0;
+      // Relax interval checking to 3000ms to tolerate low-fps/idle drop recovery loops
       const nextRejectCount =
-        now - lastRejectAt <= 500
+        now - lastRejectAt <= 3000
           ? (this.consecutiveFrameRejects.get(pane) ?? 0) + 1
           : 1;
       this.lastFrameRejectAt.set(pane, now);

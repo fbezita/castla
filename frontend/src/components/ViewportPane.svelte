@@ -26,10 +26,14 @@
   let lastRecoveryAt = 0;
   let recoveryAttempt = 0;
   let lastDecoderRecoveryAt = 0;
+  
+  // Reconnection tracking state
+  let isConnected = true;
 
   onMount(async () => {
     await tick();
     detachConnection = runtime.onConnectionChange(async (connected) => {
+      isConnected = connected;
       if (!connected) {
         return;
       }
@@ -184,8 +188,17 @@
     bind:this={canvas}
     id={`canvas-${viewport.pane}`}
   ></canvas>
+  
   {#if decoderError}
     <div class="decoder-error">{decoderError}</div>
+  {/if}
+  
+  <!-- Premium Glassmorphism Reconnection Overlay UI -->
+  {#if !isConnected && viewport.visible}
+    <div class="reconnect-overlay">
+      <div class="spinner"></div>
+      <p class="reconnect-text">연결이 일시적으로 중단되었습니다. 복구 중...</p>
+    </div>
   {/if}
 </section>
 
@@ -232,5 +245,66 @@
     color: white;
     font-size: 12px;
     z-index: 20;
+  }
+
+  .reconnect-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 25; /* Higher than decoderError but below app global modals */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(circle, rgba(12, 22, 34, 0.75) 0%, rgba(5, 7, 10, 0.9) 100%);
+    backdrop-filter: blur(8px) saturate(140%);
+    -webkit-backdrop-filter: blur(8px) saturate(140%);
+    gap: 20px;
+    pointer-events: none; /* Crucial: do not block touch/input pipeline */
+    animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  .spinner {
+    position: relative;
+    width: 54px;
+    height: 54px;
+    border-radius: 50%;
+    background: conic-gradient(transparent 10%, #00e5ff);
+    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 0);
+    mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 0);
+    animation: spin 1s linear infinite;
+  }
+
+  .spinner::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    box-shadow: 0 0 15px rgba(0, 229, 255, 0.45);
+    filter: blur(1px);
+  }
+
+  .reconnect-text {
+    color: #e2e8f0;
+    font-family: 'Outfit', 'Inter', -apple-system, sans-serif;
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+    text-align: center;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+    animation: pulseText 2s ease-in-out infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes pulseText {
+    0%, 100% { opacity: 0.85; }
+    50% { opacity: 0.55; }
   }
 </style>

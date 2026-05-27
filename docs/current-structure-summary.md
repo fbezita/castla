@@ -387,3 +387,28 @@ The virtual IME lifecycle stabilization and native binder thread crashes are now
   - Equipped `VideoEncoder` and `JpegEncoder` with delicate Atomic released flag boundaries and structured thread joins (`HandlerThread.join(2000)`).
   - This ensures that native MediaCodec and ImageReader resources are only destroyed *after* the async binder loop/drain threads have fully exited, permanently eliminating the `FORTIFY pthread_mutex_lock on destroyed mutex` signal crashes.
 
+### 2026-05-27 Hot Restart Stream Recovery & SSL Teardown Pass
+
+The hot restart stream recovery loop and embedded server SSL configurations have been streamlined.
+
+#### 1) Bypassing Keyframe Throttling on Reconnect
+- **Force Flag Propagation**: Modified `setKeyframeRequester` and `onKeyframeRequest` callbacks on Android to propagate a `force: Boolean` parameter.
+- **Instant Keyframe Guarantee**: When a new video socket opens (`video_open`), `force = true` is passed, bypassing the 1000ms keyframe request throttle (`now - lastKeyframeRequestTime < 1000L`). This ensures the newly connected browser decoder receives a keyframe instantly without being locked out by in-flight layout updates.
+
+#### 2) Relaxed Browser Frame Reject Interval
+- **Low-FPS Tolerance**: Relaxed the interval checking window (`consecutiveFrameRejects`) in `StreamRuntime.ts` from 500ms to 3000ms.
+- **Fail-Safe Pulling**: Even on static or low-fps screens, consecutive rejects now accumulate reliably without resetting, successfully pulling a fresh keyframe from Android within 3 seconds if the initial keyframe gets dropped.
+
+#### 3) Autonomic Session Hard Reset on Server Reboot
+- **Instance ID Change Tracking**: Integrated `instanceId` tracking inside `App.svelte` using the `"serverInit"` WebSocket message.
+- **Self-Healing Refocus**: When the user stops and restarts the Android service (generating a fresh UUID `instanceId`), the frontend automatically detects the reboot and triggers a clean `hardReset("server_reboot")`. This resets Svelte stores, cleans up the decoder session, and brings up the clean Logo/Launcher home screen automatically without requiring manual browser refreshes (F5).
+
+#### 4) Resolution-Preserving Hot Rebuild
+- **Requested Dimension Priority**: Fixed the hot restart resolution bug where `onBrowserConnected` would forcefully rebuild the VirtualDisplay as a 720x720 display because layout dimensions were empty during early boot.
+- **Aspect Ratio Alignment**: The early rebuild sequence now prioritizes client-requested sizes (`primary.requestedWidth/Height`) first, preventing unaligned viewports and display stretching on restart.
+
+#### 5) Streamlined SSL/HTTPS & Keystore Teardown
+- **Eliminated Keystore Overhead**: Completely removed all external cloud dynamic certificate download tasks (`triggerCertDownloadInBackground`) and static assets keystore loading (`castla.p12`).
+- **Plain WS Performance Boost**: Streamlined NanoHTTPD to run strictly as a lightweight Plain HTTP and WebSocket (WS) server on port 9090. This eliminates SSL encapsulation/decapsulation overhead, minimizes latency, and removes certificate expiration runtime crashes while benefiting from the secure context provided by the HTTPS static host.
+
+

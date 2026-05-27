@@ -127,7 +127,18 @@
     window.addEventListener("pointerdown", gestureFocusListener);
 
     // Focus or blur the hidden ime-proxy element based on Android IME focus session status
+    let lastInstanceId: string | null = null;
     const msgCleanup = runtime.control.onMessage((msg) => {
+      if (msg.type === "serverInit") {
+        const nextId = String((msg as any).instanceId ?? "unknown");
+        if (lastInstanceId && lastInstanceId !== nextId) {
+          console.warn("[CastlaSession] Server reboot detected! Forcing session hardReset.");
+          lastInstanceId = nextId;
+          hardReset("server_reboot");
+          return;
+        }
+        lastInstanceId = nextId;
+      }
       if (msg.type === "ime_active") {
         const active = (msg as any).focused === true;
 

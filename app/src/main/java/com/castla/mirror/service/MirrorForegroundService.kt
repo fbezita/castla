@@ -1394,8 +1394,12 @@ class MirrorForegroundService : Service() {
                 kotlinx.coroutines.delay(200)
                 isInitialRebuildTriggered = true
                 val primary = pipelines["primary"] ?: return@launch
-                val finalW = if (primary.width > 1) primary.width else primary.lastValidWidth.coerceAtLeast(720)
-                val finalH = if (primary.height > 1) primary.height else primary.lastValidHeight.coerceAtLeast(720)
+                val finalW = if (primary.width > 1) primary.width 
+                             else if (primary.requestedWidth > 1) primary.requestedWidth
+                             else primary.lastValidWidth.coerceAtLeast(720)
+                val finalH = if (primary.height > 1) primary.height 
+                             else if (primary.requestedHeight > 1) primary.requestedHeight
+                             else primary.lastValidHeight.coerceAtLeast(720)
                 paneVisibility["primary"] = true
                 primary.setTier(DisplayTier.ACTIVE, "browser_connected")
                 triggerPipelineRebuildWithPolicy(primary.name, finalW, finalH, force = true)
@@ -2371,7 +2375,7 @@ class MirrorForegroundService : Service() {
             if (displayId >= 0) {
                 runBinderSafe { controller.setSurface(null) }
             }
-            mirrorServer?.setKeyframeRequester(name) {}
+            mirrorServer?.setKeyframeRequester(name) { _ -> }
             mirrorServer?.pauseStream(name, displayId, width, height)
             adaptiveBitrateManager.rebalanceBitrates()
         }
@@ -2485,11 +2489,10 @@ class MirrorForegroundService : Service() {
                     }
                 }
                 
-                // Throttle keyframe requests to once per 1000ms and wake the display without
-                // injecting synthetic touches that can interfere with app gesture state.
-                mirrorServer?.setKeyframeRequester(name) {
+                // Throttle keyframe requests to once per 1000ms, bypassing if force is true.
+                mirrorServer?.setKeyframeRequester(name) { force ->
                     val now = System.currentTimeMillis()
-                    if (now - lastKeyframeRequestTime < 1000L) return@setKeyframeRequester
+                    if (!force && now - lastKeyframeRequestTime < 1000L) return@setKeyframeRequester
                     lastKeyframeRequestTime = now
                     serviceScope.launch {
                         try {
@@ -2525,11 +2528,9 @@ class MirrorForegroundService : Service() {
                     }
                 }
                 
-                // Throttle keyframe requests to once per 1000ms and avoid synthetic touch injection
-                // during decoder recovery to keep app gesture state stable.
-                mirrorServer?.setKeyframeRequester(name) {
+                mirrorServer?.setKeyframeRequester(name) { force ->
                     val now = System.currentTimeMillis()
-                    if (now - lastKeyframeRequestTime < 1000L) return@setKeyframeRequester
+                    if (!force && now - lastKeyframeRequestTime < 1000L) return@setKeyframeRequester
                     lastKeyframeRequestTime = now
                     serviceScope.launch {
                         try {
@@ -3381,7 +3382,7 @@ class MirrorForegroundService : Service() {
                     try { touchInjector?.detachController("pipeline_release") } catch (_: Exception) {}
                     touchInjector?.release()
                     isVideoApp = false
-                    mirrorServer?.setKeyframeRequester(name) {}
+                    mirrorServer?.setKeyframeRequester(name) { _ -> }
                     width = 0; height = 0; requestedWidth = 0; requestedHeight = 0
                     currentApp = ""; currentWebUrl = null
                     adaptiveBitrateManager.rebalanceBitrates()

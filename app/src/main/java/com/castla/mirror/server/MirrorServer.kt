@@ -53,89 +53,9 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         } catch (e: Exception) {
             Log.w(TAG, "Failed to configure NanoHTTPD log filter", e)
         }
-
-        // 🔐 [Improved 100% Automated SSL Loading Logic]
-        // Configure SSL context after asynchronously fetching certificates from the primary server (NAS, etc.)
-        configureSecureContext()
     }
 
     private var serverIp: String = "0.0.0.0"
-
-    /**
-     * Dynamic certificate file validation and SSL configuration application
-     */
-    private fun configureSecureContext() {
-        // Trigger certificate download in background
-        triggerCertDownloadInBackground()
-
-        // Load settings to check if WebCodecs hardware accelerated decoding is enabled
-        val settings = com.castla.mirror.ui.StreamSettings.load(context)
-
-        // ✅ Only enable SSL/HTTPS socket binding if WebCodecs option is enabled
-        if (settings.webCodecsEnabled) {
-            try {
-                val password = "castla123".toCharArray() 
-                val keyStore = KeyStore.getInstance("PKCS12")
-                val dynamicKeyStoreFile = File(context.filesDir, "dynamic_castla.p12")
-                
-                val keystoreStream: InputStream = if (dynamicKeyStoreFile.exists() && dynamicKeyStoreFile.length() > 0) {
-                    Log.i(TAG, "🔓 [Success] WebCodecs enabled: loaded public certificate")
-                    FileInputStream(dynamicKeyStoreFile)
-                } else {
-                    context.assets.open("castla.p12")
-                }
-
-                keystoreStream.use { stream -> keyStore.load(stream, password) }
-                val keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
-                keyManagerFactory.init(keyStore, password)
-
-                val sslContext = SSLContext.getInstance("TLS")
-                sslContext.init(keyManagerFactory.keyManagers, null, null)
-
-                // ✅ SSL socket binding (HTTPS)
-                makeSecure(sslContext.serverSocketFactory, null)
-                Log.i(TAG, "🚀 [HTTPS Mode] Let's Encrypt public SSL server started")
-                return
-            } catch (e: Exception) {
-                Log.e(TAG, "❌ SSL load failed, falling back to HTTP mode", e)
-            }
-        }
-
-        // 🌐 When WebCodecs is disabled, makeSecure() is bypassed so the server automatically runs in HTTP mode.
-        Log.w(TAG, "⚠️ [HTTP Mode] WebCodecs is disabled; running as a standard HTTP server.")
-    }
-    /**
-     * Function to download the latest .p12 certificate from a remote cloud or NAS server
-     */
-    fun triggerCertDownloadInBackground() {
-        Thread {
-            try {
-                val certUrl = "https://tesla.fbezita.com/certs/castla.p12"
-                val url = URL(certUrl)
-                val connection = url.openConnection() as HttpURLConnection
-                connection.connectTimeout = 5000
-                connection.readTimeout = 5000
-                connection.requestMethod = "GET"
-
-                if (connection.responseCode == HttpURLConnection.HTTP_OK) {
-                    val targetFile = File(context.filesDir, "dynamic_castla.p12")
-                    
-                    // Download and overwrite inside internal storage
-                    connection.inputStream.use { input ->
-                        FileOutputStream(targetFile).use { output ->
-                            input.copyTo(output)
-                        }
-                    }
-                    Log.i(TAG, "✨ [Certificate Sync Complete] Downloaded the latest SSL certificate from the server.")
-                } else {
-                    Log.w(TAG, "Server connection failed (HTTP code: ${connection.responseCode}). Keeping the existing file.")
-                }
-                connection.disconnect()
-            } catch (e: Exception) {
-                Log.w(TAG, "인증서 다운로드 중 네트워크 예외 발생 (인터넷 미연결 등): ${e.message}")
-            }
-        }.start()
-    }
 
     fun updateServerUrl(detectedIp: String) {
         serverIp = if (detectedIp.isNotEmpty()) detectedIp else "0.0.0.0"
@@ -196,8 +116,8 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     private var onAudioCodecListener: ((String) -> Unit)? = null
     private var onLayoutUpdateListener: ((org.json.JSONArray) -> Unit)? = null
     private var onTapOutsideListener: (() -> Unit)? = null
-    private var onPrimaryKeyframeRequest: (() -> Unit)? = null
-    private var onSecondaryKeyframeRequest: (() -> Unit)? = null
+    private var onPrimaryKeyframeRequest: ((Boolean) -> Unit)? = null
+    private var onSecondaryKeyframeRequest: ((Boolean) -> Unit)? = null
     private var networkCongestionListener: (() -> Unit)? = null
     
     // Web Launcher specific listeners
@@ -262,7 +182,7 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         onAudioCodecListener = listener
     }
 
-    fun setKeyframeRequester(channel: String = "primary", requester: () -> Unit) {
+    fun setKeyframeRequester(channel: String = "primary", requester: (Boolean) -> Unit) {
         if (channel == "secondary") onSecondaryKeyframeRequest = requester else onPrimaryKeyframeRequest = requester
     }
     
@@ -736,7 +656,8 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
                 deadSockets.forEach { unregisterVideoSocket(channel, it) }
             }
         }
-        if (channel == "secondary") onSecondaryKeyframeRequest?.invoke() else onPrimaryKeyframeRequest?.invoke()
+        val force = source == "video_open" || source.contains("socket") || source.contains("reconnect")
+        if (channel == "secondary") onSecondaryKeyframeRequest?.invoke(force) else onPrimaryKeyframeRequest?.invoke(force)
     }
     
     fun onNetworkCongestion() {
