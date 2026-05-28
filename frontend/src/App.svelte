@@ -33,6 +33,7 @@
 
   let lastCanvasTap: { pane: string; x: number; y: number } | null = null;
   let suppressImeFocusUntil = 0;
+  let audioStarted = false;
 
   function createRuntimeGraph(): void {
     runtime = new StreamRuntime(location.host);
@@ -45,6 +46,11 @@
     // touch events. The IME tapOutside message must not inject another tap;
     // it is only a focus/IME cleanup signal.
     const gestureFocusListener = (event: PointerEvent): void => {
+      if (!audioStarted) {
+        audioStarted = true;
+        console.log("[Audio] First user gesture detected. Unmuting high-fidelity audio stream...");
+        runtime.startAudio();
+      }
       const target = event.target as HTMLElement | null;
       const paneElement = target?.closest<HTMLElement>(".viewport-pane");
       const imeProxy = document.querySelector(

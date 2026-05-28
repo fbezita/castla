@@ -21,6 +21,11 @@ import com.castla.mirror.diagnostics.MirrorDiagnostics
 import com.castla.mirror.utils.AppCategoryClassifier
 import com.castla.mirror.ott.OttCatalog
 
+import com.castla.mirror.network.DeviceRelayDnsManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+
 data class TouchEvent(
     val action: String,
     val x: Float,
@@ -31,9 +36,45 @@ data class TouchEvent(
     val receivedAtElapsedMs: Long = 0L
 )
 
-class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
+class MirrorServer(private val context: Context, hostname: String? = null) : NanoWSD(hostname, DEFAULT_PORT) {
 
     val instanceId: String = java.util.UUID.randomUUID().toString()
+
+    private var serverIp: String = "0.0.0.0"
+
+    private val primaryVideoSockets = mutableSetOf<VideoStreamSocket>()
+    private val secondaryVideoSockets = mutableSetOf<VideoStreamSocket>()
+    private val controlSockets = mutableSetOf<ControlSocket>()
+    private val audioSockets = mutableSetOf<AudioStreamSocket>()
+    private val controlSocketLock = Any()
+    private val activeControlSessionId = AtomicInteger(0)
+    private val browserConnectionEpoch = AtomicInteger(0)
+    private val keyframeRequestCount = AtomicInteger(0)
+    private val lastSpsPpsReplayLogAtByChannel = ConcurrentHashMap<String, Long>()
+    @Volatile private var activeControlSocket: ControlSocket? = null
+    private val staleControlLogTimes = ConcurrentHashMap<Int, Long>()
+    @Volatile private var lastSkippedBroadcastLogAt = 0L
+    private val layoutUpdateReceivedCount = AtomicInteger(0)
+    private val layoutUpdateRelayedCount = AtomicInteger(0)
+    private val layoutUpdateDedupedCount = AtomicInteger(0)
+    @Volatile private var lastLayoutUpdateSignature: String = ""
+
+    private val dnsScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val relayDnsManager = DeviceRelayDnsManager(
+        context = context,
+        scope = dnsScope,
+        relayUpdateToken = CASTLA_CERT_TOKEN
+    )
+
+
+    companion object {
+        private const val TAG = "MirrorServer"
+        const val DEFAULT_PORT = 9090
+
+        private const val CERT_API_URL = "https://car.fbezita.com/api/castla/cert"
+        private const val CASTLA_CERT_TOKEN = "5f8c7d3a91e24f0bb4d7e6c2a8f91b6d"
+        private const val CERT_PASSWORD = "castla4864"
+    }    
 
     init {
         // [Legacy Code] Filtering NanoHTTPD socket closed exception logs
@@ -53,34 +94,187 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
         } catch (e: Exception) {
             Log.w(TAG, "Failed to configure NanoHTTPD log filter", e)
         }
+
+        Log.i(TAG, "MirrorServer init: relay DNS publish will wait for WebCodecs mode and a valid serverIp")
+
+        configureSecureContext()
+        publishRelayDnsIfReady("init_after_secure_context")
     }
 
-    private var serverIp: String = "0.0.0.0"
+    private fun configureSecureContext() {
+        // Trigger certificate download in background
+        downloadCertIfAvailableBlocking(context)
 
+        // Load settings to check if WebCodecs hardware accelerated decoding is enabled
+        val settings = com.castla.mirror.ui.StreamSettings.load(context)
+
+        // ✅ Only enable SSL/HTTPS socket binding if WebCodecs option is enabled
+        if (settings.webCodecsEnabled) {
+            try {
+                val password = CERT_PASSWORD.toCharArray()
+                val keyStore = KeyStore.getInstance("PKCS12")
+                val dynamicKeyStoreFile = File(context.filesDir, "dynamic_castla.p12")
+                
+                val isDynamic = dynamicKeyStoreFile.exists() && dynamicKeyStoreFile.length() > 0
+                val keystoreStream: InputStream = if (isDynamic) {
+                    Log.i(TAG, "🔓 [Success] SSL Cert source: dynamic_castla.p12 loaded from local app storage")
+                    FileInputStream(dynamicKeyStoreFile)
+                } else {
+                    Log.i(TAG, "🔓 [Success] SSL Cert source: castla.p12 loaded from bundled assets fallback")
+                    context.assets.open("castla.p12")
+                }
+
+                keystoreStream.use { stream -> keyStore.load(stream, password) }
+                val keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
+                keyManagerFactory.init(keyStore, password)
+
+                val sslContext = SSLContext.getInstance("TLS")
+                sslContext.init(keyManagerFactory.keyManagers, null, null)
+
+                // ✅ SSL socket binding (HTTPS) with advanced decorator logging
+                makeSecure(sslContext.serverSocketFactory, null)
+                val originalFactory = serverSocketFactory
+                if (originalFactory != null) {
+                    val loggingFactory = object : fi.iki.elonen.NanoHTTPD.ServerSocketFactory {
+                        override fun create(): java.net.ServerSocket {
+                            val originalServerSocket = originalFactory.create()
+                            return LoggingServerSocket(originalServerSocket)
+                        }
+                    }
+                    serverSocketFactory = loggingFactory
+                }
+                Log.i(TAG, "🚀 HTTPS server started")
+                Log.i(TAG, "🌐 Public URL = ${relayDnsManager.getPublicEntryUrl()}")
+                Log.i(TAG, "🔗 Device relay URL = ${relayDnsManager.getDeviceRelayUrl()}")
+                return
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ SSL load failed, falling back to HTTP mode", e)
+            }
+        }
+
+        // 🌐 When WebCodecs is disabled, makeSecure() is bypassed so the server automatically runs in HTTP mode.
+        Log.w(TAG, "⚠️ [HTTP Mode] WebCodecs is disabled; running as a standard HTTP server.")
+    }
+
+    /**
+     * Function to download the latest .p12 certificate from a remote cloud or NAS server
+     */
+    fun downloadCertIfAvailableBlocking(context: Context): Boolean {
+        val targetFile = File(context.filesDir, "dynamic_castla.p12")
+        val tempFile = File(context.filesDir, "dynamic_castla.p12.tmp")
+
+        return try {
+            val connection = (URL(CERT_API_URL).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 5000
+                readTimeout = 5000
+                requestMethod = "GET"
+                setRequestProperty("Authorization", "Bearer $CASTLA_CERT_TOKEN")
+            }
+
+            try {
+                when (connection.responseCode) {
+                    HttpURLConnection.HTTP_OK -> {
+                        connection.inputStream.use { input ->
+                            FileOutputStream(tempFile).use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+
+                        if (!tempFile.exists() || tempFile.length() <= 0L) {
+                            tempFile.delete()
+                            Log.w(TAG, "[Certificate Sync] Empty p12 downloaded. Keeping existing certificate.")
+                            return false
+                        }
+
+                        val password = CERT_PASSWORD.toCharArray()
+                        val keyStore = KeyStore.getInstance("PKCS12")
+                        FileInputStream(tempFile).use { stream ->
+                            keyStore.load(stream, password)
+                        }
+
+                        if (targetFile.exists()) {
+                            targetFile.delete()
+                        }
+
+                        if (!tempFile.renameTo(targetFile)) {
+                            tempFile.copyTo(targetFile, overwrite = true)
+                            tempFile.delete()
+                        }
+
+                        Log.i(TAG, "[Certificate Sync] Downloaded and verified castla.p12 from authenticated API.")
+                        true
+                    }
+
+                    HttpURLConnection.HTTP_UNAUTHORIZED,
+                    HttpURLConnection.HTTP_FORBIDDEN -> {
+                        Log.e(TAG, "[Certificate Sync] Unauthorized. Check CASTLA_CERT_TOKEN.")
+                        false
+                    }
+
+                    HttpURLConnection.HTTP_NOT_FOUND -> {
+                        Log.e(TAG, "[Certificate Sync] Certificate API returned 404. Check server cert path.")
+                        false
+                    }
+
+                    else -> {
+                        Log.w(TAG, "[Certificate Sync] Server returned HTTP ${connection.responseCode}. Keeping existing certificate.")
+                        false
+                    }
+                }
+            } finally {
+                connection.disconnect()
+            }
+        } catch (e: Exception) {
+            tempFile.delete()
+            Log.w(TAG, "[Certificate Sync] Network or validation error. Keeping existing certificate.", e)
+            false
+        }
+    }
+    
     fun updateServerUrl(detectedIp: String) {
-        serverIp = if (detectedIp.isNotEmpty()) detectedIp else "0.0.0.0"
+        val nextIp = detectedIp.takeIf { it.isNotBlank() } ?: "0.0.0.0"
+        if (serverIp == nextIp) {
+            Log.i(TAG, "updateServerUrl unchanged: serverIp=$serverIp")
+        } else {
+            Log.i(TAG, "updateServerUrl: serverIp $serverIp -> $nextIp")
+            serverIp = nextIp
+        }
+        publishRelayDnsIfReady("updateServerUrl")
     }
 
-    companion object {
-        private const val TAG = "MirrorServer"
-        const val DEFAULT_PORT = 9090
-    }
+    private fun publishRelayDnsIfReady(reason: String) {
+        val settings = com.castla.mirror.ui.StreamSettings.load(context)
 
-    private val primaryVideoSockets = mutableSetOf<VideoStreamSocket>()
-    private val secondaryVideoSockets = mutableSetOf<VideoStreamSocket>()
-    private val controlSockets = mutableSetOf<ControlSocket>()
-    private val audioSockets = mutableSetOf<AudioStreamSocket>()
-    private val controlSocketLock = Any()
-    private val activeControlSessionId = AtomicInteger(0)
-    private val browserConnectionEpoch = AtomicInteger(0)
-    private val keyframeRequestCount = AtomicInteger(0)
-    @Volatile private var activeControlSocket: ControlSocket? = null
-    private val staleControlLogTimes = ConcurrentHashMap<Int, Long>()
-    @Volatile private var lastSkippedBroadcastLogAt = 0L
-    private val layoutUpdateReceivedCount = AtomicInteger(0)
-    private val layoutUpdateRelayedCount = AtomicInteger(0)
-    private val layoutUpdateDedupedCount = AtomicInteger(0)
-    @Volatile private var lastLayoutUpdateSignature: String = ""
+        if (!settings.webCodecsEnabled) {
+            Log.i(TAG, "Relay DNS publish skipped: WebCodecs is disabled (reason=$reason)")
+            return
+        }
+
+        if (serverIp.isBlank() || serverIp == "0.0.0.0") {
+            Log.i(TAG, "Relay DNS publish skipped: serverIp is not ready ($serverIp, reason=$reason)")
+            return
+        }
+
+        Log.i(
+            TAG,
+            "Publishing relay DNS: ip=$serverIp public=${relayDnsManager.getPublicEntryUrl()} relay=${relayDnsManager.getDeviceRelayUrl()} reason=$reason"
+        )
+
+        relayDnsManager.publishCurrentIpIfNeeded(
+            force = true,
+            preferredIp = serverIp
+        ) { success, publicUrl, relayUrl, ip ->
+            Log.i(
+                TAG,
+                "Relay publish result success=$success publicUrl=$publicUrl relayUrl=$relayUrl ip=$ip reason=$reason"
+            )
+
+            if (success) {
+                Log.i(TAG, "🚀 Public URL = $publicUrl")
+                Log.i(TAG, "🔗 Device relay URL = $relayUrl")
+            }
+        }
+    }
 
     // NanoWSD WebSocket.send() writes to a socket OutputStream. Never call it
     // from the Android main thread, otherwise StrictMode can throw
@@ -636,28 +830,48 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
     }
     
     fun onKeyframeRequest(channel: String = "primary", source: String = "unknown") {
+        val normalized = normalizeChannel(channel)
         val requestCount = keyframeRequestCount.incrementAndGet()
-        // Replay cached SPS/PPS parameters to all active video stream sockets on keyframe request.
-        // This ensures the decoder recovering from a browser hot-refresh gets the required parameters.
-        val codecMode = if (channel == "secondary") secondaryCodecMode else primaryCodecMode
+
+        // Keep the original functional behavior: every keyframe request still reaches
+        // the encoder. Only throttle noisy SPS/PPS replay logs.
+        val codecMode = if (normalized == "secondary") secondaryCodecMode else primaryCodecMode
         if (!codecMode.equals("mjpeg", ignoreCase = true)) {
-            val cached = if (channel == "secondary") cachedSecondarySpsPps else cachedPrimarySpsPps
+            val cached = if (normalized == "secondary") cachedSecondarySpsPps else cachedPrimarySpsPps
             cached?.let { spsPps ->
-                val sockets = if (channel == "secondary") secondaryVideoSockets else primaryVideoSockets
+                val sockets = if (normalized == "secondary") secondaryVideoSockets else primaryVideoSockets
                 val deadSockets = mutableListOf<VideoStreamSocket>()
+                var replayed = 0
+
                 for (socket in sockets) {
                     try {
                         socket.sendBinary(spsPps)
-                        Log.i(TAG, "Replayed cached SPS/PPS to $channel video socket on keyframe request")
+                        replayed++
                     } catch (e: Exception) {
                         deadSockets.add(socket)
                     }
                 }
-                deadSockets.forEach { unregisterVideoSocket(channel, it) }
+
+                deadSockets.forEach { unregisterVideoSocket(normalized, it) }
+
+                val now = android.os.SystemClock.elapsedRealtime()
+                val lastLogAt = lastSpsPpsReplayLogAtByChannel[normalized] ?: 0L
+                if (replayed > 0 && now - lastLogAt >= 3000L) {
+                    lastSpsPpsReplayLogAtByChannel[normalized] = now
+                    Log.i(
+                        TAG,
+                        "Replayed cached SPS/PPS to $replayed $normalized video socket(s) on keyframe request source=$source count=$requestCount"
+                    )
+                }
             }
         }
+
         val force = source == "video_open" || source.contains("socket") || source.contains("reconnect")
-        if (channel == "secondary") onSecondaryKeyframeRequest?.invoke(force) else onPrimaryKeyframeRequest?.invoke(force)
+        if (normalized == "secondary") {
+            onSecondaryKeyframeRequest?.invoke(force)
+        } else {
+            onPrimaryKeyframeRequest?.invoke(force)
+        }
     }
     
     fun onNetworkCongestion() {
@@ -804,15 +1018,29 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
 
 
     override fun openWebSocket(handshake: IHTTPSession): WebSocket {
+        Log.i(TAG, "openWebSocket uri=${handshake.uri} params=${handshake.parameters}")
+
         val uri = handshake.uri
         val channel = handshake.parameters["channel"]?.firstOrNull()
             ?: if (uri.contains("secondary")) "secondary" else "primary"
 
         return when {
-            uri.startsWith("/ws/video") -> VideoStreamSocket(handshake, this, channel)
-            uri.startsWith("/ws/control") -> ControlSocket(handshake, this)
-            uri.startsWith("/ws/audio") -> AudioStreamSocket(handshake, this)
-            else -> VideoStreamSocket(handshake, this, channel)
+            uri.startsWith("/ws/video") -> {
+                Log.i(TAG, "Creating VideoStreamSocket channel=$channel")
+                VideoStreamSocket(handshake, this, channel)
+            }
+            uri.startsWith("/ws/control") -> {
+                Log.i(TAG, "Creating ControlSocket")
+                ControlSocket(handshake, this)
+            }
+            uri.startsWith("/ws/audio") -> {
+                Log.i(TAG, "Creating AudioStreamSocket")
+                AudioStreamSocket(handshake, this)
+            }
+            else -> {
+                Log.w(TAG, "Unknown websocket uri=$uri. Falling back to video channel=$channel")
+                VideoStreamSocket(handshake, this, channel)
+            }
         }
     }
 
@@ -933,4 +1161,29 @@ class MirrorServer(private val context: Context) : NanoWSD(DEFAULT_PORT) {
             response
         }
     }
+
+}
+
+private class LoggingServerSocket(private val delegate: java.net.ServerSocket) : java.net.ServerSocket() {
+    override fun accept(): java.net.Socket {
+        android.util.Log.i("MirrorServer", "Waiting for connection...")
+        val socket = delegate.accept()
+        android.util.Log.i("MirrorServer", "Client connected: ${socket.inetAddress}:${socket.port}")
+        if (socket is javax.net.ssl.SSLSocket) {
+            android.util.Log.i("MirrorServer", "Starting TLS handshake...")
+        }
+        return socket
+    }
+
+    override fun bind(endpoint: java.net.SocketAddress?) = delegate.bind(endpoint)
+    override fun bind(endpoint: java.net.SocketAddress?, backlog: Int) = delegate.bind(endpoint, backlog)
+    override fun getInetAddress(): java.net.InetAddress = delegate.inetAddress
+    override fun getLocalPort(): Int = delegate.localPort
+    override fun getLocalSocketAddress(): java.net.SocketAddress = delegate.localSocketAddress
+    override fun close() = delegate.close()
+    override fun isClosed(): Boolean = delegate.isClosed
+    override fun getReuseAddress(): Boolean = delegate.reuseAddress
+    override fun setReuseAddress(on: Boolean) { delegate.reuseAddress = on }
+    override fun setSoTimeout(timeout: Int) { delegate.soTimeout = timeout }
+    override fun getSoTimeout(): Int = delegate.soTimeout
 }

@@ -19,14 +19,14 @@
   let detachConnection: (() => void) | undefined;
   let detachSession: (() => void) | undefined;
   let decoderError = "";
-  let backend: "jmuxer" | "webcodecs" = "jmuxer";
+  let backend: "jmuxer" | "webcodecs" = "webcodecs";
   let currentGeneration = -1;
   let decoderSession = 0;
   let stallTimer = 0;
   let lastRecoveryAt = 0;
   let recoveryAttempt = 0;
   let lastDecoderRecoveryAt = 0;
-  
+
   // Reconnection tracking state
   let isConnected = true;
 
@@ -41,7 +41,7 @@
     });
     detachSession = runtime.onSessionChange(async () => {
       currentGeneration = -1;
-      await refreshDecoder();
+      runtime.requestKeyframe(viewport.pane);
     });
     stallTimer = window.setInterval(() => {
       void maybeRecoverStalledPane();
@@ -61,7 +61,7 @@
     currentGeneration = viewport.generation;
     recoveryAttempt = 0;
     if (decoder) {
-      refreshDecoder();
+      runtime.requestKeyframe(viewport.pane);
     }
   }
 
@@ -82,10 +82,10 @@
   async function initializeDecoder(session: number) {
     try {
       decoderError = "";
-      const wantsWebCodecs =
-        new URLSearchParams(location.search).get("decoder") === "webcodecs";
+      const decoderParam = new URLSearchParams(location.search).get("decoder");
+      const forcesJmuxer = decoderParam === "jmuxer" || decoderParam === "mse";
       const canUseWebCodecs =
-        wantsWebCodecs && window.isSecureContext && "VideoDecoder" in window;
+        !forcesJmuxer && window.isSecureContext && "VideoDecoder" in window;
       let nextDecoder: DecoderBackend | undefined;
       if (canUseWebCodecs) {
         backend = "webcodecs";
@@ -105,6 +105,10 @@
         await nextDecoder.initialize(video);
         runtime.setCodec(viewport.pane, "h264", "High");
       }
+
+      console.warn(
+        `[CastlaDecoder:${viewport.pane}] backend=${backend} secure=${window.isSecureContext} videoDecoder=${typeof VideoDecoder} decoderParam=${new URLSearchParams(location.search).get("decoder")}`,
+      );
 
       if (session !== decoderSession) {
         nextDecoder.destroy();
@@ -188,11 +192,11 @@
     bind:this={canvas}
     id={`canvas-${viewport.pane}`}
   ></canvas>
-  
+
   {#if decoderError}
     <div class="decoder-error">{decoderError}</div>
   {/if}
-  
+
   <!-- Premium Glassmorphism Reconnection Overlay UI -->
   {#if !isConnected && viewport.visible}
     <div class="reconnect-overlay">
@@ -255,7 +259,11 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    background: radial-gradient(circle, rgba(12, 22, 34, 0.75) 0%, rgba(5, 7, 10, 0.9) 100%);
+    background: radial-gradient(
+      circle,
+      rgba(12, 22, 34, 0.75) 0%,
+      rgba(5, 7, 10, 0.9) 100%
+    );
     backdrop-filter: blur(8px) saturate(140%);
     -webkit-backdrop-filter: blur(8px) saturate(140%);
     gap: 20px;
@@ -269,13 +277,17 @@
     height: 54px;
     border-radius: 50%;
     background: conic-gradient(transparent 10%, #00e5ff);
-    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 0);
+    -webkit-mask: radial-gradient(
+      farthest-side,
+      transparent calc(100% - 4px),
+      #000 0
+    );
     mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 0);
     animation: spin 1s linear infinite;
   }
 
   .spinner::after {
-    content: '';
+    content: "";
     position: absolute;
     inset: 0;
     border-radius: 50%;
@@ -285,7 +297,11 @@
 
   .reconnect-text {
     color: #e2e8f0;
-    font-family: 'Outfit', 'Inter', -apple-system, sans-serif;
+    font-family:
+      "Outfit",
+      "Inter",
+      -apple-system,
+      sans-serif;
     font-size: 14px;
     font-weight: 500;
     letter-spacing: 0.5px;
@@ -295,16 +311,27 @@
   }
 
   @keyframes spin {
-    to { transform: rotate(360deg); }
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   @keyframes fadeIn {
-    from { opacity: 0; }
-    to { opacity: 1; }
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
   }
 
   @keyframes pulseText {
-    0%, 100% { opacity: 0.85; }
-    50% { opacity: 0.55; }
+    0%,
+    100% {
+      opacity: 0.85;
+    }
+    50% {
+      opacity: 0.55;
+    }
   }
 </style>

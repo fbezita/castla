@@ -1,4 +1,4 @@
-import type { EncodedFrame, PaneId } from '../protocol';
+import type { EncodedFrame, PaneId } from "../protocol";
 
 export class VideoTransport {
   private socket?: WebSocket;
@@ -8,7 +8,7 @@ export class VideoTransport {
     private readonly host: string,
     private readonly pane: PaneId,
     private readonly onFrame: (frame: EncodedFrame) => void,
-    private readonly onReconnect: () => void
+    private readonly onReconnect: () => void,
   ) {}
 
   connect(): void {
@@ -17,14 +17,44 @@ export class VideoTransport {
       previous.onclose = null;
       previous.close();
     }
-    const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-    this.socket = new WebSocket(`${protocol}://${this.host}/ws/video?channel=${encodeURIComponent(this.pane)}`);
-    this.socket.binaryType = 'arraybuffer';
+    // Enforce plain ws:// connection to bypass redundant secure handshake overheads
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const url = `${protocol}://${this.host}/ws/video?channel=${encodeURIComponent(this.pane)}`;
+    this.socket = new WebSocket(url);
+
+    // console.warn("[VideoWS] opening", {
+    //   url,
+    //   href: window.location.href,
+    //   host: this.host,
+    //   protocol,
+    //   pane: this.pane,
+    // });
+
+    this.socket.binaryType = "arraybuffer";
+
+    this.socket.onopen = () => {
+      // console.warn("[VideoWS] open", url);
+    };
+
+    this.socket.onerror = (event) => {
+      // console.warn("[VideoWS] error", url, event);
+    };
+
+    this.socket.onclose = (event) => {
+      // console.warn("[VideoWS] close", {
+      //   url,
+      //   code: event.code,
+      //   reason: event.reason,
+      //   wasClean: event.wasClean,
+      // });
+      this.scheduleReconnect();
+    };
+
     this.socket.onmessage = (event) => {
-      if (!(event.data instanceof ArrayBuffer) || event.data.byteLength < 8) return;
+      if (!(event.data instanceof ArrayBuffer) || event.data.byteLength < 8)
+        return;
       this.onFrame(parseFrame(event.data));
     };
-    this.socket.onclose = () => this.scheduleReconnect();
   }
 
   close(): void {
@@ -57,6 +87,6 @@ function parseFrame(data: ArrayBuffer): EncodedFrame {
     serverTimestampMs: view.getUint32(3, true),
     payload: data.slice(8),
     keyFrame: flags === 0x01,
-    config: flags === 0x02
+    config: flags === 0x02,
   };
 }

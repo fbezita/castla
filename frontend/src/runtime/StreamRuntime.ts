@@ -1,11 +1,13 @@
 import type { EncodedFrame, PaneId, StreamMetadata } from "../protocol";
 import { ControlTransport } from "../transport/ControlTransport";
 import { VideoTransport } from "../transport/VideoTransport";
+import { AudioPlayer } from "../transport/AudioPlayer";
 import { GenerationTracker } from "./GenerationTracker";
 import { StreamHealthMonitor } from "./StreamHealthMonitor";
 
 export class StreamRuntime {
   readonly control: ControlTransport;
+  readonly audio = new AudioPlayer();
   readonly generations = new GenerationTracker();
   readonly health = new StreamHealthMonitor();
   private serverInstanceId = "unknown";
@@ -119,6 +121,7 @@ export class StreamRuntime {
     this.controlMessageCleanup = undefined;
     this.started = false;
     this.control.close();
+    this.audio.stop();
     this.videoTransports.forEach((transport) => transport.close());
     this.videoTransports.clear();
     this.frameListeners.clear();
@@ -396,6 +399,12 @@ export class StreamRuntime {
     this.sessionListeners.forEach((listener) =>
       listener(this.sessionEpoch, reason),
     );
+  }
+
+  startAudio(): void {
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const wsUrl = `${protocol}://${this.host}/ws/audio`;
+    void this.audio.startFromUserGesture(wsUrl);
   }
 }
 

@@ -28,7 +28,8 @@ export class ControlTransport {
     this.socketId = ControlTransport.nextSocketId++;
     this.readyForControl = false;
     this.controlSessionId = 0;
-    const protocol = location.protocol === "https:" ? "wss" : "ws";
+    // Enforce plain ws:// connection to bypass redundant secure handshake overheads
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     this.socket = new WebSocket(`${protocol}://${this.host}/ws/control`);
     this.socket.onopen = () => {
       this.lastPongAt = performance.now();

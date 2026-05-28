@@ -38,7 +38,6 @@ class TunTcpRelay(
         private const val WINDOW = 65535
     }
 
-    private val tunIn = FileInputStream(tunFd)
     private val tunOut = FileOutputStream(tunFd)
     private val writeLock = Any()
     private val relayThreadCounter = AtomicInteger(0)
@@ -66,33 +65,35 @@ class TunTcpRelay(
 
     private val sessions = ConcurrentHashMap<Key, Session>()
 
-    /** Main loop — call from a dedicated thread. */
-    fun run() {
-        Log.i(TAG, "TCP relay started → 127.0.0.1:$localPort")
-        val buf = ByteArray(32767)
-        try {
-            while (running) {
-                val n = tunIn.read(buf)
-                if (n < 0) break
-                if (n >= 40) {
-                    try {
-                        processPacket(buf, n)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Packet error: ${e.message}")
-                    }
-                }
+    /** Inject packet from single reader thread */
+    fun injectPacket(buf: ByteArray, len: Int) {
+        if (!running) return
+        if (len >= 40) {
+            try {
+                processPacket(buf, len)
+            } catch (e: Exception) {
+                Log.w(TAG, "Packet injection error: ${e.message}")
             }
-        } catch (e: Exception) {
-            if (running) Log.w(TAG, "TUN read error", e)
         }
-        Log.i(TAG, "TCP relay stopped (sessions=${sessions.size})")
-        cleanup()
+    }
+
+    /** Thread-safe raw packet transmission through single writer lock */
+    fun writePacket(pkt: ByteArray) {
+        synchronized(writeLock) {
+            try {
+                tunOut.write(pkt)
+                tunOut.flush()
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to write raw packet to TUN: ${e.message}")
+            }
+        }
     }
 
     fun stop() {
         running = false
         relayExecutor.shutdownNow()
         cleanup()
+        try { tunOut.close() } catch (_: Exception) {}
     }
 
     private fun cleanup() {
@@ -136,7 +137,12 @@ class TunTcpRelay(
                     try { it.localSocket?.close() } catch (_: Exception) {}
                 }
             }
-            flags and SYN != 0 && flags and ACK == 0 -> handleSyn(key, seq)
+            // ### 수정 시작 ###
+            flags and SYN != 0 && flags and ACK == 0 -> {
+                Log.i(TAG, "TCP SYN received: src=${ipStr(srcIp)}:$srcPort dst=${ipStr(dstIp)}:$dstPort flags=${flagStr(flags)}")
+                handleSyn(key, seq)
+            }
+            // ### 수정 끝 ###
             flags and FIN != 0 -> handleFin(key, seq)
             flags and ACK != 0 -> {
                 val s = sessions[key] ?: return
@@ -158,6 +164,9 @@ class TunTcpRelay(
         }
 
         try {
+            // ### 수정 시작 ###
+            Log.i(TAG, "TCP SYN received: src=${ipStr(key.srcIp)}:${key.srcPort} dst=${ipStr(key.dstIp)}:${key.dstPort} ➔ redirecting to 127.0.0.1:$localPort")
+            // ### 수정 끝 ###
             val sock = Socket("127.0.0.1", localPort)
             sock.tcpNoDelay = true
 

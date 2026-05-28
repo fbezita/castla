@@ -212,3 +212,54 @@ graph TD
    - **물리적 리부트 지침**: 보조화면(Secondary) 비디오 스트림을 메인(Primary)으로 승격시킬 때는, 단순히 뷰포트 해상도만 변경해서는 안 됩니다. 반드시 `promoteSecondaryToPrimary` 비동기 흐름 내에서 `initDecoder(true)`를 강제 기동하여 기존 Primary의 낡은 프레임 페이서 시간축과 시퀀스 트래커를 물리적으로 완전히 파괴한 후 새로 리부트해야 `dropped` 드롭 지옥과 `RECOVERING` 갭 고착 에러를 막을 수 있습니다.
    - **SPS/PPS 캐시 이식**: 디코더를 리부트할 때, 우측 보조화면의 `window.secondaryDecoder` 및 `window._lastSecondarySpsPps` 캐시 바이트를 신형 Primary 디코더로 즉각 수동 이식해주어 `WAITING_SPS_PPS` 데드락 상태를 우회해야 합니다.
    - **투명도 쉴드 및 SSOT 정밀 정렬**: 승격 과도기(200~500ms) 동안 이전 앱의 잔상이 남지 않도록 승격과 동시에 `canvas.style.opacity = '0'` 쉴드를 장착하십시오. 그 후 첫 프레임 수신 감지 시점(`checkReady`)에 `state.left = window._promotedApp; state.right = null;` 반응형 상태를 일치 대입하고, 캔버스를 `opacity = '1'`로 우아하게 복원하십시오. 이 수명 주기를 깨뜨리면 UI 상태 엔진과 실제 비디오 디코더 캔버스가 어긋나 전체 시스템이 오작동하게 됩니다.
+
+
+---
+
+## 2026-05-28 Relay HTTPS / WebCodecs 안정화 업데이트
+
+### 핵심 변경 사항
+- Cloudflare 기반 relay hostname 자동 등록 기능 추가
+- `deviceId → c-<deviceId>.castla.fbezita.com` 구조로 동적 relay endpoint 생성
+- `MirrorServer.serverIp` 기반 실제 LAN IP publish 로직 적용
+- HTTPS + WebCodecs secure context 경로 안정화
+- HTTP(JMuxer) / HTTPS(WebCodecs) 모드 분리 검증 완료
+
+### Relay DNS 흐름
+1. MirrorServer 시작
+2. `updateServerUrl()` 에서 실제 LAN IP 확보
+3. `DeviceRelayDnsManager.publishCurrentIpIfNeeded()` 호출
+4. backend relay API 등록
+5. Cloudflare DNS 레코드 동적 생성
+6. `https://c-<device>.castla.fbezita.com:9090` 접속 가능
+
+### 중요 수정 사항
+- 초기에는 `10.0.0.50` 같은 VPN/TUN 주소가 publish 되는 문제가 있었음
+- 실제 미러 서버 접근 가능한 LAN IP (`192.168.x.x`) 기반으로 수정
+- `serverIp == "0.0.0.0"` 상태에서는 publish skip guard 추가
+- WebCodecs 비활성 상태에서는 relay publish 자체 skip 처리
+
+### 확인 완료
+- `nslookup c-<device>.castla.fbezita.com`
+  → 실제 LAN IP 정상 반환
+- `curl -vk https://c-<device>.castla.fbezita.com:9090`
+  → HTTPS 서버 응답 정상 확인
+- WebCodecs backend 정상 활성화 로그 확인:
+  `backend=webcodecs secure=true`
+
+### 추가 디버깅 결론
+- `WebSocket is closed before the connection is established`
+  초기 1회 경고는 실제 구조적 장애가 아니라:
+  - 이전 세션
+  - 중복 HTTP/HTTPS 탭
+  - stale socket close
+  등에 의해 발생 가능한 비치명적 초기 abort로 판단
+- 실제 스트림 연결 및 미러링은 정상 동작 확인
+
+### 현재 권장 운영 방식
+- WebCodecs ON:
+  - `https://castla.fbezita.com`
+- WebCodecs OFF:
+  - `http://<LAN-IP>:9090`
+- HTTP/HTTPS 혼합 동시 접속 테스트는 피할 것
+

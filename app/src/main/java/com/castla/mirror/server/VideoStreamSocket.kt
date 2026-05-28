@@ -61,6 +61,7 @@ class VideoStreamSocket(
     }, "WS-Video-Send").apply { isDaemon = true }
 
     override fun onOpen() {
+        Log.i(TAG, "onOpen channel=$channel")
         server.registerVideoSocket(channel, this)
         sendThread.start()
     }

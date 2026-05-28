@@ -11,6 +11,7 @@ import android.content.IntentFilter
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -79,6 +80,10 @@ class MainActivity : AppCompatActivity() {
         private const val SHIZUKU_APK_FILENAME = "shizuku.apk"
         private const val USB_CONFIG_PREFS = "usb_config_advisory"
         private const val KEY_SUPPRESS_USB_CONFIG_WARNING = "suppress_warning"
+        private const val CASTLA_DOMAIN = "castla.fbezita.com"
+        // User-facing stable entrypoint. The backend redirects this to the active
+        // per-device relay URL: https://c-{deviceId}.castla.fbezita.com:9090
+        private const val CASTLA_PUBLIC_URL = "https://castla.fbezita.com"
     }
 
     private var isStreaming by mutableStateOf(false)
@@ -154,6 +159,18 @@ class MainActivity : AppCompatActivity() {
         startMirrorService()
     }
 
+    private val vpnPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK) {
+            Log.i(TAG, "VPN permission GRANTED")
+            startMirrorService()
+        } else {
+            Log.w(TAG, "VPN permission DENIED")
+            clearPreparingState("VPN permission denied. WebCodecs mode requires VPN.", stopServiceIfNeeded = true)
+        }
+    }
+
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { _ ->
@@ -199,9 +216,8 @@ class MainActivity : AppCompatActivity() {
                         is NetworkState.Connected -> {
                             currentIp = state.ip
                             updateServerUrl()
-                            if (isStreaming && streamSettings.webCodecsEnabled && currentIp != "0.0.0.0") {
-                                registerPhoneIpWithSignalingServer(getUserId(), currentIp)
-                            }
+                            // WebCodecs now uses the public Castla entrypoint. The backend
+                            // redirects to the active per-device local relay.
                         }
                         is NetworkState.Disconnected -> {
                             currentIp = "0.0.0.0"
@@ -646,43 +662,11 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    private fun getUserId(): String {
-        return android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: "default_user"
-    }
-
-    private fun registerPhoneIpWithSignalingServer(userId: String, localIp: String) {
-        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                val url = java.net.URL("https://car.fbezita.com/api/castla/register-ip")
-                val conn = url.openConnection() as java.net.HttpURLConnection
-                conn.requestMethod = "POST"
-                conn.setRequestProperty("Content-Type", "application/json; utf-8")
-                conn.setRequestProperty("Accept", "application/json")
-                conn.doOutput = true
-                
-                val jsonInputString = "{\"userId\": \"$userId\", \"ip\": \"$localIp\"}"
-                conn.outputStream.use { os ->
-                    val input = jsonInputString.toByteArray(charset("utf-8"))
-                    os.write(input, 0, input.size)
-                }
-
-                val responseCode = conn.responseCode
-                Log.i(TAG, "Signaling server registration response code: $responseCode")
-                if (responseCode == 200 || responseCode == 201) {
-                    val response = conn.inputStream.bufferedReader().use { it.readText() }
-                    Log.i(TAG, "Signaling server registration success: $response")
-                } else {
-                    Log.w(TAG, "Signaling server registration failed with code $responseCode")
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error registering IP with signaling server", e)
-            }
-        }
-    }
-
     private fun updateServerUrl() {
         if (streamSettings.webCodecsEnabled) {
-            serverUrl = "https://car.fbezita.com/castla"
+            // Final Castla UX: users always type only this public entry URL.
+            // The manager backend redirects it to the active per-device local relay.
+            serverUrl = CASTLA_PUBLIC_URL
             return
         }
 
@@ -695,6 +679,8 @@ class MainActivity : AppCompatActivity() {
             else -> "0.0.0.0"
         }
 
+        // Non-WebCodecs mode intentionally remains direct HTTP to the phone IP.
+        // Browser will then fall back to MSE/JMuxer because secure context is not available.
         serverUrl = "http://${ip}:${MirrorServer.DEFAULT_PORT}"
     }
 
@@ -1166,6 +1152,12 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // WebCodecs no longer requires Castla VPN mode.
+        // HTTPS is provided by https://castla.fbezita.com, and the backend redirects
+        // to the per-device local relay hostname.
+        // Keep VpnService code in the project for legacy experiments, but do not request
+        // VPN permission in the normal start flow.
+
         startMirrorService()
     }
 
@@ -1202,40 +1194,54 @@ class MainActivity : AppCompatActivity() {
 
     private fun launchMirrorService() {
         val intent = Intent(this, MirrorForegroundService::class.java).apply {
-            putExtra(MirrorForegroundService.EXTRA_MAX_RESOLUTION,
-                if (streamSettings.isAutoResolution) 0 else streamSettings.maxResolution.maxHeight)
+            putExtra(
+                MirrorForegroundService.EXTRA_MAX_RESOLUTION,
+                if (streamSettings.isAutoResolution) 0 else streamSettings.maxResolution.maxHeight
+            )
             putExtra(MirrorForegroundService.EXTRA_FPS, streamSettings.fps) // FPS_AUTO is already 0
             putExtra(MirrorForegroundService.EXTRA_AUDIO, streamSettings.audioEnabled)
             putExtra(MirrorForegroundService.EXTRA_MIRRORING_MODE, streamSettings.mirroringMode.name)
             putExtra(MirrorForegroundService.EXTRA_TARGET_PACKAGE, streamSettings.targetAppPackage)
 
             putExtra("EXTRA_HOST_IP", currentIp)
+            putExtra("EXTRA_CASTLA_DOMAIN", CASTLA_DOMAIN)
         }
+
+        // if (streamSettings.webCodecsEnabled && !streamSettings.vpnEnabled) {
+        //     Log.w(TAG, "WebCodecs is enabled but VPN domain mode is disabled. Browser access may fail without castla.fbezita.com DNS override.")
+        //     Toast.makeText(
+        //         this,
+        //         "WebCodecs requires VPN domain mode for castla.fbezita.com",
+        //         Toast.LENGTH_LONG
+        //     ).show()
+        // }
+
+        startMirrorServiceDirect(
+            intent = intent,
+            reason = if (streamSettings.webCodecsEnabled) "webcodecs_public_entry" else "plain_mse"
+        )
+    }
+
+    private fun startMirrorServiceDirect(intent: Intent, reason: String) {
+        isPreparing = true
+
         startForegroundService(intent)
+
         if (serviceBound || bindRequested) {
             try { unbindService(serviceConnection) } catch (_: IllegalArgumentException) {}
             serviceBound = false
             bindRequested = false
         }
 
-        if (streamSettings.webCodecsEnabled) {
-            val cellularIp = getCellularIpv4Address()
-            val hotspotIp = currentIp
-            val ip = when {
-                hotspotIp != "0.0.0.0" && hotspotIp.isNotEmpty() -> hotspotIp
-                cellularIp != null && !cellularIp.startsWith("10.") -> cellularIp
-                else -> "0.0.0.0"
-            }
-            if (ip != "0.0.0.0") {
-                registerPhoneIpWithSignalingServer(getUserId(), ip)
-            }
-        }
         bindRequested = bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
         isStreaming = true
         refreshHotspotStatus()
-        Log.i(TAG, "isStreaming=true, isPreparing=$isPreparing (service started)")
+        Log.i(TAG, "isStreaming=true, isPreparing=$isPreparing (service started, reason=$reason)")
 
-        // 서비스 바인드 + 서버 실행 확인 후 최소 2초 뒤에 preparing 해제
+        waitForServiceReady()
+    }
+
+    private fun waitForServiceReady() {
         lifecycleScope.launch {
             val startTime = System.currentTimeMillis()
             while (mirrorService?.isRunning != true && isPreparing) {

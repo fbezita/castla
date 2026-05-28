@@ -412,3 +412,52 @@ The hot restart stream recovery loop and embedded server SSL configurations have
 - **Plain WS Performance Boost**: Streamlined NanoHTTPD to run strictly as a lightweight Plain HTTP and WebSocket (WS) server on port 9090. This eliminates SSL encapsulation/decapsulation overhead, minimizes latency, and removes certificate expiration runtime crashes while benefiting from the secure context provided by the HTTPS static host.
 
 
+---
+
+## 2026-05-28 Relay HTTPS / WebCodecs 안정화 업데이트
+
+### 핵심 변경 사항
+- Cloudflare 기반 relay hostname 자동 등록 기능 추가
+- `deviceId → c-<deviceId>.castla.fbezita.com` 구조로 동적 relay endpoint 생성
+- `MirrorServer.serverIp` 기반 실제 LAN IP publish 로직 적용
+- HTTPS + WebCodecs secure context 경로 안정화
+- HTTP(JMuxer) / HTTPS(WebCodecs) 모드 분리 검증 완료
+
+### Relay DNS 흐름
+1. MirrorServer 시작
+2. `updateServerUrl()` 에서 실제 LAN IP 확보
+3. `DeviceRelayDnsManager.publishCurrentIpIfNeeded()` 호출
+4. backend relay API 등록
+5. Cloudflare DNS 레코드 동적 생성
+6. `https://c-<device>.castla.fbezita.com:9090` 접속 가능
+
+### 중요 수정 사항
+- 초기에는 `10.0.0.50` 같은 VPN/TUN 주소가 publish 되는 문제가 있었음
+- 실제 미러 서버 접근 가능한 LAN IP (`192.168.x.x`) 기반으로 수정
+- `serverIp == "0.0.0.0"` 상태에서는 publish skip guard 추가
+- WebCodecs 비활성 상태에서는 relay publish 자체 skip 처리
+
+### 확인 완료
+- `nslookup c-<device>.castla.fbezita.com`
+  → 실제 LAN IP 정상 반환
+- `curl -vk https://c-<device>.castla.fbezita.com:9090`
+  → HTTPS 서버 응답 정상 확인
+- WebCodecs backend 정상 활성화 로그 확인:
+  `backend=webcodecs secure=true`
+
+### 추가 디버깅 결론
+- `WebSocket is closed before the connection is established`
+  초기 1회 경고는 실제 구조적 장애가 아니라:
+  - 이전 세션
+  - 중복 HTTP/HTTPS 탭
+  - stale socket close
+  등에 의해 발생 가능한 비치명적 초기 abort로 판단
+- 실제 스트림 연결 및 미러링은 정상 동작 확인
+
+### 현재 권장 운영 방식
+- WebCodecs ON:
+  - `https://castla.fbezita.com`
+- WebCodecs OFF:
+  - `http://<LAN-IP>:9090`
+- HTTP/HTTPS 혼합 동시 접속 테스트는 피할 것
+

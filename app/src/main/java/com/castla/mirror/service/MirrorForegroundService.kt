@@ -307,6 +307,7 @@ class MirrorForegroundService : Service() {
 
     private var reconnectJob: Job? = null
     private var pendingAudioEnabled = false
+    @Volatile private var pendingHostIp: String = "0.0.0.0"
     private var deferredAudioStartJob: Job? = null
     private var screenOffReceiver: BroadcastReceiver? = null
     private var vdKeepAliveJob: Job? = null
@@ -890,7 +891,7 @@ class MirrorForegroundService : Service() {
 
         ServiceCompat.startForeground(this, NOTIFICATION_ID, createNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         
-        val hostIp = intent?.getStringExtra("EXTRA_HOST_IP") ?: "0.0.0.0"
+        pendingHostIp = intent?.getStringExtra("EXTRA_HOST_IP") ?: "0.0.0.0"
 
         val rawMaxHeight = intent!!.getIntExtra(EXTRA_MAX_RESOLUTION, 0)
         val rawFps = intent.getIntExtra(EXTRA_FPS, 0)
@@ -910,9 +911,14 @@ class MirrorForegroundService : Service() {
         // if (mirrorServer == null) {
         //     mirrorServer = MirrorServer(applicationContext)
         // }
-        mirrorServer?.updateServerUrl(hostIp)        
+//        mirrorServer?.updateServerUrl(hostIp)
 
-        serviceScope.launch(Dispatchers.Default) { startPipeline(pendingAudioEnabled) }
+        serviceScope.launch(Dispatchers.IO) {
+            startPipeline(
+                audioEnabled = pendingAudioEnabled,
+                hostIp = pendingHostIp
+            )
+        }
         return START_NOT_STICKY
     }
 
@@ -1102,6 +1108,13 @@ class MirrorForegroundService : Service() {
         try { mirrorServer?.stop() } catch (_: Exception) {}
         mirrorServer = null
 
+        try {
+            stopService(Intent(this, com.castla.mirror.network.CastlaVpnService::class.java))
+            Log.i(TAG, "Stopped CastlaVpnService successfully during cleanup")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to stop CastlaVpnService: ${e.message}")
+        }
+
         kotlinx.coroutines.runBlocking {
             Log.i(TAG, "[Cleanup] Sequentially releasing virtual hardware display devices inside blocking coroutine.")
             pipelines.values.reversed().forEach { pipeline -> 
@@ -1139,7 +1152,7 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    private fun startPipeline(audioEnabled: Boolean) {
+    private fun startPipeline(audioEnabled: Boolean, hostIp: String) {
         try {
             terminalReason.set(null)
             MirrorDiagnostics.onSessionStart()
@@ -1188,6 +1201,7 @@ class MirrorForegroundService : Service() {
             pipelines.values.forEach { it.touchInjector = TouchInjector(width, height) }
 
             mirrorServer = MirrorServer(this).also { server ->
+                server.updateServerUrl(hostIp)
                 server.setNetworkCongestionListener { adaptiveBitrateManager.onNetworkCongestion() }
                 server.setTouchListener { event ->
                     val targetPipeline = pipelines[event.pane]
