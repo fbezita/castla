@@ -552,10 +552,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshTextInputPermissions() {
-        isImeEnabled = com.castla.mirror.input.TextInputSettingsHelper.isImeEnabled(this)
-        isImeSelected = com.castla.mirror.input.TextInputSettingsHelper.isImeSelected(this)
-        isAccessibilityEnabled = com.castla.mirror.input.TextInputSettingsHelper.isAccessibilityEnabled(this)
-        isCastlaImeActive = com.castla.mirror.input.ImeSwitchManager.isCastlaImeActive(this)
+        isImeEnabled = runCatching {
+            com.castla.mirror.input.TextInputSettingsHelper.isImeEnabled(this)
+        }.getOrDefault(true)
+
+        isImeSelected = runCatching {
+            com.castla.mirror.input.TextInputSettingsHelper.isImeSelected(this)
+        }.getOrDefault(false)
+
+        isAccessibilityEnabled = runCatching {
+            com.castla.mirror.input.TextInputSettingsHelper.isAccessibilityEnabled(this)
+        }.getOrDefault(false)
+
+        isCastlaImeActive = runCatching {
+            com.castla.mirror.input.ImeSwitchManager.isCastlaImeActive(this)
+        }.getOrDefault(false)
     }
 
     private fun refreshShizukuBatteryOptimizationState() {

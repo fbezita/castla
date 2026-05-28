@@ -15,12 +15,19 @@ object TextInputSettingsHelper {
      * Checks if the Castla IME is enabled in the system's enabled input methods list.
      */
     fun isImeEnabled(context: Context): Boolean {
-        val targetImeName = "${context.packageName}/com.castla.mirror.input.CastlaImeService"
-        val enabledInputMethods = Settings.Secure.getString(
-            context.contentResolver,
-            Settings.Secure.ENABLED_INPUT_METHODS
-        ) ?: return false
-        return enabledInputMethods.contains(targetImeName)
+        return try {
+            val targetImeName =
+                "${context.packageName}/com.castla.mirror.input.CastlaImeService"
+
+            val enabledInputMethods = Settings.Secure.getString(
+                context.contentResolver,
+                Settings.Secure.ENABLED_INPUT_METHODS
+            ) ?: return false
+
+            enabledInputMethods.contains(targetImeName)
+        } catch (e: SecurityException) {
+            true // 상태 확인 불가 시 optimistic fallback
+        }
     }
 
     /**
