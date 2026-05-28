@@ -3,6 +3,7 @@ package com.castla.mirror.input
 import android.content.Context
 import android.content.Intent
 import android.provider.Settings
+import android.util.Log
 import android.view.inputmethod.InputMethodManager
 
 /**
@@ -10,6 +11,30 @@ import android.view.inputmethod.InputMethodManager
  * CastlaImeService (virtual keyboard) and CastlaFocusAccessibilityService (focus tracking).
  */
 object TextInputSettingsHelper {
+
+    private const val TAG = "TextInputSettingsHelper"
+
+    private fun getSecureString(context: Context, key: String, fallback: String = ""): String {
+        return try {
+            Settings.Secure.getString(context.contentResolver, key) ?: fallback
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Cannot read secure setting: $key", e)
+            fallback
+        }
+    }
+
+    private fun getDefaultInputMethod(context: Context): String {
+        return getSecureString(context, Settings.Secure.DEFAULT_INPUT_METHOD)
+    }
+
+    private fun getEnabledInputMethods(context: Context): String {
+        return getSecureString(context, Settings.Secure.ENABLED_INPUT_METHODS)
+    }
+
+    private fun getEnabledAccessibilityServices(context: Context): String {
+        return getSecureString(context, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+    }
+
 
     /**
      * Checks if the Castla IME is enabled in the system's enabled input methods list.
@@ -19,10 +44,7 @@ object TextInputSettingsHelper {
             val targetImeName =
                 "${context.packageName}/com.castla.mirror.input.CastlaImeService"
 
-            val enabledInputMethods = Settings.Secure.getString(
-                context.contentResolver,
-                Settings.Secure.ENABLED_INPUT_METHODS
-            ) ?: return false
+            val enabledInputMethods = getEnabledInputMethods(context).takeIf { it.isNotEmpty() } ?: return false
 
             enabledInputMethods.contains(targetImeName)
         } catch (e: SecurityException) {
@@ -34,10 +56,7 @@ object TextInputSettingsHelper {
      * Checks if the Castla IME is currently selected as the active input method.
      */
     fun isImeSelected(context: Context): Boolean {
-        val defaultInputMethod = Settings.Secure.getString(
-            context.contentResolver,
-            Settings.Secure.DEFAULT_INPUT_METHOD
-        ) ?: return false
+        val defaultInputMethod = getDefaultInputMethod(context).takeIf { it.isNotEmpty() } ?: return false
         return defaultInputMethod.startsWith(context.packageName)
     }
 
@@ -46,10 +65,7 @@ object TextInputSettingsHelper {
      */
     fun isAccessibilityEnabled(context: Context): Boolean {
         val targetAccessibilityName = "${context.packageName}/com.castla.mirror.input.CastlaFocusAccessibilityService"
-        val enabledServices = Settings.Secure.getString(
-            context.contentResolver,
-            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        ) ?: return false
+        val enabledServices = getEnabledAccessibilityServices(context).takeIf { it.isNotEmpty() } ?: return false
         return enabledServices.contains(targetAccessibilityName)
     }
 
@@ -105,10 +121,7 @@ object TextInputSettingsHelper {
      * Works silently via Shizuku shell commands.
      */
     fun saveCurrentImeAndSwitchToCastla(context: Context, execCommand: (String) -> String?) {
-        val currentIme = Settings.Secure.getString(
-            context.contentResolver,
-            Settings.Secure.DEFAULT_INPUT_METHOD
-        ) ?: ""
+        val currentIme = getDefaultInputMethod(context)
         val targetIme = "${context.packageName}/com.castla.mirror.input.CastlaImeService"
 
         // If Castla IME is already the default, do not overwrite the saved previous IME
@@ -124,10 +137,7 @@ object TextInputSettingsHelper {
             .apply()
 
         // Enable Castla IME if not already enabled in system settings
-        val enabledMethods = Settings.Secure.getString(
-            context.contentResolver,
-            Settings.Secure.ENABLED_INPUT_METHODS
-        ) ?: ""
+        val enabledMethods = getEnabledInputMethods(context)
         if (!enabledMethods.contains(targetIme)) {
             val newEnabled = if (enabledMethods.isEmpty()) targetIme else "$enabledMethods:$targetIme"
             execCommand("settings put secure enabled_input_methods $newEnabled")
@@ -167,20 +177,14 @@ object TextInputSettingsHelper {
         val targetIme = "${context.packageName}/com.castla.mirror.input.CastlaImeService"
 
         // Also check if Castla is currently set as the default IME, which implies we should restore even if preference was cleared
-        val currentIme = Settings.Secure.getString(
-            context.contentResolver,
-            Settings.Secure.DEFAULT_INPUT_METHOD
-        ) ?: ""
+        val currentIme = getDefaultInputMethod(context)
 
         if (restorePending || currentIme == targetIme) {
             var previousIme = prefs.getString(KEY_PREVIOUS_IME, null)
 
             // Dynamic fallback: If saved IME is lost, find a suitable enabled system keyboard as fallback
             if (previousIme == null || previousIme.isEmpty() || previousIme == targetIme) {
-                val enabledMethods = Settings.Secure.getString(
-                    context.contentResolver,
-                    Settings.Secure.ENABLED_INPUT_METHODS
-                ) ?: ""
+                val enabledMethods = getEnabledInputMethods(context)
                 
                 // Parse enabled methods and pick the first non-Castla method
                 previousIme = enabledMethods.split(":")
@@ -205,10 +209,7 @@ object TextInputSettingsHelper {
      */
     fun enableAccessibilityServiceSilently(context: Context, execCommand: (String) -> String?) {
         val targetService = "${context.packageName}/com.castla.mirror.input.CastlaFocusAccessibilityService"
-        val enabledServices = Settings.Secure.getString(
-            context.contentResolver,
-            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        ) ?: ""
+        val enabledServices = getEnabledAccessibilityServices(context)
 
         val services = enabledServices.split(":")
             .filter { it.isNotBlank() && it != "null" }
@@ -226,10 +227,7 @@ object TextInputSettingsHelper {
      */
     fun disableAccessibilityServiceSilently(context: Context, execCommand: (String) -> String?) {
         val targetService = "${context.packageName}/com.castla.mirror.input.CastlaFocusAccessibilityService"
-        val enabledServices = Settings.Secure.getString(
-            context.contentResolver,
-            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        ) ?: ""
+        val enabledServices = getEnabledAccessibilityServices(context)
 
         val services = enabledServices.split(":")
             .filter { it.isNotBlank() && it != "null" && it != targetService }

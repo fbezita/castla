@@ -40,7 +40,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
 
     val instanceId: String = java.util.UUID.randomUUID().toString()
 
-    private var serverIp: String = "0.0.0.0"
+    private var relayPublishIp: String = "0.0.0.0"    
 
     private val primaryVideoSockets = mutableSetOf<VideoStreamSocket>()
     private val secondaryVideoSockets = mutableSetOf<VideoStreamSocket>()
@@ -230,17 +230,19 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             false
         }
     }
-    
-    fun updateServerUrl(detectedIp: String) {
-        val nextIp = detectedIp.takeIf { it.isNotBlank() } ?: "0.0.0.0"
-        if (serverIp == nextIp) {
-            Log.i(TAG, "updateServerUrl unchanged: serverIp=$serverIp")
+
+    fun setRelayPublishIp(ip: String) {
+        val nextIp = ip.takeIf { it.isNotBlank() } ?: "0.0.0.0"
+
+        if (relayPublishIp == nextIp) {
+            Log.i(TAG, "setRelayPublishIp unchanged: relayPublishIp=$relayPublishIp")
         } else {
-            Log.i(TAG, "updateServerUrl: serverIp $serverIp -> $nextIp")
-            serverIp = nextIp
+            Log.i(TAG, "setRelayPublishIp: relayPublishIp $relayPublishIp -> $nextIp")
+            relayPublishIp = nextIp
         }
-        publishRelayDnsIfReady("updateServerUrl")
-    }
+
+        publishRelayDnsIfReady("setRelayPublishIp")
+    } 
 
     private fun publishRelayDnsIfReady(reason: String) {
         val settings = com.castla.mirror.ui.StreamSettings.load(context)
@@ -250,19 +252,19 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             return
         }
 
-        if (serverIp.isBlank() || serverIp == "0.0.0.0") {
-            Log.i(TAG, "Relay DNS publish skipped: serverIp is not ready ($serverIp, reason=$reason)")
+        if (relayPublishIp.isBlank() || relayPublishIp == "0.0.0.0") {
+            Log.i(TAG, "Relay DNS publish skipped: relayPublishIp is not ready ($relayPublishIp, reason=$reason)")
             return
         }
 
         Log.i(
             TAG,
-            "Publishing relay DNS: ip=$serverIp public=${relayDnsManager.getPublicEntryUrl()} relay=${relayDnsManager.getDeviceRelayUrl()} reason=$reason"
+            "Publishing relay DNS: ip=$relayPublishIp public=${relayDnsManager.getPublicEntryUrl()} relay=${relayDnsManager.getDeviceRelayUrl()} reason=$reason"
         )
 
         relayDnsManager.publishCurrentIpIfNeeded(
             force = true,
-            preferredIp = serverIp
+            preferredIp = relayPublishIp
         ) { success, publicUrl, relayUrl, ip ->
             Log.i(
                 TAG,

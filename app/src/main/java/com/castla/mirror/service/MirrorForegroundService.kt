@@ -99,6 +99,7 @@ class MirrorForegroundService : Service() {
         const val EXTRA_AUDIO = "audio_enabled"
         const val EXTRA_MIRRORING_MODE = "mirroring_mode"
         const val EXTRA_TARGET_PACKAGE = "target_package"
+        const val EXTRA_RELAY_PUBLISH_IP = "relay_publish_ip"
 
         private val _serviceRunningFlow = MutableStateFlow(false)
         val serviceRunningFlow: StateFlow<Boolean> = _serviceRunningFlow
@@ -307,7 +308,6 @@ class MirrorForegroundService : Service() {
 
     private var reconnectJob: Job? = null
     private var pendingAudioEnabled = false
-    @Volatile private var pendingHostIp: String = "0.0.0.0"
     private var deferredAudioStartJob: Job? = null
     private var screenOffReceiver: BroadcastReceiver? = null
     private var vdKeepAliveJob: Job? = null
@@ -891,15 +891,20 @@ class MirrorForegroundService : Service() {
 
         ServiceCompat.startForeground(this, NOTIFICATION_ID, createNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         
-        pendingHostIp = intent?.getStringExtra("EXTRA_HOST_IP") ?: "0.0.0.0"
+        val hostIp = intent?.getStringExtra("EXTRA_HOST_IP") ?: "0.0.0.0"
+        val relayPublishIp =
+            intent?.getStringExtra(EXTRA_RELAY_PUBLISH_IP)
+                ?.takeIf { it.isNotBlank() }
+                ?: hostIp        
 
-        val rawMaxHeight = intent!!.getIntExtra(EXTRA_MAX_RESOLUTION, 0)
-        val rawFps = intent.getIntExtra(EXTRA_FPS, 0)
-        pendingAudioEnabled = intent.getBooleanExtra(EXTRA_AUDIO, false)
-        mirroringMode = intent.getStringExtra(EXTRA_MIRRORING_MODE) ?: "FULL_SCREEN"
-        targetPackage = intent.getStringExtra(EXTRA_TARGET_PACKAGE) ?: ""
 
-        Log.i(TAG, "onStartCommand() - Frame profiling parameters input. HeightHint=$rawMaxHeight, FpsHint=$rawFps, Audio=$pendingAudioEnabled")
+        val rawMaxHeight = intent?.getIntExtra(EXTRA_MAX_RESOLUTION, 0) ?: 0
+        val rawFps = intent?.getIntExtra(EXTRA_FPS, 0) ?: 0
+        pendingAudioEnabled = intent?.getBooleanExtra(EXTRA_AUDIO, false) ?: false
+        mirroringMode = intent?.getStringExtra(EXTRA_MIRRORING_MODE) ?: "FULL_SCREEN"
+        targetPackage = intent?.getStringExtra(EXTRA_TARGET_PACKAGE) ?: ""
+
+        Log.i(TAG, "onStartCommand() - Frame profiling parameters input. HeightHint=$rawMaxHeight, FpsHint=$rawFps, Audio=$pendingAudioEnabled, hostIp=$hostIp, relayPublishIp=$relayPublishIp")
 
         pipelines.values.forEach { pipeline ->
             pipeline.autoResolution = (rawMaxHeight == 0)
@@ -908,15 +913,10 @@ class MirrorForegroundService : Service() {
             pipeline.targetFps = if (pipeline.autoFps) 30 else rawFps
         }
 
-        // if (mirrorServer == null) {
-        //     mirrorServer = MirrorServer(applicationContext)
-        // }
-//        mirrorServer?.updateServerUrl(hostIp)
-
         serviceScope.launch(Dispatchers.IO) {
             startPipeline(
                 audioEnabled = pendingAudioEnabled,
-                hostIp = pendingHostIp
+                relayPublishIp = relayPublishIp
             )
         }
         return START_NOT_STICKY
@@ -1152,7 +1152,7 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    private fun startPipeline(audioEnabled: Boolean, hostIp: String) {
+    private fun startPipeline(audioEnabled: Boolean, relayPublishIp: String) {
         try {
             terminalReason.set(null)
             MirrorDiagnostics.onSessionStart()
@@ -1201,7 +1201,7 @@ class MirrorForegroundService : Service() {
             pipelines.values.forEach { it.touchInjector = TouchInjector(width, height) }
 
             mirrorServer = MirrorServer(this).also { server ->
-                server.updateServerUrl(hostIp)
+                server.setRelayPublishIp(relayPublishIp)
                 server.setNetworkCongestionListener { adaptiveBitrateManager.onNetworkCongestion() }
                 server.setTouchListener { event ->
                     val targetPipeline = pipelines[event.pane]

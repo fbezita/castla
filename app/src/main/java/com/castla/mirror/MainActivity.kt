@@ -674,20 +674,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateServerUrl() {
+        val ip = resolveReachableMirrorIp()
+
         if (streamSettings.webCodecsEnabled) {
             // Final Castla UX: users always type only this public entry URL.
             // The manager backend redirects it to the active per-device local relay.
             serverUrl = CASTLA_PUBLIC_URL
             return
-        }
-
-        val cellularIp = getCellularIpv4Address()
-        val hotspotIp = currentIp
-
-        val ip = when {
-            hotspotIp != "0.0.0.0" && hotspotIp.isNotEmpty() -> hotspotIp
-            cellularIp != null && !cellularIp.startsWith("10.") -> cellularIp
-            else -> "0.0.0.0"
         }
 
         // Non-WebCodecs mode intentionally remains direct HTTP to the phone IP.
@@ -718,6 +711,16 @@ class MainActivity : AppCompatActivity() {
         return null
     }
 
+    private fun resolveReachableMirrorIp(): String {
+        val cellularIp = getCellularIpv4Address()
+        val hotspotIp = currentIp
+
+        return when {
+            hotspotIp != "0.0.0.0" && hotspotIp.isNotEmpty() -> hotspotIp
+            cellularIp != null && !cellularIp.startsWith("10.") -> cellularIp
+            else -> "0.0.0.0"
+        }
+    }
 
     /**
      * Enable WiFi tethering (hotspot) via Shizuku's privileged service.
@@ -1204,6 +1207,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun launchMirrorService() {
+        val reachableMirrorIp = resolveReachableMirrorIp()
+        
         val intent = Intent(this, MirrorForegroundService::class.java).apply {
             putExtra(
                 MirrorForegroundService.EXTRA_MAX_RESOLUTION,
@@ -1216,6 +1221,7 @@ class MainActivity : AppCompatActivity() {
 
             putExtra("EXTRA_HOST_IP", currentIp)
             putExtra("EXTRA_CASTLA_DOMAIN", CASTLA_DOMAIN)
+            putExtra(MirrorForegroundService.EXTRA_RELAY_PUBLISH_IP, reachableMirrorIp)
         }
 
         // if (streamSettings.webCodecsEnabled && !streamSettings.vpnEnabled) {

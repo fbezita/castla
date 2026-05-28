@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeViewFocused|typeViewTextChanged|typeViewTextSelectionChanged"
+    android:accessibilityEventTypes="typeViewFocused|typeViewTextSelectionChanged|typeWindowStateChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews|flagRequestEnhancedWebAccessibility"
-    android:canRetrieveWindowContent="true" />
+    android:accessibilityFlags="flagDefault"
+    android:canRetrieveWindowContent="true"
+    android:notificationTimeout="100" />

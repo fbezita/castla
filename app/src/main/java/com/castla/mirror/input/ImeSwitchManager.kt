@@ -47,6 +47,24 @@ object ImeSwitchManager {
     private val mutex = Mutex()
     @Volatile private var currentState = ImeState.IDLE
 
+    private fun getSecureString(context: Context, key: String, fallback: String = ""): String {
+        return try {
+            Settings.Secure.getString(context.contentResolver, key) ?: fallback
+        } catch (e: SecurityException) {
+            Log.w(TAG, "[FSM] Cannot read secure setting: $key", e)
+            fallback
+        }
+    }
+
+    private fun getDefaultInputMethod(context: Context): String {
+        return getSecureString(context, Settings.Secure.DEFAULT_INPUT_METHOD)
+    }
+
+    private fun getEnabledInputMethods(context: Context): String {
+        return getSecureString(context, Settings.Secure.ENABLED_INPUT_METHODS)
+    }
+
+
     fun getCurrentState(): ImeState = currentState
 
     /**
@@ -176,7 +194,7 @@ object ImeSwitchManager {
     private fun performSilentEnable(context: Context, execCommand: (String) -> String?) {
         try {
             val targetIme = "${context.packageName}/com.castla.mirror.input.CastlaImeService"
-            val enabledStr = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_INPUT_METHODS) ?: ""
+            val enabledStr = getEnabledInputMethods(context)
             // toMutableSet() in Kotlin returns a LinkedHashSet, which strictly preserves the original IME insertion order.
             val enabled = enabledStr.split(":").filter { it.isNotBlank() && it != "null" }.toMutableSet()
 
@@ -193,11 +211,11 @@ object ImeSwitchManager {
 
     private fun performSaveAndSwitchFlow(context: Context, execCommand: (String) -> String?) {
         try {
-            val currentIme = Settings.Secure.getString(context.contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)
+            val currentIme = getDefaultInputMethod(context)
             val targetIme = "${context.packageName}/com.castla.mirror.input.CastlaImeService"
 
             // Abort transition if previous IME is null or empty to prevent invalid states
-            if (currentIme.isNullOrEmpty()) {
+            if (currentIme.isEmpty()) {
                 Log.w(TAG, "[FSM] Aborting switch: previous default input method is null or empty.")
                 currentState = ImeState.ERROR
                 return
@@ -239,7 +257,7 @@ object ImeSwitchManager {
 
             if (restorePending && !previousIme.isNullOrEmpty()) {
                 val targetIme = "${context.packageName}/com.castla.mirror.input.CastlaImeService"
-                val currentIme = Settings.Secure.getString(context.contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD) ?: ""
+                val currentIme = getDefaultInputMethod(context)
 
                 if (currentIme == targetIme || currentIme == CASTLA_IME_ID) {
                     Log.i(TAG, "[FSM] Restoring previous default IME '$previousIme' programmatically.")
@@ -270,14 +288,14 @@ object ImeSwitchManager {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val restorePending = prefs.getBoolean(KEY_RESTORE_PENDING, false)
             val targetIme = "${context.packageName}/com.castla.mirror.input.CastlaImeService"
-            val currentIme = Settings.Secure.getString(context.contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD) ?: ""
+            val currentIme = getDefaultInputMethod(context)
 
             if (restorePending || currentIme == targetIme || currentIme == CASTLA_IME_ID) {
                 var previousIme = prefs.getString(KEY_PREVIOUS_IME, null)
 
                 // Fallback discovery if cache is lost
                 if (previousIme.isNullOrEmpty() || previousIme == targetIme || previousIme == CASTLA_IME_ID) {
-                    val enabledStr = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_INPUT_METHODS) ?: ""
+                    val enabledStr = getEnabledInputMethods(context)
                     val enabled = enabledStr.split(":").filter { it.isNotBlank() && it != "null" }
                     previousIme = enabled.firstOrNull { it.isNotEmpty() && !it.contains(context.packageName) }
                 }
@@ -319,7 +337,7 @@ object ImeSwitchManager {
      * Checks if Castla IME is currently selected as the active default input method.
      */
     fun isCastlaImeActive(context: Context): Boolean {
-        val defaultIme = Settings.Secure.getString(context.contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD) ?: ""
+        val defaultIme = getDefaultInputMethod(context)
         val targetIme = "${context.packageName}/com.castla.mirror.input.CastlaImeService"
         return defaultIme == targetIme || defaultIme == CASTLA_IME_ID
     }
