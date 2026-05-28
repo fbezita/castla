@@ -25,3 +25,4 @@ build.log
 /frontend/dist
 /tmp
 *.mjs
+/.kotlin

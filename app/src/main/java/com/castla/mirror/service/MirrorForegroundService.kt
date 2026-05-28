@@ -79,9 +79,11 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 
+@OptIn(
+    kotlinx.coroutines.ExperimentalCoroutinesApi::class,
+    kotlinx.coroutines.DelicateCoroutinesApi::class
+)
 class MirrorForegroundService : Service() {
-
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private val vdDispatcher = kotlinx.coroutines.newSingleThreadContext("vd-operations")
 
     private suspend fun <T> runBinderSafe(timeoutMs: Long = 3000L, block: suspend () -> T): T? {
