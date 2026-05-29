@@ -1,258 +1,141 @@
-# Castla 기술 아키텍처 및 통합 개발 연대기 (Technical Architecture & Unified Development Chronicle)
+# Castla 종합 기술 아키텍처 가이드 (Castla System Architecture Guide)
 
-본 문서는 Castla 프로젝트에서 구현된 100% 대칭형 리액티브 상태 지향 아키텍처, Shizuku 기반의 시스템 우회 및 독립 가상 미러링 기술, 물리 화면 차단 기법, 초저지연 H.264 비디오 스트리밍 파이프라인의 튜닝 사상 및 런타임 보안/연결성 제어의 발전사를 총망라하여 일원화한 고해상도 아키텍처 연대기 및 종합 기술 통사입니다.
+본 문서는 Castla 저지연 가상 독립 미러링 플랫폼의 시스템 레이어 구조, 프론트엔드 상태 머신, 백엔드 서비스 파이프라인, 그리고 네트워크 세션 연동 메커니즘을 입체적으로 기술한 종합 아키텍처 설계 명세서입니다.
 
 ---
 
-## 1. 🔄 100% 대칭형 리액티브 상태 지향 아키텍처 (SSOT)
+## 1. 🌟 전체 시스템 아키텍처 구성도 (System Architecture Blueprint)
 
-기존에 존재하던 비대칭적이고 결합도가 높은 레거시 `browserSplitState` 객체, 스플릿 전용 기형 플래그(`keepSplitState`), 그리고 절차형 수동 렌더링 호출(`updateLayoutUI()`)을 **영구히 전면 통삭제**했습니다.
-
-대신에 가상 디스플레이 2개(VD_1, VD_2)를 동등한 1급 시민 리소스로 바라보는 **`state.left`** 와 **`state.right`** 라는 두 개의 절대적인 독립 실행 정보(Single Source of Truth, SSOT)만을 정의하고, 이 상태의 변화에 따라 뷰가 자동으로 스스로를 갱신하는 **자율 반응형 바인딩**을 이룩했습니다.
+Castla는 안드로이드의 OS/하드웨어 레벨 특권을 Shizuku 샌드박스를 통해 제어하며, 암호화된 SSL/TLS 무선 채널을 거쳐 테슬라 웹 브라우저 클라이언트에 60fps 초저지연 비디오를 렌더링하고 멀티 터치/키보드 입력을 역주입하는 대칭형 반응형 시스템 구조를 갖추고 있습니다.
 
 ```mermaid
-graph TD
-    %% 런칭 액션들
-    Action1[일반 런처 터치 클릭] -->|1. 반대쪽 state.right 비움| Launch1[launchApp app, false]
-    Action2[드래그 앤 드롭] -->|1. 반대쪽 상태 유지 보존| Launch2[launchApp app, isRight]
-    Action3[앱 페어 듀얼 런칭] -->|1. 시차 두고 차례대로| Launch3[launchApp left, false & launchApp right, true]
+graph TB
+    %% 테슬라 클라이언트 영역 (Front-end)
+    subgraph Tesla Browser [테슬라 웹 클라이언트 (Svelte 5 Runes)]
+        UI[웹 런처 & UI 레이아웃]
+        SSOT[SSOT 상태 엔진: state.left / state.right]
+        WebCodecs[WebCodecs H.264 디코더]
+        Pacer[FramePacer 시간축 보정 스케줄러]
+        TouchHandler[터치 스케일러 및 제어기]
+    end
 
-    %% 상태 변화 및 반응형 트리거
-    Launch1 -->|2. 대칭 대입| StateUpdate[state.left 또는 state.right 값 갱신]
-    Launch2 -->|2. 대칭 대입| StateUpdate
-    Launch3 -->|2. 대칭 대입| StateUpdate
+    %% 네트워크 브릿지 영역
+    subgraph Network Bridge [네트워크 & 시그널링 레이어]
+        Signaling[NestJS 시그널링 서버: tesla_manager]
+        RelayDNS[Cloudflare Dynamic Relay DNS]
+        SSLSocket[HTTPS / SSL Secure Socket Channel]
+    end
 
-    %% 자율 반응형 UI 자동 업데이트
-    StateUpdate -->|3. Reactive Setter 자율 감지| AutoTrigger[requestAnimationFrame 자율 트리거]
-    AutoTrigger -->|4. 상황 자동 진단| UpdateUI[updateLayoutUI 스스로 상황 파악]
+    %% 안드로이드 백엔드 영역 (Back-end)
+    subgraph Android OS [안드로이드 미러링 백엔드 (Kotlin)]
+        Service[MirrorForegroundService 코어 서비스]
+        MirrorServer[MirrorServer SSL 웹소켓 서버]
+        VDM[VirtualDisplayManager 가상 화면 관리자]
+        Encoder[MediaCodec H.264 하드웨어 인코더]
+        TouchInjector[TouchInjector 가상 입력 주입기]
+    end
 
-    %% 최종 레이아웃 결과
-    UpdateUI -->|Left & Right 존재| DualLayout[50:50 듀얼 스플릿 레이아웃 자동 안착]
-    UpdateUI -->|Left만 존재| LeftFull[Left 단독 꽉 찬 화면 UI 자동 안착]
-    UpdateUI -->|Right만 존재| RightFull[Right 단독 꽉 찬 화면 UI 자동 안착]
-    UpdateUI -->|둘 다 없음| HomeLauncher[깨끗하게 홈 런처 UI로 자동 환원]
+    %% 하드웨어 및 시스템 영역
+    subgraph Android System [안드로이드 OS 커널 및 시스템 서버]
+        Shizuku[Shizuku Privileged Service]
+        ShellContext[com.android.shell 특권 컨텍스트]
+        DisplayManager[DisplayManagerGlobal & WMS]
+        SurfaceControl[SurfaceControl 물리 백라이트 제어]
+    end
+
+    %% 통신 및 제어 사슬 연결
+    SSOT -->|1. UI 상태 감지| UI
+    UI -->|2. Viewport 변경 전송| SSLSocket
+    SSLSocket -->|3. 포트 9090 인입| MirrorServer
+    MirrorServer -->|4. 비동기 위임| Service
+    Service -->|5. 전대전송| VDM
+    VDM -->|6. 리플렉션 생성| DisplayManager
+    DisplayManager -->|7. 가상 버퍼 생성| Encoder
+    Encoder -->|8. Annex-B H.264 패킷| SSLSocket
+    SSLSocket -->|9. 인밴드 SPS/PPS 병합 스트림| WebCodecs
+    WebCodecs -->|10. 디코드 프레임| Pacer
+    Pacer -->|11. 60fps 렌더링| UI
+    TouchHandler -->|12. 10바이트 바이너리 터치| SSLSocket
+    SSLSocket -->|13. 터치 디코딩| TouchInjector
+    TouchInjector -->|14. Shizuku 터치 전송| Shizuku
+    Shizuku -->|15. 가상 좌표 주입| DisplayManager
+    ShellContext -->|특권 우회 승인| WindowManager
 ```
-
-### 1.1. 100% 리액티브 상태 엔진 (SSOT) 작동
-`state.left` 와 `state.right` 의 세터(Setters)는 값의 실제 변동을 칼같이 감지하여, 브라우저가 화면을 갱신하는 가장 안전한 시점인 `requestAnimationFrame` 에 자율적으로 레이아웃 뷰 업데이트를 태웁니다.
-
-```javascript
-    // 대칭적인 2가지 가상 디스플레이 독립 실행 정보 (SSOT 리액티브 상태 엔진)
-    let _leftApp = null;
-    let _rightApp = null;
-
-    const state = {
-        get left() { return _leftApp; },
-        set left(app) {
-            if (_leftApp === app) return;
-            console.log(`[State] Left display app changed: ${app ? app.label : 'null'}`);
-            _leftApp = app;
-            requestAnimationFrame(() => updateLayoutUI());
-        },
-        get right() { return _rightApp; },
-        set right(app) {
-            if (_rightApp === app) return;
-            console.log(`[State] Right display app changed: ${app ? app.label : 'null'}`);
-            _rightApp = app;
-            requestAnimationFrame(() => updateLayoutUI());
-        }
-    };
-```
-
-### 1.2. 런칭 진입점별 3대 자율 흐름
-그 어떤 진입점에서도 `updateLayoutUI()`를 명시적으로 수동 호출하는 하드코딩 사슬은 존재하지 않습니다. 오직 `state`의 값만 투명하게 대입해 주는 것으로 모든 UI 흐름이 자율 연쇄 작동합니다.
-
-1. **홈 런처 그리드 일반 앱 아이콘 클릭 (단독 실행)**:
-   단독 꽉 찬 화면 실행을 의미하므로, 반대쪽 실행 정보를 깨끗이 비워주고 기동합니다. 세터가 자동으로 이를 감지하여 단독 화면 UI로 자동 보정합니다.
-   ```javascript
-   if (app.isPair) {
-       launchAppPair(app.left, app.right);
-   } else {
-       state.right = null; 
-       launchApp(app, false); 
-   }
-   ```
-2. **사이드바 드래그 앤 드롭 런칭 (스플릿 업데이트)**:
-   기존 반대쪽 화면을 보존하며 해당 위치의 디스플레이만 갈아끼우는 의도이므로, 상태를 강제로 비우지 않고 그대로 덮어씁니다. 양쪽이 모두 차 있으므로 세터가 자동으로 판단하여 듀얼 스플릿 화면을 온전하게 유지 보정해 줍니다.
-   - 왼쪽 구역에 드롭 (`launch_left`): `launchApp(app, false);`
-   - 오른쪽 구역에 드롭 (`launch_right`): `launchApp(app, true);`
-3. **앱 페어 클릭 (듀얼 시차 런칭)**:
-   `launchAppPair` 는 오직 한 쌍의 두 앱이 모두 완벽하게 보장되어 있을 때만 기동하는 극도의 논리적 정합성을 갖추고 있으며, 시차 기동으로 양쪽 상태를 스무스하게 순차 대입합니다.
-   ```javascript
-   function launchAppPair(leftPkg, rightPkg) {
-       console.log(`[Launcher] Launching App Pair: left=${leftPkg}, right=${rightPkg}`);
-       if (Date.now() < launchGuardUntil) return;
-       lastLaunchTime = Date.now();
-
-       const targetLeftApp = allApps.find(a => a.packageName === leftPkg);
-       const targetRightApp = allApps.find(a => a.packageName === rightPkg);
-
-       if (targetLeftApp && targetRightApp) {
-           launchApp(targetLeftApp, false);
-           setTimeout(() => {
-               launchApp(targetRightApp, true);
-           }, 300);
-       } else {
-           console.warn(`[Launcher] Failed to launch App Pair: one or both apps are missing.`);
-       }
-   }
-   ```
 
 ---
 
-## 2. 🤖 Shizuku 기반 가상 디스플레이 (Virtual Display) 미러링 구현
+## 2. 🎨 프론트엔드 아키텍처 (Front-end Web Client)
 
-### 2.1. 기술적 배경 및 MediaProjection의 한계
-일반적인 안드로이드 화면 미러링은 `MediaProjection` API를 사용합니다. 그러나 이 방식은 다음과 같은 두 가지 치명적인 문제가 있습니다:
-- **사용자 동의 팝업 강제**: 앱을 실행하고 미러링을 시작할 때마다 시스템 보안 경고("Castla에서 화면에 표시되는 모든 내용을 캡처합니다")가 노출되어 드라이빙 환경의 UX를 훼손합니다.
-- **주 화면의 종속성**: 휴대전화의 주 화면(Primary Display)을 그대로 복제(Clone)하므로, 휴대전화 화면이 꺼지거나 다른 앱을 사용할 때 차량 내 미러링 화면도 같이 끊기거나 변경됩니다.
+Svelte 5 (Runes)와 Vanilla CSS를 기반으로 한 고성능 웹 아키텍처로, 가상 디스플레이의 상태 변화에 따라 UI와 네트워크 세션이 자율적으로 정렬되는 반응형 상태 관리 패러다임을 준수합니다.
 
-### 2.2. 구현 메커니즘 (Shizuku를 활용한 특권 권한 우회)
-Castla는 Shizuku를 통해 시스템 쉘 UID(2000) 권한을 획득하여, 시스템 내부 서비스인 `DisplayManagerGlobal`에 직접 리플렉션으로 접근해 **완전히 독립된 가상 디스플레이(Virtual Display)**를 동적으로 생성합니다. 이 방식을 통해 **사용자 동의 팝업이 100% 생략**됩니다.
+### 2.1. 100% 대칭형 리액티브 상태 엔진 (SSOT)
+- **디자인 사상**: 스플릿 여부를 제어하는 레거시 기형 플래그들을 통삭제하고, 디바이스의 독립적인 가상 디스플레이(VD_1, VD_2)를 나타내는 **`state.left`** 와 **`state.right`** 두 개의 정보 소스(SSOT)로 상태를 일원화했습니다.
+- **반응형 바인딩**: 상태의 값 변경(`set`)이 감지되면 브라우저 렌더링 스레드의 가장 안전한 주기인 `requestAnimationFrame` 내에서 레이아웃 뷰어의 형태(단독화면, 듀얼 스플릿 화면, 홈 런처 환원)를 자율적으로 갱신합니다.
 
-```kotlin
-// android.hardware.display.DisplayManagerGlobal을 리플렉션으로 획득하여 가상 디스플레이 직접 생성
-val configClass = Class.forName("android.hardware.display.VirtualDisplayConfig")
-val builderClass = Class.forName("android.hardware.display.VirtualDisplayConfig\$Builder")
-
-// 디스플레이의 핵심 동작을 규정하는 특권 플래그 지정
-var flags = DISPLAY_FLAG_PUBLIC or DISPLAY_FLAG_OWN_CONTENT_ONLY or DISPLAY_FLAG_PRESENTATION or DISPLAY_FLAG_DESTROY_CONTENT
-if (android.os.Build.VERSION.SDK_INT >= 33) {
-    // ALWAYS_UNLOCKED: 주 화면(휴대전화)이 잠겨도 가상 디스플레이는 잠금 상태로 들어가지 않음
-    // TRUSTED: 시스템 UI(Status Bar, Navigation Bar 등)가 가상 디스플레이 상에서도 원활하게 렌더링됨
-    flags = flags or DISPLAY_FLAG_ALWAYS_UNLOCKED or DISPLAY_FLAG_TRUSTED or DISPLAY_FLAG_OWN_DISPLAY_GROUP
-}
-
-val builderCtor = builderClass.getConstructor(
-    String::class.java, Int::class.javaPrimitiveType,
-    Int::class.javaPrimitiveType, Int::class.javaPrimitiveType
-)
-val builder = builderCtor.newInstance(name, width, height, dpi)
-builderClass.getMethod("setFlags", Int::class.javaPrimitiveType).invoke(builder, flags)
-val config = builderClass.getMethod("build").invoke(builder)
-
-val dmgClass = Class.forName("android.hardware.display.DisplayManagerGlobal")
-val dmg = dmgClass.getMethod("getInstance").invoke(null)
-val createMethod = dmgClass.declaredMethods.first { m ->
-    m.name == "createVirtualDisplay" && m.parameterTypes.any { it == configClass }
-}
-createMethod.isAccessible = true
-val display = createMethod.invoke(dmg, *args) as? VirtualDisplay
-```
-
-### 2.3. 독립 가상 화면 런처 작동
-가상 디스플레이가 생성되면, 쉘 명령어를 통해 해당 가상 화면 ID에 맞춤형 홈 액티비티를 강제 실행합니다.
-```bash
-am start -W --display $displayId -n com.castla.mirror/.ui.VirtualDisplayHomeActivity
-```
-이를 통해 사용자는 스마트폰으로 카카오톡이나 다른 작업을 수행하는 동시에, 차량 테슬라 화면에서는 완전히 다른 독립적인 화면(Waze, Google Maps 등)이 독립적으로 구동되는 **진정한 멀티 디스플레이(Multi-Display) 환경**이 완성됩니다.
+### 2.2. 무재실행 (Zero-Restart) 비디오 핫리프레시 및 디코더 자가 치유
+- **Zero-Restart 핫리프레시**: 드래그 바로 화면 레이아웃 비율을 실시간 조정할 때, 비디오 웹소켓 세션을 끊지 않고 그대로 유지한 상태에서 프론트엔드 WebCodecs 디코더 객체만 원자적으로 기민하게 재생성(`initDecoder`)하여 깜빡임과 로딩 딜레이를 0ms로 수렴시킵니다.
+- **Pointerup 1회 전송**: 화면 비율 조절 조작 도중에는 백엔드로 해상도 변경 신호를 보내지 않고 오직 브라우저 CSS와 `fill` 스케일링으로 무중단 피팅을 구현하며, 최종적으로 손을 뗀 시점(`pointerup`, `pointercancel`)에만 최종 규격 해상도를 단 1회 전송하여 인코더 재부팅 부하를 완벽히 종식합니다.
+- **디코더 자가 치유 및 시퀀스 재정착**:
+  - 디코더가 재초기화될 때 들어오는 최초의 정상 키프레임을 수신하는 즉시 시퀀스 번호의 정합성 유무에 관계없이 **`_waitingForKeyframe = false` 상태를 최선행 해제**하여 초기 검은 화면 락을 완치합니다.
+  - 디코더 백로그 임계치 초과나 네트워크 혼잡으로 일부 프레임이 부하 조절(Backlog drop)될 때도 `this._lastSeqNum = seqNum`을 동반 수행하도록 하여 시퀀스 갭 오판으로 인한 무한 키프레임 요청 루프를 예방합니다.
 
 ---
 
-## 3. 📱 물리 화면 전원 꺼짐 (Screen OFF) 미러링 유지 기법
+## 3. 🤖 백엔드 코어 아키텍처 (Android Foreground Service)
 
-차량 주행 중 스마트폰의 화면이 계속 켜져 있으면 **배터리 과소모, 기기 발열, 디스플레이 번인(Burn-in)**이 발생합니다. Castla는 스마트폰의 물리 화면(Physical Panel)은 완전히 끄되, 가상 디스플레이의 미러링 세션은 활성 상태로 유지하는 고급 전원 관리 기법을 구현했습니다.
+Shizuku 시스템 셸 UID(2000) 권한을 활용하여 기기의 하드웨어 전원과 시스템 서비스를 통제하는 고성능 비동기 백엔드 아키텍처입니다.
 
-### 3.1. SurfaceControl 기반 물리 패널 전원 차단
-스마트폰의 물리 화면 전원을 쉘 레벨에서 직접 제어하기 위해, `scrcpy`에서 사용하는 특권적 `SurfaceControl` API를 사용해 내부 물리 디스플레이의 백라이트와 패널을 강제로 `POWER_MODE_OFF (0)`로 전환합니다.
-
-```kotlin
-private val POWER_MODE_OFF = 0
-private val POWER_MODE_NORMAL = 2
-
-fun setPhysicalDisplayPower(on: Boolean) {
-    val mode = if (on) POWER_MODE_NORMAL else POWER_MODE_OFF
-    val scClass = Class.forName("android.view.SurfaceControl")
-    val setMethod = scClass.getMethod("setDisplayPowerMode", android.os.IBinder::class.java, Int::class.javaPrimitiveType)
-    
-    val token = getPhysicalDisplayToken(scClass)
-    if (token != null) {
-        setMethod.invoke(null, token, mode)
-    }
-}
 ```
-- **버전별 물리 디스플레이 토큰(IBinder) 획득**:
-  - **Android 10 ~ 13**: `SurfaceControl.getPhysicalDisplayIds()` 및 `getPhysicalDisplayToken()` 또는 `getInternalDisplayToken()` 사용.
-  - **Android 14+**: 구글의 보안 강화로 숨겨진 `DisplayControl`에 접근하기 위해 `/system/framework/services.jar`를 커스텀 ClassLoader로 동적 로드하고 `libandroid_servers.so` JNI 라이브러리를 동적 링킹하여 내부 디스플레이 토큰을 안정적으로 조회합니다.
-
-### 3.2. 가상 디스플레이 수명 연장 및 CPU 잠자기 극복
-물리 화면이 꺼지면 안드로이드 시스템은 절전을 위해 CPU를 슬립(Sleep) 상태로 전환하고 가상 디스플레이도 정지시키려고 시도합니다. 이를 해결하기 위해 세 가지 정밀 제어 메커니즘을 도입했습니다.
-- **비동기 복구 (Asynchronous Post-Delayed Recovery)**:
-  사용자가 물리 전원 버튼을 누르거나 화면 타임아웃으로 `ACTION_SCREEN_OFF` 이벤트가 유입되면 시스템이 완전한 슬립 전환 처리를 끝낼 수 있도록 **150ms의 미세 딜레이**를 줍니다. 그 직후 Shizuku의 `InputManager.injectInputEvent`를 통해 `KEYCODE_WAKEUP (224)` 키를 입력하고 가상 디스플레이 강제 가동 명령을 주입합니다.
-  ```bash
-  dumpsys power set-display-state $displayId ON
-  ```
-  이로 인해 시스템 CPU와 가상 디스플레이 파이프라인은 깨어나 동작을 유지하지만, `SurfaceControl`에 의해 물리 패널은 완전히 꺼진(Black screen) 상태가 영구 유지됩니다.
-- **Keep-alive 주기 단축 (3000ms)**:
-  물리 화면이 강제 비활성화된 과도기 상태에서 화면 타임아웃이 5~6초 내로 급격히 짧아지는 현상을 방지하기 위해 가상 디스플레이 생존 신호(Keep-alive) 송신 주기를 기존 30초에서 **3초**로 대폭 단축하여 프레임 전송 끊김을 원천 차단했습니다.
-
-### 3.3. [CRITICAL] 1초 고속 파워오프 버스트 (1-Second Fast Power-Off Burst)
-> [!IMPORTANT]
-> 사용자가 스마트폰의 전원 버튼을 눌러 화면을 끌 때, 안드로이드 AOSP 시스템은 내부 전원 매니저와 백라이트 드라이버를 통해 **비동기적인 백라이트 리셋 명령어들을 여러 차례 연속적으로 전달**합니다.
-> 이때 단 한 번만 `setPhysicalDisplayPower(false)`를 호출하면, 찰나의 순간 뒤에 유입되는 AOSP의 비동기 화면 켜짐/리셋 명령에 의해 물리 패널이 다시 켜지거나 플리커링(flicker)이 발생해 화면 끄기 동작이 실패하게 됩니다.
-
-이 치명적인 AOSP 전원 드라이버 레이스 컨디션(Race Condition)을 완전히 극복하기 위해 **"고속 파워오프 버스트(Power-Off Burst)"**를 고안해 구현했습니다:
-
-```kotlin
-ScreenOffAction.TURN_PANEL_OFF -> {
-    val vdm = virtualDisplayManager
-    if (vdm == null) {
-        val fallback = screenOffPolicy.onPanelOffResult(success = false)
-        executeScreenOffAction(fallback)
-        return
-    }
-    
-    try {
-        vdm.getPrivilegedService()?.execCommand("input keyevent 224")
-        vdm.getPrivilegedService()?.execCommand("wm dismiss-keyguard")
-    } catch (e: Exception) {
-        Log.w(TAG, "Failed to inject WAKEUP/dismiss-keyguard keyevents", e)
-    }
-
-    // 100ms 주기로 총 10회(1초 동안) 비동기 고속 버스트(Burst) 형태로 setPhysicalDisplayPower(false)를 인젝션!
-    serviceScope.launch {
-        var success = false
-        for (i in 1..10) {
-            try {
-                success = vdm.setPhysicalDisplayPower(false)
-            } catch (_: Exception) {}
-            kotlinx.coroutines.delay(100)
-        }
-        
-        serviceScope.launch(kotlinx.coroutines.Dispatchers.Main) {
-            val fallback = screenOffPolicy.onPanelOffResult(success)
-            if (fallback != ScreenOffAction.NONE) {
-                executeScreenOffAction(fallback)
-            }
-        }
-    }
-}
++-------------------------------------------------------------------------+
+|                        MirrorForegroundService                          |
+|                                                                         |
+|  +------------------------+ +-------------------+ +------------------+  |
+|  |    PowerLockManager    | |  ThermalThrottle  | | AdaptiveBitrate  |  |
+|  |  (CPU & Wi-Fi Lock 격리)  | |  (발열 통제 엔진)  | |  (FPS/BR 스케일) |  |
+|  +------------------------+ +-------------------+ +------------------+  |
+|                                                                         |
+|  +-------------------------------------------------------------------+  |
+|  |                        VirtualDisplayManager                      |  |
+|  |                                                                   |  |
+|  |  [VD_1 (Primary display)] <====== setSurface ======> MediaCodec   |  |
+|  |  [VD_2 (Secondary display)] <==== setSurface ======> MediaCodec   |  |
+|  +-------------------------------------------------------------------+  |
+|                                                                         |
+|  +-------------------------------------------------------------------+  |
+|  |                   stale displayId Auto-Correction                 |  |
+|  |                                                                   |  |
+|  |   stale ID 감지 ➔ activePrimaryId / activeSecondaryId 자동 대입    |  |
+|  +-------------------------------------------------------------------+  |
++-------------------------------------------------------------------------+
 ```
-이 고성능 버스트 기법을 통해 디바이스 기종에 관계없이 화면 전환 과도기 타이밍에 발생하는 백라이트 플리커링이 완벽하게 방지되며, 물리 화면은 철저하게 암전 상태를 유지하게 됩니다.
+
+### 3.1. Shizuku 가상 디스플레이 생성 및 입력 주입
+- **사용자 동의 팝업 100% 생략**: `DisplayManagerGlobal`에 직접 리플렉션으로 접근하여 가상 디스플레이를 생성함으로써 미러링 시작 시 강제 노출되는 시스템 보안 캡처 경고 팝업을 스킵합니다.
+- **물리 터치 주입**: 브라우저로부터 수신한 10바이트 바이너리 터치 패킷을 파싱하여, 주입하려는 가상 디스플레이 절대 좌표계로 스케일링한 후 Shizuku 특권 세션의 `InputManager`를 거쳐 각 화면에 독립 기동 중인 앱에 물리 좌표를 오차 없이 인젝션합니다.
+
+### 3.2. SurfaceControl 기반 물리 화면 전원 차단
+- **백라이트 강제 암전**: 스마트폰의 물리 디스플레이 백라이트와 패널을 강제로 `POWER_MODE_OFF (0)`로 주입하여 화면을 끕니다. 이와 동시에 가상 디스플레이는 `dumpsys power set-display-state ON` 및 `KEYCODE_WAKEUP`을 통해 활성 상태를 지속 유지시켜 배터리 번인과 발열을 원천 차단합니다.
+- **1초 고속 파워오프 버스트**: 화면이 꺼질 때 안드로이드 시스템 드라이버가 임의로 백라이트를 재활성화하려는 레이스 컨디션을 짓밟기 위해, **100ms 주기로 총 10회(1초간) 연속 버스트** 형태로 물리 전원 꺼짐 명령을 밀어넣어 안정적으로 화면을 꺼짐 상태로 고정시킵니다.
+
+### 3.3. 넌블로킹 보장 신뢰성 설계 및 격벽
+- **메인 UI 스레드 오프로딩**: 서비스 소멸(`onDestroy`) 및 리소스 클린업(`performCleanup`) 시 메인 UI 스레드가 단 1ms도 교착되거나 블록되지 않도록, 즉석에서 백그라운드 스레드(`cleanupThread`)를 분리 생성하여 모든 웹소켓 셧다운 및 가상 디스플레이 반납을 완전히 격리 수행합니다.
+- **Shizuku Binder Safe 가딩**: 윈도우 매니저나 액티비티 서비스와 바인더 통신 시 AIDL 트랜잭션이 비정상 크래시되어도 메인 서비스가 데드락에 빠지지 않도록 모든 결합부를 백그라운드 위임과 최대 3초 타임아웃을 탑재한 `runBinderSafe` 가드로 밀봉 보호합니다.
 
 ---
 
-## 4. 🔗 미러링 백엔드 서버 수명 주기 및 넌블로킹 신뢰성 설계
+## 4. 🌐 네트워크 & 세션 아키텍처 (Network & Signal Connection)
 
-웹 프런트엔드의 대칭 상태가 갱신되면, 백엔드의 Android 시스템 서비스도 이에 매핑되어 가상 디스플레이 및 입력 제어 수명 주기를 투명하게 바인딩합니다.
+차량 브라우저 환경에서 보안이 확보된 로컬 가속을 활용할 수 있도록 HTTPS 통신을 확보하고, 사용자 개입 없는 지능화된 기기 페어링 모델을 수립합니다.
 
-### 4.1. MirrorForegroundService (백엔드 코어 시스템 서비스)
-- **역할**: 미러링의 전반적인 백엔드 전면 생명주기를 주관하는 시스템 코어 서비스.
-- **가상 디스플레이 할당 및 소멸 (`VirtualDisplayManager`)**: 장치의 가상 화면 리소스인 `VD_1` (웹 클라이언트의 `state.left` 매핑)과 `VD_2` (웹 클라이언트의 `state.right` 매핑)를 생성 및 해제합니다.
-- **인코딩 & 스트리밍 엔진 (`VideoEncoder` / `JpegEncoder`)**: 각 가상 디스플레이의 프레임 버퍼 Surface를 하드웨어 미디어 코덱으로 전달받아 H.264/H.265 또는 MJPEG 스트림으로 실시간 인코딩하여 웹 클라이언트로 전송합니다.
+### 4.1. HTTPS 보안 안전지대 (Secure Context) 확보
+- **로컬 SSL 인증서**: WebCodecs 하드웨어 가속 API가 브라우저 단에서 안전하게 가동되도록, Assets 내부에 100년 만기의 자체 서명 인증서 키스토어(`castla.p12`)를 적용하여 폰 내에 가동되는 `MirrorServer`를 엄격한 HTTPS 채널로 바인딩합니다.
+- **Cloudflare Relay DNS**: Cloudflare API를 경유하여 기기의 실시간 LAN IP 주소(`192.168.x.x`)를 동적 DDNS 레코드인 `https://c-<deviceId>.castla.fbezita.com:9090`으로 신속히 퍼블리시하여 차량 브라우저가 원활하게 secure context 경로로 접근할 수 있는 망 환경을 제공합니다.
 
-### 4.2. ControlSocket & MirrorServer (웹소켓 명령 통로 브릿지)
-- **명령 수신 (`onAppLaunchRequest`)**: 클라이언트로부터 `launchApp` 명령(`pkg`, `componentName`, `pane = primary/secondary`)을 전달받으면, `pane` 정보에 맞추어 안드로이드 멀티 디스플레이 인텐트를 생성하여 `VD_1` 또는 `VD_2` 에 앱을 분기 런칭시킵니다.
-- **해상도 및 뷰포트 변경 (`onViewportChange`)**: 듀얼/단독 상태에 따라 클라이언트가 계산해 보낸 `width`, `height`, `pane` 정보를 바탕으로, 해당 가상 디스플레이의 해상도를 실시간으로 재구축(Resize)하여 디코더 가속율과 화질 선명도를 동기화합니다.
-- **물리 터치 주입 (`TouchInjector`)**: 브라우저에서 날아온 10바이트 바이너리 터치 패킷의 `pane` 필드(`0=primary(left)`, `1=secondary(right)`)를 판독하여, 안드로이드 가상 디스플레이의 절대 좌표계로 좌표를 변환 및 스케일링한 후 Shizuku/PrivilegedService를 거쳐 각 화면에 독립 주입합니다.
-
-### 4.3. 넌블로킹 보장 신뢰성 설계 및 예외 가드 사양
-현재 Castla 백엔드 시스템은 어떠한 극한의 동기 경합 상황이나 바인더 마비 시나리오에서도 메인 UI 스레드가 절대 블록되지 않는 극도의 넌블로킹 안전성 사양을 충족합니다.
-1. **정리 스레드 분리**: `onDestroy()` -> `cleanupThread (Background)` -> `performCleanup` -> `runBlocking` (UI 스레드 영향도 0ms).
-2. **셧다운 락 바이패스**: `release(forcePhysical = true)` 호출 시 코루틴 락 및 단일 스레드 컨텍스트 점유를 완전히 우회(Bypass)하여 즉시 하드웨어 자원을 수거.
-3. **4초 타임아웃 격리**: 모든 해상도 변경 락 대기를 `withTimeoutOrNull(4000L)`로 제어하여 무한 홀딩 차단.
-4. **Shizuku 바인더 안전 가드**: 모든 AIDL 호출부를 백그라운드 스레드에 귀속시키고 최대 3초의 타임아웃을 지닌 `runBinderSafe`로 래핑하여 Binder Crash 격벽 완성.
-5. **Shizuku SecurityException 완치 패치**: Shizuku 셸 권한 직접 바인딩 시 안드로이드 14+ 대응을 위해 `com.android.shell` 패키지명과 올바른 AttributionTag를 리플렉션으로 주입하여, `IWindowManager` 및 `IActivityTaskManager` AIDL 인터페이스 리플렉션 호출 시의 권한 에러를 완벽 영구 차단.
+### 4.2. 공인 IP 매핑 기반 자동 세션 페어링 (Shared Public IP Correlation)
+- **통신망의 생태계적 특성 활용**: 스마트폰의 핫스팟에 차량 테슬라 브라우저가 연결되면, 두 기기가 최종 외부 인터넷으로 나갈 때 **동일한 셀룰러 공인 IP**를 할당받는 네트워크의 공유 구조를 활용합니다.
+- **이중 맵 역추적**: 
+  - NestJS 기반 백엔드(`tesla_manager`)에 안드로이드 앱 기동 시 사설 IP와 요청 공인 IP(`cf-connecting-ip`)를 결합한 테이블(`publicIpMap`)을 갱신합니다.
+  - 차량 테슬라 웹 클라이언트가 별도의 기기 식별 파라미터(`userId`) 없이 정적 단일 주소 `https://car.fbezita.com/castla`로 즉시 인입 시, 요청한 테슬라 브라우저의 공인 IP와 일치하는 가장 최신의 안드로이드 폰 사설 IP를 서버가 추적 매핑하여 자동 페어링을 즉각적으로 성사시킵니다.
 
 ---
 
@@ -289,38 +172,85 @@ virtualDisplay?.resize(newWidth, newHeight, newDpi)
 
 ---
 
-## 6. 🚀 초저지연 H.264 비디오 스트리밍 파이프라인 및 안정적 재연결
+## 6. 📦 MSE & WebCodecs 패킷 구조 및 스트리밍 처리 파이프라인
 
-테슬라 웹 브라우저 환경에서 실시간 60fps 미러링을 초저지연(50~80ms)으로 재생하기 위해 고성능 하드웨어 H.264 인코더와 안정성 높은 브라우저 단의 네트워크 복구 루틴을 설계했습니다.
+Castla는 안드로이드 하드웨어 인코더(MediaCodec)로부터 실시간 바이너리 소켓을 통해 H.264 NAL 유닛 패킷을 수집하며, 클라이언트 차량의 스펙과 보안 상태에 맞춰 **MSE(Media Source Extensions) 방식**과 **WebCodecs 방식**의 이원화된 가속 스트리밍 파이프라인을 구동합니다.
 
-### 6.1. 안드로이드 하드웨어 인코더(MediaCodec) 최적화
-[VideoEncoder.kt](file:///c:/project/private/castla/app/src/main/java/com/castla/mirror/capture/VideoEncoder.kt)에서 기기의 하드웨어 미디어 코덱을 커스텀 제어합니다.
-- **프로파일 어댑티브 매핑 (High vs Baseline)**: 압축 효율이 15~25% 높은 CABAC 및 8x8 변환 기반의 **H.264 High Profile**을 먼저 시도하고, 칩셋(예: 일부 Exynos/MediaTek AP)에 의해 거부되면 즉시 호환성이 완벽한 **Baseline Profile**로 폴백(Fallback) 처리합니다.
-- **VBR (Variable Bitrate) 및 레이턴시 제어**: CBR 대신 **VBR(`BITRATE_MODE_VBR`)**을 활성화하고, 프레임 버퍼링 지연을 유발하는 **B-프레임을 강제 비활성화(`max-bframes = 0`)**했습니다.
-- **인코더 강제 활성화 및 워치독 관리**:
-  - `KEY_OPERATING_RATE`를 최대치(`32767`)로 강제 주입하여, 화면 변화가 적을 때 GPU/VPU가 저클럭(underclocking) 상태로 들어가 저지연 성능이 떨어지는 문제를 원천 차단했습니다.
-  - 정적 화면 상태에서 프레임 송신이 끊겨 웹소켓이 타임아웃 처리되는 것을 막고자, 100ms 동안 화면 변화가 없을 때 이전 프레임을 자동으로 재송출하도록 `KEY_REPEAT_PREVIOUS_FRAME_AFTER (100_000ms)`을 인코더에 인젝션했습니다.
-- **제로카피 네트워크 패킷 설계 (Zero-Copy Network Optimization)**:
-  ```kotlin
-  // 네트워크 전송 시 8바이트 헤더를 붙여서 보낼 수 있도록, 바이트 어레이 생성 단계에서 앞쪽에 8바이트의 빈 공간을 미리 확보합니다.
-  val data = ByteArray(info.size + 8)
-  buffer.get(data, 8, info.size) // 실제 비디오 데이터를 8번 인덱스부터 쓰기 작업
-  ```
-  이를 통해 네트워크 전송 모듈에서 중복적인 메모리 복사 및 할당(GC 유발)을 완벽히 방지하여 소켓 전송 효율을 대폭 끌어올렸습니다.
+```
++--------------------------------------------------------------------------------------------------------+
+|                                    Raw Video Socket Binary Packet                                      |
+|                                                                                                        |
+|  +---------------------------+ +-----------------+ +-----------------------+ +---------------------+  |
+|  | Byte 0~3: Sequence Number | | Byte 4: Type    | | Byte 5: Keyframe flag | | Byte 6~7: Size      |  |
+|  +---------------------------+ +-----------------+ +-----------------------+ +---------------------+  |
+|  | Byte 8 ~ N: Raw Annex-B H.264 NAL Unit Stream (SPS/PPS + I-Frame/Delta Frame)                       |  |
+|  +-----------------------------------------------------------------------------------------------------+  |
++--------------------------------------------------------------------------------------------------------+
+                                                    |
+                                    +---------------+---------------+
+                                    |                               |
+                     [ 1. MSE + jmuxer Route ]        [ 2. WebCodecs API Route ]
+                                    |                               |
+                      바이너리 8바이트 헤더 디카드          바이너리 8바이트 헤더 판독
+                                    |                               |
+                      Raw NAL Unit ➔ jmuxer 피딩         Annex-B I-Frame 선두 SPS/PPS 주입
+                                    |                               |
+                      ISO BMFF (MP4) 청크 리먹싱         EncodedVideoChunk 직접 다이렉트 구성
+                                    |                               |
+                      SourceBuffer.appendBuffer()      VideoDecoder.decode() 하드웨어 디코딩
+                                    |                               |
+                      HTML5 <video> 가속 렌더링          VideoFrame 획득 ➔ Canvas drawImage()
+                                    |                               |
+                              [지연 약 150~300ms]                [초저지연 50~80ms & VRAM 즉시 반환]
+```
 
-### 6.2. 테슬라 브라우저와 결합된 재연결 및 세션 동기화
-로컬 WiFi 무선 통신의 특성상 테슬라 차량이 멀어지거나 신호가 약해질 때 웹소켓 연결이 일시적으로 해제될 수 있습니다. Castla는 끊김 발생 시 1초 만에 화면이 자동 복구되는 연결 상태 기계를 구축했습니다.
-- **재연결 시 SPS/PPS 및 시퀀스 캐시 강제 무력화**:
-  인코더 세션이 재시작되면 안드로이드 코덱은 완전히 새로운 SPS 및 PPS를 전송하고 프레임 번호(`Sequence Number`)를 `0`으로 리셋합니다. 이때 브라우저 디코더가 기존 미디어가 가지고 있던 캐시와 프레임 순서 번호를 유지하고 있으면 디코딩 엔진(WebCodecs) 내부에서 **프레임 갭 에러(Frame gap error)가 터져 화면이 영구 로딩(`Loading...`) 상태에 갇깁니다**.
-  이를 차단하기 위해 브라우저의 소켓 재연결 핸들러 실행 즉시 **디코더의 캐시와 상태 메타데이터를 강제로 초기화**하여 최초로 도착한 SPS/PPS 키프레임을 완벽하게 재디코딩하도록 최적화했습니다.
-  ```javascript
-  if (decoder) {
-      decoder._lastSeqNum = undefined; // 이전 시퀀스 트래킹 무력화
-      decoder._cachedSpsPps = null;    // 이전 코덱 설정 데이터 캐시 클리어
-      if (decoder.resetStats) decoder.resetStats();
-  }
-  ```
-- **이중 연결 및 독립 패스 모니터링**: 비디오 웹소켓, 터치 입력 제어 웹소켓, 오디오 플레이어 웹소켓이 상호 유기적으로 상태를 공유하여, 하나의 스트림이 끊어지더라도 전체 미러링 환경이 대기 시간 없이 즉시 동기화 재연결 프로세스를 실행하여 매끄러운 화면 복원을 구현했습니다.
+### 6.1. 비디오 소켓 공통 바이너리 패킷 구조 (Common Binary Packet Specification)
+비디오 소켓(`videoSocket`)을 통해 실시간으로 인입되는 영상 패킷은 오버헤드를 극소화하기 위해 설계된 **8바이트의 전용 프로토콜 헤더**와 실제 비디오 스트림 페이로드로 정밀 레이아웃되어 있습니다:
+1. **Byte 0 ~ 3 (Sequence Number)**: 네트워크 상에서의 프레임 순서를 추적하는 고정형 `Int32 (Big-Endian)` 값입니다. 패킷 드롭 및 프레임 시퀀스 갭 보정 연산에 직접 반영됩니다.
+2. **Byte 4 (Payload Type)**: 현재 송출되는 바이너리의 타입 플래그. `0x00`은 비디오 스트림 데이터를 고유 지시합니다.
+3. **Byte 5 (Keyframe Indicator)**: 해당 프레임의 NAL Unit 속성을 마킹하는 지시 플래그입니다. **`0x01`**은 인코더가 갓 출력한 완전한 **I-Frame(Keyframe)**임을 뜻하며, 디코더의 시퀀스 락 해제 및 캔버스 뷰 가시성 제어의 논리 관문 트리거로 활용됩니다.
+4. **Byte 6 ~ 7 (Payload Size)**: 뒤이어 나타나는 순수 미디어 프레임 바이트의 물리적 사이즈 정보를 담은 고정 `UInt16 (Big-Endian)` 정보입니다.
+5. **Byte 8 ~ N (NAL Unit Payload)**: 안드로이드 MediaCodec 인코더로부터 유출된 H.264 원시 Annex-B 데이터(시작 마커 `0x00000001` 또는 `0x000001` 로 연결된 실시간 프레임 스트림)의 본체입니다.
+
+---
+
+### 6.2. MSE (Media Source Extensions) + jmuxer 처리 파이프라인
+MSE 방식은 표준 HTML5 `<video>` 미디어 가속 인프라를 활용하여 광범위한 호환성을 타겟으로 작동합니다.
+1. **헤더 분리 (Header Discarding)**: 수신된 바이너리 패킷의 앞쪽 8바이트 헤더를 오프셋 슬라이싱으로 신속히 걷어내고 순수 H.264 Annex-B NAL 유닛 바이트만 격리 추출합니다.
+2. **원시 데이터 피딩 (Raw Data Feeding)**: 분리된 NAL 유닛 바이트를 MP4 리먹서인 `jmuxer` 인스턴스의 `.feed()` 파이프에 인젝션합니다.
+3. **실시간 리먹싱 (Real-time Re-muxing)**: `jmuxer` 내부 엔진이 원시 NAL 유닛의 NAL Header를 해독하여 동적 타임프레임 스케줄을 연산하고, 이를 브라우저 표준 재생기 컴포넌트가 해독할 수 있는 **ISO BMFF (MP4, `video/mp4; codecs="avc1.64002a"`)** 파일 조각으로 컨테이너 실시간 가공을 수행합니다.
+4. **버퍼 추가 및 가속 재생**: 리포매팅된 MP4 스트림 버퍼 데이터를 브라우저 가상 미디어 인스턴스인 `SourceBuffer` 에 `.appendBuffer()` 로 푸시하여 하드웨어 가속기가 내장된 `<video>` 엘리먼트를 통해 화면에 부드럽게 재생시킵니다.
+- **아키텍처 평치**:
+  - **장점**: 구형 테슬라 MCU(Intel Atom 칩셋 디바이스)를 포함하여 사실상 모든 모던 브라우저 환경에서 플러그인 없이 돌아가는 완벽한 안전 장치 역할을 합니다.
+  - **단점**: 실시간 NAL 유닛을 읽어 MP4 구조체로 재생성하는 컨테이너 오버헤드와 브라우저 미들웨어의 고유 버퍼 지연이 중첩되어 약 **150~300ms의 레이턴시(버퍼랙)**가 발생합니다.
+
+---
+
+### 6.3. WebCodecs API 초저지연 처리 파이프라인
+WebCodecs 방식은 미디어 리먹싱과 브라우저 소스 버퍼의 시간축 버퍼 오버헤드를 완전히 걷어내고 하드웨어 GPU 디코더에 원시 NAL 유닛을 직접 밀어넣는 **궁극의 초저지연(50~80ms) 전송 기술**입니다.
+1. **바이너리 헤더 판독 & SPS/PPS 인밴드 병합**:
+   - 패킷 유입 시 Byte 5를 검출하여 `0x01` (Keyframe) 여부를 상시 감시합니다.
+   - Chrome WebCodecs API 규격 검증을 우회하기 위하여 `VideoDecoder.configure()` 실행 시 메타 데이터 주입용 `description` 매개변수를 완전히 생략함으로써 디코더를 **Annex-B 무설정 통과 모드**로 가동시킵니다.
+   - 이를 극복하기 위해, 백엔드로부터 수신한 최초의 Keyframe NAL 유닛 물리 바이트 최선두에 **SPS(Sequence Parameter Set) 및 PPS(Picture Parameter Set) NAL 유닛 바이너리(시작 마커 포함)를 직접 결합하여 결합형 Annex-B I-Frame 스트림**으로 재조립해 디코더에 흘려보냅니다.
+2. **EncodedVideoChunk 인코딩 청크 인스턴스화**:
+   - 재조립된 미디어 본체 바이트(`SPS + PPS + I-Frame` 또는 `Delta Frame`)를 바탕으로 `EncodedVideoChunk` 객체를 즉석에서 인스턴스화합니다.
+   ```javascript
+   const chunk = new EncodedVideoChunk({
+       type: isKeyFrame ? 'key' : 'delta',
+       timestamp: seqNum * 16666, // 60fps 기준 가상 타임스탬프 계산 (Microseconds 단위)
+       data: new Uint8Array(payloadBytes)
+   });
+   ```
+3. **하드웨어 디코딩 다이렉트 디스패칭 (Hardware Decoding)**:
+   - 생성 완료된 EncodedVideoChunk 객체를 `VideoDecoder.decode(chunk)` 를 사용해 무중단 백그라운드로 GPU 디코딩 칩셋에 Direct 전송합니다.
+4. **VideoFrame 해제 및 Canvas drawImage**:
+   - GPU 해독이 완료되면 디코더의 아웃풋 콜백을 통해 원시 그래픽 메모리 포인터인 **`VideoFrame`** 인스턴스가 실시간 발행됩니다.
+   - 프론트엔드의 `FramePacer` 스케줄러를 거쳐 시간축이 맞춰진 렌더링 프레임을 `HTMLCanvasElement` 2D context 상에 `ctx.drawImage(videoFrame, ...)` 로 직접 고속 사사합니다.
+5. **VRAM 자원 즉각 반환**:
+   - 드로잉이 끝나는 즉시 가비지 컬렉터의 비동기 수거를 기다리지 않고 물리적 메모리 누수 예방을 위하여 **`videoFrame.close()`**를 명시적으로 동기 호출해 그래픽 VRAM 리소스를 즉시 시스템에 즉각 반환합니다.
+- **아키텍처 평치**:
+  - **장점**: 중간 매핑 컨테이너 래핑 오버헤드가 없기 때문에 **50~80ms의 눈빛과 싱크가 일치하는 최저지연 수준**을 달성합니다.
+  - **단점**: 반드시 로컬 안전 보안 지대(HTTPS / SSL Context)가 보장되어야만 브라우저가 해당 기능을 허가합니다.
 
 ---
 
@@ -463,7 +393,7 @@ sequenceDiagram
 ```
 
 - **해결 조치**:
-  1. **주 디코더/페이서 엔진 물리적 리부트**: `promoteSecondaryToPrimary`를 비동기(`async`)로 전면 개편하고, 승격 시작 즉시 `initDecoder(true)`를 강제 기동하여 페이서 타임라인 왜곡 및 드롭 hunt 현상을 원천 진압했습니다.
+  1. **주 디코더/페이서 엔진 물리적 리부트**: `promoteSecondaryToPrimary`를 비동기(`async`)로 전면 개편하고, 승격 시작 즉시 `initDecoder(true)`를 강제 기동하여 페이서 타임라인 왜곡 및 드롭 현상을 원천 진압했습니다.
   2. **SPS/PPS 캐시 즉각 이식 (Migration)**: 우측 보조화면의 `window.secondaryDecoder` 및 `window._lastSecondarySpsPps` 캐시 데이터를 Primary 디코더로 수동 이식시켰습니다.
   3. **과도기 투명도 쉴드 (Transition Shield) 도입**: 승격이 개시되자마자 `canvas.style.opacity = "0"`으로 전환하여 정지 잔상을 은폐하고, `main.video.js`의 `firstFrameReceived = false`로 강제 리셋하여 다음 신규 키프레임 감지 즉시 `checkReady()` 귀착 흐름이 완벽히 트리거되도록 교정했습니다.
   4. **UI SSOT 자율 반응형 동기화 및 페이드인 복구**: `checkReady()`가 첫 프레임 정착을 검출하면, 상태 변수를 `state.left = window._promotedApp; state.right = null;`로 대입하여 자율 레이아웃 바인딩을 연쇄 작동시키고 캔버스를 `opacity = '1'`로 노출했습니다.

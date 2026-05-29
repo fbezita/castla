@@ -461,3 +461,21 @@ The hot restart stream recovery loop and embedded server SSL configurations have
   - `http://<LAN-IP>:9090`
 - HTTP/HTTPS 혼합 동시 접속 테스트는 피할 것
 
+
+---
+
+## 2026-05-29 WebCodecs Black Screen 및 안드로이드 안정화/자동화 업데이트
+
+### 핵심 변경 사항
+- **WebCodecs 블랙 스크린 해결**: 
+  - `VideoDecoder.configure`에서 `description` 필드(SPS/PPS)를 과감하게 생략하여 디코더가 완벽히 `Annex-B` 바이트 스트림 모드로 작동하도록 유도.
+  - 최초 키프레임(`keyFrame = true`)이 도달할 때 캐싱해둔 `configPayload`(SPS/PPS)를 키프레임 데이터 앞에 다이렉트로 결합하여 단일 Annex-B 청크로 주입하도록 `WebCodecsBackend.ts` 조치 완료.
+- **안드로이드 Target SDK 34+ 보안 예외 예방**:
+  - `enabled_input_methods` settings를 직접 읽으려 시도할 때 `SecurityException`이 뜨던 문제를 `InputMethodManager` API 우선 조회 및 settings Secure 폴백 이중 구조로 전환하여 박멸.
+- **서비스 onDestroy/performCleanup MainThread 블로킹 방지**:
+  - 메인 UI 스레드 상에서 `mirrorServer?.stop()`이 호출되었을 때 Conscrypt SSL 소켓 클로즈와 얽혀 `NetworkOnMainThreadException`이 발생하던 현상 해소.
+  - `MirrorServer.stop()`을 오버라이딩하여 메인 스레드 호출 시 자동으로 백그라운드 스레드(`MirrorServerStopThread`)에서 모든 소켓 정지 프로세스를 실행하도록 구조화.
+- **Shizuku 기반 접근성 서비스 100% 자동 바인딩 및 불필요 수동 UI 영구 삭제**:
+  - Shizuku를 통해 접근성 서비스를 백그라운드로 켤 때, OS(`AccessibilityManagerService`)가 변경 사항을 강제 인식해 백그라운드 서비스를 런타임에 리로드 및 즉각 바인딩(Binding)할 수 있도록 `null/0 -> 재설정/1` 강제 상태 급변(State Churn) 시퀀스 쉘 패치 적용.
+  - 이에 따라 수동으로 직접 껐다 켤 필요가 아예 없어졌으므로, UI 상에서 사용자 혼란을 유도하던 "Text Input Setup" 가이드 카드를 `MainActivity.kt` 의 컴포저블 코드 상에서 완전히 삭제하여 원터치 자동 UX 실현.
+
