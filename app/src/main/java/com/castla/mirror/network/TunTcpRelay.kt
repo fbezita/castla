@@ -137,12 +137,10 @@ class TunTcpRelay(
                     try { it.localSocket?.close() } catch (_: Exception) {}
                 }
             }
-            // ### 수정 시작 ###
             flags and SYN != 0 && flags and ACK == 0 -> {
                 Log.i(TAG, "TCP SYN received: src=${ipStr(srcIp)}:$srcPort dst=${ipStr(dstIp)}:$dstPort flags=${flagStr(flags)}")
                 handleSyn(key, seq)
             }
-            // ### 수정 끝 ###
             flags and FIN != 0 -> handleFin(key, seq)
             flags and ACK != 0 -> {
                 val s = sessions[key] ?: return
@@ -164,9 +162,7 @@ class TunTcpRelay(
         }
 
         try {
-            // ### 수정 시작 ###
             Log.i(TAG, "TCP SYN received: src=${ipStr(key.srcIp)}:${key.srcPort} dst=${ipStr(key.dstIp)}:${key.dstPort} ➔ redirecting to 127.0.0.1:$localPort")
-            // ### 수정 끝 ###
             val sock = Socket("127.0.0.1", localPort)
             sock.tcpNoDelay = true
 

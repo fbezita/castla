@@ -18,9 +18,9 @@ export class JMuxerBackend implements DecoderBackend {
   private mseReady = false;
   private pendingPayloads: Uint8Array[] = [];
   private fedFrames = 0;
-  private rendered = false;
   private destroyed = false;
   private detachVideoListeners: Array<() => void> = [];
+  private lastSyncTime = 0;
 
   constructor(onFrame?: () => void, onStatus?: (event: string, detail?: string) => void) {
     this.onFrame = onFrame;
@@ -63,8 +63,8 @@ export class JMuxerBackend implements DecoderBackend {
       this.muxer = new JMuxer({
         node: this.video,
         mode: 'video',
-        flushingTime: 0,
-        maxDelay: 400,
+        flushingTime: 30, // Optimized flush interval for automotive webview
+        maxDelay: 1000,   // Expanded delay limit to prevent aggressive buffer drops in Tesla Chromium
         clearBuffer: true,
         fps: 60,
         debug: false,
@@ -134,11 +134,42 @@ export class JMuxerBackend implements DecoderBackend {
       if (this.destroyed || isAbortError(error)) return;
       this.onStatus?.('videoPlayError', String(error));
     });
+
+    // Stalled playhead unfreezing mechanism for embedded/automotive Chromium engines
+    this.syncPlayheadIfNeeded();
+
     if (!this.rendered && this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
       this.rendered = true;
       this.reportVideoState('videoHasCurrentData');
     }
     this.onFrame?.();
+  }
+
+  /**
+   * Monitor video buffering status and force-jump playhead to the live edge if stalled.
+   * Helps Automotive Chromium recover when transition delays pause the media stream timeline.
+   */
+  private syncPlayheadIfNeeded(): void {
+    const video = this.video;
+    if (!video || video.buffered.length === 0) return;
+
+    try {
+      const bufferedEnd = video.buffered.end(video.buffered.length - 1);
+      const diff = bufferedEnd - video.currentTime;
+
+      // Throttled unfreezing logic: Adjust threshold to 0.3s to allow normal decode margin.
+      // Jump immediately when lag exceeds 0.3s, but throttle status logging to every 3 seconds to avoid spam.
+      if (diff > 0.3) {
+        const now = Date.now();
+        if (now - this.lastSyncTime > 3000) {
+          this.onStatus?.('playheadSync', `lag=${diff.toFixed(2)}s forced_jump_to=${bufferedEnd.toFixed(2)}s`);
+          this.lastSyncTime = now;
+        }
+        video.currentTime = bufferedEnd;
+      }
+    } catch (error) {
+      this.onStatus?.('playheadSyncError', String(error));
+    }
   }
 
   private reportVideoState(event: string, prefix = ''): void {

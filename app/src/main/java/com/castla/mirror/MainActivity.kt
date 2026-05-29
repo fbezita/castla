@@ -55,6 +55,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.castla.mirror.network.NetworkMonitor
 import com.castla.mirror.network.NetworkState
+import com.castla.mirror.network.CastlaDeviceId
 import com.castla.mirror.service.HotspotClientDetector
 import com.castla.mirror.service.MirrorForegroundService
 import com.castla.mirror.service.TeslaBleScanner
@@ -352,6 +353,7 @@ class MainActivity : AppCompatActivity() {
                         isStreaming = isStreaming,
                         isPreparing = isPreparing,
                         serverUrl = serverUrl,
+                        reachableMirrorIp = resolveReachableMirrorIp(),
                         shizukuInstalled = shizukuInstalled,
                         shizukuRunning = shizukuRunning,
                         shizukuPermitted = shizukuPermitted,
@@ -1315,6 +1317,7 @@ fun CastlaScreen(
     isStreaming: Boolean,
     isPreparing: Boolean = false,
     serverUrl: String,
+    reachableMirrorIp: String = "0.0.0.0",
     shizukuInstalled: Boolean,
     shizukuRunning: Boolean,
     shizukuPermitted: Boolean = false,
@@ -1543,9 +1546,11 @@ fun CastlaScreen(
                             textAlign = TextAlign.Center
                         )
                         Spacer(modifier = Modifier.height(8.dp))
-                        val deviceId = com.castla.mirror.network.CastlaDeviceId.getDeviceId(context)
+                        val orgDeviceId = CastlaDeviceId.getDeviceId(context)
+                        val mixedDeviceId = CastlaDeviceId.getDeviceId(context, reachableMirrorIp)
+                        
                         Text(
-                            text = "Device ID: $deviceId / Relay Label: c-$deviceId",
+                            text = "Device ID: $orgDeviceId / Active: c-$mixedDeviceId ($reachableMirrorIp)",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color.White.copy(alpha = 0.5f),
                             textAlign = TextAlign.Center

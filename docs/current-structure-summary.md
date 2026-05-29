@@ -479,3 +479,30 @@ The hot restart stream recovery loop and embedded server SSL configurations have
   - Shizuku를 통해 접근성 서비스를 백그라운드로 켤 때, OS(`AccessibilityManagerService`)가 변경 사항을 강제 인식해 백그라운드 서비스를 런타임에 리로드 및 즉각 바인딩(Binding)할 수 있도록 `null/0 -> 재설정/1` 강제 상태 급변(State Churn) 시퀀스 쉘 패치 적용.
   - 이에 따라 수동으로 직접 껐다 켤 필요가 아예 없어졌으므로, UI 상에서 사용자 혼란을 유도하던 "Text Input Setup" 가이드 카드를 `MainActivity.kt` 의 컴포저블 코드 상에서 완전히 삭제하여 원터치 자동 UX 실현.
 
+
+---
+
+## 2026-05-29 Mixed-Hashing DNS 캐시 극복 및 테슬라 초미세 동기화 / Manifest 안정화
+
+### 1. Mixed-Hashing 디바이스 ID 아키텍처 도입 (DNS 캐시 원천 차단)
+* **문제 현상**: 동일 기기가 핫스팟/네트워크 변경으로 인해 사설 IP가 달라질 때(예: `192.168.43.100` ➔ `192.168.1.50`), 이전 릴레이 호스트명이 동일하게 유지되면 차량 브라우저의 이전 IP DNS 캐싱에 의해 새로운 릴레이 접속이 완전히 마비되는 현상.
+* **처방**: `CastlaDeviceId.kt` 내부 `getDeviceId(context, ip)` 가 사설 IP도 매개변수로 수용하여 `ANDROID_ID + "_" + ip` 조합으로 가변 믹스 해시(10자리 16진수)를 도출하는 **Mixed-Hashing 아키텍처**를 수립.
+* **효과**: 네트워크 IP가 변동되는 즉시 새로운 릴레이 엔드포인트(`c-<mixedDeviceId>.castla.fbezita.com`)가 고유 식별자로 발급되어, 차량 브라우저의 고질적인 로컬 DNS 캐시 마비를 완벽하게 회피 및 우회 성공.
+
+### 2. 테슬라 브라우저 초미세 Live-Edge 동기화 및 인코더 안전 롤백
+* **장애 실체**: PC 크롬 및 WebCodecs 모드와 달리, 오직 테슬라 임베디드 Chromium 브라우저(JMuxer/MSE 모드)에서 비디오 소스 버퍼가 새로 유입될 때 재생 헤드(`video.currentTime`)가 최신 버퍼 경계(`bufferedEnd`)를 스스로 추종하지 못하고 정체(Stall)되어 최초 기동 시 블랙스크린, 앱 전환 시 마지막 프레임 고착(Freeze) 버그가 유발됨.
+* **처방**:
+  * **안드로이드 인코더 원복**: `VideoEncoder.kt` 의 `KEY_REPEAT_PREVIOUS_FRAME_AFTER` 리피터 주기를 의심의 여지 없이 안전하고 가벼운 표준 안정 상태(`100_000` 마이크로초, 100ms)로 **완벽하게 롤백 복원**하여 모바일 기기 리소스 부하를 제거.
+  * **초미세 Live-Edge 강제 동기화 (`JMuxerBackend.ts`)**: 고착 판단 임계 지연 한도를 기존 `1.5초`에서 **`0.3초`**로 초정밀 튜닝하고, 이를 넘어서는 오차가 발생하는 즉시 재생 헤드를 최신 버퍼 끝(`bufferedEnd`)으로 강제 점프(`currentTime = bufferedEnd`)시키는 트리거 이식.
+  * **콘솔 로그 쓰로틀링 (Throttling)**: 정상 디코딩 버퍼 변동에 의한 콘솔 도배(Spam)를 억제하기 위해, 강제 점프 로그 및 `onStatus` 상태 콜백 전송 빈도를 **최소 3초당 1회**로 정밀 억제하는 차단막을 적용하여 콘솔 청정 상태 확보.
+
+### 3. Compose 탑레벨 스코프 가이드 및 FQN 가독성 리팩토링
+* **클래스 독립형 Composable 스코프 수정**: `MainActivity.kt` 외부의 독립 탑 레벨 함수인 `CastlaScreen` 컴포저블 내부에서 `this@MainActivity.resolveReachableMirrorIp` 에러 완치 ➔ Composable 인터페이스에 `reachableMirrorIp: String` 매개변수를 전격 이관하고, `MainActivity.setContent` 인스턴스 스코프에서 IP를 사전에 도출하여 투명하게 주입받도록 하는 **단방향 의존성 주입(Dependency Injection) Compose 정석 구조** 확립.
+* **FQN(장황한 전체 패키지명) 단축**: `com.castla.mirror.network.CastlaDeviceId`와 같이 인라인으로 나열되던 FQN 호출부를 상단 임포트 정비(`import com.castla.mirror.network.CastlaDeviceId`)를 거쳐 가독성 높게 **`CastlaDeviceId.getDeviceId(...)`**의 최단 명세로 단축 정돈 완료.
+
+### 4. Android OS 자동 백업(Auto Backup)에 의한 캐시 오염 차단
+* **문제 현상**: 이전 디버그/릴리즈 테스트 시 스마트폰에 저장해둔 WebCodecs `disable` 설정 캐시가, 앱을 완전히 삭제하고 다시 재설치해도 안드로이드 OS의 백그라운드 클라우드 구글 백업 엔진에 의해 자동으로 복원 덮어쓰여 최초 구동 기본값이 짓밟히던 현상.
+* **처방**: `app/src/main/AndroidManifest.xml` 파일의 application 블록 내에 **`android:allowBackup="false"`** 옵션을 박아 OS의 임의 복원 개입을 영구 차단. 
+* **효과**: 일반적인 앱 업데이트 시에는 기존 설정이 100% 보존되면서도, 삭제 후 최초 재설치 시에는 조용히 복원되는 꼬인 캐시 데이터의 영향 없이 언제나 순수하고 투명한 코드 기본 활성 상태(`Enable`)로 시작하는 청정 상태 보장.
+
+

@@ -480,4 +480,22 @@ sequenceDiagram
   - 기기 B(abcd) ➔ `Domain: c-192-168-43-1...`
 - **정밀 로깅**: 테슬라 뷰어 혹은 클라이언트가 접속을 시도할 때, 서버 메모리 테이블을 바탕으로 **"어떤 기기 ID가 활성화되어 릴레이 주소로 통신하고 있는지"** 완벽하게 독립적으로 격리하여 인지하고 시스템 접속 이력 로그를 남길 수 있도록 안전하게 조율했습니다.
 
+### 16.3. 모노레포 최신 패키지 릴리즈 갱신 및 엄격한 TS 5.x 컴파일 장애 완치 패치
+- **의존성 대대적 최신화**: 사용자 요청에 따라 모노레포 전체 워크스페이스의 의존성 패키지를 `latest` 사양으로 일제히 업데이트하였습니다 (Prisma Client `7.7.0` ➔ `7.8.0` 최신 릴리즈 갱신 및 NestJS 코어 의존성 일괄 갱신).
+- **컴파일 장애 완치 내역**:
+  1. **ESM / TS `cookie-parser` namespace 호출 실패 완치**: `src/main.ts` 에서 ESM 빌드 호환성 충돌로 namespace 형식 import 가 거부되던 문제를 default import(`import cookieParser from 'cookie-parser'`)로 신속 개편하여 런타임 및 빌드 안전성을 확보했습니다.
+  2. **`unknown` Catch Block 타입 엄격화 완치**: `automation.service.ts` 및 `tesla.service.ts` 에서 예외 수신부 `e` 가 `unknown`으로 엄격히 강제되던 문제를 `e instanceof Error` 타입 가드를 적용하여 안전하게 에러 메시지를 수렴/로깅하도록 보완했습니다.
+  3. **StrictPropertyInitialization 미초기화 예외 완치**: 클래스 프로퍼티 자동 엄격 가드에 의해 생성자 외 런타임(onModuleInit 등) 수명주기에서 초기화되는 필드가 에러를 뱉던 문제를 데피니티브 할당 어설션(`!`) 기호를 추가 명시하여 성공적으로 통과시켰습니다.
+  4. **tsconfig.build.json 빌드 레이아웃 오차(TS5011) 완치**: 컴파일 빌드 레이아웃 판단의 예기치 않은 오차를 방지하도록 `tsconfig.build.json` 내 `compilerOptions.rootDir`에 `"src"` 경로를 명시적으로 엄격 바인딩하여 컴파일 에러를 최종 박멸시켰습니다.
+
+### 16.4. Device ID 기반 IP 주소 조회 API 구현 및 HTTP 테스트 명세 추가
+- **GET /api/castla/ip/:deviceId 신설**:
+  - 기기의 고유 `deviceId`를 경로 변수로 수신받아, 서버 내부의 `activeRelaysByDeviceId` 매핑 테이블을 실시간으로 역조회하여 기기가 할당받아 가동 중인 실제 사설 IP, 수렴 도메인(`hostname`), 릴레이 타겟 주소(`relayUrl`) 및 최종 업데이트 타임스탬프(`updatedAt`)를 안전하게 반환해 주는 전용 엔드포인트를 구축했습니다.
+  - 기존의 보안 정책과 일치되도록 요청 헤더의 `Authorization (Bearer <token>)` 토큰 유효성 검증 단계를 전진 배치하여 외부 비인가 임의 조회를 철저히 차단했습니다.
+- **test.http 테스트 유틸리티 갱신**:
+  - [test.http](file:///C:/project/private/tesla_manager/manager/test/test.http) 파일 내의 테스트 변수들 중 기기별로 흩어져 있던 `@CASTLA_DEVICE_HOSTNAME` 및 `@CASTLA_DEVICE_RELAY_URL` 예시 값을 실제 수렴 도메인 아키텍처 규격(`c-10-0-0-50...`)에 최적 합치되도록 개편했습니다.
+  - 신설된 IP 역추적 API를 간편하게 연동 테스트할 수 있도록 `C1.1. Device ID 기반 IP 주소 및 릴레이 정보 조회` Mock 통신 시나리오 템플릿을 새롭게 편입시켰습니다.
+
+
+
 

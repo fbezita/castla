@@ -20,20 +20,20 @@ class DeviceRelayDnsManager(
     @Volatile
     private var lastPublishedIp: String? = null
 
-    fun getDeviceId(): String {
-        return CastlaDeviceId.getDeviceId(context)
+    fun getDeviceId(ip: String? = null): String {
+        return CastlaDeviceId.getDeviceId(context, ip)
     }
 
-    fun getPublicEntryUrl(): String {
-        return "$PUBLIC_ENTRY_URL?device=${getDeviceId()}"
+    fun getPublicEntryUrl(ip: String? = null): String {
+        return "$PUBLIC_ENTRY_URL?device=${getDeviceId(ip)}"
     }
 
-    fun getDeviceHostname(): String {
-        return CastlaDeviceId.getRelayHostname(context, rootDomain)
+    fun getDeviceHostname(ip: String? = null): String {
+        return CastlaDeviceId.getRelayHostname(context, ip, rootDomain)
     }
 
-    fun getDeviceRelayUrl(port: Int = 9090): String {
-        return "https://${getDeviceHostname()}:$port"
+    fun getDeviceRelayUrl(ip: String? = null, port: Int = 9090): String {
+        return "https://${getDeviceHostname(ip)}:$port"
     }
 
     fun publishCurrentIpIfNeeded(
@@ -44,16 +44,20 @@ class DeviceRelayDnsManager(
         val ip = preferredIp
             ?.takeIf { it.isNotBlank() && it != "0.0.0.0" }
             ?: HotspotIpDetector.getReachableLocalIpv4(context)
-        val deviceId = getDeviceId()
-        val hostname = getDeviceHostname()
-        val relayUrl = getDeviceRelayUrl()
-        val publicUrl = getPublicEntryUrl()
 
         if (ip == null) {
             Log.e(TAG, "❌ Cannot publish relay DNS: no reachable local IPv4 found")
-            onResult?.invoke(false, publicUrl, relayUrl, null)
+            val fallbackPublicUrl = getPublicEntryUrl(null)
+            val fallbackRelayUrl = getDeviceRelayUrl(null)
+            onResult?.invoke(false, fallbackPublicUrl, fallbackRelayUrl, null)
             return
         }
+
+        // Generate IP-mixed configurations to isolate sessions dynamically
+        val deviceId = getDeviceId(ip)
+        val hostname = getDeviceHostname(ip)
+        val relayUrl = getDeviceRelayUrl(ip)
+        val publicUrl = getPublicEntryUrl(ip)
 
         if (!force && ip == lastPublishedIp) {
             Log.i(TAG, "Relay DNS already current: device=$deviceId $hostname -> $ip")

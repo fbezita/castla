@@ -56,10 +56,8 @@ class CastlaVpnService : VpnService() {
     private var standaloneDnsSocket: DatagramSocket? = null
     private var standaloneDnsThread: Thread? = null
     
-    // ### 수정 시작 ###
     // Active hijacked public relay IPs for matching TCP packets in Route Hijack Mode
     private val activeHijackedIps = java.util.concurrent.CopyOnWriteArraySet<String>()
-    // ### 수정 끝 ###
     
     @Volatile
     private var running = false
@@ -93,7 +91,6 @@ class CastlaVpnService : VpnService() {
 
     private fun startVpn() {
         try {
-            // ### 수정 시작 ###
             // Dynamic DNS resolution of target domains to hijack public IP routes
             activeHijackedIps.clear()
             if (USE_ROUTE_HIJACK_MODE) {
@@ -112,7 +109,6 @@ class CastlaVpnService : VpnService() {
             if (activeHijackedIps.isEmpty()) {
                 activeHijackedIps.addAll(FALLBACK_RELAY_IPS)
             }
-            // ### 수정 끝 ###
 
             val builder = Builder()
                 .setSession("Castla VPN")
@@ -142,13 +138,11 @@ class CastlaVpnService : VpnService() {
             } else {
                 // Route the virtual IP subnet to local interface to safely pull traffic into TUN
                 try {
-                    // ### 수정 시작 ###
                     builder.addRoute("100.99.9.0", 24)
                     builder.addRoute("192.168.0.0", 16) // Capture Wi-Fi LAN DNS/tethering routes
                     builder.addRoute("10.0.0.0", 8)     // Capture Hotspot DNS/AP routes
                     builder.addRoute("172.16.0.0", 12)  // Capture standard private network scopes
                     Log.i(TAG, "🎯 Added private subnet routes to intercept all tethering/DNS forwarding packets")
-                    // ### 수정 끝 ###
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ Failed to set subnet route: ${e.message}")
                 }
@@ -249,7 +243,6 @@ class CastlaVpnService : VpnService() {
             val dstPort = u16(buf, t + 2)
             val udpLen = u16(buf, t + 4)
 
-            // ### 수정 시작 ###
             // DNS intercept: UDP, Destination Port is 53 (Intercept all DNS queries for dynamic local redirection)
             if (dstPort == 53) {
                 // 1. Counting received UDP 53 DNS packets for Private DNS / Chrome Secure DNS diagnostic purposes
@@ -262,7 +255,6 @@ class CastlaVpnService : VpnService() {
                     handleDnsQuery(buf, payStart, payLen, srcIp, srcPort, dstIp)
                 }
             }
-            // ### 수정 끝 ###
         } else if (proto == PROTO_TCP) {
             val t = ihl
             var srcPort = -1
@@ -300,7 +292,6 @@ class CastlaVpnService : VpnService() {
         }
     }
 
-    // ### 수정 시작 ###
     private fun handleDnsQuery(buf: ByteArray, off: Int, len: Int, clientIp: Int, clientPort: Int, dstIp: Int) {
         val dnsPayload = buf.copyOfRange(off, off + len)
         
@@ -383,7 +374,6 @@ class CastlaVpnService : VpnService() {
             }
         }
     }
-    // ### 수정 끝 ###
 
     private fun proxyDnsRequest(dnsPayload: ByteArray, clientIp: Int, clientPort: Int, originalDstIp: Int = ipToInt(DNS_SERVER)) {
         var socket: DatagramSocket? = null
@@ -444,10 +434,8 @@ class CastlaVpnService : VpnService() {
         
         // Modify DNS Header flags for response
         // Keep original RD, Opcode, CD, AD flags intact by utilizing precise bitwise masking
-        // ### 수정 시작 ###
         response[2] = (response[2].toInt() or 0x80).toByte()
         response[3] = ((response[3].toInt() and 0xF0) or 0x80).toByte()
-        // ### 수정 끝 ###
         
         // QDCOUNT = 1, ANCOUNT = 1
         response[4] = 0x00.toByte()
@@ -489,7 +477,6 @@ class CastlaVpnService : VpnService() {
         return response
     }
 
-    // ### 수정 시작 ###
     /**
      * Builds a standard DNS response with No Error and No Answers (NODATA).
      * Clones the entire query payload to preserve EDNS0 OPT RR and additional sections exactly,
@@ -501,10 +488,8 @@ class CastlaVpnService : VpnService() {
         
         // Modify DNS Header flags for response (Response, standard query, recursion available, no error)
         // Keep original RD, Opcode, CD, AD flags intact by utilizing precise bitwise masking
-        // ### 수정 시작 ###
         response[2] = (response[2].toInt() or 0x80).toByte()
         response[3] = ((response[3].toInt() and 0xF0) or 0x80 or (rcode and 0x0F)).toByte()
-        // ### 수정 끝 ###
         
         // ANCOUNT = 0, NSCOUNT = 0 (Clear answers and authority counts, but keep QDCOUNT and ARCOUNT for EDNS0 compliance)
         response[6] = 0x00.toByte()
@@ -514,7 +499,6 @@ class CastlaVpnService : VpnService() {
         
         return response
     }
-    // ### 수정 끝 ###
 
     private fun sendUdpPacket(srcIp: String, srcPort: Int, dstIp: String, dstPort: Int, payload: ByteArray) {
         val ipTotal = 20 + 8 + payload.size
@@ -547,9 +531,7 @@ class CastlaVpnService : VpnService() {
         System.arraycopy(payload, 0, pkt, 20 + 8, payload.size)
 
         // Calculate and inject correct UDP Checksum for PC tethering environments (Windows OS and driver compliance)
-        // ### 수정 시작 ###
         w16(pkt, t + 6, udpCksum(srcIpInt, dstIpInt, pkt, t, udpLen))
-        // ### 수정 끝 ###
 
         // Delegate UDP write task to the same shared thread-safe writer in tcpRelay
         tcpRelay?.writePacket(pkt)
@@ -695,7 +677,6 @@ class CastlaVpnService : VpnService() {
 
     // --- Packet Crafting Byte Helpers ---
 
-    // ### 수정 시작 ###
     /**
      * Calculates the standard UDP Checksum over the IPv4 pseudo-header and UDP payload.
      * Complies with RFC 768 to avoid packet drop on strict OS firewall stacks (e.g., Windows).
@@ -703,14 +684,12 @@ class CastlaVpnService : VpnService() {
     private fun udpCksum(srcIp: Int, dstIp: Int, buf: ByteArray, udpOff: Int, udpLen: Int): Int {
         var sum = 0L
         // Pseudo-header elements - enforce unsigned 32-bit conversion to bypass sign extension bugs
-        // ### 수정 시작 ###
         val sIp = srcIp.toLong() and 0xFFFFFFFFL
         val dIp = dstIp.toLong() and 0xFFFFFFFFL
         sum += (sIp ushr 16) and 0xFFFF
         sum += sIp and 0xFFFF
         sum += (dIp ushr 16) and 0xFFFF
         sum += dIp and 0xFFFF
-        // ### 수정 끝 ###
         sum += PROTO_UDP.toLong()
         sum += udpLen.toLong()
         // UDP Segment parsing
@@ -721,9 +700,6 @@ class CastlaVpnService : VpnService() {
         val ck = (sum.toInt().inv()) and 0xFFFF
         return if (ck == 0) 0xFFFF else ck
     }
-    // ### 수정 끝 ###
-
-    // ### 수정 시작 ###
     /**
      * Calculates the standard TCP Checksum over the IPv4 pseudo-header and TCP payload.
      * Complies with RFC 793 to generate valid checksum for PC client IP stack.
@@ -779,7 +755,6 @@ class CastlaVpnService : VpnService() {
 
         tcpRelay?.writePacket(pkt)
     }
-    // ### 수정 끝 ###
 
     private fun ipToInt(ip: String): Int {
         val p = ip.split(".")
@@ -820,7 +795,6 @@ class CastlaVpnService : VpnService() {
     private fun ipStr(ip: Int) =
         "${ip ushr 24 and 0xFF}.${ip ushr 16 and 0xFF}.${ip ushr 8 and 0xFF}.${ip and 0xFF}"
 
-    // ### 수정 시작 ###
     private fun getRelayDnsResponseIp(): String {
         if (FORCED_RELAY_DNS_IP.isNotBlank()) {
             Log.i(TAG, "🌐 DNS test mode: forcing relay.castla.fbezita.com -> $FORCED_RELAY_DNS_IP")
@@ -881,5 +855,4 @@ class CastlaVpnService : VpnService() {
         Log.w(TAG, "⚠️ No active physical IP found. Falling back to VPN virtual IP: $VPN_ADDRESS")
         return VPN_ADDRESS
     }
-    // ### 수정 끝 ###
 }
