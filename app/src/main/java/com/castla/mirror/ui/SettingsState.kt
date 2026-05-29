@@ -16,7 +16,7 @@ data class StreamSettings(
     val autoHotspot: Boolean = true,
 
     // Option to enable or disable WebCodecs hardware accelerated decoding
-    val webCodecsEnabled: Boolean = false
+    val webCodecsEnabled: Boolean = true
 
 ) {
     enum class Resolution(val maxHeight: Int, val label: String) {
@@ -66,7 +66,7 @@ data class StreamSettings(
                 targetAppPackage = prefs.getString(KEY_TARGET_APP_PACKAGE, "") ?: "",
                 targetAppLabel = prefs.getString(KEY_TARGET_APP_LABEL, "") ?: "",
                 autoHotspot = prefs.getBoolean(KEY_AUTO_HOTSPOT, true),
-                webCodecsEnabled = prefs.getBoolean(KEY_WEBCODECS, false)
+                webCodecsEnabled = prefs.getBoolean(KEY_WEBCODECS, true)
             )
         }
 

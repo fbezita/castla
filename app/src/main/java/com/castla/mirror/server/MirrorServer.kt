@@ -1164,6 +1164,26 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         }
     }
 
+    override fun stop() {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            // Offload super.stop() to a background thread to prevent NetworkOnMainThreadException
+            val stopThread = Thread({
+                try {
+                    super.stop()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error stopping server in background thread", e)
+                }
+            }, "MirrorServerStopThread")
+            stopThread.start()
+            try {
+                // Wait up to 500ms to allow smooth socket teardown without blocking the UI thread indefinitely
+                stopThread.join(500)
+            } catch (_: Exception) {}
+        } else {
+            super.stop()
+        }
+    }
+
 }
 
 private class LoggingServerSocket(private val delegate: java.net.ServerSocket) : java.net.ServerSocket() {

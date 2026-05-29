@@ -40,6 +40,22 @@ object TextInputSettingsHelper {
      * Checks if the Castla IME is enabled in the system's enabled input methods list.
      */
     fun isImeEnabled(context: Context): Boolean {
+        try {
+            val targetImeName = "${context.packageName}/com.castla.mirror.input.CastlaImeService"
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            val enabledImeList = imm.enabledInputMethodList
+            if (enabledImeList != null) {
+                for (ime in enabledImeList) {
+                    if (ime.id == targetImeName) {
+                        return true
+                    }
+                }
+                return false
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to check enabled IMEs via InputMethodManager", e)
+        }
+
         return try {
             val targetImeName =
                 "${context.packageName}/com.castla.mirror.input.CastlaImeService"
@@ -217,6 +233,11 @@ object TextInputSettingsHelper {
 
         services.add(targetService)
 
+        // Force state churn to trigger AccessibilityManagerService to reload and bind the service immediately
+        execCommand("settings put secure enabled_accessibility_services null")
+        execCommand("settings put secure accessibility_enabled 0")
+
+        // Write the actual enabled service list and turn on accessibility
         execCommand("settings put secure enabled_accessibility_services ${services.joinToString(":")}")
         execCommand("settings put secure accessibility_enabled 1")
     }

@@ -81,12 +81,18 @@ export class VideoTransport {
 function parseFrame(data: ArrayBuffer): EncodedFrame {
   const view = new DataView(data);
   const flags = view.getUint8(0);
+  const serverTimestampMs = view.getUint32(3, true);
+
   return {
     flags,
     sequence: view.getUint16(1, true),
-    serverTimestampMs: view.getUint32(3, true),
+    serverTimestampMs,
+    // Keep this alias because WebCodecsBackend historically read timestampMs.
+    // Without it EncodedVideoChunk.timestamp becomes NaN and WebCodecs can stay black
+    // while MSE still works.
+    timestampMs: serverTimestampMs,
     payload: data.slice(8),
-    keyFrame: flags === 0x01,
-    config: flags === 0x02,
+    keyFrame: (flags & 0x01) !== 0,
+    config: (flags & 0x02) !== 0,
   };
 }

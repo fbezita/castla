@@ -27,6 +27,7 @@ export class WebCodecsBackend implements DecoderBackend {
   private renderedFrames = 0;
   private droppedDeltaBeforeKeyframe = 0;
   private lastDropLogAt = 0;
+  private lastKeyframeRequestAt = 0;
   private onFrame?: () => void;
   private requestKeyframe?: () => void;
   private onStatus?: (event: string, detail?: string) => void;
@@ -105,10 +106,20 @@ export class WebCodecsBackend implements DecoderBackend {
     }
 
     try {
+      const timestampMs = frame.timestampMs ?? frame.serverTimestampMs ?? performance.now();
+      let payload = frame.payload;
+      if (frame.keyFrame && this.configPayload) {
+        // Concatenate SPS/PPS config payload before the keyframe in Annex-B mode
+        const combined = new Uint8Array(this.configPayload.byteLength + frame.payload.byteLength);
+        combined.set(new Uint8Array(this.configPayload), 0);
+        combined.set(new Uint8Array(frame.payload), this.configPayload.byteLength);
+        payload = combined.buffer;
+      }
+
       const chunk = new EncodedVideoChunk({
         type: frame.keyFrame ? 'key' : 'delta',
-        timestamp: frame.timestampMs * 1000,
-        data: frame.payload,
+        timestamp: timestampMs * 1000,
+        data: payload,
       });
       decoder.decode(chunk);
     } catch (error) {
@@ -178,7 +189,6 @@ export class WebCodecsBackend implements DecoderBackend {
     try {
       const config: VideoDecoderConfig = {
         codec,
-        description: this.configPayload,
         optimizeForLatency: true,
       };
 
@@ -228,9 +238,8 @@ export class WebCodecsBackend implements DecoderBackend {
 
   private requestKeyframeThrottled(reason: string): void {
     const now = performance.now();
-    const last = this.lastDropLogAt;
-    if (now - last < 1500) return;
-    this.lastDropLogAt = now;
+    if (now - this.lastKeyframeRequestAt < 1500) return;
+    this.lastKeyframeRequestAt = now;
     this.onStatus?.('webcodecsRequestKeyframe', reason);
     this.requestKeyframe?.();
   }
