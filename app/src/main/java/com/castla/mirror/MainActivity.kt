@@ -1542,7 +1542,14 @@ fun CastlaScreen(
                             color = Color(0xFF69F0AE),
                             textAlign = TextAlign.Center
                         )
-
+                        Spacer(modifier = Modifier.height(8.dp))
+                        val deviceId = com.castla.mirror.network.CastlaDeviceId.getDeviceId(context)
+                        Text(
+                            text = "Device ID: $deviceId / Relay Label: c-$deviceId",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.5f),
+                            textAlign = TextAlign.Center
+                        )
                     }
                 }
             }
