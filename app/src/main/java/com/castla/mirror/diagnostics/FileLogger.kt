@@ -90,6 +90,32 @@ object FileLogger {
     fun w(tag: String, msg: String, t: Throwable? = null) = write("W", tag, msg, t)
     fun e(tag: String, msg: String, t: Throwable? = null) = write("E", tag, msg, t)
 
+    fun writeRaw(tag: String, msg: String) {
+        if (!initialized || degraded) return
+        val ts = timestampFmt.get()?.format(Date()) ?: ""
+        val tname = Thread.currentThread().name
+        val header = "$ts I $tag: (t=$tname)"
+        synchronized(lock) {
+            val dir = logsDir ?: return
+            try {
+                val current = File(dir, "mirror.log")
+                if (current.exists() && current.length() >= maxFileBytes) {
+                    val rotated = File(dir, "mirror.log.1")
+                    if (rotated.exists()) rotated.delete()
+                    current.renameTo(rotated)
+                }
+                FileWriter(current, true).use { fw ->
+                    PrintWriter(fw).use { pw ->
+                        pw.println(header)
+                        pw.print(msg)
+                    }
+                }
+            } catch (failure: Throwable) {
+                Log.w(TAG, "Failed to write raw log block", failure)
+            }
+        }
+    }
+
     fun getLogFiles(): List<File> {
         synchronized(lock) {
             val dir = logsDir ?: return emptyList()

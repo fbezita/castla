@@ -1,4 +1,5 @@
 import type { EncodedFrame, PaneId } from "../protocol";
+import { debugLog } from "../utils/debugLogger";
 
 export class VideoTransport {
   private socket?: WebSocket;
@@ -82,17 +83,30 @@ function parseFrame(data: ArrayBuffer): EncodedFrame {
   const view = new DataView(data);
   const flags = view.getUint8(0);
   const serverTimestampMs = view.getUint32(3, true);
+  const sequence = view.getUint16(1, true);
+  const keyFrame = (flags & 0x01) !== 0;
+  const config = (flags & 0x02) !== 0;
+  const payloadSize = data.byteLength - 8;
+
+  debugLog("[VideoTransport] parseFrame", {
+    sequence,
+    flags,
+    keyFrame,
+    config,
+    payloadSize,
+    timestamp: serverTimestampMs
+  });
 
   return {
     flags,
-    sequence: view.getUint16(1, true),
+    sequence,
     serverTimestampMs,
     // Keep this alias because WebCodecsBackend historically read timestampMs.
     // Without it EncodedVideoChunk.timestamp becomes NaN and WebCodecs can stay black
     // while MSE still works.
     timestampMs: serverTimestampMs,
     payload: data.slice(8),
-    keyFrame: (flags & 0x01) !== 0,
-    config: (flags & 0x02) !== 0,
+    keyFrame,
+    config,
   };
 }

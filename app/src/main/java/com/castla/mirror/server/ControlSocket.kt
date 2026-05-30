@@ -227,10 +227,51 @@ class ControlSocket(
                 "bubbleClosed" -> {
                     server.onBubbleClosed()
                 }
+                "debugDump" -> {
+                    val logsArray = json.optJSONArray("logs")
+                    if (logsArray != null) {
+                        handleDebugDump(logsArray)
+                    }
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to parse control message", e)
         }
+    }
+    
+    private fun handleDebugDump(logs: org.json.JSONArray) {
+        val count = logs.length()
+        Log.i(TAG, "⚡ [debugDump] Received $count frontend logs from Tesla browser.")
+        
+        val boundary = "========================\nTESLA FRONTEND DEBUG DUMP\ntimestamp=${System.currentTimeMillis()}\n========================\n"
+        
+        val sb = java.lang.StringBuilder()
+        sb.append("\n").append(boundary)
+        
+        for (i in 0 until count) {
+            val entry = logs.optJSONObject(i) ?: continue
+            val ts = entry.optLong("ts", 0L)
+            val msg = entry.optString("message", "")
+            val dataObj = entry.opt("data")
+            val data = if (dataObj != null && dataObj != org.json.JSONObject.NULL) dataObj.toString() else ""
+            
+            val date = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date(ts))
+            sb.append("[$date] $msg")
+            if (data.isNotEmpty()) {
+                sb.append(" | data=").append(data)
+            }
+            sb.append("\n")
+        }
+        
+        sb.append("========================\nEND OF TESLA FRONTEND DEBUG DUMP\n========================\n")
+        
+        val fullDump = sb.toString()
+        
+        // 1. Append frontend logs to existing diagnostic file using FileLogger
+        com.castla.mirror.diagnostics.FileLogger.writeRaw("TeslaFrontend", fullDump)
+        
+        // 2. Append frontend logs to existing MirrorServer log stream (Logcat)
+        Log.w(TAG, fullDump)
     }
 
     private fun handleBinaryTouch(data: ByteArray) {

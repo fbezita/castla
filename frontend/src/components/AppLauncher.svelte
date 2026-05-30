@@ -522,6 +522,10 @@
   function touchDrawer() {
     drawerRevision += 1;
   }
+
+  function triggerToggleDiagnostics() {
+    (window as any).castlaDebug?.toggleDiagnostics?.();
+  }
 </script>
 
 <div class:hidden={launchedOnce || hasVisibleStream} class="standby">
@@ -537,7 +541,12 @@
   </button>
   <header>
     <strong>Launcher</strong>
-    <span>{loading ? 'Loading' : `${apps.length} apps`}</span>
+    <div style="display: flex; gap: 8px; align-items: center;">
+      <button class="diag-toggle-btn" on:click|stopPropagation={triggerToggleDiagnostics} title="Toggle Diagnostics">
+        🛠️
+      </button>
+      <span>{loading ? 'Loading' : `${apps.length} apps`}</span>
+    </div>
   </header>
   <div class="search-row">
     <input bind:value={search} placeholder="Search apps" autocomplete="off" />
@@ -808,6 +817,26 @@
   header span {
     color: #a9adba;
     font-size: 12px;
+  }
+
+  .diag-toggle-btn {
+    border: none;
+    background: transparent;
+    color: rgb(255 255 255 / 0.65);
+    font-size: 16px;
+    padding: 2px 6px;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background 0.2s ease, transform 0.1s ease;
+  }
+
+  .diag-toggle-btn:hover {
+    background: rgb(255 255 255 / 0.1);
+    color: white;
+  }
+
+  .diag-toggle-btn:active {
+    transform: scale(0.9);
   }
 
   input,

@@ -10,6 +10,7 @@
   import { StreamRuntime } from "./runtime/StreamRuntime";
   import { TouchRouter, mapViewportPoint } from "./touch/TouchRouter";
   import { ImeBridge } from "./ime/ImeBridge";
+  import { triggerDump, isLoggingEnabled, setLoggingEnabled } from "./utils/debugLogger";
 
   let runtime: StreamRuntime;
   let compositor: BrowserCompositor;
@@ -37,6 +38,7 @@
 
   function createRuntimeGraph(): void {
     runtime = new StreamRuntime(location.host);
+    (window as any).castlaRuntime = runtime;
     compositor = new BrowserCompositor(runtime, compositorStore);
     touchRouter = new TouchRouter(runtime);
     imeBridge = new ImeBridge(runtime.control);
@@ -225,6 +227,9 @@
   });
 
   (window as Window & { castlaDebug?: Record<string, unknown> }).castlaDebug = {
+    isLoggingEnabled,
+    setLoggingEnabled,
+    triggerDump: (reason = "manual_debug") => triggerDump(runtime, reason),
     touchReset: (reason = "manual_debug") => runtime.resetTouchState(reason),
     controlReconnect: () => runtime.control.reconnectNow(),
     serverRearm: () => runtime.control.send({ type: "debugBrowserRearm" }),

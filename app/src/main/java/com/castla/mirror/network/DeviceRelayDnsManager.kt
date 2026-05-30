@@ -29,7 +29,11 @@ class DeviceRelayDnsManager(
     }
 
     fun getDeviceHostname(ip: String? = null): String {
-        return CastlaDeviceId.getRelayHostname(context, ip, rootDomain)
+        val safeIp = ip
+            ?.takeIf { it.isNotBlank() && it != "0.0.0.0" }
+            ?: return CastlaDeviceId.getRelayHostname(context, null, rootDomain)
+
+        return "c-${safeIp.replace(".", "-")}.$rootDomain"
     }
 
     fun getDeviceRelayUrl(ip: String? = null, port: Int = 9090): String {

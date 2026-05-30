@@ -103,7 +103,7 @@
             runtime.reportDecoderStatus(viewport.pane, event, detail),
         );
         await nextDecoder.initialize(video);
-        runtime.setCodec(viewport.pane, "h264", "High");
+        runtime.setCodec(viewport.pane, "h264", "Baseline");
       }
 
       console.warn(

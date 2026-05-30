@@ -18,6 +18,7 @@ export class StreamRuntime {
     Set<(frame: EncodedFrame) => void>
   >();
   private frameCounts = new Map<PaneId, number>();
+  private preferredProfiles = new Map<PaneId, string>();
   private connectionListeners = new Set<(connected: boolean) => void>();
   private sessionListeners = new Set<(epoch: number, reason: string) => void>();
   private touchStateListeners = new Set<(reason: string) => void>();
@@ -80,7 +81,8 @@ export class StreamRuntime {
       }
       for (const [pane, listeners] of this.frameListeners) {
         if (listeners.size === 0) continue;
-        this.setCodec(pane, "h264", "High");
+        const profile = this.preferredProfiles.get(pane) ?? "High";
+        this.setCodec(pane, "h264", profile);
         this.requestKeyframe(pane);
       }
     });
@@ -165,6 +167,7 @@ export class StreamRuntime {
   }
 
   setCodec(pane: PaneId, mode: "h264" | "mjpeg", profile = "High"): void {
+    this.preferredProfiles.set(pane, profile);
     this.control.send({ type: "codec", pane, mode, profile });
   }
 
