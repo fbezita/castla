@@ -342,12 +342,17 @@
     else if (primary) launch(primary, 'primary');
   }
 
+  // ### 수정 시작 ###
   function startPress(event: PointerEvent, app: AppInfo) {
     const target = event.target as HTMLElement;
+    // Functional buttons should not trigger app selection
     if (target.closest('button')) return;
     pairMenuOpen = '';
-    event.preventDefault();
-    (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+    
+    // Do not call preventDefault to allow smooth scrolling. Pointer capture is deferred to long press trigger.
+    const currentTarget = event.currentTarget as HTMLElement;
+    const pointerId = event.pointerId;
+    
     pressedApp = app;
     pressStartX = event.clientX;
     pressStartY = event.clientY;
@@ -357,24 +362,51 @@
     window.clearTimeout(pressTimer);
     pressTimer = window.setTimeout(() => {
       draggingApp = pressedApp;
+      if (draggingApp && currentTarget) {
+        try { currentTarget.setPointerCapture(pointerId); } catch {}
+      }
       navigator.vibrate?.(50);
       drawerOpen = true;
       updateDropZone(dragX, dragY);
-    }, 1000);
+    }, 700); // Tuned response to 700ms
   }
 
+  // ### 수정 시작 ###
   function movePress(event: PointerEvent) {
     if (!pressedApp && !draggingApp) return;
     dragX = event.clientX;
     dragY = event.clientY;
-    if (Math.hypot(dragX - pressStartX, dragY - pressStartY) > 10) pressMoved = true;
+    // Restored standard 10px threshold for precise drag-and-drop response
+    if (Math.hypot(dragX - pressStartX, dragY - pressStartY) > 10) {
+      pressMoved = true;
+      if (!draggingApp) {
+        // Pointer moved beyond scroll threshold before long press, cancel selection timer
+        window.clearTimeout(pressTimer);
+        pressedApp = null;
+      }
+    }
     if (draggingApp) {
       autoScrollDrawer(dragY);
       updateDropZone(dragX, dragY);
     }
   }
 
+  // Clean handler for pointercancel events to completely isolate native scrolling from activation
+  function cancelPress(event?: PointerEvent) {
+    window.clearTimeout(pressTimer);
+    if (event?.currentTarget instanceof HTMLElement) {
+      try { event.currentTarget.releasePointerCapture(event.pointerId); } catch {}
+    }
+    pressedApp = null;
+    draggingApp = null;
+    dropZone = '';
+    drawerDimmed = false;
+    pressMoved = false;
+    pairTarget = null;
+  }
+
   function endPress(event?: PointerEvent) {
+  // ### 수정 끝 ###
     window.clearTimeout(pressTimer);
     if (draggingApp) {
       if (pairTarget) createPair(draggingApp, pairTarget);
@@ -392,6 +424,7 @@
     pressMoved = false;
     pairTarget = null;
   }
+  // ### 수정 끝 ###
 
   function updateDropZone(x: number, y: number) {
     if (isPointInsideDrawer(x, y)) {
@@ -572,7 +605,7 @@
               on:pointerdown={(event) => startPress(event, app)}
               on:pointermove={movePress}
               on:pointerup={endPress}
-              on:pointercancel={endPress}
+              on:pointercancel={cancelPress}
               on:keydown={(event) => { if (event.key === 'Enter' || event.key === ' ') activateApp(app); }}
               on:contextmenu|preventDefault
               role="button"
@@ -586,7 +619,9 @@
               {:else}
                 <img class="split-app-icon" src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`} alt="" loading="lazy" draggable="false" />
               {/if}
-              <button class="launch-main" on:click|stopPropagation={() => activateApp(app)}><span>{app.label}</span></button>
+              <!-- ### 수정 시작 ### -->
+              <div class="launch-main"><span>{app.label}</span></div>
+              <!-- ### 수정 끝 ### -->
               <button class:primary={!app.isPair && primaryAutorun === app.packageName} class:secondary={!app.isPair && secondaryAutorun === app.packageName} class:active-pair={app.isPair && isAutorunPair(app)} class="bolt" title="Auto-run" on:click|stopPropagation={() => toggleAutorunForApp(app)}>↯</button>
               <button class:active={favorites.includes(app.packageName)} class="star" title="Favorite" on:click|stopPropagation={() => toggleFavorite(app.packageName)}>★</button>
               {#if app.isPair}
@@ -916,7 +951,9 @@
     border-radius: 8px;
     background: rgb(255 255 255 / 0.075);
     user-select: none;
-    touch-action: none;
+    /* ### 수정 시작 ### */
+    touch-action: pan-y;
+    /* ### 수정 끝 ### */
     -webkit-user-drag: none;
     transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
   }
@@ -993,6 +1030,9 @@
     text-align: left;
     font-size: 16px;
     font-weight: 700;
+    /* ### 수정 시작 ### */
+    cursor: pointer;
+    /* ### 수정 끝 ### */
   }
 
   .launch-main span {
@@ -1141,7 +1181,9 @@
   .drop-overlay {
     position: absolute;
     inset: 0;
-    z-index: 80;
+    /* ### 수정 시작 ### */
+    z-index: 95;
+    /* ### 수정 끝 ### */
     background: rgb(4 5 12 / 0.76);
     backdrop-filter: blur(2px);
     pointer-events: none;
