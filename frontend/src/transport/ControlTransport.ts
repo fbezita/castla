@@ -120,6 +120,20 @@ export class ControlTransport {
     }
   }
 
+  sendFrontendDiag(
+    tag: string,
+    message: string,
+    data?: Record<string, unknown>,
+  ): void {
+    this.send({
+      type: "frontendDiag",
+      tag,
+      message,
+      data,
+      ts: Date.now(),
+    });
+  }
+
   sendBinary(data: ArrayBuffer): void {
     if (this.socket?.readyState === WebSocket.OPEN) {
       this.socket.send(data);

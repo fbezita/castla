@@ -1,4 +1,9 @@
+<script context="module" lang="ts">
+  declare const __CASTLA_BUILD_TIMESTAMP__: string;
+</script>
+
 <script lang="ts">
+
   import ViewportHost from "./components/ViewportHost.svelte";
   import DiagnosticsOverlay from "./components/DiagnosticsOverlay.svelte";
   import AppLauncher from "./components/AppLauncher.svelte";
@@ -21,6 +26,7 @@
   let showDiagnostics = false;
   let frontendResetCleanup: (() => void) | undefined;
   const JMUXER_SCRIPT_SRC = "/js/jmuxer.min.js";
+  const FRONTEND_BUILD_MARKER = "frontend_ime_guard_v4_20260601";
 
   let imeActiveCleanup: (() => void) | undefined;
   let remoteTextMode = false;
@@ -28,17 +34,77 @@
   type ImeFsmState = 'IDLE' | 'ANDROID_FOCUSING' | 'READY' | 'BLUR_PENDING' | 'RECOVERING';
   let imeState: ImeFsmState = 'IDLE';
   let currentSessionId = 0;
+  let remoteEditableActive = false;
+  let lastRemoteFocusPackage: string | null = null;
+  let lastRemoteFocusSessionId = 0;
 
   let blurDebounceTimer: number | undefined;
   let focusRetryTimer: number | undefined;
+  let lifecycleCleanup: (() => void) | undefined;
+  (window as any).__CASTLA_VERBOSE_DIAGNOSTICS__ ??= false;
+
+  function isVerboseFrontendDiagnostics(): boolean {
+    return (window as any).__CASTLA_VERBOSE_DIAGNOSTICS__ === true;
+  }
+
+  function verboseWarn(message: string, payload?: unknown) {
+    if (!isVerboseFrontendDiagnostics()) return;
+    console.warn(message, payload);
+  }
+
+  function sendVerboseFrontendDiag(tag: string, message: string, payload: Record<string, unknown>) {
+    if (!isVerboseFrontendDiagnostics()) return;
+    runtime?.control?.sendFrontendDiag(tag, message, payload);
+  }
 
   function setImeState(newState: ImeFsmState) {
-    console.warn(`[FSM] state change: ${imeState} -> ${newState}`);
+    verboseWarn(`[FSM] state change: ${imeState} -> ${newState}`);
     imeState = newState;
     remoteTextMode = newState !== 'IDLE';
   }
 
-  function attemptProxyFocus(retryCount = 0) {
+  function sendFrontendRuntimeDiag(
+    tag: string,
+    message: string,
+    extra: Record<string, unknown> = {},
+  ) {
+    const payload = {
+      href: location.href,
+      visibilityState: document.visibilityState,
+      readyState: document.readyState,
+      activeElement: describeActiveElement(),
+      ts: Date.now(),
+      ...extra,
+    };
+    if (tag === "FRONTEND_ERROR" || isVerboseFrontendDiagnostics()) {
+      console.warn(`[${tag}] ${message}`, payload);
+      runtime?.control?.sendFrontendDiag(tag, message, payload);
+    }
+  }
+
+  function describeActiveElement(): string {
+    const active = document.activeElement as HTMLElement | null;
+    if (!active) return "null";
+    const tag = active.tagName || "unknown";
+    const className = active.className ? String(active.className) : "";
+    return className ? `${tag}.${className}` : tag;
+  }
+
+  function setRemoteEditableActive(next: boolean, reason: string) {
+    remoteEditableActive = next;
+    const payload = {
+      reason,
+      imeState,
+      currentSessionId,
+      lastRemoteFocusPackage,
+      lastRemoteFocusSessionId,
+      activeElement: describeActiveElement(),
+    };
+    verboseWarn(`[IME_DEBUG] remoteEditableActive=${next}`, payload);
+    sendVerboseFrontendDiag("IME_DEBUG", `remoteEditableActive=${next}`, payload);
+  }
+
+  function attemptProxyFocus(reason: string, retryCount = 0) {
     if (focusRetryTimer) {
       window.clearTimeout(focusRetryTimer);
       focusRetryTimer = undefined;
@@ -50,7 +116,28 @@
       return;
     }
 
-    console.warn(`[PROXY_FOCUS] attempt #${retryCount + 1}`, {
+    const focusPayload = {
+      retryCount,
+      remoteEditableActive,
+      imeState,
+      currentSessionId,
+      lastRemoteFocusPackage,
+      lastRemoteFocusSessionId,
+      activeElement: describeActiveElement(),
+    };
+    verboseWarn(`[IME_DEBUG] attemptProxyFocus reason=${reason}`, focusPayload);
+    sendVerboseFrontendDiag("IME_DEBUG", `attemptProxyFocus reason=${reason}`, focusPayload);
+
+    if (!remoteEditableActive) {
+      verboseWarn(`[IME_DEBUG] attemptProxyFocus blocked reason=${reason}`, {
+        retryCount,
+        imeState,
+        activeElement: describeActiveElement(),
+      });
+      return;
+    }
+
+    verboseWarn(`[PROXY_FOCUS] attempt #${retryCount + 1}`, {
       exists: !!imeProxy,
       disabled: imeProxy.disabled,
       readOnly: imeProxy.readOnly,
@@ -58,7 +145,7 @@
       visibility: getComputedStyle(imeProxy).visibility,
       width: imeProxy.offsetWidth,
       height: imeProxy.offsetHeight,
-      activeElement: document.activeElement?.tagName,
+      activeElement: describeActiveElement(),
     });
 
     try {
@@ -69,13 +156,13 @@
 
     // Verify focus
     if (document.activeElement === imeProxy) {
-      console.warn("[PROXY_FOCUS] verified successfully!");
+      verboseWarn("[PROXY_FOCUS] verified successfully!");
       setImeState('READY');
     } else {
-      console.warn(`[PROXY_FOCUS] verification failed. Active element is ${document.activeElement?.tagName}`);
+      verboseWarn(`[PROXY_FOCUS] verification failed. Active element is ${describeActiveElement()}`);
       if (retryCount < 3) {
         focusRetryTimer = window.setTimeout(() => {
-          attemptProxyFocus(retryCount + 1);
+          attemptProxyFocus(reason, retryCount + 1);
         }, 50);
       } else {
         console.error("[PROXY_FOCUS] Failed to acquire proxy focus after 3 retries");
@@ -99,9 +186,122 @@
     );
   }
 
+  function isEditableInputType(inputType: number | null | undefined): boolean {
+    if (!inputType) return false;
+    const TYPE_MASK_CLASS = 0x0000000f;
+    const TYPE_CLASS_TEXT = 0x00000001;
+    const TYPE_CLASS_NUMBER = 0x00000002;
+    const TYPE_CLASS_PHONE = 0x00000003;
+    const TYPE_CLASS_DATETIME = 0x00000004;
+    const inputClass = inputType & TYPE_MASK_CLASS;
+    return (
+      inputClass === TYPE_CLASS_TEXT ||
+      inputClass === TYPE_CLASS_NUMBER ||
+      inputClass === TYPE_CLASS_PHONE ||
+      inputClass === TYPE_CLASS_DATETIME
+    );
+  }
+
   function createRuntimeGraph(): void {
     runtime = new StreamRuntime(location.host);
     (window as any).castlaRuntime = runtime;
+    const frontendBuildPayload = {
+      marker: FRONTEND_BUILD_MARKER,
+      buildTimestamp: __CASTLA_BUILD_TIMESTAMP__,
+      href: location.href,
+      userAgent: navigator.userAgent,
+      ts: Date.now(),
+    };
+    console.warn("[BUILD_MARKER] frontend boot", frontendBuildPayload);
+    runtime.control.sendFrontendDiag("BUILD_MARKER", "frontend boot", frontendBuildPayload);
+    runtime.control.onConnectionChange((connected) => {
+      if (!connected) return;
+      runtime.control.sendFrontendDiag("BUILD_MARKER", "frontend control connected", {
+        ...frontendBuildPayload,
+        control: runtime.control.debugSnapshot(),
+      });
+    });
+    const errorListener = (event: ErrorEvent) => {
+      sendFrontendRuntimeDiag("FRONTEND_ERROR", "window.error", {
+        message: event.message,
+        filename: event.filename,
+        lineno: event.lineno,
+        colno: event.colno,
+        error: event.error instanceof Error
+          ? {
+              name: event.error.name,
+              message: event.error.message,
+              stack: event.error.stack,
+            }
+          : String(event.error),
+      });
+    };
+    const rejectionListener = (event: PromiseRejectionEvent) => {
+      const reason = event.reason;
+      sendFrontendRuntimeDiag("FRONTEND_ERROR", "window.unhandledrejection", {
+        reason: reason instanceof Error
+          ? {
+              name: reason.name,
+              message: reason.message,
+              stack: reason.stack,
+            }
+          : String(reason),
+      });
+    };
+    const beforeUnloadListener = () => {
+      sendFrontendRuntimeDiag("FRONTEND_LIFECYCLE", "beforeunload");
+    };
+    const pageHideListener = (event: PageTransitionEvent) => {
+      sendFrontendRuntimeDiag("FRONTEND_LIFECYCLE", "pagehide", {
+        persisted: event.persisted,
+      });
+    };
+    const pageShowListener = (event: PageTransitionEvent) => {
+      sendFrontendRuntimeDiag("FRONTEND_LIFECYCLE", "pageshow", {
+        persisted: event.persisted,
+      });
+    };
+    const visibilityListener = () => {
+      sendFrontendRuntimeDiag("FRONTEND_LIFECYCLE", "visibilitychange", {
+        hidden: document.hidden,
+      });
+    };
+    const onlineListener = () => {
+      sendFrontendRuntimeDiag("FRONTEND_LIFECYCLE", "online");
+    };
+    const offlineListener = () => {
+      sendFrontendRuntimeDiag("FRONTEND_LIFECYCLE", "offline");
+    };
+    const heartbeatId = isVerboseFrontendDiagnostics()
+      ? window.setInterval(() => {
+          sendFrontendRuntimeDiag("FRONTEND_LIFECYCLE", "heartbeat", {
+            control: runtime.control.debugSnapshot(),
+          });
+        }, 5000)
+      : 0;
+    window.addEventListener("error", errorListener);
+    window.addEventListener("unhandledrejection", rejectionListener);
+    if (isVerboseFrontendDiagnostics()) {
+      window.addEventListener("beforeunload", beforeUnloadListener);
+      window.addEventListener("pagehide", pageHideListener);
+      window.addEventListener("pageshow", pageShowListener);
+      document.addEventListener("visibilitychange", visibilityListener);
+      window.addEventListener("online", onlineListener);
+      window.addEventListener("offline", offlineListener);
+    }
+    lifecycleCleanup = () => {
+      window.clearInterval(heartbeatId);
+      window.removeEventListener("error", errorListener);
+      window.removeEventListener("unhandledrejection", rejectionListener);
+      if (isVerboseFrontendDiagnostics()) {
+        window.removeEventListener("beforeunload", beforeUnloadListener);
+        window.removeEventListener("pagehide", pageHideListener);
+        window.removeEventListener("pageshow", pageShowListener);
+        document.removeEventListener("visibilitychange", visibilityListener);
+        window.removeEventListener("online", onlineListener);
+        window.removeEventListener("offline", offlineListener);
+      }
+    };
     compositor = new BrowserCompositor(runtime, compositorStore);
     touchRouter = new TouchRouter(runtime);
     imeBridge = new ImeBridge(runtime.control);
@@ -125,24 +325,36 @@
       ) as HTMLTextAreaElement | null;
 
       if (paneElement) {
-        // Proactively grab text focus under direct User Gesture viewport touch context
-        // to bypass modern browser asynchronous programmatic focus restrictions.
-        if (imeProxy && document.activeElement !== imeProxy) {
-          console.warn("[ImeBridge] Proactively focusing ime-proxy under User Gesture viewport click context");
-          imeProxy.focus();
+        if (remoteEditableActive && imeProxy && document.activeElement !== imeProxy) {
+        const payload = {
+          remoteEditableActive,
+          imeState,
+          activeElement: describeActiveElement(),
+          };
+          verboseWarn("[IME_DEBUG] viewport tap eligible for proxy focus", payload);
+          sendVerboseFrontendDiag("IME_DEBUG", "viewport tap eligible for proxy focus", payload);
+          attemptProxyFocus("viewport_pointerdown_remote_editable");
+        } else {
+          const payload = {
+            remoteEditableActive,
+            imeState,
+            activeElement: describeActiveElement(),
+          };
+          verboseWarn("[IME_DEBUG] viewport tap skipped proxy focus", payload);
+          sendVerboseFrontendDiag("IME_DEBUG", "viewport tap skipped proxy focus", payload);
         }
         return;
       }
 
-      if (imeState !== 'IDLE') {
+      if (remoteEditableActive && imeState !== 'IDLE') {
         if (imeProxy && document.activeElement !== imeProxy) {
-          imeProxy.focus();
+          attemptProxyFocus("global_pointerdown_remote_editable");
         }
       }
     };
 
     const globalKeydownListener = (event: KeyboardEvent): void => {
-      console.warn("[IME_MODE]", {
+      verboseWarn("[IME_MODE]", {
         imeState,
         activeElement: document.activeElement?.tagName,
         key: event.key
@@ -186,6 +398,7 @@
     const msgCleanup = runtime.control.onMessage((msg) => {
       if (msg.type === "serverInit") {
         const nextId = String((msg as any).instanceId ?? "unknown");
+        (window as any).__CASTLA_VERBOSE_DIAGNOSTICS__ = (msg as any).verboseDiagnosticsEnabled === true;
         if (lastInstanceId && lastInstanceId !== nextId) {
           console.warn("[CastlaSession] Server reboot detected! Forcing session hardReset.");
           lastInstanceId = nextId;
@@ -198,13 +411,25 @@
         const incomingSessionId = Number((msg as any).sessionId ?? 0);
         const active = (msg as any).focused === true;
         const targetPkg = (msg as any).packageName;
+        const inputType = Number((msg as any).inputType ?? 0);
+        const editableConfirmed = (msg as any).editableConfirmed === true;
+        const focusSource = String((msg as any).focusSource ?? "unknown");
 
-        console.warn("[ANDROID_FOCUS] received event", {
+        const androidFocusPayload = {
           focused: active,
           packageName: targetPkg,
           sessionId: incomingSessionId,
-          currentSessionId
-        });
+          inputType,
+          editableConfirmed,
+          focusSource,
+          currentSessionId,
+          activeElement: describeActiveElement(),
+          remoteEditableActive,
+        };
+        verboseWarn(`[IME_DEBUG] androidFocusChanged focused=${active}`, androidFocusPayload);
+        if (active) {
+          sendVerboseFrontendDiag("IME_DEBUG", `androidFocusChanged focused=${active}`, androidFocusPayload);
+        }
 
         // Ignore self package focus events to prevent loops/keyboard collapse
         if (targetPkg === "com.castla.mirror" || targetPkg === "com.castla.mirror.debug") {
@@ -220,16 +445,40 @@
           });
           return;
         }
+        const editable =
+          isEditableInputType(inputType) || editableConfirmed === true;
+        if (active && !editable) {
+          verboseWarn("[IME_DEBUG] skip focused=true on frontend due to non-editable inputType", {
+            packageName: targetPkg,
+            sessionId: incomingSessionId,
+            inputType,
+            editable,
+            editableConfirmed,
+            focusSource,
+          });
+          sendVerboseFrontendDiag("IME_DEBUG", "skip focused=true on frontend due to non-editable inputType", {
+            packageName: targetPkg,
+            sessionId: incomingSessionId,
+            inputType,
+            editable,
+            editableConfirmed,
+            focusSource,
+          });
+          return;
+        }
         currentSessionId = incomingSessionId;
+        lastRemoteFocusPackage = targetPkg ?? null;
+        lastRemoteFocusSessionId = incomingSessionId;
 
         if (active) {
           if (blurDebounceTimer) {
             window.clearTimeout(blurDebounceTimer);
             blurDebounceTimer = undefined;
           }
+          setRemoteEditableActive(true, "androidFocusChanged_true");
           setImeState('ANDROID_FOCUSING');
           requestAnimationFrame(() => {
-            attemptProxyFocus(0);
+            attemptProxyFocus("androidFocusChanged_true", 0);
           });
         } else {
           if (blurDebounceTimer) {
@@ -248,6 +497,7 @@
                   console.error("[ANDROID_FOCUS] Failed to blur imeProxy", e);
                 }
               }
+              setRemoteEditableActive(false, "androidFocusChanged_false_debounced");
               setImeState('IDLE');
             }
             blurDebounceTimer = undefined;
@@ -292,6 +542,8 @@
     frontendResetCleanup = undefined;
     imeActiveCleanup?.();
     imeActiveCleanup = undefined;
+    lifecycleCleanup?.();
+    lifecycleCleanup = undefined;
     touchRouter.dispose();
     compositor.dispose();
     runtime.dispose();
@@ -397,11 +649,18 @@
         console.warn("[ImeBridge] Refocus recovery bypassed after delay via activeElement");
         return;
       }
+      if (!remoteEditableActive) {
+        verboseWarn("[IME_DEBUG] proxy blur recovery skipped because remoteEditableActive=false", {
+          imeState,
+          activeElement: describeActiveElement(),
+        });
+        return;
+      }
       if (imeState === 'READY' || imeState === 'ANDROID_FOCUSING' || imeState === 'RECOVERING') {
         setImeState('RECOVERING');
         window.setTimeout(() => {
           if (imeState === 'RECOVERING') {
-            attemptProxyFocus(0);
+            attemptProxyFocus("proxy_blur_recovery", 0);
           }
         }, REMOTE_IME_REFOCUS_DELAY_MS);
       }
@@ -447,7 +706,7 @@
     }}
     on:input={(event) => {
       const imeProxy = event.currentTarget;
-      console.warn("[INPUT_FORWARD] input event", {
+      verboseWarn("[INPUT_FORWARD] input event", {
         active: document.activeElement?.tagName,
         imeState,
         value: imeProxy.value,
@@ -460,7 +719,7 @@
     }}
     on:keydown={(event) => {
       const imeProxy = event.currentTarget;
-      console.warn("[INPUT_FORWARD] keydown event", {
+      verboseWarn("[INPUT_FORWARD] keydown event", {
         active: document.activeElement?.tagName,
         imeState,
         value: imeProxy.value,

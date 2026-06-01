@@ -29,6 +29,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
     companion object {
         private const val TAG = "PrivilegedService"
+        private const val VDIME_PREFIX = "[VDIME]"
         // FLAG_PUBLIC ensures the virtual display behaves like a real display and allows home/launcher to render
         private const val DISPLAY_FLAG_PUBLIC = 1 shl 0
         // FLAG_OWN_CONTENT_ONLY prevents the main display's content from leaking into the VD
@@ -43,6 +44,19 @@ class PrivilegedService : IPrivilegedService.Stub() {
         private const val DISPLAY_FLAG_OWN_DISPLAY_GROUP = 1 shl 11
         // FLAG_DESTROY_CONTENT_ON_REMOVAL destroys tasks instead of reparenting to main display
         private const val DISPLAY_FLAG_DESTROY_CONTENT = 1 shl 8
+        private const val DISPLAY_IME_POLICY_LOCAL = 0
+    }
+
+    private fun describeVirtualDisplayFlags(flags: Int): String {
+        val parts = mutableListOf<String>()
+        if ((flags and DISPLAY_FLAG_PUBLIC) != 0) parts += "PUBLIC"
+        if ((flags and DISPLAY_FLAG_PRESENTATION) != 0) parts += "PRESENTATION"
+        if ((flags and DISPLAY_FLAG_OWN_CONTENT_ONLY) != 0) parts += "OWN_CONTENT_ONLY"
+        if ((flags and DISPLAY_FLAG_DESTROY_CONTENT) != 0) parts += "DESTROY_CONTENT"
+        if ((flags and DISPLAY_FLAG_OWN_DISPLAY_GROUP) != 0) parts += "OWN_DISPLAY_GROUP"
+        if ((flags and DISPLAY_FLAG_TRUSTED) != 0) parts += "TRUSTED"
+        if ((flags and DISPLAY_FLAG_ALWAYS_UNLOCKED) != 0) parts += "ALWAYS_UNLOCKED"
+        return if (parts.isEmpty()) "none" else parts.joinToString("|")
     }
 
     private val virtualDisplays = mutableMapOf<Int, VirtualDisplay>()
@@ -59,6 +73,10 @@ class PrivilegedService : IPrivilegedService.Stub() {
     private var setForcedDisplayDensityForUserMethod: Method? = null
     private var clearForcedDisplaySizeMethod: Method? = null
     private var clearForcedDisplayDensityForUserMethod: Method? = null
+    private var setShouldShowSystemDecorsMethod: Method? = null
+    private var setDisplayImePolicyMethod: Method? = null
+    private var getDisplayImePolicyMethod: Method? = null
+    private var syncInputTransactionsMethod: Method? = null
     private var registerDisplayWindowListenerMethod: Method? = null
     private var unregisterDisplayWindowListenerMethod: Method? = null
     private var displayWindowListenerProxy: Any? = null
@@ -446,6 +464,18 @@ class PrivilegedService : IPrivilegedService.Stub() {
                         Int::class.javaPrimitiveType,
                         Int::class.javaPrimitiveType
                     )
+                    setShouldShowSystemDecorsMethod = wmInterface?.methods?.firstOrNull {
+                        it.name == "setShouldShowSystemDecors" && it.parameterTypes.size == 2
+                    }
+                    setDisplayImePolicyMethod = wmInterface?.methods?.firstOrNull {
+                        it.name == "setDisplayImePolicy" && it.parameterTypes.size == 2
+                    }
+                    getDisplayImePolicyMethod = wmInterface?.methods?.firstOrNull {
+                        it.name == "getDisplayImePolicy" && it.parameterTypes.size == 1
+                    }
+                    syncInputTransactionsMethod = wmInterface?.methods?.firstOrNull {
+                        it.name == "syncInputTransactions" && it.parameterTypes.size == 1
+                    }
                     registerDisplayWindowListenerMethod = wmInterface?.methods?.firstOrNull {
                         it.name == "registerDisplayWindowListener"
                     }
@@ -461,6 +491,32 @@ class PrivilegedService : IPrivilegedService.Stub() {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize system services reflection cache", e)
         }
+    }
+
+    private fun configureImePolicyForDisplay(displayId: Int, reason: String) {
+        val wm = windowManagerInstance ?: run {
+            Log.w(TAG, "$VDIME_PREFIX [IME_POLICY] skipped displayId=$displayId reason=$reason wm=null")
+            return
+        }
+        try {
+            setShouldShowSystemDecorsMethod?.invoke(wm, displayId, true)
+        } catch (e: Exception) {
+            Log.w(TAG, "$VDIME_PREFIX [IME_POLICY] setShouldShowSystemDecors failed displayId=$displayId reason=$reason", e)
+        }
+        try {
+            setDisplayImePolicyMethod?.invoke(wm, displayId, DISPLAY_IME_POLICY_LOCAL)
+        } catch (e: Exception) {
+            Log.w(TAG, "$VDIME_PREFIX [IME_POLICY] setDisplayImePolicy failed displayId=$displayId reason=$reason", e)
+        }
+        try {
+            syncInputTransactionsMethod?.invoke(wm, false)
+        } catch (_: Exception) {}
+        val policy = try {
+            (getDisplayImePolicyMethod?.invoke(wm, displayId) as? Int) ?: -1
+        } catch (_: Exception) {
+            -1
+        }
+        Log.i(TAG, "$VDIME_PREFIX [IME_POLICY] displayId=$displayId reason=$reason policy=$policy local=$DISPLAY_IME_POLICY_LOCAL trusted=true")
     }
 
     // Force stop package natively using IActivityManager to achieve 0ms latency
@@ -590,6 +646,11 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 virtualDisplays[displayId] = display
                 virtualDisplayNames[displayId] = name
                 Log.i(TAG, "[FocusTrace] vd_created displayId=$displayId size=${width}x${height} flags=$flags")
+                Log.i(
+                    TAG,
+                    "$VDIME_PREFIX [VD] source=shizuku_shell name=$name displayId=$displayId ownerUid=${android.os.Process.myUid()} flags=$flags flagNames=${describeVirtualDisplayFlags(flags)}"
+                )
+                configureImePolicyForDisplay(displayId, "createVirtualDisplay")
                 scheduleDisplayFocusRefresh(displayId, "createVirtualDisplay")
 
                 // Keep the display explicitly powered on with multiple delayed triggers to secure power state
@@ -626,6 +687,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
             return
         }
         display.surface = surface
+        configureImePolicyForDisplay(displayId, "setSurface")
 //        Log.i(TAG, "Surface attached to virtual display $displayId")
         if (surface != null) {
             tetheringExecutor.execute {
@@ -1088,6 +1150,8 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
     override fun launchAppOnDisplayV2(displayId: Int, packageName: String, forceStop: Boolean) {
         try {
+            configureImePolicyForDisplay(displayId, "launchAppOnDisplayV2")
+            Log.i(TAG, "$VDIME_PREFIX [APP_LAUNCH] package=$packageName displayId=$displayId method=native_launch_on_display_v2 forceStop=$forceStop")
             val pkg = if (packageName.contains("/")) packageName.substringBefore("/") else packageName
             if (forceStop) {
                 nativeForceStop(pkg)
@@ -1121,6 +1185,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     Log.i(TAG, "Natively launched app $packageName on display $displayId with 0ms delay")
                 } catch (e: Exception) {
                     Log.w(TAG, "Native launchAppOnDisplay failed, falling back to shell executor", e)
+                    Log.i(TAG, "$VDIME_PREFIX [APP_LAUNCH] package=$packageName displayId=$displayId method=shell_am_start_display fallback=true")
                     val cmd = buildLaunchCommand(displayId, packageName)
                     execCommand(cmd)
                 }
@@ -1145,6 +1210,8 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
     override fun launchAppWithExtraOnDisplay(displayId: Int, packageName: String, extraKey: String, extraValue: String) {
         try {
+            configureImePolicyForDisplay(displayId, "launchAppWithExtraOnDisplay")
+            Log.i(TAG, "$VDIME_PREFIX [APP_LAUNCH] package=$packageName displayId=$displayId method=native_launch_with_extra extraKey=$extraKey")
             val pkg = if (packageName.contains("/")) packageName.substringBefore("/") else packageName
             nativeForceStop(pkg)
 
@@ -1178,6 +1245,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     Log.i(TAG, "Natively launched app $packageName with extras on display $displayId with 0ms delay")
                 } catch (e: Exception) {
                     Log.w(TAG, "Native launchAppWithExtraOnDisplay failed, falling back to shell executor", e)
+                    Log.i(TAG, "$VDIME_PREFIX [APP_LAUNCH] package=$packageName displayId=$displayId method=shell_am_start_display fallback=true extraKey=$extraKey")
                     val cmd = buildLaunchCommand(displayId, packageName, extraKey, extraValue)
                     execCommand(cmd)
                 }
@@ -1193,6 +1261,8 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
     override fun launchHomeOnDisplay(displayId: Int) {
         try {
+            configureImePolicyForDisplay(displayId, "launchHomeOnDisplay")
+            Log.i(TAG, "$VDIME_PREFIX [APP_LAUNCH] package=com.castla.mirror/.ui.VirtualDisplayHomeActivity displayId=$displayId method=native_launch_home")
             val intent = Intent().apply {
                 component = ComponentName("com.castla.mirror", "com.castla.mirror.ui.VirtualDisplayHomeActivity")
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)

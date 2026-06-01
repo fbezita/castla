@@ -17,6 +17,7 @@ import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import com.castla.mirror.diagnostics.DiagnosticEvent
+import com.castla.mirror.diagnostics.FileLogger
 import com.castla.mirror.diagnostics.MirrorDiagnostics
 import com.castla.mirror.utils.AppCategoryClassifier
 import com.castla.mirror.ott.OttCatalog
@@ -513,6 +514,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             put("type", "serverInit")
             put("instanceId", instanceId)
             put("controlSessionId", sessionId)
+            put("verboseDiagnosticsEnabled", com.castla.mirror.ui.StreamSettings.load(context).verboseDiagnosticsEnabled)
         }
         sendControlSocketAsync(socket, initMsg.toString(), "serverInit")
 
@@ -571,6 +573,9 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             .getOrPut(normalized) { AtomicInteger(0) }
             .incrementAndGet()
         firstFrameReady[normalized] = false
+        Log.i(TAG, "[FRAME_DEBUG] beginStreamGeneration channel=$normalized vdId=$vdId generation=$generation ${width}x$height")
+        FileLogger.i("FRAME_DEBUG", "beginStreamGeneration channel=$normalized vdId=$vdId generation=$generation ${width}x$height")
+        FileLogger.i("STREAM_GENERATION", "begin channel=$normalized vdId=$vdId generation=$generation width=$width height=$height")
         broadcastStreamMetadata(normalized, vdId, generation, width, height, streamReady = true, firstFrame = false)
         return generation
     }
@@ -580,6 +585,9 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         if (firstFrameReady[normalized] == true) return
         firstFrameReady[normalized] = true
         val generation = streamGenerations[normalized]?.get() ?: 0
+        Log.i(TAG, "[FRAME_DEBUG] firstFrameReady channel=$normalized vdId=$vdId generation=$generation ${width}x$height")
+        FileLogger.i("FRAME_DEBUG", "firstFrameReady channel=$normalized vdId=$vdId generation=$generation ${width}x$height")
+        FileLogger.i("VD_FRAME", "firstFrameReady channel=$normalized vdId=$vdId generation=$generation width=$width height=$height")
         broadcastStreamMetadata(normalized, vdId, generation, width, height, streamReady = true, firstFrame = true)
     }
 
@@ -665,7 +673,9 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         } else {
             cachedPrimarySpsPps = null
         }
-        Log.i(TAG, "Cleared cached SPS/PPS for $channel channel")
+        Log.i(TAG, "[FRAME_DEBUG] Cleared cached SPS/PPS for $channel channel")
+        FileLogger.i("FRAME_DEBUG", "clearCachedSpsPps channel=$channel")
+        FileLogger.i("STREAM_GENERATION", "clearCachedSpsPps channel=$channel")
     }
 
     fun broadcastFrame(data: ByteArray, isKeyFrame: Boolean, channel: String = "primary") {
@@ -686,6 +696,16 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             // Fallback for MJPEG Encoder or old pipelines that don't pre-allocate 8 bytes
             val header = buildVideoHeader(flags, seq)
             header + data
+        }
+
+        if (seq <= 3 || isKeyFrame || seq % 120 == 0) {
+            val generation = streamGenerations[normalized]?.get() ?: 0
+            Log.i(
+                TAG,
+                "[FRAME_DEBUG] broadcastFrame channel=$normalized generation=$generation seq=$seq key=$isKeyFrame bytes=${frame.size} sockets=${if (normalized == "secondary") secondaryVideoSockets.size else primaryVideoSockets.size}"
+            )
+            FileLogger.i("FRAME_DEBUG", "broadcastFrame channel=$normalized generation=$generation seq=$seq key=$isKeyFrame bytes=${frame.size} sockets=${if (normalized == "secondary") secondaryVideoSockets.size else primaryVideoSockets.size}")
+            FileLogger.i("ENCODER_FRAME", "channel=$normalized generation=$generation seq=$seq key=$isKeyFrame bytes=${frame.size}")
         }
 
         val sockets = if (normalized == "secondary") secondaryVideoSockets else primaryVideoSockets
@@ -783,6 +803,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
                     put("type", "serverInit")
                     put("instanceId", instanceId)
                     put("controlSessionId", adoptedSessionId)
+                    put("verboseDiagnosticsEnabled", com.castla.mirror.ui.StreamSettings.load(context).verboseDiagnosticsEnabled)
                 }
                 sendControlSocketAsync(socket, initMsg.toString(), "orphan serverInit")
                 updateConnectionState()
@@ -865,11 +886,13 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
                         TAG,
                         "Replayed cached SPS/PPS to $replayed $normalized video socket(s) on keyframe request source=$source count=$requestCount"
                     )
+                    FileLogger.i("KEYFRAME_REQUEST", "replayCachedSpsPps channel=$normalized source=$source count=$requestCount replayed=$replayed")
                 }
             }
         }
 
         val force = source == "video_open" || source.contains("socket") || source.contains("reconnect")
+        FileLogger.i("KEYFRAME_REQUEST", "channel=$normalized source=$source force=$force count=$requestCount")
         if (normalized == "secondary") {
             onSecondaryKeyframeRequest?.invoke(force)
         } else {

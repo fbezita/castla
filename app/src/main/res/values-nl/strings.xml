@@ -85,8 +85,4 @@
     <string name="settings_language_system_default">Systeemstandaard</string>
 
     <!-- Support / Donate -->
-    <string name="settings_support_title">Ondersteun de ontwikkelaar</string>
-    <string name="settings_support_description">Castla is gratis en open source.\nAls je het handig vindt, trakteer me op een koffie!</string>
-    <string name="settings_donate_kofi">Trakteer op Ko-fi</string>
-    <string name="settings_donate_kakaopay">카카오페이로 후원하기</string>
 </resources>

@@ -2,6 +2,7 @@ package com.castla.mirror.server
 
 import android.os.SystemClock
 import android.util.Log
+import com.castla.mirror.diagnostics.FileLogger
 import fi.iki.elonen.NanoHTTPD
 import fi.iki.elonen.NanoWSD
 import org.json.JSONObject
@@ -232,6 +233,21 @@ class ControlSocket(
                     if (!QUIET_DECODER_EVENTS.contains(event)) {
                         Log.w(DECODER_TAG, "[$pane] $event ${detail.take(180)}")
                     }
+                }
+                "frontendDiag" -> {
+                    val tag = json.optString("tag", "FrontendDiag")
+                    val messageText = json.optString("message", "")
+                    val ts = json.optLong("ts", System.currentTimeMillis())
+                    val data = json.opt("data")?.takeIf { it != JSONObject.NULL }?.toString()
+                    val line = buildString {
+                        append("[frontendDiag] ts=").append(ts)
+                        append(" message=").append(messageText)
+                        if (!data.isNullOrBlank()) {
+                            append(" data=").append(data)
+                        }
+                    }
+                    FileLogger.i(tag, line)
+                    Log.i(tag, line)
                 }
                 "bubbleClosed" -> {
                     server.onBubbleClosed()

@@ -93,12 +93,6 @@
     <string name="settings_language">Language</string>
     <string name="settings_language_system_default">System Default</string>
 
-    <!-- Support / Donate -->
-    <string name="settings_support_title">Support the Developer</string>
-    <string name="settings_support_description">Castla is free and open-source.\nIf you find it useful, consider buying me a coffee!</string>
-    <string name="settings_donate_kofi">Buy me a Coffee on Ko-fi</string>
-    <string name="settings_donate_kakaopay">카카오페이로 후원하기</string>
-
     <!-- Diagnostic logs -->
     <string name="settings_logs_title">Diagnostic Logs</string>
     <string name="settings_logs_description">If mirroring fails, share or copy these logs to help diagnose the issue. URLs are redacted.</string>
@@ -108,6 +102,13 @@
     <string name="settings_logs_copied">Recent logs copied to clipboard.</string>
     <string name="settings_logs_share_failed">Could not share logs.</string>
     <string name="settings_logs_chooser_title">Share diagnostic logs</string>
+
+    <string name="settings_native_vd_ime">Android Keyboard in Virtual Display</string>
+    <string name="settings_native_vd_ime_title">Use native Android keyboard</string>
+    <string name="settings_native_vd_ime_description">Render Samsung Keyboard or Gboard directly inside the trusted virtual display. When disabled, Castla falls back to the IME proxy path.</string>
+    <string name="settings_verbose_diagnostics">Verbose Diagnostics</string>
+    <string name="settings_verbose_diagnostics_title">Enable verbose diagnostics</string>
+    <string name="settings_verbose_diagnostics_description">Turns on high-frequency Android and frontend diagnostic logs. Leave this off for normal use.</string>
 
     <!-- WebCodecs (Hardware Decoding) -->
     <string name="settings_webcodecs">WebCodecs Decoder</string>

@@ -56,6 +56,7 @@ export interface ServerInitMessage {
   type: 'serverInit';
   instanceId: string;
   controlSessionId?: number;
+  verboseDiagnosticsEnabled?: boolean;
 }
 
 export type ControlMessage =

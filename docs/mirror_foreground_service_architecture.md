@@ -158,6 +158,25 @@ graph TD
 - viewport 탭으로 원격 검색창 dismiss 의도를 추론하는 `tapOutside` 기능은 제거되었습니다.
 - `MirrorForegroundService`는 tapOutside 전용 `requestHideSelf()`, `finishComposingText()`, `KEYCODE_BACK` fallback 경로를 더 이상 가지지 않습니다.
 - 원격 IME 상태는 정상적인 `androidFocusChanged`, `onStartInput`, `onFinishInput` 수명주기 신호에만 의존합니다.
+- 현재 우선 경로는 **Castla IME proxy가 아니라 trusted VirtualDisplay 안의 native Android IME** 입니다.
+- `useNativeVirtualDisplayIme=true`일 때:
+  - Samsung Keyboard / Gboard 가 trusted VD 안에서 직접 렌더링되는 경로를 우선 사용합니다.
+  - Castla IME proxy 전환 로직은 fallback-only로 남습니다.
+- `PrivilegedService`는 native IME 경로를 위해:
+  - trusted/public/presentation VD 생성
+  - `setShouldShowSystemDecors(displayId, true)`
+  - `setDisplayImePolicy(displayId, DISPLAY_IME_POLICY_LOCAL)`
+  를 적용합니다.
+
+### 1.b) 현재 진단 정책
+- `[VDIME]` prefix는 유지하지만, 무거운 상세 진단은 기본적으로 꺼져 있습니다.
+- `verboseDiagnosticsEnabled=false`가 기본값입니다.
+- verbose 모드가 꺼져 있으면:
+  - repeated IME routing snapshot
+  - frontend IME chatter
+  - JMuxer per-frame / SourceBuffer diagnostics
+  는 기본적으로 기록하지 않습니다.
+- verbose 모드가 켜지면 Android `serverInit`과 frontend runtime이 같은 설정값을 공유하여 함께 상세 로그를 활성화합니다.
 
 ### 2) 뷰포트(Viewport) 변경 및 소멸 흐름 (Symmetric Viewport & Release Flow)
 1. **레이아웃 변경**: 클라이언트 브라우저의 레이아웃이 단독(Single) 혹은 분할(Split) 상태로 바뀝니다.

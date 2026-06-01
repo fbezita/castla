@@ -85,8 +85,4 @@
     <string name="settings_language_system_default">系统默认</string>
 
     <!-- Support / Donate -->
-    <string name="settings_support_title">支持开发者</string>
-    <string name="settings_support_description">Castla是免费开源应用。\n如果觉得好用，请我喝杯咖啡吧！</string>
-    <string name="settings_donate_kofi">在Ko-fi上请我喝咖啡</string>
-    <string name="settings_donate_kakaopay">카카오페이로 후원하기</string>
 </resources>

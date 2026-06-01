@@ -27,7 +27,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.widget.Toast
@@ -323,6 +322,84 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(20.dp))
 
+            SettingSection(title = stringResource(R.string.settings_native_vd_ime)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.settings_native_vd_ime_title),
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Color.White,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = stringResource(R.string.settings_native_vd_ime_description),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.6f)
+                        )
+                    }
+                    Switch(
+                        checked = settings.useNativeVirtualDisplayIme,
+                        onCheckedChange = { enabled ->
+                            if (!isStreaming) onSettingsChanged(settings.copy(useNativeVirtualDisplayIme = enabled))
+                        },
+                        enabled = !isStreaming,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = Color(0xFF2979FF),
+                            uncheckedThumbColor = Color.White.copy(alpha = 0.7f),
+                            uncheckedTrackColor = Color.White.copy(alpha = 0.2f),
+                            uncheckedBorderColor = Color.Transparent
+                        )
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            SettingSection(title = stringResource(R.string.settings_verbose_diagnostics)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.settings_verbose_diagnostics_title),
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Color.White,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = stringResource(R.string.settings_verbose_diagnostics_description),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.6f)
+                        )
+                    }
+                    Switch(
+                        checked = settings.verboseDiagnosticsEnabled,
+                        onCheckedChange = { enabled ->
+                            if (!isStreaming) onSettingsChanged(settings.copy(verboseDiagnosticsEnabled = enabled))
+                        },
+                        enabled = !isStreaming,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = Color(0xFF2979FF),
+                            uncheckedThumbColor = Color.White.copy(alpha = 0.7f),
+                            uncheckedTrackColor = Color.White.copy(alpha = 0.2f),
+                            uncheckedBorderColor = Color.Transparent
+                        )
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
             // WebCodecs (Hardware Decoding) Switch UI
             SettingSection(title = stringResource(R.string.settings_webcodecs)) {
                 Row(
@@ -417,52 +494,6 @@ fun SettingsScreen(
                                     }
                                 )
                             }
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(32.dp))
-
-            // Support the Developer
-            run {
-                val context = LocalContext.current
-                val appLocales = AppCompatDelegate.getApplicationLocales()
-                val isKorean = if (appLocales.isEmpty) {
-                    java.util.Locale.getDefault().language == "ko"
-                } else {
-                    appLocales.toLanguageTags().startsWith("ko")
-                }
-                val donateUrl = if (isKorean) "https://qr.kakaopay.com/Ej8mYEElE" else "https://ko-fi.com/suprhimp"
-                val buttonLabel = if (isKorean) stringResource(R.string.settings_donate_kakaopay) else stringResource(R.string.settings_donate_kofi)
-
-                SettingSection(title = stringResource(R.string.settings_support_title)) {
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(
-                            text = stringResource(R.string.settings_support_description),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Color.White.copy(alpha = 0.7f),
-                            textAlign = TextAlign.Center
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Button(
-                            onClick = {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(donateUrl)))
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(12.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isKorean) Color(0xFFFFEB00) else Color(0xFF72A4F2)
-                            )
-                        ) {
-                            Text(
-                                text = buttonLabel,
-                                color = if (isKorean) Color.Black else Color.White,
-                                fontWeight = FontWeight.Bold
-                            )
                         }
                     }
                 }

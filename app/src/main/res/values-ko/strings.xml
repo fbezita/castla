@@ -98,11 +98,6 @@
     <string name="settings_language_system_default">시스템 기본값</string>
 
     <!-- Support / Donate -->
-    <string name="settings_support_title">개발자 후원</string>
-    <string name="settings_support_description">Castla는 무료 오픈소스 앱입니다.\n유용하게 사용하셨다면 커피 한 잔 사주세요!</string>
-    <string name="settings_donate_kofi">Ko-fi로 후원하기</string>
-    <string name="settings_donate_kakaopay">카카오페이로 후원하기</string>
-
     <!-- Diagnostic logs -->
     <string name="settings_logs_title">진단 로그</string>
     <string name="settings_logs_description">미러링이 실패하면 로그를 공유하거나 복사해 원인 분석에 도움을 받을 수 있어요. URL은 자동 가려집니다.</string>

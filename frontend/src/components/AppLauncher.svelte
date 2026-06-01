@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
-  import type { StreamRuntime } from '../runtime/StreamRuntime';
-  import { compositorStore } from '../stores/compositorStore';
-  import type { PaneId } from '../protocol';
+  import { onDestroy, onMount } from "svelte";
+  import type { StreamRuntime } from "../runtime/StreamRuntime";
+  import { compositorStore } from "../stores/compositorStore";
+  import type { PaneId } from "../protocol";
 
   export let runtime: StreamRuntime;
 
@@ -22,31 +22,37 @@
     right: string;
   }
 
-  type DropZone = 'favorite' | 'autorun' | 'primary' | 'secondary' | 'remove' | '';
-  const APP_CACHE_KEY = 'castla_cached_apps_v1';
-  const AUTORUN_SESSION_KEY = 'castla_autorun_done';
+  type DropZone =
+    | "favorite"
+    | "autorun"
+    | "primary"
+    | "secondary"
+    | "remove"
+    | "";
+  const APP_CACHE_KEY = "castla_cached_apps_v1";
+  const AUTORUN_SESSION_KEY = "castla_autorun_done";
 
   const groups = [
-    ['PAIR', 'App Pairs', '#00e5ff'],
-    ['FAVORITES', 'Favorites', '#ffd400'],
-    ['NAVIGATION', 'Navigation', '#49d66d'],
-    ['VIDEO', 'Video', '#ff6b43'],
-    ['MUSIC', 'Music', '#b46cff'],
-    ['OTHER', 'Apps', '#9ea3ad']
+    ["PAIR", "App Pairs", "#00e5ff"],
+    ["FAVORITES", "Favorites", "#ffd400"],
+    ["NAVIGATION", "Navigation", "#49d66d"],
+    ["VIDEO", "Video", "#ff6b43"],
+    ["MUSIC", "Music", "#b46cff"],
+    ["OTHER", "Apps", "#9ea3ad"],
   ] as const;
 
   let apps: AppInfo[] = readCachedApps();
   let loading = apps.length === 0;
-  let error = '';
+  let error = "";
   let drawerOpen = true;
   let drawerElement: HTMLElement;
   let drawerListElement: HTMLDivElement;
-  let search = '';
-  let favorites = readArray('castla_favorites');
+  let search = "";
+  let favorites = readArray("castla_favorites");
   let appPairs = readPairs();
-  let primaryAutorun = localStorage.getItem('castla_autorun_primary') ?? '';
-  let secondaryAutorun = localStorage.getItem('castla_autorun_secondary') ?? '';
-  let notice = '';
+  let primaryAutorun = localStorage.getItem("castla_autorun_primary") ?? "";
+  let secondaryAutorun = localStorage.getItem("castla_autorun_secondary") ?? "";
+  let notice = "";
   let noticeTimer: number | undefined;
   let launchedOnce = false;
   let autoClosePending = false;
@@ -56,19 +62,24 @@
   let draggingApp: AppInfo | null = null;
   let dragX = 0;
   let dragY = 0;
-  let dropZone: DropZone = '';
+  let dropZone: DropZone = "";
   let drawerDimmed = false;
   let pressStartX = 0;
   let pressStartY = 0;
   let pressMoved = false;
   let pairTarget: AppInfo | null = null;
-  let pairMenuOpen = '';
+  let pairMenuOpen = "";
   let editingPair: AppInfo | null = null;
   let drawerRevision = 0;
   let pairApps: AppInfo[] = [];
   let searchableApps: AppInfo[] = [];
   let displayApps: AppInfo[] = [];
-  let groupedApps: Array<{ key: string; title: string; color: string; items: AppInfo[] }> = [];
+  let groupedApps: Array<{
+    key: string;
+    title: string;
+    color: string;
+    items: AppInfo[];
+  }> = [];
 
   onMount(() => {
     if (apps.length > 0) {
@@ -81,7 +92,9 @@
     window.clearTimeout(noticeTimer);
   });
 
-  $: hasVisibleStream = Array.from($compositorStore.viewports.values()).some((viewport) => viewport.committed);
+  $: hasVisibleStream = Array.from($compositorStore.viewports.values()).some(
+    (viewport) => viewport.committed,
+  );
   $: if (autoClosePending && hasVisibleStream) {
     requestAnimationFrame(() => {
       drawerOpen = false;
@@ -92,25 +105,29 @@
     void drawerRevision;
     pairApps = getPairApps(appPairs, apps);
     searchableApps = [...pairApps, ...apps];
-    displayApps = searchableApps.filter((app) => app.label.toLowerCase().includes(search.trim().toLowerCase()));
-    groupedApps = groups.map(([key, title, color]) => ({
-      key,
-      title,
-      color,
-      items: displayApps.filter((app) => belongsToGroup(app, key, favorites))
-    })).filter((group) => group.items.length > 0);
+    displayApps = searchableApps.filter((app) =>
+      app.label.toLowerCase().includes(search.trim().toLowerCase()),
+    );
+    groupedApps = groups
+      .map(([key, title, color]) => ({
+        key,
+        title,
+        color,
+        items: displayApps.filter((app) => belongsToGroup(app, key, favorites)),
+      }))
+      .filter((group) => group.items.length > 0);
   }
 
   async function loadApps() {
     try {
-      const response = await fetch('/api/apps');
+      const response = await fetch("/api/apps");
       if (!response.ok) throw new Error(`apps ${response.status}`);
       const data = await response.json();
       apps = Array.isArray(data.apps) ? data.apps : [];
       localStorage.setItem(APP_CACHE_KEY, JSON.stringify(apps));
       touchDrawer();
       runAutorunOnce();
-      error = '';
+      error = "";
     } catch (err) {
       if (apps.length === 0) {
         error = err instanceof Error ? err.message : String(err);
@@ -120,19 +137,30 @@
     }
   }
 
-  function belongsToGroup(app: AppInfo, group: string, favoritePackages: string[]) {
-    if (group === 'PAIR') return app.isPair === true;
-    if (group === 'FAVORITES') return favoritePackages.includes(app.packageName);
-    if (group === 'OTHER') return !['NAVIGATION', 'VIDEO', 'MUSIC'].includes(app.category ?? '');
+  function belongsToGroup(
+    app: AppInfo,
+    group: string,
+    favoritePackages: string[],
+  ) {
+    if (group === "PAIR") return app.isPair === true;
+    if (group === "FAVORITES")
+      return favoritePackages.includes(app.packageName);
+    if (group === "OTHER")
+      return !["NAVIGATION", "VIDEO", "MUSIC"].includes(app.category ?? "");
     return app.category === group;
   }
 
-  function launch(app: AppInfo, pane: PaneId = 'primary') {
+  function launch(app: AppInfo, pane: PaneId = "primary") {
     launchedOnce = true;
     autoClosePending = true;
-    if (pane === 'primary') setSingle('primary');
+    if (pane === "primary") setSingle("primary");
     else setSplit(true);
-    runtime.launchApp(app.packageName, pane, app.componentName, app.category === 'VIDEO' || app.isWeb === true);
+    runtime.launchApp(
+      app.packageName,
+      pane,
+      app.componentName,
+      app.category === "VIDEO" || app.isWeb === true,
+    );
     runtime.requestKeyframe(pane);
     drawerOpen = true;
     toast(`${app.label} launching`);
@@ -148,11 +176,21 @@
     launchedOnce = true;
     autoClosePending = true;
     setSplit(true);
-    runtime.launchApp(left.packageName, 'primary', left.componentName, left.category === 'VIDEO' || left.isWeb === true);
-    runtime.requestKeyframe('primary');
+    runtime.launchApp(
+      left.packageName,
+      "primary",
+      left.componentName,
+      left.category === "VIDEO" || left.isWeb === true,
+    );
+    runtime.requestKeyframe("primary");
     setTimeout(() => {
-      runtime.launchApp(right.packageName, 'secondary', right.componentName, right.category === 'VIDEO' || right.isWeb === true);
-      runtime.requestKeyframe('secondary');
+      runtime.launchApp(
+        right.packageName,
+        "secondary",
+        right.componentName,
+        right.category === "VIDEO" || right.isWeb === true,
+      );
+      runtime.requestKeyframe("secondary");
     }, 260);
     drawerOpen = true;
     toast(`${left.label} + ${right.label}`);
@@ -166,57 +204,101 @@
 
   function activateApp(app: AppInfo) {
     if (app.isPair) {
-      const left = app.left ? apps.find((candidate) => candidate.packageName === app.left) : undefined;
-      const right = app.right ? apps.find((candidate) => candidate.packageName === app.right) : undefined;
+      const left = app.left
+        ? apps.find((candidate) => candidate.packageName === app.left)
+        : undefined;
+      const right = app.right
+        ? apps.find((candidate) => candidate.packageName === app.right)
+        : undefined;
       if (left && right) {
         launchPair(left, right);
         return;
       }
     }
-    launch(app, 'primary');
+    launch(app, "primary");
   }
 
   function setSingle(pane: PaneId) {
     compositorStore.update((state) => {
       const viewports = new Map(state.viewports);
-      const primary = viewports.get('primary') ?? { pane: 'primary' as PaneId, width: 1280, height: 720, committed: false, generation: 0, visible: true };
-      const secondary = viewports.get('secondary') ?? { pane: 'secondary' as PaneId, width: 1280, height: 720, committed: false, generation: 0, visible: false };
-      viewports.set('primary', { ...primary, visible: pane === 'primary' });
-      viewports.set('secondary', { ...secondary, visible: pane === 'secondary' });
-      return { ...state, viewports, layoutMode: 'single' };
+      const primary = viewports.get("primary") ?? {
+        pane: "primary" as PaneId,
+        width: 1280,
+        height: 720,
+        committed: false,
+        generation: 0,
+        visible: true,
+      };
+      const secondary = viewports.get("secondary") ?? {
+        pane: "secondary" as PaneId,
+        width: 1280,
+        height: 720,
+        committed: false,
+        generation: 0,
+        visible: false,
+      };
+      viewports.set("primary", { ...primary, visible: pane === "primary" });
+      viewports.set("secondary", {
+        ...secondary,
+        visible: pane === "secondary",
+      });
+      return { ...state, viewports, layoutMode: "single" };
     });
   }
 
   function setSplit(active: boolean) {
     compositorStore.update((state) => {
       const viewports = new Map(state.viewports);
-      const primary = viewports.get('primary') ?? { pane: 'primary' as PaneId, width: 1280, height: 720, committed: false, generation: 0, visible: true };
-      const secondary = viewports.get('secondary') ?? { pane: 'secondary' as PaneId, width: 1280, height: 720, committed: false, generation: 0, visible: false };
-      viewports.set('primary', { ...primary, visible: true });
-      viewports.set('secondary', { ...secondary, visible: active });
-      return { ...state, viewports, layoutMode: active ? 'split' : 'single' };
+      const primary = viewports.get("primary") ?? {
+        pane: "primary" as PaneId,
+        width: 1280,
+        height: 720,
+        committed: false,
+        generation: 0,
+        visible: true,
+      };
+      const secondary = viewports.get("secondary") ?? {
+        pane: "secondary" as PaneId,
+        width: 1280,
+        height: 720,
+        committed: false,
+        generation: 0,
+        visible: false,
+      };
+      viewports.set("primary", { ...primary, visible: true });
+      viewports.set("secondary", { ...secondary, visible: active });
+      return { ...state, viewports, layoutMode: active ? "split" : "single" };
     });
   }
 
   function toggleFavorite(packageName: string) {
-    favorites = favorites.includes(packageName) ? favorites.filter((pkg) => pkg !== packageName) : [...favorites, packageName];
-    localStorage.setItem('castla_favorites', JSON.stringify(favorites));
+    favorites = favorites.includes(packageName)
+      ? favorites.filter((pkg) => pkg !== packageName)
+      : [...favorites, packageName];
+    localStorage.setItem("castla_favorites", JSON.stringify(favorites));
     touchDrawer();
   }
 
-  function getPairApps(pairs: AppPairRecord[], availableApps: AppInfo[]): AppInfo[] {
+  function getPairApps(
+    pairs: AppPairRecord[],
+    availableApps: AppInfo[],
+  ): AppInfo[] {
     const result: AppInfo[] = [];
     for (const pair of pairs) {
-      const leftApp = availableApps.find((app) => app.packageName === pair.left);
-      const rightApp = availableApps.find((app) => app.packageName === pair.right);
+      const leftApp = availableApps.find(
+        (app) => app.packageName === pair.left,
+      );
+      const rightApp = availableApps.find(
+        (app) => app.packageName === pair.right,
+      );
       if (!leftApp || !rightApp) continue;
       result.push({
         packageName: `pair:${pair.left}:${pair.right}`,
         label: `${leftApp.label} + ${rightApp.label}`,
-        category: 'PAIR',
+        category: "PAIR",
         isPair: true,
         left: pair.left,
-        right: pair.right
+        right: pair.right,
       });
     }
     return result;
@@ -225,27 +307,32 @@
   function createPair(source: AppInfo, target: AppInfo) {
     if (source.isPair || target.isPair) return;
     if (source.packageName === target.packageName) {
-      toast('Choose a different app');
+      toast("Choose a different app");
       return;
     }
-    const exists = appPairs.some((pair) =>
-      (pair.left === source.packageName && pair.right === target.packageName) ||
-      (pair.left === target.packageName && pair.right === source.packageName)
+    const exists = appPairs.some(
+      (pair) =>
+        (pair.left === source.packageName &&
+          pair.right === target.packageName) ||
+        (pair.left === target.packageName && pair.right === source.packageName),
     );
     if (exists) {
-      toast('This App Pair already exists');
+      toast("This App Pair already exists");
       return;
     }
-    appPairs = [...appPairs, { left: source.packageName, right: target.packageName }];
-    localStorage.setItem('castla_app_pairs', JSON.stringify(appPairs));
+    appPairs = [
+      ...appPairs,
+      { left: source.packageName, right: target.packageName },
+    ];
+    localStorage.setItem("castla_app_pairs", JSON.stringify(appPairs));
     touchDrawer();
     openPairEdit({
       packageName: `pair:${source.packageName}:${target.packageName}`,
       label: `${source.label} + ${target.label}`,
-      category: 'PAIR',
+      category: "PAIR",
       isPair: true,
       left: source.packageName,
-      right: target.packageName
+      right: target.packageName,
     });
     toast(`${source.label} + ${target.label}`);
   }
@@ -253,7 +340,7 @@
   function openPairEdit(app: AppInfo) {
     if (!app.left || !app.right) return;
     editingPair = { ...app };
-    pairMenuOpen = '';
+    pairMenuOpen = "";
   }
 
   function swapEditingPair() {
@@ -261,55 +348,68 @@
     editingPair = {
       ...editingPair,
       left: editingPair.right,
-      right: editingPair.left
+      right: editingPair.left,
     };
   }
 
-  function persistPair(app: AppInfo, previousLeft?: string, previousRight?: string) {
+  function persistPair(
+    app: AppInfo,
+    previousLeft?: string,
+    previousRight?: string,
+  ) {
     if (!app.left || !app.right) return;
     const oldLeft = previousLeft ?? app.left;
     const oldRight = previousRight ?? app.right;
     const nextPair = { left: app.left, right: app.right };
-    const index = appPairs.findIndex((pair) =>
-      (pair.left === oldLeft && pair.right === oldRight) ||
-      (pair.left === oldRight && pair.right === oldLeft)
+    const index = appPairs.findIndex(
+      (pair) =>
+        (pair.left === oldLeft && pair.right === oldRight) ||
+        (pair.left === oldRight && pair.right === oldLeft),
     );
     if (index >= 0) {
-      appPairs = appPairs.map((pair, pairIndex) => (pairIndex === index ? nextPair : pair));
+      appPairs = appPairs.map((pair, pairIndex) =>
+        pairIndex === index ? nextPair : pair,
+      );
     } else {
       appPairs = [...appPairs, nextPair];
     }
-    localStorage.setItem('castla_app_pairs', JSON.stringify(appPairs));
+    localStorage.setItem("castla_app_pairs", JSON.stringify(appPairs));
     touchDrawer();
   }
 
   function saveEditingPair() {
     if (!editingPair?.left || !editingPair?.right) return;
     const nextPair = editingPair;
-    const original = getPairApps(appPairs, apps).find((app) => app.packageName === nextPair.packageName);
+    const original = getPairApps(appPairs, apps).find(
+      (app) => app.packageName === nextPair.packageName,
+    );
     persistPair(nextPair, original?.left, original?.right);
     editingPair = null;
-    toast('App Pair updated');
+    toast("App Pair updated");
   }
 
   function removePair(app: AppInfo) {
     if (!app.left || !app.right) return;
-    appPairs = appPairs.filter((pair) =>
-      !((pair.left === app.left && pair.right === app.right) || (pair.left === app.right && pair.right === app.left))
+    appPairs = appPairs.filter(
+      (pair) =>
+        !(
+          (pair.left === app.left && pair.right === app.right) ||
+          (pair.left === app.right && pair.right === app.left)
+        ),
     );
-    localStorage.setItem('castla_app_pairs', JSON.stringify(appPairs));
+    localStorage.setItem("castla_app_pairs", JSON.stringify(appPairs));
     favorites = favorites.filter((pkg) => pkg !== app.packageName);
-    localStorage.setItem('castla_favorites', JSON.stringify(favorites));
+    localStorage.setItem("castla_favorites", JSON.stringify(favorites));
     if (primaryAutorun === app.left && secondaryAutorun === app.right) {
-      primaryAutorun = '';
-      secondaryAutorun = '';
-      updateStorage('castla_autorun_primary', primaryAutorun);
-      updateStorage('castla_autorun_secondary', secondaryAutorun);
+      primaryAutorun = "";
+      secondaryAutorun = "";
+      updateStorage("castla_autorun_primary", primaryAutorun);
+      updateStorage("castla_autorun_secondary", secondaryAutorun);
     }
     touchDrawer();
     if (editingPair?.packageName === app.packageName) editingPair = null;
-    pairMenuOpen = '';
-    toast('App Pair dissolved');
+    pairMenuOpen = "";
+    toast("App Pair dissolved");
   }
 
   function cancelEditingPair() {
@@ -317,38 +417,44 @@
   }
 
   function togglePairMenu(app: AppInfo) {
-    pairMenuOpen = pairMenuOpen === app.packageName ? '' : app.packageName;
+    pairMenuOpen = pairMenuOpen === app.packageName ? "" : app.packageName;
   }
 
   function toggleAutorun(packageName: string) {
     if (primaryAutorun === packageName || secondaryAutorun === packageName) {
-      if (primaryAutorun === packageName) primaryAutorun = '';
-      if (secondaryAutorun === packageName) secondaryAutorun = '';
+      if (primaryAutorun === packageName) primaryAutorun = "";
+      if (secondaryAutorun === packageName) secondaryAutorun = "";
     } else if (!primaryAutorun) {
       primaryAutorun = packageName;
     } else {
       secondaryAutorun = packageName;
     }
-    updateStorage('castla_autorun_primary', primaryAutorun);
-    updateStorage('castla_autorun_secondary', secondaryAutorun);
+    updateStorage("castla_autorun_primary", primaryAutorun);
+    updateStorage("castla_autorun_secondary", secondaryAutorun);
     touchDrawer();
   }
 
   function isAutorunPair(app: AppInfo) {
-    return Boolean(app.isPair && app.left && app.right && primaryAutorun === app.left && secondaryAutorun === app.right);
+    return Boolean(
+      app.isPair &&
+        app.left &&
+        app.right &&
+        primaryAutorun === app.left &&
+        secondaryAutorun === app.right,
+    );
   }
 
   function toggleAutorunForApp(app: AppInfo) {
     if (app.isPair && app.left && app.right) {
       if (isAutorunPair(app)) {
-        primaryAutorun = '';
-        secondaryAutorun = '';
+        primaryAutorun = "";
+        secondaryAutorun = "";
       } else {
         primaryAutorun = app.left;
         secondaryAutorun = app.right;
       }
-      updateStorage('castla_autorun_primary', primaryAutorun);
-      updateStorage('castla_autorun_secondary', secondaryAutorun);
+      updateStorage("castla_autorun_primary", primaryAutorun);
+      updateStorage("castla_autorun_secondary", secondaryAutorun);
       touchDrawer();
       return;
     }
@@ -357,36 +463,35 @@
 
   function runAutorunOnce() {
     if ((window as any).castlaAutorunDone) return;
-    if (sessionStorage.getItem(AUTORUN_SESSION_KEY) === '1') {
+    if (sessionStorage.getItem(AUTORUN_SESSION_KEY) === "1") {
       (window as any).castlaAutorunDone = true;
       return;
     }
 
     if (hasVisibleStream) {
       (window as any).castlaAutorunDone = true;
-      sessionStorage.setItem(AUTORUN_SESSION_KEY, '1');
+      sessionStorage.setItem(AUTORUN_SESSION_KEY, "1");
       return;
     }
 
     (window as any).castlaAutorunDone = true;
-    sessionStorage.setItem(AUTORUN_SESSION_KEY, '1');
+    sessionStorage.setItem(AUTORUN_SESSION_KEY, "1");
     const primary = apps.find((app) => app.packageName === primaryAutorun);
     const secondary = apps.find((app) => app.packageName === secondaryAutorun);
     if (primary && secondary) launchPair(primary, secondary);
-    else if (primary) launch(primary, 'primary');
+    else if (primary) launch(primary, "primary");
   }
 
-  // ### 수정 시작 ###
   function startPress(event: PointerEvent, app: AppInfo) {
     const target = event.target as HTMLElement;
     // Functional buttons should not trigger app selection
-    if (target.closest('button')) return;
-    pairMenuOpen = '';
-    
+    if (target.closest("button")) return;
+    pairMenuOpen = "";
+
     // Do not call preventDefault to allow smooth scrolling. Pointer capture is deferred to long press trigger.
     const currentTarget = event.currentTarget as HTMLElement;
     const pointerId = event.pointerId;
-    
+
     pressedApp = app;
     pressStartX = event.clientX;
     pressStartY = event.clientY;
@@ -397,7 +502,9 @@
     pressTimer = window.setTimeout(() => {
       draggingApp = pressedApp;
       if (draggingApp && currentTarget) {
-        try { currentTarget.setPointerCapture(pointerId); } catch {}
+        try {
+          currentTarget.setPointerCapture(pointerId);
+        } catch {}
       }
       navigator.vibrate?.(50);
       drawerOpen = true;
@@ -405,7 +512,6 @@
     }, 700); // Tuned response to 700ms
   }
 
-  // ### 수정 시작 ###
   function movePress(event: PointerEvent) {
     if (!pressedApp && !draggingApp) return;
     dragX = event.clientX;
@@ -429,18 +535,19 @@
   function cancelPress(event?: PointerEvent) {
     window.clearTimeout(pressTimer);
     if (event?.currentTarget instanceof HTMLElement) {
-      try { event.currentTarget.releasePointerCapture(event.pointerId); } catch {}
+      try {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      } catch {}
     }
     pressedApp = null;
     draggingApp = null;
-    dropZone = '';
+    dropZone = "";
     drawerDimmed = false;
     pressMoved = false;
     pairTarget = null;
   }
 
   function endPress(event?: PointerEvent) {
-  // ### 수정 끝 ###
     window.clearTimeout(pressTimer);
     if (draggingApp) {
       if (pairTarget) createPair(draggingApp, pairTarget);
@@ -449,21 +556,22 @@
       activateApp(pressedApp);
     }
     if (event?.currentTarget instanceof HTMLElement) {
-      try { event.currentTarget.releasePointerCapture(event.pointerId); } catch {}
+      try {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      } catch {}
     }
     pressedApp = null;
     draggingApp = null;
-    dropZone = '';
+    dropZone = "";
     drawerDimmed = false;
     pressMoved = false;
     pairTarget = null;
   }
-  // ### 수정 끝 ###
 
   function updateDropZone(x: number, y: number) {
     if (isPointInsideDrawer(x, y)) {
       pairTarget = findPairTarget(x, y);
-      dropZone = '';
+      dropZone = "";
       drawerDimmed = false;
       return;
     }
@@ -471,11 +579,11 @@
     drawerDimmed = true;
     const w = window.innerWidth;
     const h = window.innerHeight;
-    if (y < h * 0.16 && x < w * 0.5) dropZone = 'favorite';
-    else if (y < h * 0.16) dropZone = 'autorun';
-    else if (y > h * 0.86) dropZone = 'remove';
-    else if (x < w * 0.5) dropZone = 'primary';
-    else dropZone = 'secondary';
+    if (y < h * 0.16 && x < w * 0.5) dropZone = "favorite";
+    else if (y < h * 0.16) dropZone = "autorun";
+    else if (y > h * 0.86) dropZone = "remove";
+    else if (x < w * 0.5) dropZone = "primary";
+    else dropZone = "secondary";
   }
 
   function autoScrollDrawer(y: number) {
@@ -487,59 +595,68 @@
       const intensity = Math.min(1, (y - (rect.bottom - edgeSize)) / edgeSize);
       drawerListElement.scrollTop += Math.ceil(maxStep * intensity);
     } else if (y < rect.top + edgeSize && y > rect.top - 24) {
-      const intensity = Math.min(1, ((rect.top + edgeSize) - y) / edgeSize);
+      const intensity = Math.min(1, (rect.top + edgeSize - y) / edgeSize);
       drawerListElement.scrollTop -= Math.ceil(maxStep * intensity);
     }
   }
 
   function applyDrop(app: AppInfo, zone: DropZone) {
     if (app.isPair && app.left && app.right) {
-      if (zone === 'autorun') {
+      if (zone === "autorun") {
         primaryAutorun = app.left;
         secondaryAutorun = app.right;
-        updateStorage('castla_autorun_primary', primaryAutorun);
-        updateStorage('castla_autorun_secondary', secondaryAutorun);
+        updateStorage("castla_autorun_primary", primaryAutorun);
+        updateStorage("castla_autorun_secondary", secondaryAutorun);
         touchDrawer();
         toast(`${app.label} set to Auto-run`);
         return;
       }
-      if (zone === 'remove') {
+      if (zone === "remove") {
         removePair(app);
         return;
       }
     }
-    if (zone === 'favorite') {
+    if (zone === "favorite") {
       toggleFavorite(app.packageName);
-      toast(favorites.includes(app.packageName) ? 'Favorite updated' : 'Favorite removed');
-    } else if (zone === 'autorun') {
+      toast(
+        favorites.includes(app.packageName)
+          ? "Favorite updated"
+          : "Favorite removed",
+      );
+    } else if (zone === "autorun") {
       toggleAutorun(app.packageName);
-      toast('Auto-run updated');
-    } else if (zone === 'primary') {
-      launch(app, 'primary');
-    } else if (zone === 'secondary') {
-      launch(app, 'secondary');
-    } else if (zone === 'remove') {
+      toast("Auto-run updated");
+    } else if (zone === "primary") {
+      launch(app, "primary");
+    } else if (zone === "secondary") {
+      launch(app, "secondary");
+    } else if (zone === "remove") {
       favorites = favorites.filter((pkg) => pkg !== app.packageName);
-      if (primaryAutorun === app.packageName) primaryAutorun = '';
-      if (secondaryAutorun === app.packageName) secondaryAutorun = '';
-      localStorage.setItem('castla_favorites', JSON.stringify(favorites));
-      updateStorage('castla_autorun_primary', primaryAutorun);
-      updateStorage('castla_autorun_secondary', secondaryAutorun);
+      if (primaryAutorun === app.packageName) primaryAutorun = "";
+      if (secondaryAutorun === app.packageName) secondaryAutorun = "";
+      localStorage.setItem("castla_favorites", JSON.stringify(favorites));
+      updateStorage("castla_autorun_primary", primaryAutorun);
+      updateStorage("castla_autorun_secondary", secondaryAutorun);
       touchDrawer();
-      toast('Removed from shortcuts');
+      toast("Removed from shortcuts");
     }
   }
 
   function isPointInsideDrawer(x: number, y: number): boolean {
     if (!drawerElement || !drawerOpen) return false;
     const rect = drawerElement.getBoundingClientRect();
-    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    return (
+      x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+    );
   }
 
   function findPairTarget(x: number, y: number): AppInfo | null {
-    const hovered = document.elementFromPoint(x, y)?.closest('.split-app-item') as HTMLElement | null;
+    const hovered = document
+      .elementFromPoint(x, y)
+      ?.closest(".split-app-item") as HTMLElement | null;
     const packageName = hovered?.dataset.packageName;
-    if (!packageName || !draggingApp || packageName === draggingApp.packageName) return null;
+    if (!packageName || !draggingApp || packageName === draggingApp.packageName)
+      return null;
     const target = apps.find((app) => app.packageName === packageName);
     if (!target || target.isPair) return null;
     return target;
@@ -548,12 +665,12 @@
   function toast(message: string) {
     notice = message;
     clearTimeout(noticeTimer);
-    noticeTimer = window.setTimeout(() => (notice = ''), 2600);
+    noticeTimer = window.setTimeout(() => (notice = ""), 2600);
   }
 
   function readArray(key: string): string[] {
     try {
-      const value = JSON.parse(localStorage.getItem(key) ?? '[]');
+      const value = JSON.parse(localStorage.getItem(key) ?? "[]");
       return Array.isArray(value) ? value : [];
     } catch {
       return [];
@@ -562,10 +679,16 @@
 
   function readPairs(): AppPairRecord[] {
     try {
-      const value = JSON.parse(localStorage.getItem('castla_app_pairs') ?? '[]');
+      const value = JSON.parse(
+        localStorage.getItem("castla_app_pairs") ?? "[]",
+      );
       if (!Array.isArray(value)) return [];
-      return value.filter((pair): pair is AppPairRecord =>
-        pair && typeof pair.left === 'string' && typeof pair.right === 'string' && pair.left !== pair.right
+      return value.filter(
+        (pair): pair is AppPairRecord =>
+          pair &&
+          typeof pair.left === "string" &&
+          typeof pair.right === "string" &&
+          pair.left !== pair.right,
       );
     } catch {
       return [];
@@ -574,7 +697,7 @@
 
   function readCachedApps(): AppInfo[] {
     try {
-      const value = JSON.parse(localStorage.getItem(APP_CACHE_KEY) ?? '[]');
+      const value = JSON.parse(localStorage.getItem(APP_CACHE_KEY) ?? "[]");
       return Array.isArray(value) ? value : [];
     } catch {
       return [];
@@ -612,17 +735,32 @@
   <div class="server-pill"><span></span>SERVER ACTIVE</div>
 </div>
 
-<aside bind:this={drawerElement} class:open={drawerOpen} class:dimmed={drawerDimmed} class:dragging={Boolean(draggingApp)} class="split-drawer" on:contextmenu|preventDefault>
-  <button class="split-handle" on:click={() => (drawerOpen = !drawerOpen)} aria-label="Launcher">
+<aside
+  bind:this={drawerElement}
+  class:open={drawerOpen}
+  class:dimmed={drawerDimmed}
+  class:dragging={Boolean(draggingApp)}
+  class="split-drawer"
+  on:contextmenu|preventDefault
+>
+  <button
+    class="split-handle"
+    on:click={() => (drawerOpen = !drawerOpen)}
+    aria-label="Launcher"
+  >
     <span></span><span></span><span></span>
   </button>
   <header>
     <strong>Launcher</strong>
     <div style="display: flex; gap: 8px; align-items: center;">
-      <button class="diag-toggle-btn" on:click|stopPropagation={triggerToggleDiagnostics} title="Toggle Diagnostics">
+      <button
+        class="diag-toggle-btn"
+        on:click|stopPropagation={triggerToggleDiagnostics}
+        title="Toggle Diagnostics"
+      >
         🛠️
       </button>
-      <span>{loading ? 'Loading' : `${apps.length} apps`}</span>
+      <span>{loading ? "Loading" : `${apps.length} apps`}</span>
     </div>
   </header>
   <div class="search-row">
@@ -634,7 +772,8 @@
     {#each groupedApps as group (group.key)}
       <section class="split-category-section">
         <div class="split-category-header">
-          <span class="split-category-bar" style={`background:${group.color}`}></span>
+          <span class="split-category-bar" style={`background:${group.color}`}
+          ></span>
           <span class="split-category-title">{group.title}</span>
         </div>
         <div class="split-category-items">
@@ -642,7 +781,8 @@
             <div
               data-package-name={app.isPair ? undefined : app.packageName}
               class:pair-target={pairTarget?.packageName === app.packageName}
-              class:merge-target={pairTarget?.packageName === app.packageName && draggingApp !== null}
+              class:merge-target={pairTarget?.packageName === app.packageName &&
+                draggingApp !== null}
               class:drag-source={draggingApp?.packageName === app.packageName}
               class="split-app-item"
               title={app.label}
@@ -650,41 +790,99 @@
               on:pointermove={movePress}
               on:pointerup={endPress}
               on:pointercancel={cancelPress}
-              on:keydown={(event) => { if (event.key === 'Enter' || event.key === ' ') activateApp(app); }}
+              on:keydown={(event) => {
+                if (event.key === "Enter" || event.key === " ")
+                  activateApp(app);
+              }}
               on:contextmenu|preventDefault
               role="button"
               tabindex="0"
             >
               {#if app.isPair && app.left && app.right}
                 <div class="pair-icons split-pair-icon">
-                  <img class="app-pair-icon-left" src={`/api/icon?pkg=${encodeURIComponent(app.left)}`} alt="" loading="lazy" draggable="false" />
-                  <img class="app-pair-icon-right" src={`/api/icon?pkg=${encodeURIComponent(app.right)}`} alt="" loading="lazy" draggable="false" />
+                  <img
+                    class="app-pair-icon-left"
+                    src={`/api/icon?pkg=${encodeURIComponent(app.left)}`}
+                    alt=""
+                    loading="lazy"
+                    draggable="false"
+                  />
+                  <img
+                    class="app-pair-icon-right"
+                    src={`/api/icon?pkg=${encodeURIComponent(app.right)}`}
+                    alt=""
+                    loading="lazy"
+                    draggable="false"
+                  />
                 </div>
               {:else}
-                <img class="split-app-icon" src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`} alt="" loading="lazy" draggable="false" />
+                <img
+                  class="split-app-icon"
+                  src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`}
+                  alt=""
+                  loading="lazy"
+                  draggable="false"
+                />
               {/if}
-              <!-- ### 수정 시작 ### -->
               <div class="launch-main"><span>{app.label}</span></div>
-              <!-- ### 수정 끝 ### -->
-              <button class:primary={!app.isPair && primaryAutorun === app.packageName} class:secondary={!app.isPair && secondaryAutorun === app.packageName} class:active-pair={app.isPair && isAutorunPair(app)} class="bolt" title="Auto-run" on:click|stopPropagation={() => toggleAutorunForApp(app)}>↯</button>
-              <button class:active={favorites.includes(app.packageName)} class="star" title="Favorite" on:click|stopPropagation={() => toggleFavorite(app.packageName)}>★</button>
+              <button
+                class:primary={!app.isPair &&
+                  primaryAutorun === app.packageName}
+                class:secondary={!app.isPair &&
+                  secondaryAutorun === app.packageName}
+                class:active-pair={app.isPair && isAutorunPair(app)}
+                class="bolt"
+                title="Auto-run"
+                on:click|stopPropagation={() => toggleAutorunForApp(app)}
+                >↯</button
+              >
+              <button
+                class:active={favorites.includes(app.packageName)}
+                class="star"
+                title="Favorite"
+                on:click|stopPropagation={() => toggleFavorite(app.packageName)}
+                >★</button
+              >
               {#if app.isPair}
-                <button class:active={pairMenuOpen === app.packageName} class="pair-settings" title="Pair settings" on:click|stopPropagation={() => openPairEdit(app)}>⚙️</button>
+                <button
+                  class:active={pairMenuOpen === app.packageName}
+                  class="pair-settings"
+                  title="Pair settings"
+                  on:click|stopPropagation={() => openPairEdit(app)}>⚙️</button
+                >
               {:else}
                 <span class="control-spacer" aria-hidden="true"></span>
               {/if}
               {#if pairTarget?.packageName === app.packageName && draggingApp}
                 <div class="merge-preview" aria-hidden="true">
                   <div class="merge-icon incoming">
-                    <img src={`/api/icon?pkg=${encodeURIComponent(draggingApp.packageName)}`} alt="" draggable="false" />
+                    <img
+                      src={`/api/icon?pkg=${encodeURIComponent(draggingApp.packageName)}`}
+                      alt=""
+                      draggable="false"
+                    />
                   </div>
                   <div class="merge-plus">+</div>
                   <div class="merge-icon target">
-                    <img src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`} alt="" draggable="false" />
+                    <img
+                      src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`}
+                      alt=""
+                      draggable="false"
+                    />
                   </div>
                   <div class="merge-result">
-                    <img class="merge-half left" src={`/api/icon?pkg=${encodeURIComponent(draggingApp.packageName)}`} alt="" draggable="false" />
-                    <img class="merge-half right" src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`} alt="" draggable="false" />
+                    <img
+                      class="merge-half left"
+                      src={`/api/icon?pkg=${encodeURIComponent(draggingApp.packageName)}`}
+                      alt=""
+                      draggable="false"
+                    />
+                    <img
+                      class="merge-half right"
+                      src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`}
+                      alt=""
+                      draggable="false"
+                    />
                   </div>
                 </div>
               {/if}
@@ -698,13 +896,50 @@
 
 {#if draggingApp && !pairTarget}
   <div class="drop-overlay">
-    <div class:active={dropZone === 'favorite'} class:hidden={pairTarget !== null} class="drop-zone shortcut favorite-zone"><strong>★</strong><span>즐겨찾기 추가</span></div>
-    <div class:active={dropZone === 'autorun'} class:hidden={pairTarget !== null} class="drop-zone shortcut autorun-zone"><strong>↯</strong><span>자동실행 등록</span></div>
-    <div class:active={dropZone === 'primary'} class:hidden={pairTarget !== null} class="drop-zone primary-zone"><strong>▰</strong><span>Primary(왼쪽)에 실행</span><small>빈 화면 (VD_1)</small></div>
-    <div class:active={dropZone === 'secondary'} class:hidden={pairTarget !== null} class="drop-zone secondary-zone"><strong>▰</strong><span>Secondary(오른쪽)에 실행</span><small>빈 화면 (VD_2)</small></div>
-    <div class:active={dropZone === 'remove'} class:hidden={pairTarget !== null} class="drop-zone remove-zone"><strong>⌫</strong><span>제거 / 휴지통</span></div>
+    <div
+      class:active={dropZone === "favorite"}
+      class:hidden={pairTarget !== null}
+      class="drop-zone shortcut favorite-zone"
+    >
+      <strong>★</strong><span>즐겨찾기 추가</span>
+    </div>
+    <div
+      class:active={dropZone === "autorun"}
+      class:hidden={pairTarget !== null}
+      class="drop-zone shortcut autorun-zone"
+    >
+      <strong>↯</strong><span>자동실행 등록</span>
+    </div>
+    <div
+      class:active={dropZone === "primary"}
+      class:hidden={pairTarget !== null}
+      class="drop-zone primary-zone"
+    >
+      <strong>▰</strong><span>Primary(왼쪽)에 실행</span><small
+        >빈 화면 (VD_1)</small
+      >
+    </div>
+    <div
+      class:active={dropZone === "secondary"}
+      class:hidden={pairTarget !== null}
+      class="drop-zone secondary-zone"
+    >
+      <strong>▰</strong><span>Secondary(오른쪽)에 실행</span><small
+        >빈 화면 (VD_2)</small
+      >
+    </div>
+    <div
+      class:active={dropZone === "remove"}
+      class:hidden={pairTarget !== null}
+      class="drop-zone remove-zone"
+    >
+      <strong>⌫</strong><span>제거 / 휴지통</span>
+    </div>
     <div class="drag-ghost" style={`left:${dragX}px;top:${dragY}px`}>
-      <img src={`/api/icon?pkg=${encodeURIComponent(draggingApp.packageName)}`} alt="" />
+      <img
+        src={`/api/icon?pkg=${encodeURIComponent(draggingApp.packageName)}`}
+        alt=""
+      />
     </div>
   </div>
 {/if}
@@ -718,7 +953,8 @@
     aria-label="Close App Pair editor"
     on:click|self={cancelEditingPair}
     on:keydown={(event) => {
-      if (event.key === 'Escape' || event.key === 'Enter' || event.key === ' ') cancelEditingPair();
+      if (event.key === "Escape" || event.key === "Enter" || event.key === " ")
+        cancelEditingPair();
     }}
   >
     <div
@@ -733,18 +969,34 @@
       </header>
       <div class="pair-dialog-body">
         <div class="pair-dialog-app">
-          <img src={`/api/icon?pkg=${encodeURIComponent(pair.left ?? '')}`} alt="" draggable="false" />
-          <span>{apps.find((app) => app.packageName === pair.left)?.label ?? 'Unknown'}</span>
+          <img
+            src={`/api/icon?pkg=${encodeURIComponent(pair.left ?? "")}`}
+            alt=""
+            draggable="false"
+          />
+          <span
+            >{apps.find((app) => app.packageName === pair.left)?.label ??
+              "Unknown"}</span
+          >
         </div>
         <button class="pair-dialog-swap" on:click={swapEditingPair}>⇄</button>
         <div class="pair-dialog-app">
-          <img src={`/api/icon?pkg=${encodeURIComponent(pair.right ?? '')}`} alt="" draggable="false" />
-          <span>{apps.find((app) => app.packageName === pair.right)?.label ?? 'Unknown'}</span>
+          <img
+            src={`/api/icon?pkg=${encodeURIComponent(pair.right ?? "")}`}
+            alt=""
+            draggable="false"
+          />
+          <span
+            >{apps.find((app) => app.packageName === pair.right)?.label ??
+              "Unknown"}</span
+          >
         </div>
       </div>
       <div class="pair-dialog-actions">
         <button on:click={cancelEditingPair}>취소</button>
-        <button class="danger" on:click={() => removePair(pair)}>분리하기</button>
+        <button class="danger" on:click={() => removePair(pair)}
+          >분리하기</button
+        >
         <button class="primary" on:click={saveEditingPair}>저장</button>
       </div>
     </div>
@@ -761,7 +1013,12 @@
     justify-items: center;
     text-align: center;
     color: #eaf7ff;
-    background: radial-gradient(circle at center, #171724 0%, #090a12 68%, #06070d 100%);
+    background: radial-gradient(
+      circle at center,
+      #171724 0%,
+      #090a12 68%,
+      #06070d 100%
+    );
     pointer-events: none;
   }
 
@@ -776,7 +1033,9 @@
     place-items: center;
     border: 3px solid #28c9ff;
     border-radius: 50%;
-    box-shadow: 0 0 40px rgb(40 201 255 / 0.45), inset 0 0 25px rgb(158 75 255 / 0.3);
+    box-shadow:
+      0 0 40px rgb(40 201 255 / 0.45),
+      inset 0 0 25px rgb(158 75 255 / 0.3);
     color: #8c74ff;
     font-size: 52px;
     margin-bottom: 34px;
@@ -792,8 +1051,12 @@
   }
 
   @keyframes spin-glorious {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
+    0% {
+      transform: rotate(0deg);
+    }
+    100% {
+      transform: rotate(360deg);
+    }
   }
 
   .standby-logo {
@@ -849,7 +1112,10 @@
     background: rgb(18 18 28 / 0.97);
     border-left: 1px solid rgb(255 255 255 / 0.1);
     box-shadow: -8px 0 24px rgb(0 0 0 / 0.42);
-    transition: right 0.24s ease, opacity 0.18s ease, filter 0.18s ease;
+    transition:
+      right 0.24s ease,
+      opacity 0.18s ease,
+      filter 0.18s ease;
   }
 
   .split-drawer.open {
@@ -920,7 +1186,9 @@
     padding: 2px 6px;
     cursor: pointer;
     border-radius: 4px;
-    transition: background 0.2s ease, transform 0.1s ease;
+    transition:
+      background 0.2s ease,
+      transform 0.1s ease;
   }
 
   .diag-toggle-btn:hover {
@@ -1009,11 +1277,12 @@
     border-radius: 8px;
     background: rgb(255 255 255 / 0.075);
     user-select: none;
-    /* ### 수정 시작 ### */
     touch-action: pan-y;
-    /* ### 수정 끝 ### */
     -webkit-user-drag: none;
-    transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+    transition:
+      transform 0.18s ease,
+      box-shadow 0.18s ease,
+      background 0.18s ease;
   }
 
   .split-app-item.drag-source {
@@ -1022,7 +1291,9 @@
 
   .split-app-item.pair-target {
     outline: 2px solid #00e5ff;
-    box-shadow: 0 0 0 1px rgb(0 229 255 / 0.25), inset 0 0 24px rgb(0 229 255 / 0.18);
+    box-shadow:
+      0 0 0 1px rgb(0 229 255 / 0.25),
+      inset 0 0 24px rgb(0 229 255 / 0.18);
     background: rgb(0 229 255 / 0.12);
   }
 
@@ -1088,9 +1359,7 @@
     text-align: left;
     font-size: 16px;
     font-weight: 700;
-    /* ### 수정 시작 ### */
     cursor: pointer;
-    /* ### 수정 끝 ### */
   }
 
   .launch-main span {
@@ -1159,7 +1428,11 @@
     gap: 6px;
     padding: 8px 10px;
     border-radius: 8px;
-    background: linear-gradient(90deg, rgb(0 229 255 / 0.12), rgb(0 229 255 / 0.04));
+    background: linear-gradient(
+      90deg,
+      rgb(0 229 255 / 0.12),
+      rgb(0 229 255 / 0.04)
+    );
     overflow: hidden;
   }
 
@@ -1239,9 +1512,7 @@
   .drop-overlay {
     position: absolute;
     inset: 0;
-    /* ### 수정 시작 ### */
     z-index: 95;
-    /* ### 수정 끝 ### */
     background: rgb(4 5 12 / 0.76);
     backdrop-filter: blur(2px);
     pointer-events: none;

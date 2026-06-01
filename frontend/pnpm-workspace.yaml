@@ -1,0 +1,5 @@
+allowBuilds:
+  esbuild: true
+  svelte-preprocess: true
+minimumReleaseAgeExclude:
+  - vite@8.0.15

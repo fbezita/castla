@@ -24,10 +24,12 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import android.view.Surface
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import com.castla.mirror.BuildConfig
 import com.castla.mirror.R
 import com.castla.mirror.widget.MirrorWidgetProvider
 import com.castla.mirror.capture.AudioCapture
@@ -85,6 +87,13 @@ import org.json.JSONObject
 )
 class MirrorForegroundService : Service() {
     private val vdDispatcher = kotlinx.coroutines.newSingleThreadContext("vd-operations")
+    @Volatile private var useNativeVirtualDisplayIme = true
+    private val castlaImeProxyEnabled: Boolean
+        get() = !useNativeVirtualDisplayIme
+    private val vdImeLogPrefix = "[VDIME]"
+    @Volatile private var verboseDiagnosticsEnabled = false
+    private val vdImeVerboseLogging: Boolean
+        get() = verboseDiagnosticsEnabled
 
     private suspend fun <T> runBinderSafe(timeoutMs: Long = 3000L, block: suspend () -> T): T? {
         return withTimeoutOrNull(timeoutMs) { block() }
@@ -134,14 +143,16 @@ class MirrorForegroundService : Service() {
     }
 
     private val binder = LocalBinder()
-    // ### 수정 시작 ###
     @Volatile private var backFallbackLastTriggeredTime = 0L
-    // ### 수정 끝 ###
     private var mirrorServer: MirrorServer? = null
     fun getMirrorServer(): MirrorServer? = mirrorServer
 
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val imeTimeoutRunnable = Runnable {
+        if (!castlaImeProxyEnabled) {
+            FileLogger.i("IME_ROUTING", "timeout_ignored reason=system_ime_mode")
+            return@Runnable
+        }
         Log.i(TAG, "IME input inactivity timeout (30 seconds) reached. Triggering FSM Timeout.")
         val svc = shizukuSetup?.privilegedService
         if (svc != null) {
@@ -162,12 +173,20 @@ class MirrorForegroundService : Service() {
 
     fun resetImeTimeoutTimer() {
         mainHandler.removeCallbacks(imeTimeoutRunnable)
+        if (!castlaImeProxyEnabled) {
+            FileLogger.i("IME_ROUTING", "resetImeTimeoutTimer skipped reason=system_ime_mode")
+            return
+        }
         // Switch to Castla IME dynamically if not already active when remote input occurs
         ensureCastlaImeActiveDynamically()
         mainHandler.postDelayed(imeTimeoutRunnable, 30000L) // 30 seconds
     }
 
     fun ensureCastlaImeActiveDynamically() {
+        if (!castlaImeProxyEnabled) {
+            FileLogger.i("IME_ROUTING", "ensureCastlaImeActiveDynamically skipped reason=system_ime_mode")
+            return
+        }
         val svc = shizukuSetup?.privilegedService
         if (svc != null) {
             serviceScope.launch {
@@ -186,6 +205,10 @@ class MirrorForegroundService : Service() {
     }
 
     fun restoreUserKeyboardSilently() {
+        if (!castlaImeProxyEnabled) {
+            FileLogger.i("IME_ROUTING", "restoreUserKeyboardSilently skipped reason=system_ime_mode")
+            return
+        }
         val svc = shizukuSetup?.privilegedService
         if (svc != null) {
             serviceScope.launch {
@@ -206,11 +229,22 @@ class MirrorForegroundService : Service() {
     fun onRemoteFocusLost() {
         Log.i(TAG, "onRemoteFocusLost -> restoring user keyboard silently")
         mainHandler.removeCallbacks(imeTimeoutRunnable)
+        if (!castlaImeProxyEnabled) {
+            FileLogger.i("IME_ROUTING", "onRemoteFocusLost ignored reason=system_ime_mode")
+            return
+        }
         restoreUserKeyboardSilently()
     }
 
     fun handleRemoteFocusHint(packageName: String?, inputType: Int, imeOptions: Int, privateImeOptions: String?) {
         Log.i(TAG, "handleRemoteFocusHint: pkg=$packageName, inputType=$inputType, options=$imeOptions")
+        if (!castlaImeProxyEnabled) {
+            FileLogger.i(
+                "IME_ROUTING",
+                "remoteFocusHint ignored reason=system_ime_mode pkg=${packageName ?: ""} inputType=$inputType imeOptions=$imeOptions"
+            )
+            return
+        }
         
         remoteImeWatchdogJob?.cancel()
         remoteImeWatchdogJob = null
@@ -233,6 +267,10 @@ class MirrorForegroundService : Service() {
 
     fun handleRemoteBlurHint() {
         Log.i(TAG, "handleRemoteBlurHint received. Scheduling 500ms blur debounce & 3s watchdog.")
+        if (!castlaImeProxyEnabled) {
+            FileLogger.i("IME_ROUTING", "remoteBlurHint ignored reason=system_ime_mode")
+            return
+        }
         
         remoteImeWatchdogJob?.cancel()
         remoteImeWatchdogJob = serviceScope.launch(Dispatchers.Main) {
@@ -545,6 +583,13 @@ class MirrorForegroundService : Service() {
         return (now - lastTouchAt).coerceAtLeast(0L)
     }
 
+    fun recentViewportFocusAcquisitionAgeMs(): Long? = mostRecentTouchAgeMs()
+
+    fun isRecentViewportFocusAcquisitionWindow(maxAgeMs: Long = 1200L): Boolean {
+        val age = mostRecentTouchAgeMs() ?: return false
+        return age in 0..maxAgeMs
+    }
+
     private suspend fun requestRebuild(request: RebuildRequest) {
         val pipeline = pipelines[request.pipelineName]
         if (pipeline == null || isAppLaunchingContext || request.width <= 0 || request.height <= 0) {
@@ -707,6 +752,15 @@ class MirrorForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.i(TAG, "onCreate() - Initializing Symmetrical Pipeline Context Map Pool")
+        val initialSettings = com.castla.mirror.ui.StreamSettings.load(this)
+        useNativeVirtualDisplayIme = initialSettings.useNativeVirtualDisplayIme
+        verboseDiagnosticsEnabled = initialSettings.verboseDiagnosticsEnabled
+        logImeSelectionState("service_onCreate")
+        val buildLine =
+            "marker=ime_guard_v4 appId=${BuildConfig.APPLICATION_ID} versionName=${BuildConfig.VERSION_NAME} " +
+                "versionCode=${BuildConfig.VERSION_CODE} buildTimestamp=${BuildConfig.BUILD_TIMESTAMP} debug=${BuildConfig.DEBUG}"
+        Log.i(TAG, "[BUILD_MARKER] $buildLine")
+        FileLogger.i("BUILD_MARKER", "MirrorForegroundService $buildLine")
         
         
         // Start the sequential hardware worker to handle rebuild tasks sequentially
@@ -958,8 +1012,26 @@ class MirrorForegroundService : Service() {
         pendingAudioEnabled = intent?.getBooleanExtra(EXTRA_AUDIO, false) ?: false
         mirroringMode = intent?.getStringExtra(EXTRA_MIRRORING_MODE) ?: "FULL_SCREEN"
         targetPackage = intent?.getStringExtra(EXTRA_TARGET_PACKAGE) ?: ""
+        val runtimeSettings = com.castla.mirror.ui.StreamSettings.load(this)
+        useNativeVirtualDisplayIme = runtimeSettings.useNativeVirtualDisplayIme
+        verboseDiagnosticsEnabled = runtimeSettings.verboseDiagnosticsEnabled
 
         Log.i(TAG, "onStartCommand() - Frame profiling parameters input. HeightHint=$rawMaxHeight, FpsHint=$rawFps, Audio=$pendingAudioEnabled, hostIp=$hostIp, relayPublishIp=$relayPublishIp")
+        Log.i(
+            TAG,
+            "$vdImeLogPrefix [IME_ROUTING] mode=${if (useNativeVirtualDisplayIme) "native_vd_ime" else "castla_proxy_fallback"} " +
+                "targetDisplayId=${activeInputDisplayId()} localIme=$useNativeVirtualDisplayIme proxyEnabled=$castlaImeProxyEnabled"
+        )
+        Log.i(
+            TAG,
+            "$vdImeLogPrefix [VD] mode=${if (useNativeVirtualDisplayIme) "native_vd_ime_primary" else "ime_proxy_primary"} " +
+                "mirroringMode=$mirroringMode primaryTier=${pipelines["primary"]?.displayTier} secondaryTier=${pipelines["secondary"]?.displayTier}"
+        )
+        FileLogger.i(
+            "IME_ROUTING",
+            "$vdImeLogPrefix mode=${if (useNativeVirtualDisplayIme) "native_vd_ime" else "castla_proxy_fallback"} " +
+                "targetDisplayId=${activeInputDisplayId()} localIme=$useNativeVirtualDisplayIme proxyEnabled=$castlaImeProxyEnabled"
+        )
 
         pipelines.values.forEach { pipeline ->
             pipeline.autoResolution = (rawMaxHeight == 0)
@@ -972,9 +1044,205 @@ class MirrorForegroundService : Service() {
             startPipeline(
                 audioEnabled = pendingAudioEnabled,
                 relayPublishIp = relayPublishIp
-            )
+        )
         }
         return START_NOT_STICKY
+    }
+
+    private fun logImeSelectionState(event: String) {
+        val defaultIme = try {
+            Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)
+        } catch (_: Throwable) {
+            null
+        }
+        val enabledImes = try {
+            Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_INPUT_METHODS)
+        } catch (_: Throwable) {
+            null
+        }
+        val castlaImeId = "${packageName}/com.castla.mirror.input.CastlaImeService"
+        val line =
+            "event=$event castlaImeId=$castlaImeId defaultInputMethod=${defaultIme ?: ""} " +
+                "enabledInputMethods=${enabledImes ?: ""} " +
+                "mode=${if (useNativeVirtualDisplayIme) "native_vd_ime" else "castla_proxy_fallback"}"
+        Log.i(TAG, "$vdImeLogPrefix [IME_SERVICE_STATE] $line")
+        FileLogger.i("IME_SERVICE_STATE", "$vdImeLogPrefix $line")
+    }
+
+    private fun scheduleDisplayRoutingDiagnostics(
+        pane: String,
+        service: IPrivilegedService?,
+        targetPkg: String,
+        targetDisplayId: Int,
+        phase: String,
+        launchMode: String,
+        vdDisplayId: Int
+    ) {
+        if (!vdImeVerboseLogging) return
+        if (service == null || targetPkg.isBlank() || targetDisplayId < 0) return
+        Log.i(
+            TAG,
+            "$vdImeLogPrefix [IME_ROUTING] phase=$phase pane=$pane targetPkg=$targetPkg targetDisplayId=$targetDisplayId launchMode=$launchMode vdDisplayId=$vdDisplayId"
+        )
+        FileLogger.i(
+            "IME_ROUTING",
+            "$vdImeLogPrefix phase=$phase pane=$pane targetPkg=$targetPkg targetDisplayId=$targetDisplayId launchMode=$launchMode vdDisplayId=$vdDisplayId"
+        )
+        serviceScope.launch(Dispatchers.IO) {
+            val delays = if (phase == "prelaunch") listOf(0L) else listOf(250L, 1000L)
+            for (delayMs in delays) {
+                if (delayMs > 0L) delay(delayMs)
+                captureDisplayRoutingSnapshot(pane, service, targetPkg, targetDisplayId, phase, launchMode, vdDisplayId, delayMs)
+            }
+        }
+    }
+
+    private suspend fun captureDisplayRoutingSnapshot(
+        pane: String,
+        service: IPrivilegedService,
+        targetPkg: String,
+        targetDisplayId: Int,
+        phase: String,
+        launchMode: String,
+        vdDisplayId: Int,
+        delayMs: Long
+    ) {
+        val appDisplayId = try {
+            runBinderSafe { service.getDisplayIdForPackage(targetPkg) } ?: -1
+        } catch (_: Exception) {
+            -1
+        }
+        val imeDump = try {
+            runBinderSafe(1500L) { service.execCommand("dumpsys input_method") } ?: ""
+        } catch (_: Exception) {
+            ""
+        }
+        val windowDump = try {
+            runBinderSafe(1500L) { service.execCommand("dumpsys window displays") } ?: ""
+        } catch (_: Exception) {
+            ""
+        }
+        val imeDisplayId = extractImeDisplayId(imeDump, windowDump)
+        val imeSummary = buildImeSummary(imeDump, windowDump)
+        val localIme =
+            appDisplayId != -1 &&
+                imeDisplayId != -1 &&
+                appDisplayId == imeDisplayId &&
+                imeDisplayId == vdDisplayId
+        Log.i(
+            TAG,
+            "$vdImeLogPrefix [VD] pane=$pane phase=$phase vdDisplayId=$vdDisplayId targetDisplayId=$targetDisplayId launchMode=$launchMode delayMs=$delayMs"
+        )
+        Log.i(
+            TAG,
+            "$vdImeLogPrefix [APP_DISPLAY] pane=$pane phase=$phase pkg=$targetPkg appDisplayId=$appDisplayId targetDisplayId=$targetDisplayId vdDisplayId=$vdDisplayId delayMs=$delayMs"
+        )
+        Log.i(
+            TAG,
+            "$vdImeLogPrefix [IME_DISPLAY] pane=$pane phase=$phase pkg=$targetPkg imeDisplayId=$imeDisplayId targetDisplayId=$targetDisplayId vdDisplayId=$vdDisplayId delayMs=$delayMs summary=$imeSummary"
+        )
+        Log.i(
+            TAG,
+            "$vdImeLogPrefix [IME_ROUTING] pane=$pane phase=$phase pkg=$targetPkg localIme=$localIme targetDisplayId=$targetDisplayId appDisplayId=$appDisplayId imeDisplayId=$imeDisplayId vdDisplayId=$vdDisplayId launchMode=$launchMode delayMs=$delayMs"
+        )
+        FileLogger.i(
+            "VD",
+            "$vdImeLogPrefix pane=$pane phase=$phase vdDisplayId=$vdDisplayId targetDisplayId=$targetDisplayId launchMode=$launchMode delayMs=$delayMs"
+        )
+        FileLogger.i(
+            "APP_DISPLAY",
+            "$vdImeLogPrefix pane=$pane phase=$phase pkg=$targetPkg appDisplayId=$appDisplayId targetDisplayId=$targetDisplayId vdDisplayId=$vdDisplayId delayMs=$delayMs"
+        )
+        FileLogger.i(
+            "IME_DISPLAY",
+            "$vdImeLogPrefix pane=$pane phase=$phase pkg=$targetPkg imeDisplayId=$imeDisplayId targetDisplayId=$targetDisplayId vdDisplayId=$vdDisplayId delayMs=$delayMs summary=$imeSummary"
+        )
+        FileLogger.i(
+            "IME_ROUTING",
+            "$vdImeLogPrefix pane=$pane phase=$phase pkg=$targetPkg localIme=$localIme targetDisplayId=$targetDisplayId appDisplayId=$appDisplayId imeDisplayId=$imeDisplayId vdDisplayId=$vdDisplayId launchMode=$launchMode delayMs=$delayMs"
+        )
+    }
+
+    private fun extractImeDisplayId(imeDump: String, windowDump: String): Int {
+        listOf(
+            Regex("""mCurTokenDisplayId\s*[=:]\s*(-?\d+)"""),
+            Regex("""imeDisplayId\s*[=:]\s*(-?\d+)""")
+        ).forEach { pattern ->
+            pattern.find(imeDump)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toIntOrNull()
+                ?.let { return it }
+        }
+
+        val imeRelatedText = buildImeRelatedText(imeDump, windowDump)
+        val scopedPatterns = listOf(
+            Regex("""mDisplayId\s*[=:]\s*(-?\d+)"""),
+            Regex("""displayId\s*[=:]\s*(-?\d+)"""),
+            Regex("""display\s*[=:]\s*(-?\d+)""")
+        )
+        for (pattern in scopedPatterns) {
+            pattern.find(imeRelatedText)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toIntOrNull()
+                ?.let { return it }
+        }
+        return -1
+    }
+
+    private fun buildImeRelatedText(imeDump: String, windowDump: String): String {
+        val keywords = listOf(
+            "InputMethod",
+            "input method",
+            "IME",
+            "ime",
+            "mIme",
+            "mInputMethod",
+            "mCurTokenDisplayId",
+            "imeDisplayId",
+            "imeLayeringTarget",
+            "mInputMethodTarget",
+            "mCurFocusedWindow",
+            "mServedView"
+        )
+
+        fun isImeLine(line: String): Boolean =
+            keywords.any { line.contains(it, ignoreCase = true) }
+
+        return buildString {
+            imeDump.lineSequence()
+                .filter(::isImeLine)
+                .forEach { appendLine(it.trim()) }
+
+            windowDump.lineSequence()
+                .filter(::isImeLine)
+                .forEach { appendLine(it.trim()) }
+        }
+    }
+
+    private fun buildImeSummary(imeDump: String, windowDump: String): String {
+        val related = buildImeRelatedText(imeDump, windowDump)
+
+        return related
+            .lineSequence()
+            .filter { line ->
+                line.contains("mCurMethodId", true) ||
+                    line.contains("mCurTokenDisplayId", true) ||
+                    line.contains("imeDisplayId", true) ||
+                    line.contains("mCurFocusedWindow", true) ||
+                    line.contains("mServedView", true) ||
+                    line.contains("displayId", true) ||
+                    line.contains("mDisplayId", true) ||
+                    line.contains("InputMethod", true) ||
+                    line.contains("imeLayeringTarget", true) ||
+                    line.contains("mInputMethodTarget", true)
+            }
+            .map { it.trim() }
+            .distinct()
+            .take(16)
+            .joinToString(" | ")
+            .take(1200)
     }
 
     private fun requestStopAsync(reason: String) {
@@ -1647,21 +1915,25 @@ class MirrorForegroundService : Service() {
                     val svc = setup.privilegedService
                     if (svc != null) {
                         try {
-                            // Self-healing: recover any pending crashes safely via FSM startup recovery
-                            com.castla.mirror.input.ImeSwitchManager.sendEvent(
-                                this@MirrorForegroundService,
-                                com.castla.mirror.input.ImeEvent.AppStartupRecovery
-                            ) { cmd ->
-                                svc.execCommand(cmd)
+                            if (castlaImeProxyEnabled) {
+                                // Self-healing: recover any pending crashes safely via FSM startup recovery
+                                com.castla.mirror.input.ImeSwitchManager.sendEvent(
+                                    this@MirrorForegroundService,
+                                    com.castla.mirror.input.ImeEvent.AppStartupRecovery
+                                ) { cmd ->
+                                    svc.execCommand(cmd)
+                                }
+                                // Silent prep: set Castla IME as the default keyboard programmatically on startup
+                                com.castla.mirror.input.ImeSwitchManager.sendEvent(
+                                    this@MirrorForegroundService,
+                                    com.castla.mirror.input.ImeEvent.RemoteTextFocus
+                                ) { cmd ->
+                                    svc.execCommand(cmd)
+                                }
+                                Log.i(TAG, "Programmatically prepared Castla IME silently on service connected.")
+                            } else {
+                                FileLogger.i("IME_ROUTING", "imeSwitchFsm skipped on reconnect reason=system_ime_mode")
                             }
-                            // Silent prep: set Castla IME as the default keyboard programmatically on startup
-                            com.castla.mirror.input.ImeSwitchManager.sendEvent(
-                                this@MirrorForegroundService,
-                                com.castla.mirror.input.ImeEvent.RemoteTextFocus
-                            ) { cmd ->
-                                svc.execCommand(cmd)
-                            }
-                            Log.i(TAG, "Programmatically prepared Castla IME silently on service connected.")
                         } catch (e: Exception) {
                             Log.e(TAG, "Failed programmatically preparing IME settings", e)
                         }
@@ -1697,6 +1969,10 @@ class MirrorForegroundService : Service() {
         pipelines.values.forEach { it.controller.attachPrivilegedService(svc) }
         
         pipelines.values.forEach { pipeline ->
+            if (!pipeline.shouldMaterializeVirtualDisplay()) {
+                Log.i(TAG, "[VDIME] skip reconnect VD materialization pane=${pipeline.name} tier=${pipeline.displayTier}")
+                return@forEach
+            }
             val surf = pipeline.currentEncoderSurface ?: return@forEach
             if (pipeline.width <= 0 || pipeline.height <= 0) return@forEach
             serviceScope.launch(Dispatchers.IO) {
@@ -1794,6 +2070,10 @@ class MirrorForegroundService : Service() {
             
             var globalSuccess = true
             pipelines.values.forEach { pipeline ->
+                if (!pipeline.shouldMaterializeVirtualDisplay()) {
+                    Log.i(TAG, "[VDIME] skip initial VD materialization pane=${pipeline.name} tier=${pipeline.displayTier}")
+                    return@forEach
+                }
                 val w = if (pipeline.width > 0) pipeline.width else width
                 val h = if (pipeline.height > 0) pipeline.height else height
                 val dpi = computeVirtualDisplayDpi(w, h)
@@ -2048,10 +2328,8 @@ class MirrorForegroundService : Service() {
     }
 
     private fun verifySurfaceAndFallback(pipeline: MirroringPipeline, service: IPrivilegedService, displayId: Int, pkg: String, taskIds: List<Int>, packageOrComponent: String, extraKey: String?, extraValue: String?) {
-        // ### 수정 시작 ###
         // Clean package check without hardcoded maps filter
         if (pkg.contains("com.castla.mirror") || pkg == "HOME" || pkg.isBlank()) return
-        // ### 수정 끝 ###
         
         // Cancel the previous active fallback watchdog job to refresh the 5500ms grace period.
         // This prevents race condition and false positives where a subsequent fast layout rebuild
@@ -2084,7 +2362,6 @@ class MirrorForegroundService : Service() {
                 // Already rendered static scenes (lastFrameRenderedTime > 0L) are excluded from recovery triggers.
                 val isStagnated = !isAbsent && (pipeline.lastFrameRenderedTime == 0L)
                 
-                // ### 수정 시작 ###
                 if (isStagnated && !isAbsent) {
                     Log.i(TAG, "[Fallback] Watchdog skipped: app ($pkg) exists, first frame delayed. displayId=$displayId")
                     return@launch
@@ -2103,7 +2380,6 @@ class MirrorForegroundService : Service() {
                         Log.e(TAG, "[Fallback] Soft recovery failed: ${e.message}")
                     }
                 }
-                // ### 수정 끝 ###
             } catch (e: Exception) {
                 Log.e(TAG, "[Fallback] Critical error occurred inside surface verification coroutine: ${e.message}", e)
             } finally {
@@ -2411,6 +2687,9 @@ class MirrorForegroundService : Service() {
             return "$lastServiceMutationReason@${age}ms"
         }
 
+        fun shouldMaterializeVirtualDisplay(): Boolean =
+            displayTier != DisplayTier.PARKED
+
         suspend fun setTier(next: DisplayTier, reason: String) {
             if (displayTier == next && (next == DisplayTier.ACTIVE || next == DisplayTier.VISIBLE)) return
             displayTier = next
@@ -2425,6 +2704,11 @@ class MirrorForegroundService : Service() {
                 }
                 DisplayTier.SUSPENDED, DisplayTier.PARKED -> {
                     suspendEncoder(reason)
+                    if (next == DisplayTier.PARKED && displayId >= 0) {
+                        Log.i(TAG, "[$name Pipeline] Releasing parked VirtualDisplay id=$displayId ($reason)")
+                        runBinderSafe { controller.releaseVirtualDisplay() }
+                        displayId = -1
+                    }
                     mirrorServer?.broadcastDiagnostics()
                 }
             }
@@ -2525,6 +2809,12 @@ class MirrorForegroundService : Service() {
 
             val w = alignedWidth; val h = alignedHeight; val dpi = computeVirtualDisplayDpi(w, h)
             val calculatedBitrate = adaptiveBitrateManager.getSharedBitrateForPipeline(this)
+            Log.i(
+                TAG,
+                "[PIPELINE_DEBUG] [$name] rebuild session=$sessionId target=${targetWidth}x${targetHeight} aligned=${w}x${h} force=$force forceSingle=$forceSingle currentDisplayId=$displayId currentApp=$currentApp"
+            )
+            FileLogger.i("PIPELINE_DEBUG", "[$name] rebuild session=$sessionId target=${targetWidth}x${targetHeight} aligned=${w}x${h} force=$force forceSingle=$forceSingle currentDisplayId=$displayId currentApp=$currentApp")
+            FileLogger.i("DISPLAY_STATE", "[$name] rebuild session=$sessionId displayId=$displayId currentApp=$currentApp target=${w}x${h}")
 
             // Reset frame indicator on viewport/encoder layout reconstruction to guarantee correct watchdog operation
             lastFrameRenderedTime = 0L
@@ -2628,7 +2918,13 @@ class MirrorForegroundService : Service() {
                     virtualDisplayHardwareMutex.withLock {
                         val currentId = controller.getDisplayId()
                         if (currentId >= 0) {
+                            Log.i(TAG, "[DISPLAY_DEBUG] [$name] reusing VirtualDisplay id=$currentId resize=${w}x${h} dpi=$dpi")
+                            FileLogger.i("DISPLAY_DEBUG", "[$name] reuseVirtualDisplay id=$currentId resize=${w}x${h} dpi=$dpi")
+                            FileLogger.i("DISPLAY_STATE", "[$name] reuseVirtualDisplay id=$currentId width=$w height=$h dpi=$dpi")
                             runBinderSafe { controller.resizeDisplay(w, h, dpi) }
+                            Log.i(TAG, "[DISPLAY_DEBUG] [$name] attaching surface to existing display id=$currentId surfacePresent=${surface != null}")
+                            FileLogger.i("DISPLAY_DEBUG", "[$name] setSurface existing id=$currentId surfacePresent=${surface != null}")
+                            FileLogger.i("DISPLAY_STATE", "[$name] setSurface existing id=$currentId surfacePresent=${surface != null}")
                             runBinderSafe { controller.setSurface(surface) }
                             displayId = currentId
                             activeId = currentId
@@ -2636,6 +2932,9 @@ class MirrorForegroundService : Service() {
                             isNewVd = false
                             success = true
                         } else {
+                            Log.i(TAG, "[DISPLAY_DEBUG] [$name] creating new VirtualDisplay target=${w}x${h} dpi=$dpi surfacePresent=${surface != null}")
+                            FileLogger.i("DISPLAY_DEBUG", "[$name] createVirtualDisplay target=${w}x${h} dpi=$dpi surfacePresent=${surface != null}")
+                            FileLogger.i("DISPLAY_STATE", "[$name] createVirtualDisplay width=$w height=$h dpi=$dpi surfacePresent=${surface != null}")
                             runBinderSafe { controller.releaseVirtualDisplay() }
                             runBinderSafe { controller.createVirtualDisplay(w, h, dpi, surface) }
                             if (controller.hasVirtualDisplay()) {
@@ -2670,6 +2969,9 @@ class MirrorForegroundService : Service() {
                     if (isNewVd) {
                         try {
                             controller.getPrivilegedService()?.wakeUpDisplay(activeId)
+                            Log.i(TAG, "[DISPLAY_DEBUG] [$name] wakeUpDisplay after new VD id=$activeId")
+                            FileLogger.i("DISPLAY_DEBUG", "[$name] wakeUpDisplay after new VD id=$activeId")
+                            FileLogger.i("DISPLAY_STATE", "[$name] wakeUpDisplay id=$activeId")
                         } catch (e: Exception) {
                             Log.w(TAG, "[$name Pipeline] Failed to trigger early wakeup guard", e)
                         }
@@ -2685,6 +2987,9 @@ class MirrorForegroundService : Service() {
                     }
                     markServiceMutation("rebuild_end(newVd=$isNewVd,activeId=$activeId)")
                     Log.i(TAG, "[$name Pipeline] VirtualDisplay configured successfully. ID: $activeId (New VD: $isNewVd)")
+                    Log.i(TAG, "[DISPLAY_DEBUG] [$name] configured activeId=$activeId generation=$gen isNewVd=$isNewVd currentApp=$currentApp")
+                    FileLogger.i("DISPLAY_DEBUG", "[$name] configured activeId=$activeId generation=$gen isNewVd=$isNewVd currentApp=$currentApp")
+                    FileLogger.i("DISPLAY_STATE", "[$name] configured activeId=$activeId generation=$gen isNewVd=$isNewVd currentApp=$currentApp")
                 } else {
                     throw IllegalStateException("VirtualDisplay allocation completely failed via binder server.")
                 }
@@ -2704,6 +3009,9 @@ class MirrorForegroundService : Service() {
                             markServiceMutation("post_rebuild_keyframe")
                             videoEncoder?.requestKeyFrame()
                         }
+                        Log.i(TAG, "[FRAME_DEBUG] [$name] post-rebuild wakeup/keyframe displayId=$displayId codec=$currentCodecMode")
+                        FileLogger.i("FRAME_DEBUG", "[$name] post-rebuild wakeup/keyframe displayId=$displayId codec=$currentCodecMode")
+                        FileLogger.i("KEYFRAME_REQUEST", "[$name] postRebuild displayId=$displayId codec=$currentCodecMode")
                         Log.i(TAG, "[$name Pipeline] Requested post-rebuild wakeup/keyframe (codec: $currentCodecMode)")
                     } catch (e: Exception) {
                         Log.w(TAG, "[$name Pipeline] Failed to force graphics wakeup post rebuild", e)
@@ -2714,7 +3022,14 @@ class MirrorForegroundService : Service() {
             mirrorServer?.broadcastDiagnostics()
         }
 
-        fun invalidateVd(reason: String): Long { Log.w(TAG, "[$name Pipeline] Invalidating display channel cache token. Reason: $reason"); displayId = -1; return vdGeneration.incrementAndGet() }
+        fun invalidateVd(reason: String): Long {
+            Log.w(TAG, "[$name Pipeline] Invalidating display channel cache token. Reason: $reason")
+            Log.w(TAG, "[DISPLAY_DEBUG] [$name] invalidateVd reason=$reason oldDisplayId=$displayId currentApp=$currentApp")
+            FileLogger.i("DISPLAY_DEBUG", "[$name] invalidateVd reason=$reason oldDisplayId=$displayId currentApp=$currentApp")
+            FileLogger.i("DISPLAY_STATE", "[$name] invalidateVd reason=$reason oldDisplayId=$displayId currentApp=$currentApp")
+            displayId = -1
+            return vdGeneration.incrementAndGet()
+        }
 
         private fun summarizeProbeDump(raw: String, needles: List<String>): String {
             if (raw.isBlank()) return "none"
@@ -3022,6 +3337,10 @@ class MirrorForegroundService : Service() {
             val targetDisplayId = this.displayId
             if (targetDisplayId < 0) return
             Log.i(TAG, "[$name Pipeline] Spawning internal container panel component: $activityClassName")
+            FileLogger.i(
+                "IME_ROUTING",
+                "pane=$name phase=internal_activity targetDisplayId=$targetDisplayId vdDisplayId=$displayId launchMode=activity_options activity=$activityClassName"
+            )
             val options = android.app.ActivityOptions.makeBasic().apply { launchDisplayId = targetDisplayId }
             val intent = Intent().apply {
                 setClassName(this@MirrorForegroundService, activityClassName)
@@ -3065,6 +3384,7 @@ class MirrorForegroundService : Service() {
             
             if (isAlreadyActive && isEncoderActive && isFrameStreamingNormal && !needsFreshLaunchPreparation && !forceColdStart && !forceTaskRealign && !isSelfHealingInProgress) {
                 Log.i(TAG, "[$name Pipeline] Command Equivalence Guard activated. $cleanPkg is already running and active on display $displayId. Bypassing redundant launch command.")
+                FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision sameAppGuard=true pkg=$cleanPkg displayId=$displayId freshPrep=$needsFreshLaunchPreparation frameStreamingNormal=$isFrameStreamingNormal forceColdStart=$forceColdStart forceTaskRealign=$forceTaskRealign")
                 // Keep-awake graphic trigger
                 val correctedDisplayId = if (displayId >= 0) displayId else controller.getDisplayId()
                 val service = controller.getPrivilegedService()
@@ -3126,9 +3446,19 @@ class MirrorForegroundService : Service() {
                 val targetDisplayId = if (!needsFreshLaunchPreparation && !forceDisplayId && originalDisplayId >= 0 && activeDisplayIds.contains(originalDisplayId)) originalDisplayId else correctedDisplayId
 
                 Log.i(TAG, "[$name Pipeline] Symmetric task processing initialized -> Routing $cleanPkg to Display token: $targetDisplayId freshLaunchPrep=$needsFreshLaunchPreparation previousPkg=$previousPkg lastPrepared=$lastPreparedTargetPackage")
+                FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision pkg=$cleanPkg freshPrep=$needsFreshLaunchPreparation sameAppGuard=false originalDisplayId=$originalDisplayId correctedDisplayId=$correctedDisplayId targetDisplayId=$targetDisplayId previousPkg=$previousPkg lastPrepared=$lastPreparedTargetPackage forceDisplayId=$forceDisplayId")
 
                 val matchingTaskIds = try { runBinderSafe(1000L) { service.getTaskIdsForPackage(cleanPkg).toList() } ?: emptyList() } catch (_: Exception) { emptyList() }
                 val isWarmStart = matchingTaskIds.isNotEmpty()
+                scheduleDisplayRoutingDiagnostics(
+                    pane = name,
+                    service = service,
+                    targetPkg = cleanPkg,
+                    targetDisplayId = targetDisplayId,
+                    phase = "prelaunch",
+                    launchMode = if (isWarmStart) "warm_task_move" else "pending",
+                    vdDisplayId = displayId
+                )
 
                 for (taskId in matchingTaskIds) {
                     try { runBinderSafe { service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId"); service.execCommand("cmd activity task move-to-front $taskId") } } catch (_: Exception) {}
@@ -3139,6 +3469,8 @@ class MirrorForegroundService : Service() {
                 // frequently forcing the primary Display 0 (MainActivity) to recede to the background Recents view.
                 if (isWarmStart && !forceColdStart) {
                     markServiceMutation("launch_component_warm_start")
+                    FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision warmStart=true pkg=$cleanPkg taskCount=${matchingTaskIds.size} targetDisplayId=$targetDisplayId freshPrep=$needsFreshLaunchPreparation")
+                    scheduleDisplayRoutingDiagnostics(name, service, cleanPkg, targetDisplayId, "postlaunch", "warm_task_move", displayId)
                     // Trigger adaptive task residency-aware wakeup asynchronously instead of waiting on hardcoded timings
                     executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
                     if (needsFreshLaunchPreparation) {
@@ -3173,6 +3505,8 @@ class MirrorForegroundService : Service() {
                 val isEncoderActive = if (currentCodecMode == "mjpeg") jpegEncoder != null else videoEncoder != null
                 if (forceTaskRealign && isAlreadyActiveApp && isEncoderActive && !needsFreshLaunchPreparation) {
                     Log.w(TAG, "[$name Pipeline] Realignment requested for active app $cleanPkg. Bypassing native cold start to prevent WMS focus transition lock.")
+                    FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision realignBypass=true pkg=$cleanPkg targetDisplayId=$targetDisplayId freshPrep=$needsFreshLaunchPreparation")
+                    scheduleDisplayRoutingDiagnostics(name, service, cleanPkg, targetDisplayId, "postlaunch", "realign_bypass", displayId)
                     executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
                     currentApp = packageOrComponent
                     return@withContext true
@@ -3193,6 +3527,7 @@ class MirrorForegroundService : Service() {
                 if (!nativeStarted) {
                     markServiceMutation("launch_component_shell_start")
                     Log.i(TAG, "[$name Pipeline] Executing fallback shell launch command for $packageOrComponent")
+                    FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision nativeStarted=false usingShell=true pkg=$cleanPkg targetDisplayId=$targetDisplayId warmStart=$isWarmStart")
                     // Introduce a 150ms delay for stabilization of window manager and focus subsystems.
                     delay(150L)
                     val command = buildShellLaunchCommand(targetDisplayId, packageOrComponent, extraKey, extraValue, reorderToFront = isWarmStart)
@@ -3211,10 +3546,20 @@ class MirrorForegroundService : Service() {
                         }
                     }
                 }
+                scheduleDisplayRoutingDiagnostics(
+                    name,
+                    service,
+                    cleanPkg,
+                    targetDisplayId,
+                    "postlaunch",
+                    if (nativeStarted) "native_launch_on_display" else "shell_am_start_display",
+                    displayId
+                )
                 
                 // Force an immediate graphics wakeup sequence and request encoder keyframe for Cold-Start apps to prevent early stream corruption.
                 if (!isWarmStart || forceColdStart) {
                     markServiceMutation("launch_component_cold_start")
+                    FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision coldStartPath=true pkg=$cleanPkg targetDisplayId=$targetDisplayId freshPrep=$needsFreshLaunchPreparation forceColdStart=$forceColdStart")
                     executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
                     markServiceMutation("launch_component_keyframe")
                     mirrorServer?.onKeyframeRequest(name, if (needsFreshLaunchPreparation) "fresh_launch_prepare" else "launch_component")
@@ -3287,7 +3632,6 @@ class MirrorForegroundService : Service() {
 
         suspend fun launchStandard(launchTarget: String, forceDisplayId: Boolean = false) {
             val resolvedTarget = normalizeLaunchTarget(launchTarget)
-            // ### 수정 시작 ###
             // Force task realignment on standard launching requests from web to bypass the Command Equivalence Guard
             val launched = if (displayId >= 0) launchComponent(resolvedTarget, forceDisplayId = forceDisplayId, forceTaskRealign = true) else false
             if (!launched) {
@@ -3310,7 +3654,6 @@ class MirrorForegroundService : Service() {
                 currentApp = resolvedTarget; currentWebUrl = null; isVideoApp = false
                 adaptiveBitrateManager.rebalanceBitrates()
             }
-            // ### 수정 끝 ###
         }
 
         suspend fun launchWeb(activityClassName: String, url: String) {

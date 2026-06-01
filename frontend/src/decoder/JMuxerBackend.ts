@@ -1,12 +1,22 @@
 import type { EncodedFrame } from '../protocol';
 import type { DecoderBackend } from './DecoderBackend';
 import { debugLog, triggerDump } from '../utils/debugLogger';
+import { compositorStore } from '../stores/compositorStore';
+import { get } from 'svelte/store';
 
 type JMuxerCtor = new (options: Record<string, unknown>) => { feed(data: Record<string, Uint8Array>): void; destroy(): void };
+const isVerboseJmuxerDiagnostics = (): boolean =>
+  (window as Window & { __CASTLA_VERBOSE_DIAGNOSTICS__?: boolean }).__CASTLA_VERBOSE_DIAGNOSTICS__ === true;
 
 declare global {
   interface Window {
     JMuxer?: JMuxerCtor;
+    __CASTLA_VERBOSE_DIAGNOSTICS__?: boolean;
+    castlaRuntime?: {
+      control?: {
+        sendFrontendDiag?: (tag: string, message: string, data?: Record<string, unknown>) => void;
+      };
+    };
   }
 }
 
@@ -24,6 +34,29 @@ export class JMuxerBackend implements DecoderBackend {
   private detachVideoListeners: Array<() => void> = [];
   private lastSyncTime = 0;
   private lastFeedTime = 0;
+  private firstKeyframeSeen = false;
+
+  private emitMirrorDiag(message: string, data: Record<string, unknown>): void {
+    window.castlaRuntime?.control?.sendFrontendDiag?.("VIDEO_DEBUG", message, data);
+  }
+
+  private emitVerboseMirrorDiag(message: string, data: Record<string, unknown>): void {
+    if (!isVerboseJmuxerDiagnostics()) return;
+    this.emitMirrorDiag(message, data);
+  }
+
+  private emitVideoState(tag: string): void {
+    if (!this.video) return;
+    if (!isVerboseJmuxerDiagnostics()) return;
+    this.emitMirrorDiag(tag, {
+      readyState: this.video.readyState,
+      width: this.video.videoWidth,
+      height: this.video.videoHeight,
+      currentTime: this.video.currentTime,
+      buffered: this.video.buffered.length,
+      paused: this.video.paused,
+    });
+  }
 
   constructor(onFrame?: () => void, onStatus?: (event: string, detail?: string) => void) {
     this.onFrame = onFrame;
@@ -34,6 +67,7 @@ export class JMuxerBackend implements DecoderBackend {
     if (!(target instanceof HTMLVideoElement)) throw new Error('JMuxer backend requires video');
     if (!window.JMuxer) throw new Error('JMuxer unavailable');
     this.destroyed = false;
+    this.firstKeyframeSeen = false;
     this.video = target;
     target.muted = true;
     target.playsInline = true;
@@ -43,6 +77,21 @@ export class JMuxerBackend implements DecoderBackend {
     target.style.display = 'block';
     target.style.opacity = '1';
     target.style.backgroundColor = '#000';
+    const buildMode = ((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV ?? false)
+      ? "debug"
+      : "release";
+    this.emitMirrorDiag("JMX_BUILD", {
+      mode: buildMode,
+      backend: "jmuxer",
+      secureContext: window.isSecureContext,
+      hasVideoDecoder: "VideoDecoder" in window,
+    });
+    this.emitMirrorDiag("JMX_INIT", {
+      backend: "jmuxer",
+      hasJMuxer: Boolean(window.JMuxer),
+      secureContext: window.isSecureContext,
+    });
+    this.emitVideoState("JMX_VIDEO_STATE");
     
     // Intercept and wrap SourceBuffer.prototype.appendBuffer to trace MSE and SourceBuffer activity
     hookSourceBuffer();
@@ -54,18 +103,21 @@ export class JMuxerBackend implements DecoderBackend {
           videoWidth: target.videoWidth,
           videoHeight: target.videoHeight,
         });
+        this.emitVideoState("JMX_VIDEO_STATE");
         this.reportVideoState('videoLoadedMetadata');
       }),
       bindEvent(target, 'loadeddata', () => {
         debugLog("[VideoElement] loadeddata", {
           readyState: target.readyState,
         });
+        this.emitVideoState("JMX_VIDEO_STATE");
         this.reportVideoState('videoLoadedData');
       }),
       bindEvent(target, 'canplay', () => {
         debugLog("[VideoElement] canplay", {
           readyState: target.readyState,
         });
+        this.emitVideoState("JMX_VIDEO_STATE");
         this.reportVideoState('videoCanPlay');
       }),
       bindEvent(target, 'playing', () => {
@@ -73,6 +125,7 @@ export class JMuxerBackend implements DecoderBackend {
           currentTime: target.currentTime,
           readyState: target.readyState,
         });
+        this.emitVideoState("JMX_VIDEO_STATE");
         this.reportVideoState('videoPlaying');
       }),
       bindEvent(target, 'stalled', () => {
@@ -94,11 +147,24 @@ export class JMuxerBackend implements DecoderBackend {
           readyState: target.readyState,
           buffered: getBufferedRanges(target.buffered),
         });
+        this.emitVideoState("JMX_VIDEO_STATE");
       }),
       bindEvent(target, 'error', () => {
         debugLog("[VideoElement] error", {
           code: target.error?.code,
           message: target.error?.message,
+        });
+        this.emitMirrorDiag("JMX_VIDEO_ERROR", {
+          code: target.error?.code ?? null,
+          message: target.error?.message ?? "unknown",
+          readyState: target.readyState,
+          currentTime: target.currentTime,
+          buffered: getBufferedRanges(target.buffered),
+        });
+        this.emitMirrorDiag("JMX_ERROR", {
+          kind: "video",
+          code: target.error?.code ?? null,
+          message: target.error?.message ?? "unknown",
         });
         this.onStatus?.('videoElementError', target.error ? `${target.error.code}:${target.error.message}` : 'unknown');
         
@@ -115,6 +181,9 @@ export class JMuxerBackend implements DecoderBackend {
   decode(frame: EncodedFrame): void {
     if (frame.config) {
       this.configPayload = frame.payload;
+      this.emitVerboseMirrorDiag("JMX_CONFIG", {
+        bytes: frame.payload.byteLength,
+      });
       this.onStatus?.('jmuxerConfig', `bytes=${frame.payload.byteLength}`);
       return;
     }
@@ -140,6 +209,14 @@ export class JMuxerBackend implements DecoderBackend {
         onMissingVideoFrames: () => this.onStatus?.('jmuxerMissingVideoFrames')
       });
       this.onStatus?.('jmuxerCreated', `key=${frame.keyFrame} hasConfig=${Boolean(this.configPayload)}`);
+    }
+    if (frame.keyFrame && !this.firstKeyframeSeen) {
+      this.firstKeyframeSeen = true;
+      this.emitVerboseMirrorDiag("JMX_FIRST_KEYFRAME", {
+        sequence: frame.sequence,
+        payloadBytes: frame.payload.byteLength,
+        configBytes: this.configPayload?.byteLength ?? 0,
+      });
     }
     const payload = frame.keyFrame && this.configPayload
       ? concat(this.configPayload, frame.payload)
@@ -200,6 +277,43 @@ export class JMuxerBackend implements DecoderBackend {
       feedIntervalMs: interval,
       feedFrequencyFps: interval > 0 ? (1000 / interval).toFixed(1) : "0.0"
     });
+    if (this.fedFrames < 3 || this.fedFrames % 120 === 0) {
+      const hasVisibleStream = Array.from(get(compositorStore).viewports.values()).some((viewport) => viewport.committed);
+      if (isVerboseJmuxerDiagnostics()) console.warn("[FRAME_DEBUG] JMuxer feed", {
+        fedFrames: this.fedFrames + 1,
+        frameSize: payload.byteLength,
+        nalCount,
+        readyState: this.video.readyState,
+        currentTime: this.video.currentTime,
+        paused: this.video.paused,
+        videoWidth: this.video.videoWidth,
+        videoHeight: this.video.videoHeight,
+      });
+      this.emitVerboseMirrorDiag("JMX_FEED", {
+        fedFrames: this.fedFrames + 1,
+        frameSize: payload.byteLength,
+        nalCount,
+        readyState: this.video.readyState,
+        currentTime: this.video.currentTime,
+        buffered: getBufferedRanges(this.video.buffered),
+        hasVisibleStream,
+        paused: this.video.paused,
+      });
+      this.emitVideoState("JMX_VIDEO_STATE");
+      this.emitVerboseMirrorDiag("videoElementState", {
+        fedFrames: this.fedFrames + 1,
+        frameSize: payload.byteLength,
+        nalCount,
+        visible: getComputedStyle(this.video).display !== 'none' && getComputedStyle(this.video).visibility !== 'hidden',
+        readyState: this.video.readyState,
+        currentTime: this.video.currentTime,
+        buffered: getBufferedRanges(this.video.buffered),
+        hasVisibleStream,
+        paused: this.video.paused,
+        videoWidth: this.video.videoWidth,
+        videoHeight: this.video.videoHeight,
+      });
+    }
 
     this.muxer.feed({ video: payload });
     this.fedFrames += 1;
@@ -216,6 +330,25 @@ export class JMuxerBackend implements DecoderBackend {
 
     if (!this.rendered && this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
       this.rendered = true;
+      const hasVisibleStream = Array.from(get(compositorStore).viewports.values()).some((viewport) => viewport.committed);
+      if (isVerboseJmuxerDiagnostics()) console.warn("[DISPLAY_DEBUG] JMuxer first renderable data", {
+        readyState: this.video.readyState,
+        currentTime: this.video.currentTime,
+        paused: this.video.paused,
+        videoWidth: this.video.videoWidth,
+        videoHeight: this.video.videoHeight,
+      });
+      this.emitVerboseMirrorDiag("videoElementFirstRenderable", {
+        visible: getComputedStyle(this.video).display !== 'none' && getComputedStyle(this.video).visibility !== 'hidden',
+        readyState: this.video.readyState,
+        currentTime: this.video.currentTime,
+        buffered: getBufferedRanges(this.video.buffered),
+        hasVisibleStream,
+        paused: this.video.paused,
+        videoWidth: this.video.videoWidth,
+        videoHeight: this.video.videoHeight,
+      });
+      this.emitVideoState("JMX_VIDEO_STATE");
       this.reportVideoState('videoHasCurrentData');
     }
     this.onFrame?.();
@@ -301,6 +434,7 @@ function getBufferedRanges(buffered: TimeRanges): string {
 function hookSourceBuffer() {
   if ((window as any).SourceBuffer_hooked) return;
   (window as any).SourceBuffer_hooked = true;
+  const verbose = isVerboseJmuxerDiagnostics();
 
   const originalAppend = SourceBuffer.prototype.appendBuffer;
   SourceBuffer.prototype.appendBuffer = function(data: ArrayBufferView | ArrayBuffer) {
@@ -311,6 +445,14 @@ function hookSourceBuffer() {
       updating: this.updating,
       buffered: getBufferedRanges(this.buffered),
     });
+    if (verbose) {
+      window.castlaRuntime?.control?.sendFrontendDiag?.("VIDEO_DEBUG", "JMX_SOURCEBUFFER", {
+        phase: "appendBuffer",
+        bytes,
+        updating: this.updating,
+        buffered: this.buffered.length,
+      });
+    }
 
     if (!(this as any)._eventsHooked) {
       (this as any)._eventsHooked = true;
@@ -320,6 +462,13 @@ function hookSourceBuffer() {
           updating: this.updating,
           buffered: getBufferedRanges(this.buffered),
         });
+        if (verbose) {
+          window.castlaRuntime?.control?.sendFrontendDiag?.("VIDEO_DEBUG", "JMX_SOURCEBUFFER", {
+            phase: "updatestart",
+            updating: this.updating,
+            buffered: this.buffered.length,
+          });
+        }
       });
       
       this.addEventListener("updateend", () => {
@@ -327,12 +476,28 @@ function hookSourceBuffer() {
           updating: this.updating,
           buffered: getBufferedRanges(this.buffered),
         });
+        if (verbose) {
+          window.castlaRuntime?.control?.sendFrontendDiag?.("VIDEO_DEBUG", "JMX_SOURCEBUFFER", {
+            phase: "updateend",
+            updating: this.updating,
+            buffered: this.buffered.length,
+          });
+        }
       });
       
       this.addEventListener("error", (err: any) => {
         debugLog("[SourceBuffer] error", {
           error: err.message || String(err),
           buffered: getBufferedRanges(this.buffered),
+        });
+        window.castlaRuntime?.control?.sendFrontendDiag?.("VIDEO_DEBUG", "JMX_ERROR", {
+          kind: "sourcebuffer",
+          error: err.message || String(err),
+        });
+        window.castlaRuntime?.control?.sendFrontendDiag?.("VIDEO_DEBUG", "JMX_SOURCEBUFFER_ERROR", {
+          error: err.message || String(err),
+          buffered: getBufferedRanges(this.buffered),
+          updating: this.updating,
         });
       });
       
@@ -345,6 +510,17 @@ function hookSourceBuffer() {
       originalAppend.call(this, data as BufferSource);
     } catch (error: any) {
       debugLog("[SourceBuffer] appendException", {
+        name: error.name,
+        message: error.message,
+        code: error.code,
+      });
+      window.castlaRuntime?.control?.sendFrontendDiag?.("VIDEO_DEBUG", "JMX_ERROR", {
+        kind: "appendException",
+        name: error.name,
+        message: error.message,
+        code: error.code,
+      });
+      window.castlaRuntime?.control?.sendFrontendDiag?.("VIDEO_DEBUG", "JMX_SOURCEBUFFER_ERROR", {
         name: error.name,
         message: error.message,
         code: error.code,

@@ -16,6 +16,7 @@ class ScreenCaptureManager(private val context: Context) {
     companion object {
         private const val TAG = "ScreenCaptureManager"
         private const val VIRTUAL_DISPLAY_NAME = "Castla"
+        private const val VDIME_PREFIX = "[VDIME]"
     }
 
     private var mediaProjection: MediaProjection? = null
@@ -75,6 +76,12 @@ class ScreenCaptureManager(private val context: Context) {
         )
 
         Log.i(TAG, "Capture started: ${width}x${height}")
+        val displayId = virtualDisplay?.display?.displayId ?: -1
+        val flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR
+        Log.i(
+            TAG,
+            "$VDIME_PREFIX [VD] source=app_display_manager name=$VIRTUAL_DISPLAY_NAME displayId=$displayId ownerUid=${android.os.Process.myUid()} flags=$flags"
+        )
     }
 
     /**

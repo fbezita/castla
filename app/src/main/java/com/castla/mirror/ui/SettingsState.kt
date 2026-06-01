@@ -16,7 +16,12 @@ data class StreamSettings(
     val autoHotspot: Boolean = true,
 
     // Option to enable or disable WebCodecs hardware accelerated decoding
-    val webCodecsEnabled: Boolean = true
+    val webCodecsEnabled: Boolean = true,
+
+    // Prefer native Android IME rendered inside the trusted VirtualDisplay.
+    // The Castla IME proxy remains available as a fallback path.
+    val useNativeVirtualDisplayIme: Boolean = true,
+    val verboseDiagnosticsEnabled: Boolean = false
 
 ) {
     enum class Resolution(val maxHeight: Int, val label: String) {
@@ -41,6 +46,8 @@ data class StreamSettings(
         private const val KEY_TARGET_APP_LABEL = "target_app_label"
         private const val KEY_AUTO_HOTSPOT = "auto_hotspot"
         private const val KEY_WEBCODECS = "webcodecs"
+        private const val KEY_NATIVE_VD_IME = "native_vd_ime"
+        private const val KEY_VERBOSE_DIAGNOSTICS = "verbose_diagnostics"
 
         /** Sentinel value indicating auto FPS mode. Must not collide with real FPS values. */
         const val FPS_AUTO = 0
@@ -66,7 +73,9 @@ data class StreamSettings(
                 targetAppPackage = prefs.getString(KEY_TARGET_APP_PACKAGE, "") ?: "",
                 targetAppLabel = prefs.getString(KEY_TARGET_APP_LABEL, "") ?: "",
                 autoHotspot = prefs.getBoolean(KEY_AUTO_HOTSPOT, true),
-                webCodecsEnabled = prefs.getBoolean(KEY_WEBCODECS, true)
+                webCodecsEnabled = prefs.getBoolean(KEY_WEBCODECS, true),
+                useNativeVirtualDisplayIme = prefs.getBoolean(KEY_NATIVE_VD_IME, true),
+                verboseDiagnosticsEnabled = prefs.getBoolean(KEY_VERBOSE_DIAGNOSTICS, false)
             )
         }
 
@@ -80,6 +89,8 @@ data class StreamSettings(
                 .putString(KEY_TARGET_APP_LABEL, settings.targetAppLabel)
                 .putBoolean(KEY_AUTO_HOTSPOT, settings.autoHotspot)
                 .putBoolean(KEY_WEBCODECS, settings.webCodecsEnabled)
+                .putBoolean(KEY_NATIVE_VD_IME, settings.useNativeVirtualDisplayIme)
+                .putBoolean(KEY_VERBOSE_DIAGNOSTICS, settings.verboseDiagnosticsEnabled)
                 .apply()
         }
     }

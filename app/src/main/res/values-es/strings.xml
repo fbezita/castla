@@ -85,8 +85,4 @@
     <string name="settings_language_system_default">Predeterminado del sistema</string>
 
     <!-- Support / Donate -->
-    <string name="settings_support_title">Apoyar al desarrollador</string>
-    <string name="settings_support_description">Castla es gratuito y de código abierto.\nSi te resulta útil, invítame a un café!</string>
-    <string name="settings_donate_kofi">Invítame un café en Ko-fi</string>
-    <string name="settings_donate_kakaopay">카카오페이로 후원하기</string>
 </resources>

@@ -3,6 +3,7 @@ package com.castla.mirror.capture
 import android.hardware.display.VirtualDisplay
 import android.util.Log
 import android.view.Surface
+import com.castla.mirror.diagnostics.FileLogger
 import com.castla.mirror.diagnostics.DiagnosticEvent
 import com.castla.mirror.diagnostics.MirrorDiagnostics
 import com.castla.mirror.shizuku.IPrivilegedService
@@ -13,6 +14,7 @@ import com.castla.mirror.shizuku.IPrivilegedService
  * independent, and highly encapsulated architecture.
  */
 class VirtualDisplayController(private val displayName: String) {
+    private val vdImeLogPrefix = "[VDIME]"
 
     companion object {
         private const val TAG = "VirtualDisplayController"
@@ -90,6 +92,8 @@ class VirtualDisplayController(private val displayName: String) {
                 totalCreateCount.incrementAndGet()
                 activeVirtualDisplayCount.incrementAndGet()
                 Log.i(TAG, "[$displayName] Virtual display created via Shizuku: id=$id, ${width}x${height}, surface attached")
+                Log.i(TAG, "$vdImeLogPrefix [VD] name=$displayName displayId=$id width=$width height=$height dpi=$dpi event=create")
+                FileLogger.i("VD", "$vdImeLogPrefix name=$displayName displayId=$id width=$width height=$height dpi=$dpi event=create")
                 MirrorDiagnostics.log(DiagnosticEvent.VD_CREATED, "id=$id ${width}x${height}")
                 null
             } else {
@@ -112,6 +116,8 @@ class VirtualDisplayController(private val displayName: String) {
             try {
                 privilegedService?.setSurface(id, surface)
                 Log.i(TAG, "[$displayName] Surface updated on Virtual Display $id")
+                Log.i(TAG, "$vdImeLogPrefix [VD] name=$displayName displayId=$id event=setSurface surfacePresent=${surface != null}")
+                FileLogger.i("VD", "$vdImeLogPrefix name=$displayName displayId=$id event=setSurface surfacePresent=${surface != null}")
             } catch (e: Exception) {
                 Log.e(TAG, "[$displayName] Failed to update surface on VD $id", e)
             }
@@ -330,6 +336,8 @@ class VirtualDisplayController(private val displayName: String) {
             }
             totalReleaseVirtualDisplayCount.incrementAndGet()
             activeVirtualDisplayCount.updateAndGet { count -> (count - 1).coerceAtLeast(0) }
+            Log.i(TAG, "$vdImeLogPrefix [VD] name=$displayName displayId=$releasedId event=releaseVirtualDisplay")
+            FileLogger.i("VD", "$vdImeLogPrefix name=$displayName displayId=$releasedId event=releaseVirtualDisplay")
             MirrorDiagnostics.log(DiagnosticEvent.VD_STOPPED, "id=$releasedId")
         }
         virtualDisplay?.release()
@@ -349,6 +357,8 @@ class VirtualDisplayController(private val displayName: String) {
                 Log.w(TAG, "[$displayName] Failed to release virtual display", e)
             }
             activeVirtualDisplayCount.updateAndGet { count -> (count - 1).coerceAtLeast(0) }
+            Log.i(TAG, "$vdImeLogPrefix [VD] name=$displayName displayId=$releasedId event=release")
+            FileLogger.i("VD", "$vdImeLogPrefix name=$displayName displayId=$releasedId event=release")
             MirrorDiagnostics.log(DiagnosticEvent.VD_STOPPED, "id=$releasedId (full release)")
         }
         totalReleaseCount.incrementAndGet()

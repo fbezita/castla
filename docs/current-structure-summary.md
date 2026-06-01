@@ -28,6 +28,9 @@ The current production path reflects a broader input/control migration, not just
 - **Focus recovery and input routing are simpler**: local input bypass remains, stale-event protection remains, but dismiss-specific gesture guards and related fallback behavior are gone.
 - **Maps interaction stability improved**: Google Maps drag/pan is no longer exposed to outside-tap misclassification.
 - **Mirroring restart stale-state protection exists**: first launch after restart performs fresh launch preparation so stale display/stream/launch state does not block Maps or same-app launch preparation.
+- **Native Android IME on trusted VirtualDisplay is now the preferred path**: Samsung Keyboard / Gboard can render inside the Shizuku-created trusted VD with local IME policy, and this path is now preferred over the Castla IME proxy.
+- **Castla IME proxy remains fallback-only**: the proxy text bridge and router remain in the codebase for fallback scenarios, but they are no longer the intended primary typing path when native VD IME is available.
+- **Verbose diagnostics are runtime-toggled**: high-frequency Android/frontend diagnostic logs are off by default and can be enabled at runtime from settings.
 
 ## Live Runtime Entry Points
 
@@ -94,6 +97,43 @@ Important service-wide pieces:
 - `MirrorServer` exposes control/video channels and callbacks
 - `ControlSocket` routes browser messages into service listeners
 - `AdaptiveBitrateManager` and other policy managers can still trigger rebuilds
+
+### Current Native IME Policy
+
+The live direction has shifted from "proxy-first" to "native IME first" when the privileged VD path is available.
+
+- `PrivilegedService.createVirtualDisplay(...)` is the working creation path for native IME-in-VD.
+- The trusted VD path applies:
+  - `PUBLIC`
+  - `PRESENTATION`
+  - `OWN_CONTENT_ONLY`
+  - `DESTROY_CONTENT`
+  - `OWN_DISPLAY_GROUP`
+  - `TRUSTED`
+  - `ALWAYS_UNLOCKED`
+- After VD creation and surface attachment, Castla also applies:
+  - `setShouldShowSystemDecors(displayId, true)`
+  - `setDisplayImePolicy(displayId, DISPLAY_IME_POLICY_LOCAL)`
+- Native app launch prefers `ActivityOptions.setLaunchDisplayId(...)` through the privileged binder path and only falls back to `am start --display ...` if necessary.
+- `MirrorForegroundService` now treats native VD IME as the preferred mode and keeps the Castla IME proxy path as fallback.
+- Samsung Keyboard can appear in split/general/floating layouts depending on Samsung Keyboard's own state. This layout choice is currently treated as IME-owned behavior, not Castla-controlled policy.
+
+### Current Diagnostics Policy
+
+Diagnostic noise was intentionally reduced after the native IME investigation.
+
+- Core logs still remain on by default:
+  - VD create / release
+  - app launch path
+  - IME policy application
+  - build markers
+  - hard errors
+- Heavy diagnostic paths are now verbose-only:
+  - repeated IME routing dumps
+  - `dumpsys input_method` / `dumpsys window` snapshot parsing
+  - frontend IME debug chatter
+  - JMuxer per-frame / SourceBuffer verbose diagnostics
+- The runtime switch is `verboseDiagnosticsEnabled` in `StreamSettings`.
 
 ## Current Frontend Structure
 

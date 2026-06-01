@@ -151,15 +151,31 @@ The existing `MirrorServer` remains the compatibility host while these boundarie
 
 `TouchRouter` maps browser coordinates through viewport contain math, letterboxing, and pane identity before sending normalized VD coordinates. Android continues injecting with `InputManager.injectInputEvent()` through the privileged service.
 
-## 15. IME Bridge Implementation
+## 15. IME Architecture
 
-`ImeBridge` sends `commitText`, `setComposingText`, `deleteSurroundingText`, and `finishComposingText`. `ControlSocket` accepts these messages and maps them to existing text/composition injection paths.
+The current preferred typing path is no longer "frontend IME proxy first".
 
-`tapOutside` is no longer part of the IME protocol. Castla does not infer remote dismiss intent from viewport taps anymore; IME focus transitions are driven by normal `androidFocusChanged`, `onStartInput`, and `onFinishInput` lifecycle signals. In the live production path, focus/editable synchronization has moved away from accessibility-dependent heuristics and toward explicit IME session-based state tracking.
+Preferred path:
+
+- Tesla / browser touch
+- native Android focus on the target app inside the privileged VirtualDisplay
+- Samsung Keyboard / Gboard rendered directly inside the trusted VD
+- normal Android `InputConnection`
+- target app
+
+Fallback path:
+
+- `ImeBridge` still exists and can send `commitText`, `setComposingText`, `deleteSurroundingText`, and `finishComposingText`
+- `ControlSocket` still accepts these messages and maps them to text/composition injection paths
+- this path is retained as a fallback, not removed entirely
+
+Native IME-in-VD currently depends on the Shizuku-created trusted VirtualDisplay path plus local IME policy. The app-created `DisplayManager` capture path is not the preferred route for remote app typing.
+
+`tapOutside` is no longer part of the IME protocol. Castla does not infer remote dismiss intent from viewport taps anymore; IME focus transitions are driven by normal `androidFocusChanged`, `onStartInput`, and `onFinishInput` lifecycle signals.
 
 ## 16. Accessibility Focus Manager
 
-`AccessibilityFocusManager` models editable focus and selection changes. It replaces fallback behavior based on failed touches with explicit focus state as the migration continues.
+`AccessibilityFocusManager` is no longer the live primary path for remote text entry. The production direction is IME-session and native-keyboard centric. Accessibility-era focus heuristics remain legacy/supporting code, not the architectural center.
 
 ## 17. Stream Health Monitoring
 
@@ -173,6 +189,12 @@ Session mutations use coroutine `Mutex`. IME composition is serialized on a sing
 
 The architecture avoids frequent VD destruction and task relaunches. Samsung and One UI instability is handled by persistent VD sessions, surface replacement, encoder restart, bounded resize verification, and no raw phone-screen fallback when privileged VD recreation fails.
 
+For Samsung Keyboard specifically:
+
+- Castla can now render the native Samsung keyboard inside the trusted VD.
+- Samsung Keyboard may choose split/general/floating layout based on its own state.
+- Castla currently treats keyboard layout mode as keyboard-owned behavior rather than something guaranteed by Castla policy.
+
 ## 20. Recovery/Reconnect Strategy
 
 WebSocket reconnects request keyframes without destroying the VD. Encoder failure is handled by rebuilding the encoder surface and reattaching it to the existing VD. Browser layout waits for first frame in the new generation.
@@ -183,6 +205,7 @@ Additional current constraints:
 - recovery must not use automatic app relaunch loops
 - watchdog and inject-reject handling are soft-recovery only
 - first app launch after mirroring restart uses fresh launch preparation so stale display/stream state does not block Maps or other same-app launches
+- verbose diagnostics are runtime-toggled and default off
 
 ## 21. Performance Optimization Strategy
 

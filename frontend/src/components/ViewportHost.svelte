@@ -20,26 +20,29 @@
   let hostRect = new DOMRect();
   let layoutTrigger = "";
   let layoutFlushScheduled = false;
+  let provisionalLayoutTimer = 0;
   const activeTouchPanes = new Map<number, PaneId>();
+  const PROVISIONAL_LAYOUT_SETTLE_MS = 220;
 
   onMount(() => {
     resizeObserver = new ResizeObserver(() => {
       hostRect = host.getBoundingClientRect();
       touchRouter.updateHost(hostRect);
       if (!resizing) {
-        sendCurrentLayout();
+        dispatchLayout();
       }
     });
     resizeObserver.observe(host);
     hostRect = host.getBoundingClientRect();
     touchRouter.updateHost(hostRect);
-    sendCurrentLayout();
+    dispatchLayout();
   });
 
   onDestroy(() => {
     resizeObserver?.disconnect();
     resizing = false;
     activeTouchPanes.clear();
+    window.clearTimeout(provisionalLayoutTimer);
     window.removeEventListener("pointermove", resizeMove);
     window.removeEventListener("pointerup", endResize);
     window.removeEventListener("pointercancel", endResize);
@@ -75,7 +78,7 @@
   $: if (host && layoutTrigger) {
     updateSplitChrome();
     if (!resizing) {
-      sendCurrentLayout();
+      dispatchLayout();
     }
   }
 
@@ -159,6 +162,25 @@
 
   function clamp(value: number, min: number, max: number) {
     return Math.min(max, Math.max(min, value));
+  }
+
+  function shouldDelayProvisionalLayout(): boolean {
+    if (resizing) return false;
+    const hasCommittedStream = visibleViewports.some((viewport) => viewport.committed);
+    if (hasCommittedStream) return false;
+    return runtime.currentAppLaunchSequence() === 0;
+  }
+
+  function dispatchLayout(forceImmediate = false) {
+    window.clearTimeout(provisionalLayoutTimer);
+    if (!forceImmediate && shouldDelayProvisionalLayout()) {
+      provisionalLayoutTimer = window.setTimeout(() => {
+        provisionalLayoutTimer = 0;
+        sendCurrentLayout();
+      }, PROVISIONAL_LAYOUT_SETTLE_MS);
+      return;
+    }
+    sendCurrentLayout();
   }
 
   function sendCurrentLayout() {
@@ -254,7 +276,7 @@
     if (!host) return;
     hostRect = host.getBoundingClientRect();
     touchRouter.updateHost(hostRect);
-    sendCurrentLayout();
+    dispatchLayout(true);
   }
 
   function updateSplitChrome(ratio = $compositorStore.splitRatio) {
@@ -316,6 +338,7 @@
 <div
   bind:this={host}
   class="viewport-host"
+  role="presentation"
   on:pointerdown={handlePointer}
   on:pointermove={handlePointer}
   on:pointerup={handlePointer}
