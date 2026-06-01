@@ -22,6 +22,13 @@
     right: string;
   }
 
+  interface RecentLaunchRecord {
+    packageName: string;
+    lastUsedAt: number;
+  }
+
+  type LaunchHubTab = "autorun" | "starred" | "recent" | "browse";
+
   type DropZone =
     | "favorite"
     | "autorun"
@@ -31,14 +38,16 @@
     | "";
   const APP_CACHE_KEY = "castla_cached_apps_v1";
   const AUTORUN_SESSION_KEY = "castla_autorun_done";
+  const RECENT_APPS_KEY = "castla_recent_apps_v1";
+  const ACTIVE_TAB_KEY = "castla_launch_hub_active_tab";
+  const MAX_RECENT_APPS = 8;
 
   const groups = [
     ["PAIR", "App Pairs", "#00e5ff"],
-    ["FAVORITES", "Favorites", "#ffd400"],
     ["NAVIGATION", "Navigation", "#49d66d"],
     ["VIDEO", "Video", "#ff6b43"],
     ["MUSIC", "Music", "#b46cff"],
-    ["OTHER", "Apps", "#9ea3ad"],
+    ["OTHER", "All Apps", "#9ea3ad"],
   ] as const;
 
   let apps: AppInfo[] = readCachedApps();
@@ -48,7 +57,10 @@
   let drawerElement: HTMLElement;
   let drawerListElement: HTMLDivElement;
   let search = "";
+  let activeTab = readActiveTab();
+  let expandedCategory = "";
   let favorites = readArray("castla_favorites");
+  let recentEntries = readRecentLaunches();
   let appPairs = readPairs();
   let primaryAutorun = localStorage.getItem("castla_autorun_primary") ?? "";
   let secondaryAutorun = localStorage.getItem("castla_autorun_secondary") ?? "";
@@ -80,6 +92,19 @@
     color: string;
     items: AppInfo[];
   }> = [];
+  let starredApps: AppInfo[] = [];
+  let recentApps: AppInfo[] = [];
+  let autorunApps: AppInfo[] = [];
+  let browseGroups: Array<{
+    key: string;
+    title: string;
+    color: string;
+    items: AppInfo[];
+  }> = [];
+  let activePanelApps: AppInfo[] = [];
+  let activePanelTitle = "";
+  let activePanelDescription = "";
+  let activePanelEmpty = "";
 
   onMount(() => {
     if (apps.length > 0) {
@@ -108,6 +133,17 @@
     displayApps = searchableApps.filter((app) =>
       app.label.toLowerCase().includes(search.trim().toLowerCase()),
     );
+    starredApps = favorites
+      .map((packageName) =>
+        displayApps.find((app) => app.packageName === packageName),
+      )
+      .filter(Boolean) as AppInfo[];
+    recentApps = recentEntries
+      .map((entry) =>
+        displayApps.find((app) => app.packageName === entry.packageName),
+      )
+      .filter(Boolean) as AppInfo[];
+    autorunApps = getAutorunApps(displayApps, apps, pairApps);
     groupedApps = groups
       .map(([key, title, color]) => ({
         key,
@@ -116,6 +152,38 @@
         items: displayApps.filter((app) => belongsToGroup(app, key, favorites)),
       }))
       .filter((group) => group.items.length > 0);
+    browseGroups = groupedApps;
+    if (activeTab === "autorun") {
+      activePanelApps = autorunApps;
+      activePanelTitle = "Auto Run";
+      activePanelDescription = "Ready when the session starts";
+      activePanelEmpty = "Set one app or app pair to auto-run on connect.";
+    } else if (activeTab === "starred") {
+      activePanelApps = starredApps;
+      activePanelTitle = "Starred";
+      activePanelDescription = "Your keep-close launch list";
+      activePanelEmpty = "Star apps to pin them in your launcher lane.";
+    } else if (activeTab === "recent") {
+      activePanelApps = recentApps;
+      activePanelTitle = "Recent";
+      activePanelDescription = "Return to what you used last";
+      activePanelEmpty = "Launch an app once to build your recent history.";
+    } else {
+      activePanelApps = [];
+      activePanelTitle = "";
+      activePanelDescription = "";
+      activePanelEmpty = "";
+    }
+  }
+  $: if (activeTab === "browse") {
+    if (search.trim().length > 0) {
+      const stillVisible = browseGroups.some(
+        (group) => group.key === expandedCategory,
+      );
+      if (!stillVisible) expandedCategory = browseGroups[0]?.key ?? "";
+    } else if (!browseGroups.some((group) => group.key === expandedCategory)) {
+      expandedCategory = "";
+    }
   }
 
   async function loadApps() {
@@ -153,6 +221,7 @@
   function launch(app: AppInfo, pane: PaneId = "primary") {
     launchedOnce = true;
     autoClosePending = true;
+    recordRecentLaunch(app.packageName);
     if (pane === "primary") setSingle("primary");
     else setSplit(true);
     runtime.launchApp(
@@ -175,6 +244,7 @@
   function launchPair(left: AppInfo, right: AppInfo) {
     launchedOnce = true;
     autoClosePending = true;
+    recordRecentLaunch(`pair:${left.packageName}:${right.packageName}`);
     setSplit(true);
     runtime.launchApp(
       left.packageName,
@@ -276,6 +346,15 @@
       ? favorites.filter((pkg) => pkg !== packageName)
       : [...favorites, packageName];
     localStorage.setItem("castla_favorites", JSON.stringify(favorites));
+    touchDrawer();
+  }
+
+  function recordRecentLaunch(packageName: string) {
+    recentEntries = [
+      { packageName, lastUsedAt: Date.now() },
+      ...recentEntries.filter((entry) => entry.packageName !== packageName),
+    ].slice(0, MAX_RECENT_APPS);
+    localStorage.setItem(RECENT_APPS_KEY, JSON.stringify(recentEntries));
     touchDrawer();
   }
 
@@ -459,6 +538,111 @@
       return;
     }
     toggleAutorun(app.packageName);
+  }
+
+  function getAutorunApps(
+    visibleApps: AppInfo[],
+    availableApps: AppInfo[],
+    availablePairs: AppInfo[],
+  ): AppInfo[] {
+    const items: AppInfo[] = [];
+    if (primaryAutorun && secondaryAutorun) {
+      const pair = availablePairs.find(
+        (app) => app.left === primaryAutorun && app.right === secondaryAutorun,
+      );
+      if (pair) {
+        const visiblePair = visibleApps.find(
+          (app) => app.packageName === pair.packageName,
+        );
+        if (visiblePair) return [visiblePair];
+      }
+    }
+    if (primaryAutorun) {
+      const primary = visibleApps.find(
+        (app) => app.packageName === primaryAutorun,
+      );
+      if (primary) items.push(primary);
+    }
+    if (secondaryAutorun && secondaryAutorun !== primaryAutorun) {
+      const secondary = visibleApps.find(
+        (app) => app.packageName === secondaryAutorun,
+      );
+      if (secondary) items.push(secondary);
+    }
+    return items;
+  }
+
+  function getRecentMeta(packageName: string) {
+    const entry = recentEntries.find(
+      (item) => item.packageName === packageName,
+    );
+    return entry ? formatRelativeTime(entry.lastUsedAt) : "";
+  }
+
+  function formatRelativeTime(timestamp: number) {
+    const elapsedMs = Math.max(0, Date.now() - timestamp);
+    const minute = 60_000;
+    const hour = 60 * minute;
+    const day = 24 * hour;
+    if (elapsedMs < minute) return "Just now";
+    if (elapsedMs < hour) return `${Math.floor(elapsedMs / minute)} min ago`;
+    if (elapsedMs < day) return `${Math.floor(elapsedMs / hour)} hr ago`;
+    if (elapsedMs < day * 2) return "Yesterday";
+    return `${Math.floor(elapsedMs / day)} days ago`;
+  }
+
+  function selectTab(tab: LaunchHubTab) {
+    activeTab = tab;
+    localStorage.setItem(ACTIVE_TAB_KEY, tab);
+    if (tab === "browse" && search.trim().length > 0 && !expandedCategory) {
+      expandedCategory = browseGroups[0]?.key ?? "";
+    }
+  }
+
+  function toggleCategory(categoryKey: string) {
+    expandedCategory = expandedCategory === categoryKey ? "" : categoryKey;
+  }
+
+  function isAppAutorun(app: AppInfo) {
+    return (
+      (!app.isPair &&
+        (primaryAutorun === app.packageName ||
+          secondaryAutorun === app.packageName)) ||
+      isAutorunPair(app)
+    );
+  }
+
+  function readRecentLaunches(): RecentLaunchRecord[] {
+    try {
+      const value = JSON.parse(localStorage.getItem(RECENT_APPS_KEY) ?? "[]");
+      if (!Array.isArray(value)) return [];
+      if (value.every((item) => typeof item === "string")) {
+        return value
+          .filter((item): item is string => typeof item === "string")
+          .map((packageName, index) => ({
+            packageName,
+            lastUsedAt: Date.now() - index * 60_000,
+          }));
+      }
+      return value.filter(
+        (item): item is RecentLaunchRecord =>
+          item &&
+          typeof item.packageName === "string" &&
+          typeof item.lastUsedAt === "number",
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  function readActiveTab(): LaunchHubTab {
+    const value = localStorage.getItem(ACTIVE_TAB_KEY);
+    return value === "autorun" ||
+      value === "starred" ||
+      value === "recent" ||
+      value === "browse"
+      ? value
+      : "autorun";
   }
 
   function runAutorunOnce() {
@@ -746,151 +930,291 @@
   <button
     class="split-handle"
     on:click={() => (drawerOpen = !drawerOpen)}
-    aria-label="Launcher"
+    aria-label={drawerOpen ? "Close launcher" : "Open launcher"}
   >
-    <span></span><span></span><span></span>
+    <span class="handle-chevron">{drawerOpen ? ">" : "<"}</span>
   </button>
   <header>
-    <strong>Launcher</strong>
-    <div style="display: flex; gap: 8px; align-items: center;">
+    <div class="drawer-heading">
+      <strong>Launch Hub</strong>
+    </div>
+    <div class="drawer-meta">
+      <span class="drawer-count"
+        >{loading ? "Loading" : `${apps.length} apps`}</span
+      >
       <button
         class="diag-toggle-btn"
         on:click|stopPropagation={triggerToggleDiagnostics}
-        title="Toggle Diagnostics"
+        title="Settings and diagnostics"
       >
-        🛠️
+        ⚙
       </button>
-      <span>{loading ? "Loading" : `${apps.length} apps`}</span>
     </div>
   </header>
   <div class="search-row">
-    <input bind:value={search} placeholder="Search apps" autocomplete="off" />
+    <input
+      bind:value={search}
+      placeholder="Search or launch"
+      autocomplete="off"
+    />
   </div>
   {#if error}<div class="notice error">{error}</div>{/if}
   {#if notice}<div class="notice">{notice}</div>{/if}
   <div bind:this={drawerListElement} class="split-app-list">
-    {#each groupedApps as group (group.key)}
-      <section class="split-category-section">
-        <div class="split-category-header">
-          <span class="split-category-bar" style={`background:${group.color}`}
-          ></span>
-          <span class="split-category-title">{group.title}</span>
-        </div>
-        <div class="split-category-items">
-          {#each group.items as app (app.packageName)}
-            <div
-              data-package-name={app.isPair ? undefined : app.packageName}
-              class:pair-target={pairTarget?.packageName === app.packageName}
-              class:merge-target={pairTarget?.packageName === app.packageName &&
-                draggingApp !== null}
-              class:drag-source={draggingApp?.packageName === app.packageName}
-              class="split-app-item"
-              title={app.label}
-              on:pointerdown={(event) => startPress(event, app)}
-              on:pointermove={movePress}
-              on:pointerup={endPress}
-              on:pointercancel={cancelPress}
-              on:keydown={(event) => {
-                if (event.key === "Enter" || event.key === " ")
-                  activateApp(app);
-              }}
-              on:contextmenu|preventDefault
-              role="button"
-              tabindex="0"
-            >
-              {#if app.isPair && app.left && app.right}
-                <div class="pair-icons split-pair-icon">
-                  <img
-                    class="app-pair-icon-left"
-                    src={`/api/icon?pkg=${encodeURIComponent(app.left)}`}
-                    alt=""
-                    loading="lazy"
-                    draggable="false"
-                  />
-                  <img
-                    class="app-pair-icon-right"
-                    src={`/api/icon?pkg=${encodeURIComponent(app.right)}`}
-                    alt=""
-                    loading="lazy"
-                    draggable="false"
-                  />
-                </div>
-              {:else}
-                <img
-                  class="split-app-icon"
-                  src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`}
-                  alt=""
-                  loading="lazy"
-                  draggable="false"
-                />
-              {/if}
-              <div class="launch-main"><span>{app.label}</span></div>
-              <button
-                class:primary={!app.isPair &&
-                  primaryAutorun === app.packageName}
-                class:secondary={!app.isPair &&
-                  secondaryAutorun === app.packageName}
-                class:active-pair={app.isPair && isAutorunPair(app)}
-                class="bolt"
-                title="Auto-run"
-                on:click|stopPropagation={() => toggleAutorunForApp(app)}
-                >↯</button
-              >
-              <button
-                class:active={favorites.includes(app.packageName)}
-                class="star"
-                title="Favorite"
-                on:click|stopPropagation={() => toggleFavorite(app.packageName)}
-                >★</button
-              >
-              {#if app.isPair}
-                <button
-                  class:active={pairMenuOpen === app.packageName}
-                  class="pair-settings"
-                  title="Pair settings"
-                  on:click|stopPropagation={() => openPairEdit(app)}>⚙️</button
+    <nav class="hub-tabs" aria-label="Launch hub views">
+      <button
+        class:active={activeTab === "autorun"}
+        on:click={() => selectTab("autorun")}>Auto Run</button
+      >
+      <button
+        class:active={activeTab === "starred"}
+        on:click={() => selectTab("starred")}>Starred</button
+      >
+      <button
+        class:active={activeTab === "recent"}
+        on:click={() => selectTab("recent")}>Recent</button
+      >
+      <button
+        class:active={activeTab === "browse"}
+        on:click={() => selectTab("browse")}>Browse</button
+      >
+    </nav>
+
+    {#if activeTab !== "browse"}
+      <section class="launcher-hero single-panel">
+        <div
+          class:priority={activeTab === "autorun"}
+          class="panel-shell rows-only"
+        >
+          {#if activePanelApps.length > 0}
+            <div class="launcher-row-list">
+              {#each activePanelApps as app (app.packageName)}
+                <div
+                  class:priority={activeTab === "autorun"}
+                  class="launcher-row"
+                  title={app.label}
+                  on:click={() => activateApp(app)}
+                  on:keydown={(event) => {
+                    if (event.key === "Enter" || event.key === " ")
+                      activateApp(app);
+                  }}
+                  role="button"
+                  tabindex="0"
                 >
-              {:else}
-                <span class="control-spacer" aria-hidden="true"></span>
-              {/if}
-              {#if pairTarget?.packageName === app.packageName && draggingApp}
-                <div class="merge-preview" aria-hidden="true">
-                  <div class="merge-icon incoming">
+                  {#if app.isPair && app.left && app.right}
+                    <div class="pair-icons row-pair-icon">
+                      <img
+                        class="app-pair-icon-left"
+                        src={`/api/icon?pkg=${encodeURIComponent(app.left)}`}
+                        alt=""
+                        loading="lazy"
+                        draggable="false"
+                      />
+                      <img
+                        class="app-pair-icon-right"
+                        src={`/api/icon?pkg=${encodeURIComponent(app.right)}`}
+                        alt=""
+                        loading="lazy"
+                        draggable="false"
+                      />
+                    </div>
+                  {:else}
                     <img
-                      src={`/api/icon?pkg=${encodeURIComponent(draggingApp.packageName)}`}
-                      alt=""
-                      draggable="false"
-                    />
-                  </div>
-                  <div class="merge-plus">+</div>
-                  <div class="merge-icon target">
-                    <img
+                      class="launcher-row-icon"
                       src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`}
                       alt=""
+                      loading="lazy"
                       draggable="false"
                     />
+                  {/if}
+                  <div class="launcher-row-text">
+                    <span class="launcher-row-title">{app.label}</span>
+                    {#if activeTab === "recent"}
+                      <span class="launcher-row-subtitle"
+                        >{getRecentMeta(app.packageName)}</span
+                      >
+                    {:else if activeTab === "autorun"}
+                      <span class="launcher-row-subtitle">Ready on startup</span
+                      >
+                    {/if}
                   </div>
-                  <div class="merge-result">
-                    <img
-                      class="merge-half left"
-                      src={`/api/icon?pkg=${encodeURIComponent(draggingApp.packageName)}`}
-                      alt=""
-                      draggable="false"
-                    />
-                    <img
-                      class="merge-half right"
-                      src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`}
-                      alt=""
-                      draggable="false"
-                    />
-                  </div>
+                  <button
+                    class:active={isAppAutorun(app)}
+                    class="auto-pill"
+                    title="Toggle auto-run"
+                    on:click|stopPropagation={() => toggleAutorunForApp(app)}
+                    >AUTO</button
+                  >
+                  <button
+                    class:active={favorites.includes(app.packageName)}
+                    class="star"
+                    title="Toggle star"
+                    on:click|stopPropagation={() =>
+                      toggleFavorite(app.packageName)}>★</button
+                  >
+                  {#if app.isPair}
+                    <button
+                      class:active={pairMenuOpen === app.packageName}
+                      class="pair-settings"
+                      title="Pair settings"
+                      on:click|stopPropagation={() => openPairEdit(app)}
+                      >⚙️</button
+                    >
+                  {:else}
+                    <span class="control-spacer" aria-hidden="true"></span>
+                  {/if}
                 </div>
-              {/if}
+              {/each}
             </div>
-          {/each}
+          {:else}
+            <div class="quick-empty">{activePanelEmpty}</div>
+          {/if}
         </div>
       </section>
-    {/each}
+    {:else}
+      <section class="library-section">
+        <div class="library-header">
+          <span
+            >{search
+              ? `${displayApps.length} matches`
+              : "All categories collapsed"}</span
+          >
+        </div>
+      </section>
+      <div class="browse-accordion">
+        {#each browseGroups as group (group.key)}
+          <section class="browse-group">
+            <button
+              class:expanded={expandedCategory === group.key}
+              class="browse-group-header"
+              on:click={() => toggleCategory(group.key)}
+            >
+              <div class="browse-group-label">
+                <span class="browse-chevron"
+                  >{expandedCategory === group.key ? "▼" : "▶"}</span
+                >
+                <span>{group.title}</span>
+              </div>
+              <span class="browse-count">{group.items.length}</span>
+            </button>
+            {#if expandedCategory === group.key}
+              <div class="browse-list">
+                {#each group.items as app (app.packageName)}
+                  <div
+                    data-package-name={app.isPair ? undefined : app.packageName}
+                    class:pair-target={pairTarget?.packageName ===
+                      app.packageName}
+                    class:merge-target={pairTarget?.packageName ===
+                      app.packageName && draggingApp !== null}
+                    class:drag-source={draggingApp?.packageName ===
+                      app.packageName}
+                    class="split-app-item compact"
+                    title={app.label}
+                    on:pointerdown={(event) => startPress(event, app)}
+                    on:pointermove={movePress}
+                    on:pointerup={endPress}
+                    on:pointercancel={cancelPress}
+                    on:keydown={(event) => {
+                      if (event.key === "Enter" || event.key === " ")
+                        activateApp(app);
+                    }}
+                    on:contextmenu|preventDefault
+                    role="button"
+                    tabindex="0"
+                  >
+                    {#if app.isPair && app.left && app.right}
+                      <div class="pair-icons split-pair-icon">
+                        <img
+                          class="app-pair-icon-left"
+                          src={`/api/icon?pkg=${encodeURIComponent(app.left)}`}
+                          alt=""
+                          loading="lazy"
+                          draggable="false"
+                        />
+                        <img
+                          class="app-pair-icon-right"
+                          src={`/api/icon?pkg=${encodeURIComponent(app.right)}`}
+                          alt=""
+                          loading="lazy"
+                          draggable="false"
+                        />
+                      </div>
+                    {:else}
+                      <img
+                        class="split-app-icon"
+                        src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`}
+                        alt=""
+                        loading="lazy"
+                        draggable="false"
+                      />
+                    {/if}
+                    <div class="launch-main"><span>{app.label}</span></div>
+                    <button
+                      class:active={isAppAutorun(app)}
+                      class="auto-pill"
+                      title="Auto-run"
+                      on:click|stopPropagation={() => toggleAutorunForApp(app)}
+                      >AUTO</button
+                    >
+                    <button
+                      class:active={favorites.includes(app.packageName)}
+                      class="star"
+                      title="Star"
+                      on:click|stopPropagation={() =>
+                        toggleFavorite(app.packageName)}>★</button
+                    >
+                    {#if app.isPair}
+                      <button
+                        class:active={pairMenuOpen === app.packageName}
+                        class="pair-settings"
+                        title="Pair settings"
+                        on:click|stopPropagation={() => openPairEdit(app)}
+                        >⚙️</button
+                      >
+                    {:else}
+                      <span class="control-spacer" aria-hidden="true"></span>
+                    {/if}
+                    {#if pairTarget?.packageName === app.packageName && draggingApp}
+                      <div class="merge-preview" aria-hidden="true">
+                        <div class="merge-icon incoming">
+                          <img
+                            src={`/api/icon?pkg=${encodeURIComponent(draggingApp.packageName)}`}
+                            alt=""
+                            draggable="false"
+                          />
+                        </div>
+                        <div class="merge-plus">+</div>
+                        <div class="merge-icon target">
+                          <img
+                            src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`}
+                            alt=""
+                            draggable="false"
+                          />
+                        </div>
+                        <div class="merge-result">
+                          <img
+                            class="merge-half left"
+                            src={`/api/icon?pkg=${encodeURIComponent(draggingApp.packageName)}`}
+                            alt=""
+                            draggable="false"
+                          />
+                          <img
+                            class="merge-half right"
+                            src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`}
+                            alt=""
+                            draggable="false"
+                          />
+                        </div>
+                      </div>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </section>
+        {/each}
+      </div>
+    {/if}
   </div>
 </aside>
 
@@ -901,14 +1225,14 @@
       class:hidden={pairTarget !== null}
       class="drop-zone shortcut favorite-zone"
     >
-      <strong>★</strong><span>즐겨찾기 추가</span>
+      <strong>★</strong><span>Star this app</span>
     </div>
     <div
       class:active={dropZone === "autorun"}
       class:hidden={pairTarget !== null}
       class="drop-zone shortcut autorun-zone"
     >
-      <strong>↯</strong><span>자동실행 등록</span>
+      <strong>↯</strong><span>Set auto-run</span>
     </div>
     <div
       class:active={dropZone === "primary"}
@@ -1136,29 +1460,30 @@
     left: -28px;
     top: 50%;
     width: 28px;
-    height: 80px;
+    height: 92px;
     transform: translateY(-50%);
     border: 1px solid rgb(255 255 255 / 0.1);
     border-right: 0;
     border-radius: 14px 0 0 14px;
-    background: rgb(20 20 30 / 0.88);
+    background: linear-gradient(
+      180deg,
+      rgb(22 24 35 / 0.96),
+      rgb(16 18 28 / 0.88)
+    );
     display: flex;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 5px;
   }
 
-  .split-handle span {
-    width: 4px;
-    height: 4px;
-    border-radius: 50%;
-    background: rgb(255 255 255 / 0.65);
+  .handle-chevron {
+    color: rgb(255 255 255 / 0.72);
+    font-size: 14px;
+    line-height: 1;
   }
 
   header,
   .search-row {
-    padding: 14px 18px;
+    padding: 12px 16px;
     border-bottom: 1px solid rgb(255 255 255 / 0.1);
   }
 
@@ -1166,11 +1491,19 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    min-height: 66px;
+    min-height: 56px;
+    background: radial-gradient(
+        circle at top left,
+        rgb(55 127 255 / 0.12),
+        transparent 42%
+      ),
+      linear-gradient(180deg, rgb(255 255 255 / 0.03), transparent);
   }
 
   header strong {
-    font-size: 20px;
+    font-size: 19px;
+    font-weight: 800;
+    letter-spacing: -0.02em;
   }
 
   header span {
@@ -1178,14 +1511,34 @@
     font-size: 12px;
   }
 
+  .drawer-heading {
+    display: flex;
+    align-items: baseline;
+  }
+
+  .drawer-meta {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+
+  .drawer-count {
+    color: #95a0b2;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+  }
+
   .diag-toggle-btn {
     border: none;
-    background: transparent;
-    color: rgb(255 255 255 / 0.65);
-    font-size: 16px;
-    padding: 2px 6px;
+    background: rgb(255 255 255 / 0.05);
+    color: rgb(255 255 255 / 0.74);
+    font-size: 15px;
+    width: 28px;
+    height: 28px;
+    padding: 0;
     cursor: pointer;
-    border-radius: 4px;
+    border-radius: 999px;
     transition:
       background 0.2s ease,
       transform 0.1s ease;
@@ -1211,12 +1564,23 @@
 
   .search-row input {
     width: 100%;
-    height: 36px;
+    height: 38px;
     border: 1px solid rgb(255 255 255 / 0.12);
-    border-radius: 8px;
-    background: rgb(255 255 255 / 0.08);
+    border-radius: 10px;
+    background: rgb(255 255 255 / 0.07);
     color: white;
-    padding: 0 10px;
+    padding: 0 12px;
+    transition:
+      border-color 0.2s ease,
+      background 0.2s ease,
+      box-shadow 0.2s ease;
+  }
+
+  .search-row input:focus {
+    outline: none;
+    border-color: rgb(139 196 255 / 0.42);
+    background: rgb(255 255 255 / 0.09);
+    box-shadow: 0 0 0 3px rgb(139 196 255 / 0.1);
   }
 
   .notice {
@@ -1234,36 +1598,239 @@
   .split-app-list {
     flex: 1;
     overflow: auto;
-    padding: 10px 6px 14px 10px;
+    padding: 12px 10px 22px;
   }
 
-  .split-category-section {
-    margin-bottom: 22px;
+  .hub-tabs {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+    padding: 0 0 12px;
+    margin-bottom: 8px;
   }
 
-  .split-category-header {
-    display: flex;
-    align-items: center;
+  .hub-tabs button {
+    min-width: 0;
+    height: 34px;
+    padding: 0 4px;
+    border: 1px solid rgb(255 255 255 / 0.08);
+    border-radius: 999px;
+    background: rgb(255 255 255 / 0.05);
+    color: #b5bdcb;
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+    letter-spacing: -0.01em;
+    transition:
+      background 0.16s ease,
+      border-color 0.16s ease,
+      color 0.16s ease;
+  }
+
+  .hub-tabs button.active {
+    background: rgb(139 196 255 / 0.14);
+    border-color: rgb(139 196 255 / 0.26);
+    color: #f6f8fc;
+  }
+
+  .launcher-hero {
+    display: grid;
     gap: 10px;
-    padding: 4px 8px 8px;
+    margin-bottom: 12px;
   }
 
-  .split-category-bar {
-    width: 4px;
-    height: 18px;
-    border-radius: 2px;
+  .panel-shell {
+    padding: 10px;
+    border: 1px solid rgb(255 255 255 / 0.08);
+    border-radius: 18px;
+    background: linear-gradient(
+        180deg,
+        rgb(255 255 255 / 0.06),
+        rgb(255 255 255 / 0.03)
+      ),
+      rgb(14 18 28 / 0.9);
+    box-shadow: 0 16px 28px rgb(0 0 0 / 0.16);
   }
 
-  .split-category-title {
-    color: #d8d9df;
-    font-size: 16px;
-    font-weight: 800;
+  .panel-shell.rows-only {
+    padding: 8px;
   }
 
-  .split-category-items {
+  .panel-shell.priority {
+    background: linear-gradient(
+        180deg,
+        rgb(60 92 160 / 0.14),
+        rgb(255 255 255 / 0.03)
+      ),
+      rgb(14 18 28 / 0.94);
+  }
+
+  .launcher-row-list {
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  .launcher-row {
+    display: grid;
+    grid-template-columns: 42px minmax(0, 1fr) auto 20px 18px;
+    align-items: center;
+    gap: 6px;
+    min-height: 50px;
+    padding: 8px 10px;
+    border: 1px solid rgb(255 255 255 / 0.06);
+    border-radius: 12px;
+    background: linear-gradient(
+        180deg,
+        rgb(255 255 255 / 0.05),
+        rgb(255 255 255 / 0.02)
+      ),
+      rgb(18 22 34 / 0.88);
+    color: white;
+    text-align: left;
+    transition:
+      transform 0.18s ease,
+      border-color 0.18s ease,
+      background 0.18s ease,
+      box-shadow 0.18s ease;
+  }
+
+  .launcher-row.priority {
+    min-height: 54px;
+    padding: 9px 10px;
+    background: linear-gradient(
+        180deg,
+        rgb(255 255 255 / 0.08),
+        rgb(255 255 255 / 0.03)
+      ),
+      rgb(22 27 40 / 0.95);
+  }
+
+  .launcher-row:hover,
+  .launcher-row:focus-visible {
+    border-color: rgb(139 196 255 / 0.42);
+    background: linear-gradient(
+        180deg,
+        rgb(139 196 255 / 0.12),
+        rgb(255 255 255 / 0.05)
+      ),
+      rgb(20 24 36 / 0.98);
+    box-shadow: 0 10px 20px rgb(0 0 0 / 0.18);
+    transform: translateY(-1px);
+    outline: none;
+  }
+
+  .launcher-row-text {
+    min-width: 0;
+    display: grid;
+    gap: 2px;
+  }
+
+  .launcher-row-title {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.2;
+    word-break: keep-all;
+    overflow-wrap: normal;
+    text-overflow: ellipsis;
+  }
+
+  .launcher-row-subtitle {
+    color: #8f96a4;
+    font-size: 10px;
+    font-weight: 600;
+  }
+
+  .launcher-row-icon {
+    width: 40px;
+    height: 40px;
+    object-fit: contain;
+  }
+
+  .row-pair-icon {
+    width: 42px;
+    height: 34px;
+  }
+
+  .quick-empty {
+    padding: 14px 2px 4px;
+    color: #8f96a4;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+
+  .library-section {
+    margin: 2px 0 12px;
+  }
+
+  .library-header {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    padding: 0 4px;
+  }
+
+  .library-header span {
+    color: #8f96a4;
+    font-size: 12px;
+  }
+
+  .browse-accordion {
+    display: grid;
+    gap: 10px;
+  }
+
+  .browse-group {
+    border: 1px solid rgb(255 255 255 / 0.08);
+    border-radius: 16px;
+    background: rgb(255 255 255 / 0.04);
+    overflow: hidden;
+  }
+
+  .browse-group-header {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 13px 14px;
+    border: 0;
+    background: transparent;
+    color: #eef2f8;
+    font-size: 15px;
+    font-weight: 700;
+  }
+
+  .browse-group-header.expanded {
+    background: rgb(255 255 255 / 0.04);
+  }
+
+  .browse-group-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .browse-chevron {
+    color: #8f96a4;
+    font-size: 11px;
+  }
+
+  .browse-count {
+    color: #8f96a4;
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  .browse-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 0 10px 10px;
   }
 
   .split-app-item {
@@ -1273,9 +1840,15 @@
     align-items: center;
     gap: 8px;
     min-height: 60px;
-    padding: 8px 10px;
-    border-radius: 8px;
-    background: rgb(255 255 255 / 0.075);
+    padding: 10px 12px;
+    border: 1px solid rgb(255 255 255 / 0.06);
+    border-radius: 14px;
+    background: linear-gradient(
+        180deg,
+        rgb(255 255 255 / 0.06),
+        rgb(255 255 255 / 0.03)
+      ),
+      rgb(255 255 255 / 0.03);
     user-select: none;
     touch-action: pan-y;
     -webkit-user-drag: none;
@@ -1283,6 +1856,26 @@
       transform 0.18s ease,
       box-shadow 0.18s ease,
       background 0.18s ease;
+  }
+
+  .split-app-item.compact {
+    grid-template-columns: 40px minmax(0, 1fr) auto 20px 18px;
+    min-height: 44px;
+    padding: 6px 10px;
+    border-radius: 12px;
+  }
+
+  .split-app-item:hover,
+  .split-app-item:focus-visible {
+    background: linear-gradient(
+        180deg,
+        rgb(255 255 255 / 0.08),
+        rgb(255 255 255 / 0.05)
+      ),
+      rgb(255 255 255 / 0.04);
+    border-color: rgb(255 255 255 / 0.12);
+    box-shadow: 0 10px 22px rgb(0 0 0 / 0.14);
+    outline: none;
   }
 
   .split-app-item.drag-source {
@@ -1312,8 +1905,8 @@
   }
 
   .split-app-icon {
-    width: 42px;
-    height: 42px;
+    width: 36px;
+    height: 36px;
     object-fit: contain;
     -webkit-user-drag: none;
     user-select: none;
@@ -1346,9 +1939,50 @@
     z-index: 2;
   }
 
+  .row-pair-icon .app-pair-icon-left,
+  .row-pair-icon .app-pair-icon-right {
+    width: 24px;
+    height: 24px;
+    padding: 2px;
+    border-radius: 9px;
+  }
+
+  .row-pair-icon .app-pair-icon-left {
+    left: 0;
+    top: 5px;
+  }
+
+  .row-pair-icon .app-pair-icon-right {
+    left: 16px;
+    top: 5px;
+  }
+
+  .split-app-item.compact .split-pair-icon {
+    width: 40px;
+    height: 32px;
+  }
+
+  .split-app-item.compact .split-pair-icon .app-pair-icon-left,
+  .split-app-item.compact .split-pair-icon .app-pair-icon-right {
+    width: 22px;
+    height: 22px;
+    padding: 2px;
+    border-radius: 8px;
+  }
+
+  .split-app-item.compact .split-pair-icon .app-pair-icon-left {
+    left: 0;
+    top: 5px;
+  }
+
+  .split-app-item.compact .split-pair-icon .app-pair-icon-right {
+    left: 14px;
+    top: 5px;
+  }
+
   .launch-main,
   .star,
-  .bolt {
+  .auto-pill {
     border: 0;
     color: white;
     background: transparent;
@@ -1357,7 +1991,7 @@
   .launch-main {
     min-width: 0;
     text-align: left;
-    font-size: 16px;
+    font-size: 14px;
     font-weight: 700;
     cursor: pointer;
   }
@@ -1368,44 +2002,68 @@
     -webkit-line-clamp: 2;
     line-clamp: 2;
     -webkit-box-orient: vertical;
+    word-break: keep-all;
+    overflow-wrap: normal;
+    text-overflow: ellipsis;
+    line-height: 1.2;
   }
 
   .star,
-  .bolt {
-    width: 28px;
-    height: 28px;
+  .auto-pill {
+    width: 22px;
+    height: 22px;
     border-radius: 50%;
     color: rgb(255 255 255 / 0.88);
-    font-size: 22px;
+    font-size: 16px;
+    transition:
+      background 0.16s ease,
+      color 0.16s ease,
+      transform 0.16s ease;
+  }
+
+  .star:hover,
+  .auto-pill:hover,
+  .pair-settings:hover {
+    background: rgb(255 255 255 / 0.08);
+    transform: translateY(-1px);
   }
 
   .star.active {
-    color: #ffd700;
-    text-shadow: 0 0 14px #ffd700;
+    color: #ffd56a;
+    text-shadow: none;
+    background: transparent;
   }
 
-  .bolt {
-    color: rgb(255 110 78 / 0.42);
+  .auto-pill {
+    width: auto;
+    min-width: 0;
+    padding: 0 5px;
+    border: 1px solid rgb(255 112 67 / 0.16);
+    border-radius: 999px;
+    background: rgb(255 112 67 / 0.08);
+    color: rgb(255 189 145 / 0.62);
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    justify-self: end;
+    margin-left: 10px;
   }
 
-  .bolt.primary,
-  .bolt.secondary {
-    color: #ff7043;
-  }
-
-  .bolt.active-pair {
-    color: #ff7043;
-    text-shadow: 0 0 12px rgb(255 112 67 / 0.45);
+  .auto-pill.active {
+    color: #ffd0b7;
+    background: rgb(255 112 67 / 0.14);
+    border-color: rgb(255 112 67 / 0.28);
+    box-shadow: none;
   }
 
   .pair-settings {
-    width: 28px;
-    height: 28px;
+    width: 18px;
+    height: 18px;
     border: 0;
     border-radius: 50%;
     background: transparent;
     color: rgb(255 255 255 / 0.72);
-    font-size: 18px;
+    font-size: 12px;
     line-height: 1;
   }
 
@@ -1415,8 +2073,8 @@
   }
 
   .control-spacer {
-    width: 28px;
-    height: 28px;
+    width: 18px;
+    height: 18px;
   }
 
   .merge-preview {
