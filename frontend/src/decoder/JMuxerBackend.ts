@@ -342,7 +342,7 @@ function hookSourceBuffer() {
     }
 
     try {
-      originalAppend.call(this, data);
+      originalAppend.call(this, data as BufferSource);
     } catch (error: any) {
       debugLog("[SourceBuffer] appendException", {
         name: error.name,

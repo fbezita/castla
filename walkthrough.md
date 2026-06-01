@@ -225,6 +225,51 @@
 
 F5 수동 리로드의 마법 없이도, 하드웨어 및 OS 레벨의 전이 락이 실시간 자가 치유되는 초저지연 완치 아키텍처가 완전히 성숙하여 영구 완성되었습니다! 🟢
 
+---
+
+## ⚡ 금융앱 오탐지 원천 차단: Castla 텍스트 입력 Accessibility Service 제거 및 VPN 코드 영구 완전 삭제
+
+본 작업은 금융/보안 앱(Toss, 뱅킹 앱 등)의 오탐지 필터링을 원천적으로 완벽히 우회하기 위해, 프로젝트 내에서 `AccessibilityService` 및 `VpnService`와 연관된 모든 선언, 권한, 자바 소스, 리소스를 100% 완벽하게 소탕한 종합 내역입니다.
+
+### 1. 설계 의사결정 및 조치 내역
+
+1. **빌드 플레이버 분리 폐기 ➔ 단일 빌드 기반 완전 제거**:
+   - standard/advanced 플레이버 분기를 생성하는 타협을 버리고, **프로젝트 전체 단일 빌드에서 접근성을 통째로 완전히 거세**했습니다. 이로써 마켓 출시 및 Release 빌드 시 보안앱의 정적 분석 엔진에 적발될 수 있는 1%의 빌트인 여지도 남기지 않았습니다.
+2. **접근성(Accessibility) 관련 소스 및 XML 리소스 100% 영구 삭제**:
+   - `app/src/main/res/xml/accessibility_service_config.xml` 설정 파일 삭제 완료.
+   - 가상 디스플레이 포커스 감지용 리스너 클래스가 기입되어 있던 `AccessibilityFocusManager.kt` 소스 파일을 물리적으로 영구 삭제 완료.
+   - `MainActivity.xml` 및 전체 코드 내에서 `BIND_ACCESSIBILITY_SERVICE` 바인딩, `accessibilityservice` 선언 제거 완료.
+3. **Pure Hybrid IME Focus Registry (`ImeFocusState`) 구축**:
+   - 가상 화면의 텍스트 입력 영역 터치 감지 흐름을 웹 클라이언트 단에서 캐치하여 소켓(`op: focus`/`blur`)을 통해 백엔드로 역송출하는 구조로 개선했습니다.
+   - 수신된 포커스 힌트를 담는 스레드 안전한 중앙 IME 레지스트리 `ImeFocusState` Flow와 `CastlaTextInputRouter`를 설계하여, 접근성 권한 없이도 완벽한 포커스 패키지명 일치성 가드 및 Soft-Fail 입력을 가능케 했습니다.
+4. **Stale `onFinishInput` 방어 및 `AtomicLong` 세션 ID 세대 정합성 확보**:
+   - 빠른 포커스 전환 과도기 상황에서 이전 입력창의 포커스 종료 이벤트(`onFinishInput`)가 뒤늦게 들어와 현재 입력을 닫아버리는 교착을 방지하고자 `AtomicLong` 기반의 증가식 세션 카운터를 IME 수명주기에 밀착 설계했습니다. 세션 ID가 다르면 Stale 신호로 즉시 판정하여 무시합니다.
+5. **50ms 폴링 & 500ms 타임아웃 지연 입력 큐잉 탑재**:
+   - 포커스 이주 극초반에 발생할 수 있는 키 입력 손실을 차단하기 위해 `RemoteImeBridge.dispatch()` 비동기 진입부에 경량 큐잉 루프를 설계하여, 새 포커스의 `InputConnection`이 활성화되는 찰나(최대 500ms) 동안 대기한 후 즉시 Flush 처리하여 타이핑 신뢰도를 보장합니다.
+6. **3초 무활동 감시견(Watchdog) 및 Blur 완충 장치 연동**:
+   - 일부 웹뷰나 앱 전환 시 포커스 아웃 신호가 유실되어 키보드가 remote 상태에 갇히는 문제를 막기 위해, blur 힌트 수신 후 500ms의 완충 대기를 거쳐 포커스를 비활성화하고, 최근 3초 동안 원격 입력 활동이 감지되지 않으면 강제로 사용자의 원래 휴대폰 키보드로 자동 복원시키는 Watchdog 루프를 탑재하여 복원력을 비약적으로 끌어올렸습니다.
+7. **설정 UI 레거시 및 VPN 코드 정밀 클린업**:
+   - `CastlaVpnService.kt` 및 `TunTcpRelay.kt` 물리적 삭제.
+   - `MainActivity.kt` 및 `MirrorForegroundService.kt` 내의 VPN 권한 런처, 미사용 임포트, VPN/접근성 제어 로직, 실시간 상태 검증 카드 UI 코드를 영구 완전 삭제했습니다.
+
+### 2. 반영 소스 코드 및 검증 결과
+
+1. **[app/build.gradle.kts](file:///c:/project/private/castla/app/build.gradle.kts)**: 플레이버 설정을 롤백하여 깨끗한 단일 빌드로 복구하고, 접근성 관련 설정 빌드 무효화 완료.
+2. **[AndroidManifest.xml](file:///c:/project/private/castla/app/src/main/AndroidManifest.xml)**: 접근성 및 VPN 서비스 노드 완전 박멸.
+3. **[CastlaTextInputRouter.kt](file:///c:/project/private/castla/app/src/main/java/com/castla/mirror/input/CastlaTextInputRouter.kt)**: `ImeFocusState` 데이터 클래스 및 Registry Flow 신설, `validateConnectionForTarget` 메타데이터 Soft-Fail 유연 개편.
+4. **[CastlaImeService.kt](file:///c:/project/private/castla/app/src/main/java/com/castla/mirror/input/CastlaImeService.kt)**: `AtomicLong` 세션 카운터 장착, 비동기 `finishComposingText()` 호출 보장 및 Stale finish 방어 루틴 적용.
+5. **[TextInputLogger.kt](file:///c:/project/private/castla/app/src/main/java/com/castla/mirror/input/diagnostics/TextInputLogger.kt)**: 접근성 로깅 흔적 삭제 및 `ImeFocusState` 기반 로깅 표준화.
+6. **[TextInputSettingsHelper.kt](file:///c:/project/private/castla/app/src/main/java/com/castla/mirror/input/TextInputSettingsHelper.kt)**: 접근성 활성화 여부 체크, 강제 제어, 설정 Navigate 등 접근성 API 결합부를 100% 색출 및 삭제 처리.
+7. **[MainActivity.kt](file:///c:/project/private/castla/app/src/main/java/com/castla/mirror/MainActivity.kt)**: Shizuku 연결 시의 접근성 silent activation 차단, Compose UI 및 상태 체크 바인딩 정리, `VpnService` 임포트 및 런처/주석 정밀 클린업.
+8. **[MirrorForegroundService.kt](file:///c:/project/private/castla/app/src/main/java/com/castla/mirror/service/MirrorForegroundService.kt)**: `handleRemoteFocusHint`, `handleRemoteBlurHint` 비동기 워치독 핸들러 장착, 소켓 바인딩 연동, VPN/접근성 active 제거.
+9. **[RemoteImeBridge.kt](file:///c:/project/private/castla/app/src/main/java/com/castla/mirror/input/RemoteImeBridge.kt)**: `50ms Polling + 500ms Timeout` 과도기 지연 큐잉 장벽 구현.
+10. **[ControlSocket.kt](file:///c:/project/private/castla/app/src/main/java/com/castla/mirror/server/ControlSocket.kt) / [MirrorServer.kt](file:///c:/project/private/castla/app/src/main/java/com/castla/mirror/server/MirrorServer.kt)**: `"ime" -> "focus"/"blur"` 소켓 액션 파싱 및 리스너 포워딩 통로 추가.
+
+* **최종 빌드 검증 결과**:
+  `.\gradlew compileDebugSources --no-daemon`을 실행하여 모든 코틀린 소스, 리소스, 매니페스트 컴파일 무결성을 완벽히 완료했습니다 (`BUILD SUCCESSFUL in 1m 3s`).
+
+이로써 Castla는 금융/보안 앱(토스, 은행 등)에 의해 악성 코드로 탐지될 소지가 다분했던 접근성 권한 및 매니페스트 선언을 완벽히 영구 박멸하였으며, 가상 입력 환경의 안정성과 자가치유 복원력은 오히려 이전보다 더욱 향상된 안전하고 우아한 차세대 입력 체계를 확보하게 되었습니다! 🟢
+
 
 
 

@@ -89,7 +89,9 @@ class ControlSocket(
                 return
             }
 //            Log.d(TAG, "Text message received: ${message.textPayload?.take(50)}")
-            val json = JSONObject(message.textPayload)
+            val rawMsg = message.textPayload ?: ""
+            // Log.i("ControlSocket", "[CONTROL_RX_RAW] $rawMsg")
+            val json = JSONObject(rawMsg)
             val type = json.optString("type", "")
 
             when (type) {
@@ -160,6 +162,16 @@ class ControlSocket(
                 }
                 "ime" -> {
                     when (json.optString("op", "")) {
+                        "focus" -> {
+                            val packageName = json.optString("packageName").takeIf { it.isNotEmpty() }
+                            val inputType = json.optInt("inputType", 0)
+                            val imeOptions = json.optInt("imeOptions", 0)
+                            val privateImeOptions = json.optString("privateImeOptions").takeIf { it.isNotEmpty() }
+                            server.onRemoteFocusHint(packageName, inputType, imeOptions, privateImeOptions)
+                        }
+                        "blur" -> {
+                            server.onRemoteBlurHint()
+                        }
                         "commitText" -> {
                             val text = json.optString("text", "")
                             if (text.isNotEmpty()) server.onTextInput(text)
@@ -180,9 +192,6 @@ class ControlSocket(
                             }
                         }                        
                         "finishComposingText" -> server.onCompositionUpdate(0, "")
-                        "tapOutside" -> {
-                            server.onTapOutside()
-                        }
                     }
                 }
                 "goHome" -> {

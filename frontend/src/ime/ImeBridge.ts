@@ -25,12 +25,14 @@ export class ImeBridge {
 
   compositionUpdate(event: CompositionEvent): void {
     const text = event.data ?? "";
-    this.control.send({
+    const payload = {
       type: "ime",
       op: "setComposingText",
       text,
       replaceChars: [...this.previousComposition].length,
-    });
+    };
+    console.warn("[IME_SEND] compositionUpdate", payload);
+    this.control.send(payload);
     this.previousComposition = text;
   }
 
@@ -38,8 +40,12 @@ export class ImeBridge {
     this.composing = false;
     const text = event.data ?? this.previousComposition;
     if (this.lastCommittedCompositionId !== this.compositionId) {
-      this.control.send({ type: "ime", op: "commitText", text });
-      this.control.send({ type: "ime", op: "finishComposingText" });
+      const commitPayload = { type: "ime", op: "commitText", text };
+      const finishPayload = { type: "ime", op: "finishComposingText" };
+      console.warn("[IME_SEND] compositionEnd: commitText", commitPayload);
+      this.control.send(commitPayload);
+      console.warn("[IME_SEND] compositionEnd: finishComposingText", finishPayload);
+      this.control.send(finishPayload);
       this.lastCommittedCompositionId = this.compositionId;
     }
     this.previousComposition = "";
@@ -69,44 +75,46 @@ export class ImeBridge {
     }
     const input = event.target as HTMLTextAreaElement;
     if (!input.value) return;
-    this.control.send({ type: "ime", op: "commitText", text: input.value });
+    const payload = { type: "ime", op: "commitText", text: input.value };
+    console.warn("[IME_SEND] input: commitText", payload);
+    this.control.send(payload);
     input.value = "";
   }
 
   keydown(event: KeyboardEvent): void {
     if (event.key === "Backspace" && !this.composing) {
-      this.control.send({
+      const payload = {
         type: "ime",
         op: "deleteSurroundingText",
         beforeLength: 1,
         afterLength: 0,
-      });
+      };
+      console.warn("[IME_SEND] keydown: deleteSurroundingText", payload);
+      this.control.send(payload);
       event.preventDefault();
     } else if (event.key === "Enter") {
-      // console.log("[IME ENTER HIT]", {
-      //   key: event.key,
-      //   code: event.code,
-      //   keyCode: event.keyCode,
-      //   isComposing: event.isComposing,
-      //   composing: this.composing,
-      //   activeElement: document.activeElement,
-      // });
       event.preventDefault();
       if (
         this.composing &&
         this.previousComposition &&
         this.lastCommittedCompositionId !== this.compositionId
       ) {
-        this.control.send({
+        const commitPayload = {
           type: "ime",
           op: "commitText",
           text: this.previousComposition,
-        });
-        this.control.send({ type: "ime", op: "finishComposingText" });
+        };
+        const finishPayload = { type: "ime", op: "finishComposingText" };
+        console.warn("[IME_SEND] keydown Enter: commitText", commitPayload);
+        this.control.send(commitPayload);
+        console.warn("[IME_SEND] keydown Enter: finishComposingText", finishPayload);
+        this.control.send(finishPayload);
         this.lastCommittedCompositionId = this.compositionId;
         this.composing = false;
       }
-      this.control.send({ type: "ime", op: "sendKeyEvent", keyCode: 66 });
+      const enterPayload = { type: "ime", op: "sendKeyEvent", keyCode: 66 };
+      console.warn("[IME_SEND] keydown Enter: sendKeyEvent", enterPayload);
+      this.control.send(enterPayload);
     }
   }
 }

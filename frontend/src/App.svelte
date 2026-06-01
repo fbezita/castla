@@ -8,7 +8,7 @@
   } from "./stores/compositorStore";
   import { BrowserCompositor } from "./compositor/BrowserCompositor";
   import { StreamRuntime } from "./runtime/StreamRuntime";
-  import { TouchRouter, mapViewportPoint } from "./touch/TouchRouter";
+  import { TouchRouter } from "./touch/TouchRouter";
   import { ImeBridge } from "./ime/ImeBridge";
   import { triggerDump, isLoggingEnabled, setLoggingEnabled } from "./utils/debugLogger";
 
@@ -25,16 +25,79 @@
   let imeActiveCleanup: (() => void) | undefined;
   let remoteTextMode = false;
 
-  const REMOTE_IME_REFOCUS_DELAY_MS = 120;
-  let intentionalBlur = false;
-  let layoutTransitioning = false;
-  let androidFocusStillEditable = false;
-  let canvasTapped = false;
-  let canvasTappedTimeout: number | null = null;
+  type ImeFsmState = 'IDLE' | 'ANDROID_FOCUSING' | 'READY' | 'BLUR_PENDING' | 'RECOVERING';
+  let imeState: ImeFsmState = 'IDLE';
+  let currentSessionId = 0;
 
-  let lastCanvasTap: { pane: string; x: number; y: number } | null = null;
-  let suppressImeFocusUntil = 0;
+  let blurDebounceTimer: number | undefined;
+  let focusRetryTimer: number | undefined;
+
+  function setImeState(newState: ImeFsmState) {
+    console.warn(`[FSM] state change: ${imeState} -> ${newState}`);
+    imeState = newState;
+    remoteTextMode = newState !== 'IDLE';
+  }
+
+  function attemptProxyFocus(retryCount = 0) {
+    if (focusRetryTimer) {
+      window.clearTimeout(focusRetryTimer);
+      focusRetryTimer = undefined;
+    }
+
+    const imeProxy = document.querySelector(".ime-proxy") as HTMLTextAreaElement | null;
+    if (!imeProxy) {
+      console.error("[PROXY_FOCUS] Proxy textarea not found in DOM");
+      return;
+    }
+
+    console.warn(`[PROXY_FOCUS] attempt #${retryCount + 1}`, {
+      exists: !!imeProxy,
+      disabled: imeProxy.disabled,
+      readOnly: imeProxy.readOnly,
+      display: getComputedStyle(imeProxy).display,
+      visibility: getComputedStyle(imeProxy).visibility,
+      width: imeProxy.offsetWidth,
+      height: imeProxy.offsetHeight,
+      activeElement: document.activeElement?.tagName,
+    });
+
+    try {
+      imeProxy.focus({ preventScroll: true });
+    } catch (e) {
+      console.error("[PROXY_FOCUS] Error calling focus()", e);
+    }
+
+    // Verify focus
+    if (document.activeElement === imeProxy) {
+      console.warn("[PROXY_FOCUS] verified successfully!");
+      setImeState('READY');
+    } else {
+      console.warn(`[PROXY_FOCUS] verification failed. Active element is ${document.activeElement?.tagName}`);
+      if (retryCount < 3) {
+        focusRetryTimer = window.setTimeout(() => {
+          attemptProxyFocus(retryCount + 1);
+        }, 50);
+      } else {
+        console.error("[PROXY_FOCUS] Failed to acquire proxy focus after 3 retries");
+      }
+    }
+  }
+
+  const REMOTE_IME_REFOCUS_DELAY_MS = 120;
   let audioStarted = false;
+
+  function isLocalEditableTarget(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    if (!el) return false;
+    if (el.classList?.contains("ime-proxy")) return false;
+
+    return (
+      el instanceof HTMLInputElement ||
+      el instanceof HTMLTextAreaElement ||
+      el.isContentEditable ||
+      Boolean(el.closest("[contenteditable='true']"))
+    );
+  }
 
   function createRuntimeGraph(): void {
     runtime = new StreamRuntime(location.host);
@@ -44,9 +107,7 @@
     imeBridge = new ImeBridge(runtime.control);
 
     // Maintain and restore input focus securely under user gesture contexts.
-    // Important: viewport taps are already sent through TouchRouter as normal
-    // touch events. The IME tapOutside message must not inject another tap;
-    // it is only a focus/IME cleanup signal.
+    // Viewport taps should only help focus acquisition and never infer dismiss intent.
     const gestureFocusListener = (event: PointerEvent): void => {
       if (!audioStarted) {
         audioStarted = true;
@@ -54,85 +115,71 @@
         runtime.startAudio();
       }
       const target = event.target as HTMLElement | null;
+      if (isLocalEditableTarget(target)) {
+        console.log("[ImeBridge] User clicked local input, skipping proactive remote focus");
+        return;
+      }
       const paneElement = target?.closest<HTMLElement>(".viewport-pane");
       const imeProxy = document.querySelector(
         ".ime-proxy",
       ) as HTMLTextAreaElement | null;
 
       if (paneElement) {
-        const paneId = paneElement.dataset.pane ?? "primary";
-        const viewport = Array.from($compositorStore.viewports.values()).find(
-          (v) => v.pane === paneId,
-        );
-
-        const mapped = viewport
-          ? mapViewportPoint(
-              event.clientX,
-              event.clientY,
-              paneElement.getBoundingClientRect(),
-              viewport.width,
-              viewport.height,
-              "contain",
-              false,
-            )
-          : null;
-
-        if (!mapped) {
-          console.warn("[ImeBridge] viewport tap could not be mapped", {
-            paneId,
-          });
-          return;
+        // Proactively grab text focus under direct User Gesture viewport touch context
+        // to bypass modern browser asynchronous programmatic focus restrictions.
+        if (imeProxy && document.activeElement !== imeProxy) {
+          console.warn("[ImeBridge] Proactively focusing ime-proxy under User Gesture viewport click context");
+          imeProxy.focus();
         }
-
-        canvasTapped = true;
-        lastCanvasTap = { pane: paneId, x: mapped.x, y: mapped.y };
-        if (canvasTappedTimeout) {
-          window.clearTimeout(canvasTappedTimeout);
-        }
-        canvasTappedTimeout = window.setTimeout(() => {
-          canvasTapped = false;
-        }, 350);
-
-        // console.log("[ImeBridge] viewport tapped", lastCanvasTap);
-
-        // If the remote editor is not active, this is just a normal map tap.
-        // Do not send tapOutside because the normal TouchRouter event is already
-        // going to the Android app. Sending both causes duplicate taps/double-tap zoom.
-        if (!remoteTextMode && !androidFocusStillEditable) {
-          return;
-        }
-
-        // console.log(
-        //   "[ImeBridge] Sending tapOutside cleanup from viewport pointerdown.",
-        // );
-
-        intentionalBlur = true;
-        suppressImeFocusUntil = performance.now() + 700;
-
-        runtime.control.send({
-          type: "ime",
-          op: "tapOutside",
-        });
-
-        imeProxy?.blur();
-
-        window.setTimeout(() => {
-          intentionalBlur = false;
-          lastCanvasTap = null;
-        }, 300);
         return;
       }
 
-      if (remoteTextMode) {
+      if (imeState !== 'IDLE') {
         if (imeProxy && document.activeElement !== imeProxy) {
-          // console.log(
-          //   "[ImeBridge] Restoring focus inside user gesture context",
-          // );
           imeProxy.focus();
         }
       }
     };
+
+    const globalKeydownListener = (event: KeyboardEvent): void => {
+      console.warn("[IME_MODE]", {
+        imeState,
+        activeElement: document.activeElement?.tagName,
+        key: event.key
+      });
+
+      const activeEl = document.activeElement;
+      if (isLocalEditableTarget(activeEl)) {
+        console.warn("[ImeBridge] skipping global keydown intercept for local input");
+        return;
+      }
+
+      const imeProxyElement = document.querySelector(
+        ".ime-proxy",
+      ) as HTMLTextAreaElement | null;
+
+      if (
+        remoteTextMode === true &&
+        imeState !== "READY" &&
+        document.activeElement !== imeProxyElement &&
+        !event.defaultPrevented
+      ) {
+        const key = event.key;
+        // Exclude system/modifier keys that should not be forwarded as input keys
+        const isExcluded = ['Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12'].includes(key);
+        if (!isExcluded) {
+          console.warn("[ImeBridge] global keydown forwarding fallback", {
+            key: event.key,
+            active: document.activeElement?.tagName,
+          });
+          imeBridge.keydown(event);
+          event.preventDefault();
+        }
+      }
+    };
+
     window.addEventListener("pointerdown", gestureFocusListener);
+    window.addEventListener("keydown", globalKeydownListener);
 
     // Focus or blur the hidden ime-proxy element based on Android IME focus session status
     let lastInstanceId: string | null = null;
@@ -147,33 +194,64 @@
         }
         lastInstanceId = nextId;
       }
-      if (msg.type === "ime_active") {
+      if (msg.type === "ime" && msg.op === "androidFocusChanged") {
+        const incomingSessionId = Number((msg as any).sessionId ?? 0);
         const active = (msg as any).focused === true;
+        const targetPkg = (msg as any).packageName;
 
-        if (active && performance.now() < suppressImeFocusUntil) {
-          // console.log(
-          //   "[ImeBridge] Suppressing ime_active=true during tapOutside cooldown",
-          // );
+        console.warn("[ANDROID_FOCUS] received event", {
+          focused: active,
+          packageName: targetPkg,
+          sessionId: incomingSessionId,
+          currentSessionId
+        });
+
+        // Ignore self package focus events to prevent loops/keyboard collapse
+        if (targetPkg === "com.castla.mirror" || targetPkg === "com.castla.mirror.debug") {
+          console.warn("[ANDROID_FOCUS] ignore self package focus event", targetPkg);
           return;
         }
 
-        remoteTextMode = active;
-        androidFocusStillEditable = active;
-        const imeProxy = document.querySelector(
-          ".ime-proxy",
-        ) as HTMLTextAreaElement | null;
-        if (imeProxy) {
-          if (active) {
-            // console.log(
-            //   "[ImeBridge] Focusing hidden ime-proxy input due to remote focus event",
-            // );
-            imeProxy.focus();
-          } else {
-            // console.log(
-            //   "[ImeBridge] Blurring hidden ime-proxy input due to remote blur event",
-            // );
-            imeProxy.blur();
+        // Stale event prevention (sessionId reverse prevention)
+        if (incomingSessionId < currentSessionId) {
+          console.warn("[ANDROID_FOCUS] stale event ignored due to older sessionId", {
+            incomingSessionId,
+            currentSessionId
+          });
+          return;
+        }
+        currentSessionId = incomingSessionId;
+
+        if (active) {
+          if (blurDebounceTimer) {
+            window.clearTimeout(blurDebounceTimer);
+            blurDebounceTimer = undefined;
           }
+          setImeState('ANDROID_FOCUSING');
+          requestAnimationFrame(() => {
+            attemptProxyFocus(0);
+          });
+        } else {
+          if (blurDebounceTimer) {
+            window.clearTimeout(blurDebounceTimer);
+          }
+          setImeState('BLUR_PENDING');
+          blurDebounceTimer = window.setTimeout(() => {
+            if (imeState === 'BLUR_PENDING') {
+              const imeProxy = document.querySelector(
+                ".ime-proxy",
+              ) as HTMLTextAreaElement | null;
+              if (imeProxy) {
+                try {
+                  imeProxy.blur();
+                } catch (e) {
+                  console.error("[ANDROID_FOCUS] Failed to blur imeProxy", e);
+                }
+              }
+              setImeState('IDLE');
+            }
+            blurDebounceTimer = undefined;
+          }, 200); // 200ms debounce
         }
       }
     });
@@ -181,6 +259,15 @@
     imeActiveCleanup = () => {
       msgCleanup();
       window.removeEventListener("pointerdown", gestureFocusListener);
+      window.removeEventListener("keydown", globalKeydownListener);
+      if (blurDebounceTimer) {
+        window.clearTimeout(blurDebounceTimer);
+        blurDebounceTimer = undefined;
+      }
+      if (focusRetryTimer) {
+        window.clearTimeout(focusRetryTimer);
+        focusRetryTimer = undefined;
+      }
     };
 
     frontendResetCleanup = runtime.onFrontendReset(() => {
@@ -296,6 +383,30 @@
       hasJMuxer: Boolean((window as Window & { JMuxer?: unknown }).JMuxer),
     });
   }
+
+  function handleProxyBlur(event: FocusEvent): void {
+    const related = event.relatedTarget as HTMLElement | null;
+
+    if (isLocalEditableTarget(related)) {
+      console.warn("[ImeBridge] Refocus recovery bypassed immediately via relatedTarget");
+      return;
+    }
+
+    window.setTimeout(() => {
+      if (isLocalEditableTarget(document.activeElement)) {
+        console.warn("[ImeBridge] Refocus recovery bypassed after delay via activeElement");
+        return;
+      }
+      if (imeState === 'READY' || imeState === 'ANDROID_FOCUSING' || imeState === 'RECOVERING') {
+        setImeState('RECOVERING');
+        window.setTimeout(() => {
+          if (imeState === 'RECOVERING') {
+            attemptProxyFocus(0);
+          }
+        }, REMOTE_IME_REFOCUS_DELAY_MS);
+      }
+    }, 60);
+  }
 </script>
 
 <main class="app-shell">
@@ -310,34 +421,56 @@
   {/if}
   <textarea
     class="ime-proxy"
-    on:compositionstart={(event) => imeBridge.compositionStart(event)}
-    on:compositionupdate={(event) => imeBridge.compositionUpdate(event)}
-    on:compositionend={(event) => imeBridge.compositionEnd(event)}
-    on:input={(event) => imeBridge.input(event)}
-    on:keydown={(event) => imeBridge.keydown(event)}
-    on:blur={(event) => {
-      if (remoteTextMode) {
-        // Prevent keyboard collapse by restoring focus asynchronously inside the microtask queue.
-        // We use a latency-aware buffer to wait and see if Android notifies us that the remote editor
-        // actually lost focus (ime_active -> focused=false). If so, we safely yield instead of refocusing.
-        setTimeout(() => {
-          if (
-            remoteTextMode &&
-            !intentionalBlur &&
-            !layoutTransitioning &&
-            androidFocusStillEditable &&
-            !canvasTapped
-          ) {
-            const target = event.target;
-            if (target && typeof target.focus === "function") {
-              // console.log(
-              //   "[ImeBridge] Restoring focus after blur buffer timeout",
-              // );
-              target.focus();
-            }
-          }
-        }, REMOTE_IME_REFOCUS_DELAY_MS);
+    on:compositionstart={(event) => {
+      const imeProxy = event.currentTarget;
+      if (imeState === 'READY' && document.activeElement === imeProxy) {
+        imeBridge.compositionStart(event);
+      } else {
+        event.preventDefault();
       }
     }}
+    on:compositionupdate={(event) => {
+      const imeProxy = event.currentTarget;
+      if (imeState === 'READY' && document.activeElement === imeProxy) {
+        imeBridge.compositionUpdate(event);
+      } else {
+        event.preventDefault();
+      }
+    }}
+    on:compositionend={(event) => {
+      const imeProxy = event.currentTarget;
+      if (imeState === 'READY' && document.activeElement === imeProxy) {
+        imeBridge.compositionEnd(event);
+      } else {
+        event.preventDefault();
+      }
+    }}
+    on:input={(event) => {
+      const imeProxy = event.currentTarget;
+      console.warn("[INPUT_FORWARD] input event", {
+        active: document.activeElement?.tagName,
+        imeState,
+        value: imeProxy.value,
+      });
+      if (imeState === 'READY' && document.activeElement === imeProxy) {
+        imeBridge.input(event);
+      } else {
+        event.preventDefault();
+      }
+    }}
+    on:keydown={(event) => {
+      const imeProxy = event.currentTarget;
+      console.warn("[INPUT_FORWARD] keydown event", {
+        active: document.activeElement?.tagName,
+        imeState,
+        value: imeProxy.value,
+      });
+      if (imeState === 'READY' && document.activeElement === imeProxy) {
+        imeBridge.keydown(event);
+      } else {
+        event.preventDefault();
+      }
+    }}
+    on:blur={handleProxyBlur}
   ></textarea>
 </main>

@@ -31,11 +31,6 @@ object TextInputSettingsHelper {
         return getSecureString(context, Settings.Secure.ENABLED_INPUT_METHODS)
     }
 
-    private fun getEnabledAccessibilityServices(context: Context): String {
-        return getSecureString(context, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
-    }
-
-
     /**
      * Checks if the Castla IME is enabled in the system's enabled input methods list.
      */
@@ -44,14 +39,12 @@ object TextInputSettingsHelper {
             val targetImeName = "${context.packageName}/com.castla.mirror.input.CastlaImeService"
             val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
             val enabledImeList = imm.enabledInputMethodList
-            if (enabledImeList != null) {
-                for (ime in enabledImeList) {
-                    if (ime.id == targetImeName) {
-                        return true
-                    }
+            for (ime in enabledImeList) {
+                if (ime.id == targetImeName) {
+                    return true
                 }
-                return false
             }
+            return false
         } catch (e: Exception) {
             Log.w(TAG, "Failed to check enabled IMEs via InputMethodManager", e)
         }
@@ -77,15 +70,6 @@ object TextInputSettingsHelper {
     }
 
     /**
-     * Checks if the Castla Focus Accessibility Service is enabled in the system settings.
-     */
-    fun isAccessibilityEnabled(context: Context): Boolean {
-        val targetAccessibilityName = "${context.packageName}/com.castla.mirror.input.CastlaFocusAccessibilityService"
-        val enabledServices = getEnabledAccessibilityServices(context).takeIf { it.isNotEmpty() } ?: return false
-        return enabledServices.contains(targetAccessibilityName)
-    }
-
-    /**
      * Shows the input method selection picker dialog.
      */
     fun showInputMethodPicker(context: Context) {
@@ -104,23 +88,6 @@ object TextInputSettingsHelper {
             context.startActivity(intent)
         } catch (e: Exception) {
             // Fallback to general settings if input method settings are not accessible directly
-            val fallbackIntent = Intent(Settings.ACTION_SETTINGS).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(fallbackIntent)
-        }
-    }
-
-    /**
-     * Navigates to the system settings screen to manage and enable accessibility services.
-     */
-    fun navigateToAccessibilitySettings(context: Context) {
-        val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        try {
-            context.startActivity(intent)
-        } catch (e: Exception) {
             val fallbackIntent = Intent(Settings.ACTION_SETTINGS).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
@@ -216,47 +183,6 @@ object TextInputSettingsHelper {
                 .remove(KEY_PREVIOUS_IME)
                 .putBoolean(KEY_RESTORE_PENDING, false)
                 .apply()
-        }
-    }
-
-    /**
-     * Programmatically enables the Castla Focus Accessibility Service silently.
-     * Works silently via Shizuku shell commands.
-     */
-    fun enableAccessibilityServiceSilently(context: Context, execCommand: (String) -> String?) {
-        val targetService = "${context.packageName}/com.castla.mirror.input.CastlaFocusAccessibilityService"
-        val enabledServices = getEnabledAccessibilityServices(context)
-
-        val services = enabledServices.split(":")
-            .filter { it.isNotBlank() && it != "null" }
-            .toMutableSet()
-
-        services.add(targetService)
-
-        // Force state churn to trigger AccessibilityManagerService to reload and bind the service immediately
-        execCommand("settings put secure enabled_accessibility_services null")
-        execCommand("settings put secure accessibility_enabled 0")
-
-        // Write the actual enabled service list and turn on accessibility
-        execCommand("settings put secure enabled_accessibility_services ${services.joinToString(":")}")
-        execCommand("settings put secure accessibility_enabled 1")
-    }
-
-    /**
-     * Programmatically disables the Castla Focus Accessibility Service silently while preserving others.
-     * Works silently via Shizuku shell commands.
-     */
-    fun disableAccessibilityServiceSilently(context: Context, execCommand: (String) -> String?) {
-        val targetService = "${context.packageName}/com.castla.mirror.input.CastlaFocusAccessibilityService"
-        val enabledServices = getEnabledAccessibilityServices(context)
-
-        val services = enabledServices.split(":")
-            .filter { it.isNotBlank() && it != "null" && it != targetService }
-
-        execCommand("settings put secure enabled_accessibility_services ${services.joinToString(":")}")
-
-        if (services.isEmpty()) {
-            execCommand("settings put secure accessibility_enabled 0")
         }
     }
 }

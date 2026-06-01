@@ -11,7 +11,6 @@ import android.content.IntentFilter
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.net.Uri
-import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -110,7 +109,6 @@ class MainActivity : AppCompatActivity() {
     // Text Input & IME states
     private var isImeEnabled by mutableStateOf(false)
     private var isImeSelected by mutableStateOf(false)
-    private var isAccessibilityEnabled by mutableStateOf(false)
     private var isCastlaImeActive by mutableStateOf(false)
 
     // Shizuku download state
@@ -158,18 +156,6 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.RequestPermission()
     ) { _ ->
         startMirrorService()
-    }
-
-    private val vpnPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == RESULT_OK) {
-            Log.i(TAG, "VPN permission GRANTED")
-            startMirrorService()
-        } else {
-            Log.w(TAG, "VPN permission DENIED")
-            clearPreparingState("VPN permission denied. WebCodecs mode requires VPN.", stopServiceIfNeeded = true)
-        }
     }
 
     private val notificationPermissionLauncher = registerForActivityResult(
@@ -309,21 +295,6 @@ class MainActivity : AppCompatActivity() {
                         val ok = shizukuSetup.ensureShizukuHardened()
                         Log.i(TAG, "ensureShizukuHardened (MainActivity): $ok")
                         evaluateUsbConfigAdvisory()
-
-                        // Programmatically enable CastlaFocusAccessibilityService silently at launch if permitted
-                        try {
-                            if (!com.castla.mirror.input.TextInputSettingsHelper.isAccessibilityEnabled(this@MainActivity)) {
-                                com.castla.mirror.input.TextInputSettingsHelper.enableAccessibilityServiceSilently(this@MainActivity) { cmd ->
-                                    shizukuSetup.exec(cmd)
-                                }
-                                Log.i(TAG, "Successfully pre-activated accessibility service silently.")
-                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                                    refreshTextInputPermissions()
-                                }
-                            }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Failed pre-activating accessibility service silently", e)
-                        }
                     }
                 }
             }
@@ -359,7 +330,6 @@ class MainActivity : AppCompatActivity() {
                         shizukuPermitted = shizukuPermitted,
                         isImeEnabled = isImeEnabled,
                         isImeSelected = isImeSelected,
-                        isAccessibilityEnabled = isAccessibilityEnabled,
                         isCastlaImeActive = isCastlaImeActive,
                         onRestoreIme = {
                             lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
@@ -387,9 +357,6 @@ class MainActivity : AppCompatActivity() {
                         },
                         onSelectIme = {
                             com.castla.mirror.input.TextInputSettingsHelper.showInputMethodPicker(this@MainActivity)
-                        },
-                        onEnableAccessibility = {
-                            com.castla.mirror.input.TextInputSettingsHelper.navigateToAccessibilitySettings(this@MainActivity)
                         },
                         shizukuDownloadProgress = shizukuDownloadProgress,
                         isHotspotActive = isHotspotActive,
@@ -560,10 +527,6 @@ class MainActivity : AppCompatActivity() {
 
         isImeSelected = runCatching {
             com.castla.mirror.input.TextInputSettingsHelper.isImeSelected(this)
-        }.getOrDefault(false)
-
-        isAccessibilityEnabled = runCatching {
-            com.castla.mirror.input.TextInputSettingsHelper.isAccessibilityEnabled(this)
         }.getOrDefault(false)
 
         isCastlaImeActive = runCatching {
@@ -1168,12 +1131,6 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // WebCodecs no longer requires Castla VPN mode.
-        // HTTPS is provided by https://castla.fbezita.com, and the backend redirects
-        // to the per-device local relay hostname.
-        // Keep VpnService code in the project for legacy experiments, but do not request
-        // VPN permission in the normal start flow.
-
         startMirrorService()
     }
 
@@ -1225,15 +1182,6 @@ class MainActivity : AppCompatActivity() {
             putExtra("EXTRA_CASTLA_DOMAIN", CASTLA_DOMAIN)
             putExtra(MirrorForegroundService.EXTRA_RELAY_PUBLISH_IP, reachableMirrorIp)
         }
-
-        // if (streamSettings.webCodecsEnabled && !streamSettings.vpnEnabled) {
-        //     Log.w(TAG, "WebCodecs is enabled but VPN domain mode is disabled. Browser access may fail without castla.fbezita.com DNS override.")
-        //     Toast.makeText(
-        //         this,
-        //         "WebCodecs requires VPN domain mode for castla.fbezita.com",
-        //         Toast.LENGTH_LONG
-        //     ).show()
-        // }
 
         startMirrorServiceDirect(
             intent = intent,
@@ -1323,7 +1271,6 @@ fun CastlaScreen(
     shizukuPermitted: Boolean = false,
     isImeEnabled: Boolean,
     isImeSelected: Boolean,
-    isAccessibilityEnabled: Boolean,
     isCastlaImeActive: Boolean = false,
     onRestoreIme: () -> Unit = {},
     onStartClick: () -> Unit,
@@ -1334,7 +1281,6 @@ fun CastlaScreen(
     onGrantShizukuPermission: () -> Unit = {},
     onEnableIme: () -> Unit,
     onSelectIme: () -> Unit,
-    onEnableAccessibility: () -> Unit,
     shizukuDownloadProgress: Float = -1f,
     isHotspotActive: Boolean = false,
     onToggleHotspot: () -> Unit = {},

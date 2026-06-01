@@ -134,6 +134,9 @@ class MirrorForegroundService : Service() {
     }
 
     private val binder = LocalBinder()
+    // ### 수정 시작 ###
+    @Volatile private var backFallbackLastTriggeredTime = 0L
+    // ### 수정 끝 ###
     private var mirrorServer: MirrorServer? = null
     fun getMirrorServer(): MirrorServer? = mirrorServer
 
@@ -201,8 +204,57 @@ class MirrorForegroundService : Service() {
     }
 
     fun onRemoteFocusLost() {
+        Log.i(TAG, "onRemoteFocusLost -> restoring user keyboard silently")
         mainHandler.removeCallbacks(imeTimeoutRunnable)
         restoreUserKeyboardSilently()
+    }
+
+    fun handleRemoteFocusHint(packageName: String?, inputType: Int, imeOptions: Int, privateImeOptions: String?) {
+        Log.i(TAG, "handleRemoteFocusHint: pkg=$packageName, inputType=$inputType, options=$imeOptions")
+        
+        remoteImeWatchdogJob?.cancel()
+        remoteImeWatchdogJob = null
+
+        val router = com.castla.mirror.input.CastlaTextInputRouter.getInstance()
+        val currentSessionId = router.getCachedImeFocusState().sessionId
+        val imeState = com.castla.mirror.input.ImeFocusState(
+            sessionId = currentSessionId,
+            packageName = packageName,
+            inputType = inputType,
+            imeOptions = imeOptions,
+            privateImeOptions = privateImeOptions,
+            isFocused = true,
+            timestamp = System.currentTimeMillis()
+        )
+        router.updateImeFocusState(imeState)
+
+        resetImeTimeoutTimer()
+    }
+
+    fun handleRemoteBlurHint() {
+        Log.i(TAG, "handleRemoteBlurHint received. Scheduling 500ms blur debounce & 3s watchdog.")
+        
+        remoteImeWatchdogJob?.cancel()
+        remoteImeWatchdogJob = serviceScope.launch(Dispatchers.Main) {
+            // 500ms hold interval
+            kotlinx.coroutines.delay(500L)
+            
+            val router = com.castla.mirror.input.CastlaTextInputRouter.getInstance()
+            val state = router.getCachedImeFocusState()
+            if (state.isFocused) {
+                Log.i(TAG, "Watchdog: 500ms blur delay expired. Setting IME registry focused = false.")
+                router.updateImeFocusState(state.copy(isFocused = false, timestamp = System.currentTimeMillis()))
+            }
+            
+            // Wait total 3 seconds (2500ms more)
+            kotlinx.coroutines.delay(2500L)
+            
+            val activeState = router.getCachedImeFocusState()
+            if (!activeState.isFocused) {
+                Log.w(TAG, "Watchdog: 3s of remote blur inactivity. Forcing restore phone keyboard.")
+                onRemoteFocusLost()
+            }
+        }
     }
     
     // Core map collection for symmetric pipeline extension
@@ -241,6 +293,7 @@ class MirrorForegroundService : Service() {
     private var audioOrchestrator: AudioCaptureOrchestrator? = null
     private var shizukuSetup: ShizukuSetup? = null
     private var remoteImeBridge: RemoteImeBridge? = null
+    private var remoteImeWatchdogJob: Job? = null
     private var mirroringMode: String = "FULL_SCREEN"
     private var targetPackage: String = ""
     private var browserConnectionListener: ((Boolean) -> Unit)? = null
@@ -1110,12 +1163,7 @@ class MirrorForegroundService : Service() {
         try { mirrorServer?.stop() } catch (_: Exception) {}
         mirrorServer = null
 
-        try {
-            stopService(Intent(this, com.castla.mirror.network.CastlaVpnService::class.java))
-            Log.i(TAG, "Stopped CastlaVpnService successfully during cleanup")
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to stop CastlaVpnService: ${e.message}")
-        }
+
 
         kotlinx.coroutines.runBlocking {
             Log.i(TAG, "[Cleanup] Sequentially releasing virtual hardware display devices inside blocking coroutine.")
@@ -1136,7 +1184,7 @@ class MirrorForegroundService : Service() {
                     com.castla.mirror.input.TextInputSettingsHelper.restorePreviousIme(this@MirrorForegroundService) { cmd ->
                         try { svc.execCommand(cmd) } catch (_: Exception) { null }
                     }
-                    Log.i(TAG, "Directly restored previous IME during performCleanup (Accessibility preserved).")
+                    Log.i(TAG, "Directly restored previous IME during performCleanup.")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed programmatically restoring previous IME during performCleanup", e)
@@ -1247,50 +1295,11 @@ class MirrorForegroundService : Service() {
                     applyBrowserLayoutUpdate(pipelinesArray)
                 }
                 server.setTextInputListener { injectText(it) }
-                server.setOnTapOutsideListener {
-                    serviceScope.launch(Dispatchers.IO) {
-                        val router = CastlaTextInputRouter.getInstance()
-                        val pipeline = pipelines["primary"]
-
-                        if (pipeline == null) {
-                            Log.w(TAG, "[tapOutside] No primary pipeline found.")
-                            return@launch
-                        }
-
-                        // 1. Check if editable focus existed recently (within 1.5 seconds) right before tapOutside detection
-                        val wasRecentlyEditable = router.isEditableFocusedRecently(1500L)
-
-                        Log.i(
-                            TAG,
-                            "[tapOutside] Received. wasRecentlyEditable=$wasRecentlyEditable (tap injection bypassed)."
-                        )
-
-                        // 2. Restore user keyboard silently and broadcast ime_active=false
-                        restoreUserKeyboardSilently()
-                        mirrorServer?.broadcastControlMessage(
-                            JSONObject().apply {
-                                put("type", "ime_active")
-                                put("focused", false)
-                                put("source", "tapOutside")
-                            }.toString()
-                        )
-
-                        // 3. Inject KEYCODE_BACK as fallback after delay to dismiss overlay
-                        if (wasRecentlyEditable) {
-                            kotlinx.coroutines.delay(250L)
-                            Log.i(TAG, "[tapOutside] Injecting KEYCODE_BACK as fallback to dismiss overlay for recently focused editor.")
-                            val displayId = pipeline.displayId
-                            runBinderSafe {
-                                val cmd =
-                                    if (displayId > 0) "input -d $displayId keyevent 4"
-                                    else "input keyevent 4"
-                                shizukuSetup?.privilegedService?.execCommand(cmd)
-                            }
-                            router.waitUntilEditableFocusCleared(timeoutMs = 350L)
-                        } else {
-                            Log.i(TAG, "[tapOutside] Skipped BACK key fallback (no recent editable focus).")
-                        }
-                    }
+                server.setRemoteFocusHintListener { packageName, inputType, imeOptions, privateImeOptions ->
+                    handleRemoteFocusHint(packageName, inputType, imeOptions, privateImeOptions)
+                }
+                server.setRemoteBlurHintListener {
+                    handleRemoteBlurHint()
                 }
                 server.setKeyEventListener { injectKeyEvent(it) }
                 server.setCompositionUpdateListener { bs, text -> injectCompositionUpdate(bs, text) }
@@ -1410,6 +1419,7 @@ class MirrorForegroundService : Service() {
                 kotlinx.coroutines.delay(200)
                 isInitialRebuildTriggered = true
                 val primary = pipelines["primary"] ?: return@launch
+                primary.markFreshLaunchPreparation("browser_connected")
                 val finalW = if (primary.width > 1) primary.width 
                              else if (primary.requestedWidth > 1) primary.requestedWidth
                              else primary.lastValidWidth.coerceAtLeast(720)
@@ -1421,6 +1431,7 @@ class MirrorForegroundService : Service() {
                 triggerPipelineRebuildWithPolicy(primary.name, finalW, finalH, force = true)
 
                 pipelines["secondary"]?.let { secondary ->
+                    secondary.markFreshLaunchPreparation("browser_connected_secondary")
                     if (paneVisibility["secondary"] != true) {
                         secondary.setTier(DisplayTier.SUSPENDED, "browser_connected_secondary_hidden")
                     }
@@ -1492,6 +1503,7 @@ class MirrorForegroundService : Service() {
         stopAppExitMonitor()
         pipelines.values.forEach { pipeline ->
             try { pipeline.touchInjector?.detachController("browser_disconnected") } catch (_: Exception) {}
+            pipeline.markFreshLaunchPreparation("browser_disconnected")
             pipeline.invalidateVd("browser_disconnected")
             try { pipeline.controller.release() } catch (_: Exception) {}
         }
@@ -1550,6 +1562,7 @@ class MirrorForegroundService : Service() {
         val router = CastlaTextInputRouter.getInstance()
         val (isValid, _) = router.validateConnectionForTarget(displayId)
         if (isValid) {
+            router.setRemoteTextDirty(true)
             val nextGenId = System.currentTimeMillis()
             remoteImeBridge?.dispatch(ImeCommand.CommitText(nextGenId, text))
         } else {
@@ -1572,6 +1585,7 @@ class MirrorForegroundService : Service() {
         val router = CastlaTextInputRouter.getInstance()
         val (isValid, _) = router.validateConnectionForTarget(displayId)
         if (isValid) {
+            router.setRemoteTextDirty(true)
             if (text.isEmpty() && backspaces == 0) {
                 remoteImeBridge?.dispatch(ImeCommand.FinishComposingText)
             } else {
@@ -1600,8 +1614,10 @@ class MirrorForegroundService : Service() {
         val router = CastlaTextInputRouter.getInstance()
         val (isValid, _) = router.validateConnectionForTarget(displayId)
         if (isValid && keyCode == 67) {
+            router.setRemoteTextDirty(true)
             remoteImeBridge?.dispatch(ImeCommand.DeleteSurroundingText(beforeLength = 1, afterLength = 0))
         } else if (isValid && keyCode == 66) {
+            router.setRemoteTextDirty(true)
             remoteImeBridge?.dispatch(ImeCommand.PerformEnter)
         } else {
             serviceScope.launch(compositionDispatcher) {
@@ -1638,20 +1654,16 @@ class MirrorForegroundService : Service() {
                             ) { cmd ->
                                 svc.execCommand(cmd)
                             }
-                            // Silent prep: ensure Castla IME is enabled in systems list silently via FSM ShizukuReady
+                            // Silent prep: set Castla IME as the default keyboard programmatically on startup
                             com.castla.mirror.input.ImeSwitchManager.sendEvent(
                                 this@MirrorForegroundService,
-                                com.castla.mirror.input.ImeEvent.ShizukuReady
+                                com.castla.mirror.input.ImeEvent.RemoteTextFocus
                             ) { cmd ->
                                 svc.execCommand(cmd)
                             }
-                            // Accessibility is fine to pre-activate silently to capture remote focuses
-                            com.castla.mirror.input.TextInputSettingsHelper.enableAccessibilityServiceSilently(this@MirrorForegroundService) { cmd ->
-                                svc.execCommand(cmd)
-                            }
-                            Log.i(TAG, "Programmatically prepared Castla IME and Accessibility silently on service connected.")
+                            Log.i(TAG, "Programmatically prepared Castla IME silently on service connected.")
                         } catch (e: Exception) {
-                            Log.e(TAG, "Failed programmatically preparing IME and Accessibility settings", e)
+                            Log.e(TAG, "Failed programmatically preparing IME settings", e)
                         }
                     }
                 }
@@ -1709,7 +1721,15 @@ class MirrorForegroundService : Service() {
                     }
                 }
                 if (hasVd && generation != -1L && displayId >= 0) {
-                    pipeline.restoreContentLocked(generation, displayId)
+                    try {
+                        svc.wakeUpDisplay(displayId)
+                        if (currentCodecMode != "mjpeg") {
+                            pipeline.videoEncoder?.requestKeyFrame()
+                        }
+                        CastlaTextInputRouter.getInstance().triggerRecoveryFocusNudge()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "[Shizuku] Soft recovery after reconnect failed for pane=${pipeline.name}", e)
+                    }
                 }
             }
         }
@@ -1800,7 +1820,15 @@ class MirrorForegroundService : Service() {
                     }
                 }
                 if (success && activeId >= 0 && generation != -1L) {
-                    pipeline.restoreContentLocked(generation, activeId)
+                    try {
+                        svc.wakeUpDisplay(activeId)
+                        if (currentCodecMode != "mjpeg") {
+                            pipeline.videoEncoder?.requestKeyFrame()
+                        }
+                        CastlaTextInputRouter.getInstance().triggerRecoveryFocusNudge()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "[VDRebuild] Soft recovery failed for pane=${pipeline.name}", e)
+                    }
                     Log.i(TAG, "[VDRebuild] Sub-session core mounted safely. Pane: (${pipeline.name}), Id: $activeId")
                 } else if (!success) {
                     Log.e(TAG, "[VDRebuild] Failed to create virtual display for pane (${pipeline.name})")
@@ -2020,7 +2048,10 @@ class MirrorForegroundService : Service() {
     }
 
     private fun verifySurfaceAndFallback(pipeline: MirroringPipeline, service: IPrivilegedService, displayId: Int, pkg: String, taskIds: List<Int>, packageOrComponent: String, extraKey: String?, extraValue: String?) {
+        // ### 수정 시작 ###
+        // Clean package check without hardcoded maps filter
         if (pkg.contains("com.castla.mirror") || pkg == "HOME" || pkg.isBlank()) return
+        // ### 수정 끝 ###
         
         // Cancel the previous active fallback watchdog job to refresh the 5500ms grace period.
         // This prevents race condition and false positives where a subsequent fast layout rebuild
@@ -2053,22 +2084,26 @@ class MirrorForegroundService : Service() {
                 // Already rendered static scenes (lastFrameRenderedTime > 0L) are excluded from recovery triggers.
                 val isStagnated = !isAbsent && (pipeline.lastFrameRenderedTime == 0L)
                 
-                // Trigger recovery ONLY when the app has failed to render its very first graphic frame (lastFrameRenderedTime == 0L).
-                // If a frame has already been rendered successfully (lastFrameRenderedTime > 0L), we MUST NOT trigger recovery,
-                // as any 'Absent' detection is a guaranteed false positive caused by OS task query sync delay or displayId mismatch.
-                val shouldRecover = (isAbsent || isStagnated) && (pipeline.lastFrameRenderedTime == 0L)
-                if (shouldRecover) {
-                    Log.w(TAG, "[Fallback] Self-healing recovery triggered for app: $pkg on Display $displayId (absent: $isAbsent, stagnated: $isStagnated). Executing cold launch.")
-                    for (taskId in taskIds) { 
-                        try { service.removeTask(taskId) } catch (e: Exception) {
-                            Log.w(TAG, "[Fallback] Failed to remove task $taskId: ${e.message}")
-                        } 
-                    }
-                    try { service.execCommand("am force-stop $pkg") } catch (_: Exception) {}
-                    val command = buildShellLaunchCommand(displayId, packageOrComponent, extraKey, extraValue, reorderToFront = false)
-                    val result = try { service.execCommand(command) } catch (e: Exception) { e.message ?: "Exception" }
-                    Log.i(TAG, "[Fallback] Self-healing cold start command executed. Result: $result")
+                // ### 수정 시작 ###
+                if (isStagnated && !isAbsent) {
+                    Log.i(TAG, "[Fallback] Watchdog skipped: app ($pkg) exists, first frame delayed. displayId=$displayId")
+                    return@launch
                 }
+                
+                if (isAbsent) {
+                    Log.w(TAG, "[Fallback] Watchdog detected missing task ($pkg) on Display $displayId; soft recovery only. Skipping force-stop / am start.")
+                    try {
+                        service.wakeUpDisplay(displayId)
+                        if (currentCodecMode != "mjpeg") {
+                            pipeline.videoEncoder?.requestKeyFrame()
+                        }
+                        val router = CastlaTextInputRouter.getInstance()
+                        router.triggerRecoveryFocusNudge()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "[Fallback] Soft recovery failed: ${e.message}")
+                    }
+                }
+                // ### 수정 끝 ###
             } catch (e: Exception) {
                 Log.e(TAG, "[Fallback] Critical error occurred inside surface verification coroutine: ${e.message}", e)
             } finally {
@@ -2110,6 +2145,8 @@ class MirrorForegroundService : Service() {
         @Volatile var displayTier: DisplayTier = if (name == "primary") DisplayTier.ACTIVE else DisplayTier.SUSPENDED
 
         var currentBitrate = 0; var currentApp = ""; var currentWebUrl: String? = null
+        @Volatile var requiresFreshLaunchPreparation = true
+        @Volatile var lastPreparedTargetPackage = ""
         @Volatile var lastTouchFocusRecoveryAt = 0L
         @Volatile var debugLaunchSeq = 0
         @Volatile var debugTopTaskMisses = 0
@@ -2188,6 +2225,21 @@ class MirrorForegroundService : Service() {
             Log.i(
                 TAG,
                 "[$name Pipeline] Input debug launch reset launchSeq=$launchSeq displayId=$displayId app=$currentApp"
+            )
+        }
+
+        fun markFreshLaunchPreparation(reason: String) {
+            requiresFreshLaunchPreparation = true
+            lastPreparedTargetPackage = ""
+            lastFrameRenderedTime = 0L
+            lastKeyframeRequestTime = 0L
+            activeFallbackJob?.cancel()
+            activeFallbackJob = null
+            mirrorServer?.clearCachedSpsPps(name)
+            mirrorServer?.pauseStream(name, displayId, width, height)
+            Log.i(
+                TAG,
+                "[$name Pipeline] Marked fresh launch preparation required. reason=$reason displayId=$displayId currentApp=$currentApp"
             )
         }
 
@@ -2476,6 +2528,7 @@ class MirrorForegroundService : Service() {
 
             // Reset frame indicator on viewport/encoder layout reconstruction to guarantee correct watchdog operation
             lastFrameRenderedTime = 0L
+            mirrorServer?.clearCachedSpsPps(name)
             mirrorServer?.beginStreamGeneration(name, displayId, w, h)
             var firstFrameMetadataSent = false
 
@@ -2486,8 +2539,6 @@ class MirrorForegroundService : Service() {
 
             var startEncoderTask: (() -> Unit)? = null
             val surface = if (currentCodecMode == "mjpeg") {
-                // Clear cached H.264 SPS/PPS packet to prevent leaking obsolete configurations to the new client socket.
-                mirrorServer?.clearCachedSpsPps(name)
                 val jpeg = JpegEncoder(w, h, fps = 15, quality = 65); val inputSurface = jpeg.createInputSurface(); jpegEncoder = jpeg
                 debugEncoderCreates += 1
                 startEncoderTask = {
@@ -2515,7 +2566,7 @@ class MirrorForegroundService : Service() {
                             if (displayId >= 0) {
                                 controller.getPrivilegedService()?.wakeUpDisplay(displayId)
                             }
-                            restoreContent()
+                            // Bypassed restoreContent() on keyframe request to prevent relaunch loop
                         } catch (e: Exception) {
                             Log.w(TAG, "[$name Pipeline] Failed to force graphics wakeup on MJPEG keyframe request", e)
                         }
@@ -2629,8 +2680,8 @@ class MirrorForegroundService : Service() {
                         markServiceMutation("launch_home_after_rebuild")
                         runBinderSafe { controller.launchHomeOnDisplay() }
                     } else if (isNewVd || forceSingle) {
-                        markServiceMutation("restore_content_after_rebuild")
-                        restoreContentLocked(gen, activeId)
+                        markServiceMutation("soft_recovery_after_rebuild")
+                        Log.i(TAG, "[$name Pipeline] Rebuild completed without automatic app relaunch. Waiting for explicit launch path.")
                     }
                     markServiceMutation("rebuild_end(newVd=$isNewVd,activeId=$activeId)")
                     Log.i(TAG, "[$name Pipeline] VirtualDisplay configured successfully. ID: $activeId (New VD: $isNewVd)")
@@ -2879,14 +2930,7 @@ class MirrorForegroundService : Service() {
                         TAG,
                         "[FocusTrace] inject_realign pane=$name displayId=$activeId action=$action app=$currentApp target=$relaunchTarget consecutive=$consecutiveInjectionRejects"
                     )
-                    try {
-                        launchComponent(
-                            relaunchTarget,
-                            forceColdStart = false,
-                            forceDisplayId = true,
-                            forceTaskRealign = true
-                        )
-                    } catch (_: Exception) {}
+                    Log.i(TAG, "[$name Pipeline] Injection recovery will not relaunch app automatically. Applying soft recovery only.")
                     try {
                         controller.getPrivilegedService()?.wakeUpDisplay(activeId)
                         controller.getPrivilegedService()?.execCommand("wm dismiss-keyguard")
@@ -2898,7 +2942,7 @@ class MirrorForegroundService : Service() {
                         if (currentCodecMode != "mjpeg") {
                             videoEncoder?.requestKeyFrame()
                         } else {
-                            restoreContent()
+                            // Bypassed restoreContent() on inject reject to prevent relaunch loop
                         }
                     } catch (_: Exception) {}
                     Log.w(
@@ -3006,6 +3050,7 @@ class MirrorForegroundService : Service() {
 
             val previousPkg = currentApp.substringBefore('/').substringBefore('?').substringBefore(' ').trim()
             val isNewApp = currentApp.substringBefore('/') != cleanPkg
+            val needsFreshLaunchPreparation = requiresFreshLaunchPreparation
             if (isNewApp || forceColdStart) {
                 lastFrameRenderedTime = 0L
             }
@@ -3018,7 +3063,7 @@ class MirrorForegroundService : Service() {
             val now = System.currentTimeMillis()
             val isFrameStreamingNormal = lastFrameRenderedTime > 0L && (now - lastFrameRenderedTime < 3000L)
             
-            if (isAlreadyActive && isEncoderActive && isFrameStreamingNormal && !forceColdStart && !forceTaskRealign && !isSelfHealingInProgress) {
+            if (isAlreadyActive && isEncoderActive && isFrameStreamingNormal && !needsFreshLaunchPreparation && !forceColdStart && !forceTaskRealign && !isSelfHealingInProgress) {
                 Log.i(TAG, "[$name Pipeline] Command Equivalence Guard activated. $cleanPkg is already running and active on display $displayId. Bypassing redundant launch command.")
                 // Keep-awake graphic trigger
                 val correctedDisplayId = if (displayId >= 0) displayId else controller.getDisplayId()
@@ -3078,9 +3123,9 @@ class MirrorForegroundService : Service() {
                 if (forceColdStart && cleanPkg != "HOME") { try { service.execCommand("am force-stop $cleanPkg") } catch (_: Exception) {} }
                 val originalDisplayId = try { runBinderSafe { service.getDisplayIdForPackage(cleanPkg) } ?: -1 } catch (_: Exception) { -1 }
                 val activeDisplayIds = pipelines.values.map { it.displayId }.filter { it >= 0 }
-                val targetDisplayId = if (!forceDisplayId && originalDisplayId >= 0 && activeDisplayIds.contains(originalDisplayId)) originalDisplayId else correctedDisplayId
+                val targetDisplayId = if (!needsFreshLaunchPreparation && !forceDisplayId && originalDisplayId >= 0 && activeDisplayIds.contains(originalDisplayId)) originalDisplayId else correctedDisplayId
 
-                Log.i(TAG, "[$name Pipeline] Symmetric task processing initialized -> Routing $cleanPkg to Display token: $targetDisplayId")
+                Log.i(TAG, "[$name Pipeline] Symmetric task processing initialized -> Routing $cleanPkg to Display token: $targetDisplayId freshLaunchPrep=$needsFreshLaunchPreparation previousPkg=$previousPkg lastPrepared=$lastPreparedTargetPackage")
 
                 val matchingTaskIds = try { runBinderSafe(1000L) { service.getTaskIdsForPackage(cleanPkg).toList() } ?: emptyList() } catch (_: Exception) { emptyList() }
                 val isWarmStart = matchingTaskIds.isNotEmpty()
@@ -3096,6 +3141,9 @@ class MirrorForegroundService : Service() {
                     markServiceMutation("launch_component_warm_start")
                     // Trigger adaptive task residency-aware wakeup asynchronously instead of waiting on hardcoded timings
                     executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
+                    if (needsFreshLaunchPreparation) {
+                        mirrorServer?.onKeyframeRequest(name, "fresh_launch_prepare")
+                    }
                     
                     // Trigger the 4-second frame-based watchdog for graceful recovery on warm start layout transition
                     verifySurfaceAndFallback(
@@ -3109,6 +3157,8 @@ class MirrorForegroundService : Service() {
                         extraValue = extraValue
                     )
 
+                    requiresFreshLaunchPreparation = false
+                    lastPreparedTargetPackage = cleanPkg
                     currentApp = packageOrComponent
                     return@withContext true
                 }
@@ -3121,7 +3171,7 @@ class MirrorForegroundService : Service() {
                 // which locks display focus and causes a perpetual touch injection rejection loop.
                 val isAlreadyActiveApp = cleanPkg == currentApp.substringBefore('/')
                 val isEncoderActive = if (currentCodecMode == "mjpeg") jpegEncoder != null else videoEncoder != null
-                if (forceTaskRealign && isAlreadyActiveApp && isEncoderActive) {
+                if (forceTaskRealign && isAlreadyActiveApp && isEncoderActive && !needsFreshLaunchPreparation) {
                     Log.w(TAG, "[$name Pipeline] Realignment requested for active app $cleanPkg. Bypassing native cold start to prevent WMS focus transition lock.")
                     executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
                     currentApp = packageOrComponent
@@ -3166,10 +3216,8 @@ class MirrorForegroundService : Service() {
                 if (!isWarmStart || forceColdStart) {
                     markServiceMutation("launch_component_cold_start")
                     executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
-                    if (currentCodecMode != "mjpeg") {
-                        markServiceMutation("launch_component_keyframe")
-                        videoEncoder?.requestKeyFrame()
-                    }
+                    markServiceMutation("launch_component_keyframe")
+                    mirrorServer?.onKeyframeRequest(name, if (needsFreshLaunchPreparation) "fresh_launch_prepare" else "launch_component")
                 }
                 
                 // Trigger the 4-second frame-based watchdog for graceful recovery on cold start layout transition
@@ -3184,6 +3232,8 @@ class MirrorForegroundService : Service() {
                     extraValue = extraValue
                 )
 
+                requiresFreshLaunchPreparation = false
+                lastPreparedTargetPackage = cleanPkg
                 currentApp = packageOrComponent; return@withContext true
             } catch (e: Exception) { Log.e(TAG, "[$name Pipeline] Component push crashed inside system shell launcher layer.", e); return@withContext false }
         }
@@ -3237,7 +3287,9 @@ class MirrorForegroundService : Service() {
 
         suspend fun launchStandard(launchTarget: String, forceDisplayId: Boolean = false) {
             val resolvedTarget = normalizeLaunchTarget(launchTarget)
-            val launched = if (displayId >= 0) launchComponent(resolvedTarget, forceDisplayId = forceDisplayId) else false
+            // ### 수정 시작 ###
+            // Force task realignment on standard launching requests from web to bypass the Command Equivalence Guard
+            val launched = if (displayId >= 0) launchComponent(resolvedTarget, forceDisplayId = forceDisplayId, forceTaskRealign = true) else false
             if (!launched) {
                 currentApp = resolvedTarget; currentWebUrl = null; isVideoApp = false
                 serviceScope.launch(Dispatchers.IO) {
@@ -3251,13 +3303,14 @@ class MirrorForegroundService : Service() {
                             newWidth = if (requestedWidth > 0) requestedWidth else fallbackW,
                             newHeight = if (requestedHeight > 0) requestedHeight else fallbackH
                         )
-                        if (displayId >= 0) launchComponent(resolvedTarget, forceDisplayId = forceDisplayId)
+                        if (displayId >= 0) launchComponent(resolvedTarget, forceDisplayId = forceDisplayId, forceTaskRealign = true)
                     } catch (_: Exception) {}
                 }
             } else {
                 currentApp = resolvedTarget; currentWebUrl = null; isVideoApp = false
                 adaptiveBitrateManager.rebalanceBitrates()
             }
+            // ### 수정 끝 ###
         }
 
         suspend fun launchWeb(activityClassName: String, url: String) {

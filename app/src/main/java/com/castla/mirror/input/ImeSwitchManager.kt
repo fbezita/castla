@@ -146,10 +146,7 @@ object ImeSwitchManager {
 
     private fun handleCastlaActive(context: Context, event: ImeEvent, execCommand: (String) -> String?) {
         when (event) {
-            ImeEvent.RemoteTextBlur,
-            ImeEvent.PhoneEditableFocus,
-            ImeEvent.MirroringStopped,
-            ImeEvent.Timeout -> {
+            ImeEvent.MirroringStopped -> {
                 currentState = ImeState.RESTORING_PREVIOUS
                 performRestoreFlow(context, execCommand)
             }
@@ -202,7 +199,7 @@ object ImeSwitchManager {
                 enabled.add(targetIme)
                 val newEnabledList = enabled.joinToString(":")
                 Log.i(TAG, "[FSM] Enabling Castla IME preserving existing: $newEnabledList")
-                execCommand("settings put secure enabled_input_methods $newEnabledList")
+                execCommand("settings put secure enabled_input_methods '$newEnabledList'")
             }
         } catch (e: Exception) {
             Log.e(TAG, "[FSM] Failed during silent enable prep", e)
@@ -240,7 +237,7 @@ object ImeSwitchManager {
 
             currentState = ImeState.SWITCHING_TO_CASTLA
             Log.i(TAG, "[FSM] Switching default_input_method to Castla IME '$targetIme'")
-            execCommand("settings put secure default_input_method $targetIme")
+            execCommand("settings put secure default_input_method '$targetIme'")
             
             currentState = ImeState.CASTLA_ACTIVE
         } catch (e: Exception) {
@@ -261,7 +258,7 @@ object ImeSwitchManager {
 
                 if (currentIme == targetIme || currentIme == CASTLA_IME_ID) {
                     Log.i(TAG, "[FSM] Restoring previous default IME '$previousIme' programmatically.")
-                    val result = execCommand("settings put secure default_input_method $previousIme")
+                    val result = execCommand("settings put secure default_input_method '$previousIme'")
                     if (result == null) {
                         Log.e(TAG, "[FSM] Restore command failed (returned null). Retaining backup for self-healing.")
                         currentState = ImeState.ERROR
@@ -302,7 +299,7 @@ object ImeSwitchManager {
 
                 if (!previousIme.isNullOrEmpty()) {
                     Log.i(TAG, "[FSM] Self-healing: Restored previous default IME to '$previousIme'")
-                    val result = execCommand("settings put secure default_input_method $previousIme")
+                    val result = execCommand("settings put secure default_input_method '$previousIme'")
                     if (result == null) {
                         Log.e(TAG, "[FSM] Self-healing restore command failed (returned null). Retaining backup.")
                         currentState = ImeState.ERROR

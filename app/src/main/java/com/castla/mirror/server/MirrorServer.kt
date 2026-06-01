@@ -311,7 +311,8 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     private var onCompositionUpdateListener: ((Int, String) -> Unit)? = null
     private var onAudioCodecListener: ((String) -> Unit)? = null
     private var onLayoutUpdateListener: ((org.json.JSONArray) -> Unit)? = null
-    private var onTapOutsideListener: (() -> Unit)? = null
+    private var onRemoteFocusHintListener: ((String?, Int, Int, String?) -> Unit)? = null
+    private var onRemoteBlurHintListener: (() -> Unit)? = null
     private var onPrimaryKeyframeRequest: ((Boolean) -> Unit)? = null
     private var onSecondaryKeyframeRequest: ((Boolean) -> Unit)? = null
     private var networkCongestionListener: (() -> Unit)? = null
@@ -362,8 +363,12 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         onTextInputListener = listener
     }
 
-    fun setOnTapOutsideListener(listener: () -> Unit) {
-        onTapOutsideListener = listener
+    fun setRemoteFocusHintListener(listener: (String?, Int, Int, String?) -> Unit) {
+        onRemoteFocusHintListener = listener
+    }
+
+    fun setRemoteBlurHintListener(listener: () -> Unit) {
+        onRemoteBlurHintListener = listener
     }
 
     fun setKeyEventListener(listener: (Int) -> Unit) {
@@ -823,10 +828,6 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         onTouchListener?.invoke(event)
     }
 
-    fun onTapOutside() {
-        onTapOutsideListener?.invoke()
-    }
-
     fun onTouchReset() {
         onTouchResetListener?.invoke()
     }
@@ -925,6 +926,14 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     
     fun onTextInput(text: String) {
         onTextInputListener?.invoke(text)
+    }
+
+    fun onRemoteFocusHint(packageName: String?, inputType: Int, imeOptions: Int, privateImeOptions: String?) {
+        onRemoteFocusHintListener?.invoke(packageName, inputType, imeOptions, privateImeOptions)
+    }
+
+    fun onRemoteBlurHint() {
+        onRemoteBlurHintListener?.invoke()
     }
     
     fun onKeyEvent(keyCode: Int) {

@@ -448,7 +448,25 @@ sequenceDiagram
 - **해결 메커니즘**:
   - 기존 `TextInputSettingsHelper.kt` 에서 시스템 보안 설정(`Settings.Secure`)의 `enabled_input_methods` 문자열 키를 직접 리플렉션이나 권한 없이 읽어가려던 레거시 탐색 방식을 완전히 폐기했습니다.
   - 대신 안드로이드가 표준으로 제공하며 targetSdkVersion 34+ 보안 컨텍스트에서도 완벽하게 승인되는 **`InputMethodManager` API**를 전면 도입하여 디바이스에 활성화된 입력기 리스트(`enabledInputMethodList`)를 실시간으로 안전하게 쿼리하도록 리팩토링했습니다.
-  - 이를 통해 어떠한 안드로이드 보안 가드 환경에서도 시스템 예외를 0%로 통제하고 텍스트 검색 포커스 및 터치 해제 입력(`tapOutside` ➔ `ime_active=false`)을 무결하게 동작시켰습니다.
+  - 이를 통해 어떠한 안드로이드 보안 가드 환경에서도 시스템 예외를 0%로 통제하고 원격 텍스트 포커스 획득, 조합 입력, 세션 동기화를 안정적으로 유지했습니다.
+
+### 15.2.a. `tapOutside` 기능 제거 및 IME 단순화 (2026-06-01)
+- **정책 변경**: 안정성과 유지보수성을 우선하기 위해 `tapOutside` 기능을 시스템에서 완전히 제거했습니다.
+- **입력 제어 아키텍처 전환**: Accessibility 기반 입력 제어와 포커스 추정에서 벗어나 IME 세션 기반 아키텍처를 현재 운영 경로의 기준으로 삼았습니다.
+- **현재 운영 원칙**:
+  - Accessibility 의존 포커스 감지는 더 이상 현재 remote editable 상태를 판정하는 주 경로가 아닙니다.
+  - 원격 editable 상태는 `androidFocusChanged`, `onStartInput`, `onFinishInput`, `sessionId` 기반 stale-event protection으로 동기화됩니다.
+  - 포커스 복구와 입력 라우팅은 local input bypass, IME proxy focus, 세션 검증 중심으로 단순화되었습니다.
+- **프론트엔드 단순화**:
+  - viewport 제스처를 이용해 원격 검색창 dismiss 의도를 추론하던 로직을 삭제했습니다.
+  - IME FSM에서 `TAP_OUTSIDE` 상태를 제거하고 `IDLE`, `ANDROID_FOCUSING`, `READY`, `BLUR_PENDING`, `RECOVERING`만 유지합니다.
+- **백엔드 단순화**:
+  - `MirrorServer` / `ControlSocket` / `MirrorForegroundService`의 tapOutside listener 경로를 제거했습니다.
+  - viewport 탭 때문에 `finishComposingText()` 또는 `requestHideSelf()`를 강제 실행하지 않습니다.
+- **보존 정책**:
+  - `BACK` fallback, `force-stop`, relaunch loop, `restoreContent()` relaunch는 다시 추가하지 않습니다.
+  - fresh launch preparation, SPS/PPS clearing, soft watchdog recovery 등 안정화 수정은 그대로 유지합니다.
+  - 미러링 재시작 직후에는 stale launch state 때문에 첫 Maps 실행이 막히지 않도록 fresh display binding / keyframe preparation / same-app first-launch bypass를 유지합니다.
 
 ### 15.3. MirrorServer Stop 스레드 백그라운드 오프로딩
 - **문제 현상**: 미러링 스트리밍을 종료(`stop`)하거나 소멸(`onDestroy`)할 때, 동기적으로 수행되던 SSL 소켓 및 웹소켓 세션 닫기 작업이 윈도우 매니저의 Surface 해제 락과 맞물려 메인 UI 스레드를 최대 수 초간 얼려버리거나 드물게 리부팅을 유발하는 병목이 존재했습니다.
@@ -495,7 +513,5 @@ sequenceDiagram
 - **test.http 테스트 유틸리티 갱신**:
   - [test.http](file:///C:/project/private/tesla_manager/manager/test/test.http) 파일 내의 테스트 변수들 중 기기별로 흩어져 있던 `@CASTLA_DEVICE_HOSTNAME` 및 `@CASTLA_DEVICE_RELAY_URL` 예시 값을 실제 수렴 도메인 아키텍처 규격(`c-10-0-0-50...`)에 최적 합치되도록 개편했습니다.
   - 신설된 IP 역추적 API를 간편하게 연동 테스트할 수 있도록 `C1.1. Device ID 기반 IP 주소 및 릴레이 정보 조회` Mock 통신 시나리오 템플릿을 새롭게 편입시켰습니다.
-
-
 
 

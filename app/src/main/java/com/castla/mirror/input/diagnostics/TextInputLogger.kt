@@ -2,7 +2,7 @@ package com.castla.mirror.input.diagnostics
 
 import android.util.Log
 import android.view.inputmethod.EditorInfo
-import com.castla.mirror.input.EditableFocusState
+import com.castla.mirror.input.ImeFocusState
 import com.castla.mirror.input.CastlaTextInputRouter
 
 /**
@@ -65,8 +65,8 @@ class TextInputLogger private constructor() {
         Log.i(TAG, "[TEXT_RX] actionType=$actionType, text='$text', deleteCount=$deleteCount, rxTime=$rxTimestamp")
     }
 
-    fun logFocus(state: EditableFocusState) {
-        Log.i(TAG, "[FOCUS] isEditable=${state.hasEditableFocus}, pkg=${state.packageName}, class=${state.className}, select=[${state.selectionStart}, ${state.selectionEnd}], windowId=${state.windowId}")
+    fun logFocus(state: ImeFocusState) {
+        Log.i(TAG, "[FOCUS_IME] isFocused=${state.isFocused}, pkg=${state.packageName}, sessionId=${state.sessionId}")
     }
 
     fun logImeLifecycle(event: String, info: EditorInfo? = null) {
@@ -94,8 +94,8 @@ class TextInputLogger private constructor() {
         Log.e(TAG, "[FAILURE_CLASSIFIED] category=${category.name}, details='$details'")
         
         // Push error to Fingerprint Database automatically
-        val focusState = CastlaTextInputRouter.getInstance().getCachedFocusState()
-        val activePkg = focusState?.packageName ?: "unknown"
+        val focusState = CastlaTextInputRouter.getInstance().getCachedImeFocusState()
+        val activePkg = focusState.packageName ?: "unknown"
         FailureFingerprintDatabase.getInstance().recordFailure(activePkg, category, details)
     }
 }

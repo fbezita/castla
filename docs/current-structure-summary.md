@@ -1,6 +1,6 @@
 # Castla Current Structure Summary
 
-Last updated: 2026-05-26
+Last updated: 2026-06-01
 
 This document is a handoff summary for the next refactoring pass.
 
@@ -16,6 +16,18 @@ The intended ownership model is still:
 - The browser owns split composition, launcher UX, pane decoder lifecycle, and input shaping before packets are sent.
 - Layout is browser-authored and Android-interpreted.
 - Pane-local stream recovery is preferred over broad session resets.
+
+## Current Migration Summary
+
+The current production path reflects a broader input/control migration, not just a small bug-fix pass:
+
+- **Accessibility-driven input control -> IME architecture**: remote text control is now centered on IME lifecycle events instead of accessibility-side focus heuristics.
+- **Accessibility-dependent focus detection removed from the live path**: Castla no longer relies on viewport dismiss inference or accessibility fallback logic to decide whether remote editing is active.
+- **IME session-based focus tracking is active**: `sessionId`-aware `onStartInput`, `onFinishInput`, and `androidFocusChanged` signals now drive editable focus state.
+- **Remote editable state synchronization exists**: frontend and Android coordinate explicit editable/focus state rather than inferring dismiss intent from viewport taps.
+- **Focus recovery and input routing are simpler**: local input bypass remains, stale-event protection remains, but dismiss-specific gesture guards and related fallback behavior are gone.
+- **Maps interaction stability improved**: Google Maps drag/pan is no longer exposed to outside-tap misclassification.
+- **Mirroring restart stale-state protection exists**: first launch after restart performs fresh launch preparation so stale display/stream/launch state does not block Maps or same-app launch preparation.
 
 ## Live Runtime Entry Points
 
@@ -57,6 +69,24 @@ The `app/src/main/java/com/castla/mirror/compositor/` tree still exists, but the
 - display wakeup and keyframe nudges
 - fallback and self-healing hooks
 - app-mounted verification
+
+### Current Launch / Restart Stability Policy
+
+The current live policy is intentionally conservative:
+
+- **No automatic app relaunch during recovery**: watchdog, keyframe recovery, touch-focus recovery, decoder recovery, and rebuild recovery must not force-stop or relaunch apps.
+- **Fresh launch preparation exists**: after browser reconnect, mirroring restart, or pipeline restart, each pipeline marks `requiresFreshLaunchPreparation = true`.
+- **First launch after restart is special**:
+  - stale launch/display/stream state is cleared
+  - cached SPS/PPS is cleared
+  - stream metadata is reset to `streamReady=false / firstFrameReady=false` before the next generation begins
+  - same-app launch dedupe is bypassed once so the first app after restart gets a fresh VD/display/stream binding even if it matches the previous package
+- **Soft recovery only**:
+  - wake display
+  - request keyframe / IDR
+  - replay cached SPS/PPS if available
+  - focus nudge where applicable
+- **No `restoreContent()` relaunch policy**: rebuild and recovery paths no longer use app relaunch as a generic repair tool.
 
 Important service-wide pieces:
 
@@ -137,6 +167,15 @@ Recent mitigation applied:
 - repeated rejects within a short window are required before `requestKeyframeAfterReject`
 
 This reduced noisy recovery, but the path is still structurally coupled to Android rebuild behavior.
+
+### Current Stream Generation Rules
+
+The active generation model now assumes:
+
+- every rebuild / restart begins a fresh stream generation
+- `firstFrameReady` remains `false` until the first decoded frame of that generation is actually broadcast
+- browser layout should remain pending until the generation's first frame is confirmed
+- cached SPS/PPS is cleared before encoder rebuild and replayed again only from fresh encoder output or explicit keyframe request paths
 
 ## Rebuild Path Today
 
@@ -367,18 +406,43 @@ If the next session starts from one sentence, it should be this:
 
 > The hardreset touch freeze was fixed by remapping browser pointer ids to Android-local pointer ids inside `TouchInjector`; the remaining touch protections worth keeping are the existing move dedup/throttle guard and the rebuild defer guard while touch is active.
 
-### 2026-05-27 IME & Service Cleanup Handoff
+### 2026-06-01 IME Simplification & tapOutside Removal
 
-The virtual IME lifecycle stabilization and native binder thread crashes are now fully resolved.
+The `tapOutside` feature was intentionally removed from the system.
 
-#### 1) Virtual IME & Google Maps Search Overlay Dismiss Fix
-- **Sender Unification**: `tapOutside` is now sent solely from `gestureFocusListener` on the frontend (`App.svelte`) upon viewport touch `pointerdown` inside a user gesture context. Sending `tapOutside` during `on:blur` was removed to prevent duplicate triggers.
-- **Coordinates Reversion**: The `tapOutside` WebSocket protocol has been reverted to a plain, coordinate-less message `{ type: "ime", op: "tapOutside" }` to guarantee complete interface compatibility and prevent compile-time type mismatches on Android.
-- **Stale-Proof Focus Check & Back Fallback Nudge**:
-  - Tapping outside the search box immediately blurs the hidden `imeProxy` and sends `tapOutside`.
-  - On the Android backend, since the focus clears before the message is received, `AccessibilityFocusState` is queried to check if the editor had editable focus within the last `1.5 seconds` (`isEditableFocusedRecently(1500L)`).
-  - If so, it restores the user's default keyboard silently and injects `KEYCODE_BACK` (`input keyevent 4`) after a `250ms` delay, cleanly dismissing custom/translucent search overlays like Google Maps. Normal map scrolls do not trigger this.
-- **Svelte Compile Restored**: Corrected Vite production compile block inside `App.svelte` by resolving mismatched curly braces inside the `blur` event handler's `setTimeout` scope.
+#### 1) Remote IME Policy
+- **IME-first architecture**: remote text entry now follows IME lifecycle synchronization rather than accessibility-dependent focus inference.
+- **No viewport-based dismiss inference**: Castla no longer tries to guess that a viewport tap means "dismiss the remote search box" or "exit text mode".
+- **No `tapOutside` control message**: The frontend does not emit `{ type: "ime", op: "tapOutside" }` anymore.
+- **Simplified FSM**: The frontend IME state machine now only keeps `IDLE`, `ANDROID_FOCUSING`, `READY`, `BLUR_PENDING`, and `RECOVERING`.
+- **Focus acquisition only**: Viewport `pointerdown` is used only to help `imeProxy` focus acquisition under browser user-gesture rules.
+- **Local input isolation remains**: Local browser inputs still bypass Android key forwarding and `imeProxy` focus stealing.
+- **Session-driven editable sync**: remote editable state is synchronized through `androidFocusChanged`, `onStartInput`, `onFinishInput`, and stale-session protection.
+
+#### 2) Stability Rationale
+- **Maps drag/pan safety**: Google Maps drag/pan can no longer be misclassified as an outside-tap dismiss gesture because that entire path no longer exists.
+- **No dismiss-side races**: Removing `tapOutside` also removes `requestHideSelf()` timing races, dismiss echo suppression, and cooldown/gesture bookkeeping.
+- **No BACK fallback**: The old `KEYCODE_BACK`-based dismiss fallback is gone and must not be reintroduced.
+
+#### 3) Android Backend Behavior
+- **TapOutside listener removed**: `MirrorServer` / `ControlSocket` / `MirrorForegroundService` no longer carry a tapOutside listener path.
+- **No dismiss-side IME forcing**: Android no longer calls `finishComposingText()` or `requestHideSelf()` in response to viewport taps.
+- **Session-driven state only**: Remote IME focus/blur state is driven by normal `androidFocusChanged`, `onStartInput`, and `onFinishInput` lifecycle events.
+
+### 2026-06-01 Restart / Maps First-Launch Stabilization
+
+Mirroring restart now carries an explicit stale-state reset policy:
+
+- **Fresh launch preparation on reconnect/restart**:
+  - `currentApp` may still remember the previous target package, but the next launch is still treated as needing fresh preparation.
+  - stale display affinity must not cause same-app launch short-circuiting on the first launch after restart.
+  - cached target package / last-launched state must not suppress first-launch preparation after restart.
+- **Maps-first launch protection**:
+  - when mirroring is stopped and started again, the first Google Maps launch must receive a fresh display binding, keyframe/IDR request, SPS/PPS replay opportunity, and stream generation reset.
+  - this is fixed without `force-stop`, `BACK`, or `am start` retry loops.
+- **Warm-start path remains allowed**:
+  - existing tasks may still be moved to the current VD/display
+  - but the first post-restart launch bypasses stale same-app guards so preparation is not skipped.
 
 #### 2) Synchronous Service onDestroy() Cleanup & Mutex Crash Prevention
 - **Synchronous Cleanup Execution**: Refactored the asynchronous thread dispatch inside `onDestroy()` into a **synchronous sequential cleanup** (`performCleanup("service_ondestroy")`). This guarantees all native resource tear-downs are completed before the Android system terminates (SIGKILL) the service process.
@@ -517,6 +581,9 @@ The hot restart stream recovery loop and embedded server SSL configurations have
   - 성공 시 즉시 뷰어로 무중단 전환, 실패(앱 강제 종료/방전 등) 시 1초 내에 **"Castla Offline (폰에서 기동해주세요)"** 오프라인 전용 수려한 가이드 화면(`renderNoActiveDevices`)으로 자동Fallback합니다.
   - 이로써 외부 망을 거치지 않는 로컬 통신을 실현하여 **폰의 모바일 데이터를 단 1바이트도 소모하지 않는 완벽한 데이터 제로 세이프티**를 달성했습니다.
   - `castla.service.ts` 의 `getActiveRelays()` 내에 **15분 만료(TTL) 필터 가드**를 장착하여, 기기의 오프라인 감지 누락 시에도 낡은 좀비 세션들이 목록에 누적되지 않도록 원천 세정했습니다.
+  - **[게이트웨이 무한 로딩 및 브라우저 캐시 완치]**:
+    - 자가 서명 SSL 인증서 미신뢰 및 사설 IP 라우팅 블랙홀로 인해 브라우저의 소켓 악수 단계에서 락이 걸려 `AbortController.abort()` 신호가 통하지 않고 검은 화면에 갇히던 결함을 완치했습니다. `1200ms` 만료 시 무조건 오프라인 가이드 UI를 강제 노출하는 **이중 안전장치(Dual-Safe Fallback)**를 스크립트에 탑재하고, 1회 수동 예외 승인을 위한 **`수동으로 연결 (최초 접속 인증서 허용)`** A 태그 링크를 직관적으로 증설했습니다.
+    - 브라우저(특히 테슬라 및 모바일 Chromium)가 302 리다이렉션과 게이트웨이 HTML 페이지 자체를 악질적으로 강력 로컬 캐싱하여, 새로운 코드로 배포한 뒤 F5를 눌러도 낡은 무한 펜딩 스크립트만 메모리에서 무한 호출되던 캐시 오염을 해소하기 위해, NestJS 진입 라우터 입구에 **`Cache-Control: no-store, no-cache, must-revalidate, max-age=0` 및 Pragma, Expires 3대 캐시 무력화 헤더를 주입**하여 매 접속 시 서버로부터 최신 HTML을 100% 강제 긁어오도록 완벽히 통제했습니다.
 
 ### 2. Sidedrawer 터치 스크롤 락 장애 및 드래그 UX 종합 완치
 * **문제 현상**: 사이드 드로어 내에 앱 아이콘이 적체되어 늘어날 때, 위아래로 터치 및 마우스 휠 스크롤이 완전히 마비되는 현상과 더불어 드래그 시 우측 오버레이가 가려지는 UI 버그가 있었습니다.
@@ -532,5 +599,3 @@ The hot restart stream recovery loop and embedded server SSL configurations have
     - 터치 다운 후 슥 밀어 네이티브 스크롤이 시작되는 즉시 브라우저가 **`pointercancel`** 이벤트를 쏴서 터치 세션을 종료합니다. 이 이벤트가 `pointerup`과 혼선되어 `endPress`를 태우면서, 미처 움직이기 전이라 숏클릭 조건을 타서 앱이 즉시 실행되던 마지막 논리 구멍을 적발했습니다.
     - **해결**: 앱 기동 분기를 100% 원천 제거하고 오직 안전한 초기화만 실행하는 **`cancelPress` 전용 취소 핸들러**를 별도 신설하고, 마크업에 `on:pointercancel={cancelPress}`로 엄격 격리 교체 매핑했습니다.
     - **반응성 10px 복원**: 캔슬 오작동이 원천 봉쇄됨에 따라 흔들림 임계치를 기분 좋고 예민한 표준 **`10px`**로 돌려놓아 완벽한 스위프 및 드래그앤드롭 감도를 이룩했습니다.
-
-

@@ -68,6 +68,7 @@ export interface EncodedFrame {
   flags: number;
   sequence: number;
   serverTimestampMs: number;
+  timestampMs?: number;
   payload: ArrayBuffer;
   keyFrame: boolean;
   config: boolean;

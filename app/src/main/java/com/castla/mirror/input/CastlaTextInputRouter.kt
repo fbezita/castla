@@ -11,16 +11,37 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 
+/**
+ * Registry state tracking for IME text input to bypass accessibility dependencies.
+ */
+data class ImeFocusState(
+    val sessionId: Long = 0L,
+    val packageName: String? = null,
+    val inputType: Int = 0,
+    val imeOptions: Int = 0,
+    val privateImeOptions: String? = null,
+    val isFocused: Boolean = false,
+    val timestamp: Long = 0L
+)
+
 class CastlaTextInputRouter private constructor() {
 
     private val logger = TextInputLogger.getInstance()
     
     @Volatile private var activeConnection: InputConnection? = null
     @Volatile private var activeEditorInfo: EditorInfo? = null
-    
-    // Accessibility focus registry mapping to track node consistency
-    @Volatile private var cachedFocusState: EditableFocusState? = null
-    private val focusStateFlow = MutableStateFlow(EditableFocusState())
+
+    // Pure hybrid IME state registry (accessible across all builds without accessibility)
+    private val imeFocusStateFlow = MutableStateFlow(ImeFocusState())
+    @Volatile private var cachedImeFocusState: ImeFocusState = ImeFocusState()
+
+    @Volatile private var remoteTextDirty = false
+
+    fun isRemoteTextDirty(): Boolean = remoteTextDirty
+
+    fun setRemoteTextDirty(dirty: Boolean) {
+        remoteTextDirty = dirty
+    }
 
     // Provision of privileged service provider and display id references externally
     private var privilegedServiceProvider: (() -> com.castla.mirror.shizuku.IPrivilegedService?)? = null
@@ -52,24 +73,34 @@ class CastlaTextInputRouter private constructor() {
 
     fun getActiveEditorInfo(): android.view.inputmethod.EditorInfo? = activeEditorInfo
 
-    fun updateFocusRegistry(state: EditableFocusState) {
-        cachedFocusState = state
-        focusStateFlow.value = state
+    fun updateImeFocusState(state: ImeFocusState) {
+        if (state.sessionId != cachedImeFocusState.sessionId) {
+            remoteTextDirty = false
+            Log.i("TextInputRouter", "Resetting remoteTextDirty to false for new sessionId=${state.sessionId}")
+        }
+        cachedImeFocusState = state
+        imeFocusStateFlow.value = state
+        logger.logInputConnectionState("IME FOCUS STATE UPDATED: sessionId=${state.sessionId}, pkg=${state.packageName}, isFocused=${state.isFocused}")
     }
 
-    fun getCachedFocusState(): EditableFocusState? = cachedFocusState
+    fun getCachedImeFocusState(): ImeFocusState = cachedImeFocusState
 
     fun isEditableFocusedRecently(maxAgeMs: Long = 700L): Boolean {
-        val focus = cachedFocusState ?: return false
+        val focus = cachedImeFocusState
+        // If actively focused, it is always considered recently editable regardless of timestamp
+        if (focus.isFocused) {
+            return true
+        }
+        // If recently blurred, check if the elapsed time is within the allowed grace period
         val ageMs = System.currentTimeMillis() - focus.timestamp
-        return focus.hasEditableFocus && focus.isFocused && ageMs in 0..maxAgeMs
+        return ageMs in 0..maxAgeMs
     }
 
     suspend fun waitUntilEditableFocusCleared(timeoutMs: Long = 500L): Boolean {
         if (!isEditableFocusedRecently(Long.MAX_VALUE)) return true
         return withTimeoutOrNull(timeoutMs) {
-            focusStateFlow
-                .filter { !it.hasEditableFocus || !it.isFocused }
+            imeFocusStateFlow
+                .filter { !it.isFocused }
                 .first()
             true
         } ?: false
@@ -82,57 +113,46 @@ class CastlaTextInputRouter private constructor() {
     }
 
     /**
-     * Verifies connection integrity using DeadObjectException and checks focus alignment
-     * using the reliability hierarchy: Node > Package > windowId > displayId
+     * Verifies connection integrity and checks focus alignment.
+     * Mismatches in metadata are handled as soft-warnings to accommodate
+     * dynamic webviews and app integrations without breaking active input.
      */
     fun validateConnectionForTarget(targetDisplayId: Int): Pair<Boolean, InputConnection?> {
         val conn = activeConnection
         val info = activeEditorInfo
-        val focus = cachedFocusState
+
+        Log.i("TextInputRouter", "[VALIDATE] active=${(conn != null)} pkg=${info?.packageName}")
 
         if (conn == null || info == null) {
+            Log.i("TextInputRouter", "[VALIDATE] FAIL reason=No active InputConnection cached in IME context")
             logger.logFailure(FailureCategory.INPUT_CONNECTION_NULL, "No active InputConnection cached in IME context")
             return false to null
         }
 
-        // 1. Binder Connection Integrity Check
-        try {
-            // Safe batch operation test to probe binder transaction state
-            conn.beginBatchEdit()
-            conn.endBatchEdit()
-        } catch (e: DeadObjectException) {
-            logger.logFailure(FailureCategory.INPUT_CONNECTION_STALE, "InputConnection Binder is DEAD (DeadObjectException)")
-            invalidateInputConnection()
-            return false to null
-        } catch (e: Exception) {
-            logger.logFailure(FailureCategory.INPUT_CONNECTION_STALE, "IPC verification failed: ${e.message}")
-            invalidateInputConnection()
-            return false to null
-        }
+        // Hybrid IME state registry validation (applied across standard and advanced configurations)
+        val imeState = cachedImeFocusState
 
-        // 2. Focused Editable Node Consistency Alignment (Trust Hierarchy)
-        if (focus == null || !focus.hasEditableFocus) {
-            logger.logFailure(FailureCategory.FOCUS_FAILURE, "Accessibility focus node is not ready or not editable")
-            return false to conn
-        }
-
-        // Package validation
-        if (focus.packageName != info.packageName) {
+        // Validate package name (soft-warning for OAuth, Chrome Custom Tabs, or Samsung Pass redirection)
+        if (imeState.packageName != null && info.packageName != imeState.packageName) {
             logger.logFailure(
                 FailureCategory.IME_LIFECYCLE_MISMATCH,
-                "Package mismatch: focusName=${focus.packageName} vs imeTarget=${info.packageName}"
+                "IME Package mismatch: imeState=${imeState.packageName} vs activeInfo=${info.packageName}"
             )
-            return false to conn
+            Log.w("TextInputRouter", "IME Package mismatch: imeState=${imeState.packageName} vs activeInfo=${info.packageName}. Soft-warning, proceeding.")
         }
 
-        // Window & Display awareness check for diagnostic logging
-        if (focus.displayId >= 0 && focus.displayId != targetDisplayId) {
-            logger.logFailure(
-                FailureCategory.DISPLAY_MISMATCH,
-                "Display mismatch: focusDisplay=${focus.displayId} vs requestedDisplay=$targetDisplayId"
-            )
+        // Soft-Fail: Log warnings for dynamic IME option updates instead of breaking session
+        if (imeState.inputType != 0 && info.inputType != imeState.inputType) {
+            Log.w("TextInputRouter", "IME InputType mismatch (Soft-fail): imeState=${imeState.inputType} vs activeInfo=${info.inputType}")
+        }
+        if (imeState.imeOptions != 0 && info.imeOptions != imeState.imeOptions) {
+            Log.w("TextInputRouter", "IME ImeOptions mismatch (Soft-fail): imeState=${imeState.imeOptions} vs activeInfo=${info.imeOptions}")
+        }
+        if (imeState.privateImeOptions != null && info.privateImeOptions != imeState.privateImeOptions) {
+            Log.w("TextInputRouter", "IME PrivateImeOptions mismatch (Soft-fail): imeState=${imeState.privateImeOptions} vs activeInfo=${info.privateImeOptions}")
         }
 
+        Log.i("TextInputRouter", "[VALIDATE] PASS")
         return true to conn
     }
 

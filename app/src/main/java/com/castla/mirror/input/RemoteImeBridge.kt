@@ -101,10 +101,48 @@ class RemoteImeBridge(
             }
 
             val displayId = displayIdProvider()
-            val (isValid, connection) = router.validateConnectionForTarget(displayId)
+
+            // Map command to debug details for precise logging
+            val opName = when (command) {
+                is ImeCommand.CommitText -> "commitText"
+                is ImeCommand.SetComposingText -> "setComposingText"
+                is ImeCommand.DeleteSurroundingText -> "deleteSurroundingText"
+                ImeCommand.FinishComposingText -> "finishComposingText"
+                ImeCommand.PerformEnter -> "performEnter"
+            }
+            val commandText = when (command) {
+                is ImeCommand.CommitText -> command.text
+                is ImeCommand.SetComposingText -> command.text
+                else -> ""
+            }
+            Log.i("RemoteImeBridge", "[REMOTE_TEXT] op=$opName text=$commandText")
+            
+            // Queuing loop: Wait for active connection with 50ms polling up to 500ms
+            var (isValid, connection) = router.validateConnectionForTarget(displayId)
+            var elapsedMs = 0L
+            val pollIntervalMs = 50L
+            val timeoutMs = 500L
+            
             if (!isValid || connection == null) {
-                Log.w("RemoteImeBridge", "Input ignored: InputConnection is currently invalid for display $displayId")
+                Log.i("RemoteImeBridge", "[TEXT_QUEUE] waitingForConnection")
+            }
+            
+            while ((!isValid || connection == null) && elapsedMs < timeoutMs) {
+                kotlinx.coroutines.delay(pollIntervalMs)
+                elapsedMs += pollIntervalMs
+                val check = router.validateConnectionForTarget(displayId)
+                isValid = check.first
+                connection = check.second
+            }
+
+            if (!isValid || connection == null) {
+                Log.i("RemoteImeBridge", "[TEXT_QUEUE] timeout")
+                Log.w("RemoteImeBridge", "Input ignored: InputConnection timed out ($timeoutMs ms) or is invalid for display $displayId")
                 return@launch
+            }
+
+            if (elapsedMs > 0) {
+                Log.i("RemoteImeBridge", "[TEXT_QUEUE] flush")
             }
 
             val rxTimestamp = System.currentTimeMillis()
@@ -126,6 +164,8 @@ class RemoteImeBridge(
                         setComposeState(ComposeState.COMPOSING)
 
                         logger.logRemoteInputRx("composing", command.text, 0, rxTimestamp)
+                        
+                        Log.i("RemoteImeBridge", "[INPUT_COMMAND] setComposingText '${command.text}'")
                         connection.setComposingText(command.text, 1)
                         
                         // Force cursor sync if explicit browser indices are supplied to prevent cursor drifts
@@ -147,6 +187,8 @@ class RemoteImeBridge(
                         setComposeState(ComposeState.COMMITTING)
 
                         logger.logRemoteInputRx("commit", command.text, 0, rxTimestamp)
+                        
+                        Log.i("RemoteImeBridge", "[INPUT_COMMAND] commitText '${command.text}'")
                         connection.commitText(command.text, 1)
                         connection.finishComposingText()
                         setComposeState(ComposeState.IDLE)
@@ -156,6 +198,7 @@ class RemoteImeBridge(
                     is ImeCommand.DeleteSurroundingText -> {
                         logger.logRemoteInputRx("delete", "", command.beforeLength, rxTimestamp)
                         if (command.beforeLength > 0) {
+                            Log.i("RemoteImeBridge", "[INPUT_COMMAND] deleteSurroundingText count=${command.beforeLength}")
                             connection.deleteSurroundingText(command.beforeLength, 0)
                             logger.logCommitAction("deleteSurroundingText: count=${command.beforeLength}")
                         }
@@ -180,6 +223,7 @@ class RemoteImeBridge(
                             actionId != EditorInfo.IME_ACTION_NONE
                         ) {
                             try {
+                                Log.i("RemoteImeBridge", "[INPUT_COMMAND] sendEditorAction actionId=$actionId")
                                 connection.performEditorAction(actionId)
                             } catch (e: Exception) {
                                 Log.w("RemoteImeBridge", "performEditorAction failed", e)
@@ -193,6 +237,7 @@ class RemoteImeBridge(
                             val now = SystemClock.uptimeMillis()
                             val flags = KeyEvent.FLAG_SOFT_KEYBOARD or KeyEvent.FLAG_EDITOR_ACTION
 
+                            Log.i("RemoteImeBridge", "[INPUT_COMMAND] sendKeyEvent keyCode=KEYCODE_ENTER")
                             connection.sendKeyEvent(
                                 KeyEvent(
                                     now, now,

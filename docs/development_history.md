@@ -518,7 +518,20 @@ sequenceDiagram
 - **해결 메커니즘**:
   - 기존 `TextInputSettingsHelper.kt` 에서 시스템 보안 설정(`Settings.Secure`)의 `enabled_input_methods` 문자열 키를 직접 리플렉션이나 권한 없이 읽어가려던 레거시 탐색 방식을 완전히 폐기했습니다.
   - 대신 안드로이드가 표준으로 제공하며 targetSdkVersion 34+ 보안 컨텍스트에서도 완벽하게 승인되는 **`InputMethodManager` API**를 전면 도입하여 디바이스에 활성화된 입력기 리스트(`enabledInputMethodList`)를 실시간으로 안전하게 쿼리하도록 리팩토링했습니다.
-  - 이를 통해 어떠한 안드로이드 보안 가드 환경에서도 시스템 예외를 0%로 통제하고 텍스트 검색 포커스 및 터치 해제 입력(`tapOutside` ➔ `ime_active=false`)을 무결하게 동작시켰습니다.
+  - 이를 통해 어떠한 안드로이드 보안 가드 환경에서도 시스템 예외를 0%로 통제하고 원격 텍스트 포커스 획득 및 조합 입력 안정성을 확보했습니다.
+
+### 15.2.a. `tapOutside` 기능 제거 및 안정성 우선 정책 전환 (2026-06-01)
+- **배경**:
+  - `tapOutside`는 원래 원격 검색창/입력창을 자동 dismiss 하기 위한 기능이었지만, 실제 운영에서는 Google Maps drag/pan 오탐, 앱 롤백, IME 레이스, 추가 유지보수 부담을 유발했습니다.
+- **결정**:
+  - 자동 dismiss 기능보다 안정성을 우선하기 위해 `tapOutside`를 프론트엔드와 안드로이드 백엔드 양쪽에서 완전히 제거했습니다.
+- **변경 내용**:
+  - `App.svelte`에서 tapOutside 전용 pointerdown/move/up/cancel 분기, cooldown, echo suppression, `TAP_OUTSIDE` 상태를 삭제했습니다.
+  - `ControlSocket`, `MirrorServer`, `MirrorForegroundService`의 tapOutside listener 경로를 제거했습니다.
+  - tapOutside 전용 `finishComposingText()` / `requestHideSelf()` 실행 경로를 삭제했습니다.
+- **유지된 정책**:
+  - `BACK` fallback, `force-stop`, `am start` loop, `restoreContent` relaunch는 다시 추가하지 않습니다.
+  - launch/restart 안정화용 fresh launch preparation, stream generation reset, SPS/PPS clearing, soft recovery 정책은 그대로 유지합니다.
 
 ### 15.3. MirrorServer Stop 스레드 백그라운드 오프로딩
 - **문제 현상**: 미러링 스트리밍을 종료(`stop`)하거나 소멸(`onDestroy`)할 때, 동기적으로 수행되던 SSL 소켓 및 웹소켓 세션 닫기 작업이 윈도우 매니저의 Surface 해제 락과 맞물려 메인 UI 스레드를 최대 수 초간 얼려버리거나 드물게 리부팅을 유발하는 병목이 존재했습니다.
@@ -578,6 +591,11 @@ sequenceDiagram
   - **테슬라 브라우저 로컬 프록시 헬스체크**: `castla.public.controller.ts`를 완전히 전팩 리팩토링하여, 테슬라 브라우저에 임시 게이트웨이 화면(`renderGateway`)을 빠르게 송출하고, 브라우저가 직접 핫스팟 사설 도메인 주소(`https://c-<mixedId>.castla.fbezita.com:9090/health`)로 800ms 타임아웃의 초고속 로컬 HTTP 헬스체크를 쏘도록 설계했습니다.
   - **100% 무중단 리다이렉션 및 오프라인 Fallback**: 헬스체크 성공 시 모바일 폰의 외부 LTE 데이터를 0바이트 소모하고 즉시 뷰어 화면으로 `location.replace` 전환합니다. 실패 시 1초 내에 **"Castla Offline (폰에서 기동해주세요)"** 오프라인 전용 수려한 단일 가이드 화면(`renderNoActiveDevices`)으로 지연 없이 즉각 Fallback 안착시킵니다.
   - **15분 좀비 차단 가드**: `castla.service.ts` 의 `getActiveRelays()` 내에 **15분 만료(TTL) 필터 가드**를 장착하여, 이전에 갱신 이력이 있었던 낡은 좀비 기기 정보들이 목록에 적체되지 않도록 원천 세정했습니다.
+  - **이중 안전장치(Dual-Safe Fallback) 및 수동 인증서 바이패스 및 캐시 완치**:
+    - 기기의 자가 서명 SSL 인증서가 브라우저에 신뢰 등록되지 않았거나 공외망 사설 IP 라우팅 블랙홀 펜딩에 진입하는 경우, 브라우저 스레드 버그로 인해 `AbortController.abort()` 취소 신호가 통하지 않고 무한 펜딩되어 로딩 스피너에 영원히 멈추는 결함을 완치했습니다.
+    - Fetch의 비동기 성공/실패 응답 여부와 완전히 무관하게, 헬스체크 개시 **`1200ms (1.2초)`**가 만료되는 즉시 스피너를 강제 철거하고 오프라인 가이드 UI를 즉각 노출시키는 **이중 안전장치(Dual-Safe Fallback) 스크립트 엔진**을 징검다리 템플릿에 전격 탑재했습니다.
+    - 이와 동시에 사용자가 직접 1회 접속하여 브라우저에 자가 서명 인증서 예외를 승인시킬 수 있도록 **`수동으로 연결 (최초 접속 인증서 허용)`** 다이렉트 A 태그 버튼을 가이드 화면에 장착하여, 무한 로딩을 완벽 타파하고 1ms 무지연 replace 리다이렉션을 안정적으로 수립했습니다.
+    - 브라우저의 과도한 게이트웨이 HTML 로컬 메모리 캐싱 오염에 대항하여, NestJS 최상단 진입 라우터에 **`Cache-Control: no-store, no-cache, must-revalidate, max-age=0`** 및 Pragma, Expires 헤더 세트를 주입함으로써 F5 새로고침이나 재진입 시 항상 외부 라이브 서버의 최신 이중 안전장치 스크립트를 강제 다운받도록 정밀 설계했습니다.
 
 ### 17.2. Sidedrawer 터치 스크롤 락 장애 및 드래그 드롭 UX 종합 완치
 - **장애 원인**: 사이드 드로어(`AppLauncher.svelte`)의 앱 아이콘 리스트가 많아졌을 때 터치 스크롤이 전면 마비되는 고질적인 UI 결함이 존재했습니다. 원인은 `.split-app-item` 엘리먼트에 고정된 CSS 속성 `touch-action: none;`과 `pointerdown` 발생 시 브라우저 기본 스크롤 메커니즘을 납치하던 `event.preventDefault()` 및 성급한 포인터 캡처 때문이었습니다.
@@ -595,7 +613,6 @@ sequenceDiagram
     - 이 캔슬 이벤트가 `pointerup`과 똑같이 `endPress`에 바인딩되어 있어, 미처 20px 한계치를 넘어가기 전의 초기 스크롤 모션에서 `pointercancel`이 터지는 순간 `endPress` 본문이 오작동하여 앱이 즉각 실행되던 마지막 결함(이벤트 네이티브 탈취 예외)을 완벽히 규명해 냈습니다.
     - **해결**: 숏클릭 앱 실행 로직을 원천 차단하고 오직 조용한 타이머 해제 및 상태 청소만 수행하는 **`cancelPress` 전용 격리 취소 핸들러**를 독점 신설하고, Svelte 마크업 상에서 `on:pointercancel={cancelPress}`로 엄격히 교환 바인딩했습니다.
     - **반응성 10px 표준 복원**: 이로써 캔슬 오작동이 원천 박멸되었으므로, 굳이 둔하게 올려두었던 감도 임계치를 기분 좋고 정교한 표준 **`10px`**로 신속 복원하여 최고 속도의 드래그앤드롭 반응 속도를 완성했습니다.
-
 
 
 

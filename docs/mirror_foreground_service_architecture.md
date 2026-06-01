@@ -96,14 +96,35 @@ graph TD
   - `secondaryPipeline`: 보조 화면을 담당하는 `VirtualDisplayPipeline` 인스턴스.
   - `virtualDisplayManager`: Android 시스템 수준의 가상 디스플레이 API 및 Shizuku 권한 대행 서비스를 추상화합니다.
   - `mirrorServer`: 브라우저와 통신하기 위한 내장 웹서버입니다.
+  - `onBrowserConnected()` / `onBrowserDisconnected()`: 브라우저 연결/해제에 맞춰 fresh launch preparation, stream generation reset, encoder rebuild 흐름을 조율합니다.
 
 ### 2) `VirtualDisplayPipeline` (Symmetric Display Pipeline)
 - **역할**: 단일 가상 디스플레이가 필요로 하는 모든 상태(해상도, 인코더, 터치 주입기, 현재 앱 정보)를 캡슐화한 **독립 실행 단위**입니다. Primary와 Secondary 디스플레이가 동일한 클래스 인스턴스 2개로 완전히 대칭적으로 구동됩니다.
-- **핵심 캡슐화 내역**:
+  - **핵심 캡슐화 내역**:
   - **인코더 수명 주기**: `VideoEncoder` (H264) 및 `JpegEncoder` (MJPEG) 생성, 해제 및 데이터 브로드캐스트.
   - **콘텐츠 정보 관리**: `currentApp` (패키지명/컴포넌트명), `currentWebUrl` (웹 앱 주소), `vdGeneration` (가상 디스플레이 고유 세션 키).
+  - **재시작 안정화 상태**: `requiresFreshLaunchPreparation`, `lastPreparedTargetPackage`, `lastFrameRenderedTime`, `lastKeyframeRequestTime`.
   - **세션 검증**: `invalidateVd()`, `markVdCreated()`, `isCurrentVd()`, `currentVdToken()`.
-  - **런칭 비즈니스 로직**: `launchBrowser()`, `launchStandard()`, `launchWeb()`, `restoreContent()` 등 콘텐츠 기동 및 복원 로직 수용.
+  - **런칭 비즈니스 로직**: `launchBrowser()`, `launchStandard()`, `launchWeb()` 및 fresh launch preparation / soft recovery 로직을 수용합니다.
+  - **복구 정책**: watchdog, keyframe, focus nudge는 soft recovery만 수행하며 자동 relaunch/force-stop을 하지 않습니다.
+
+#### Fresh Launch Preparation
+- 브라우저 재연결, 미러링 재시작, 파이프라인 재시작 직후에는 파이프라인이 `requiresFreshLaunchPreparation = true` 상태로 진입합니다.
+- 이 상태에서는:
+  - stale launch/display/stream 상태를 재사용하지 않습니다.
+  - cached SPS/PPS를 비웁니다.
+  - stream metadata를 새 generation 기준으로 다시 시작합니다.
+  - same-app guard를 1회 우회하여 이전과 같은 패키지를 다시 띄우더라도 launch preparation을 건너뛰지 않습니다.
+
+#### Recovery Boundaries
+- `verifySurfaceAndFallback()`:
+  - `isStagnated && !isAbsent` 이면 로그만 남기고 종료합니다.
+  - `isAbsent` 이면 wake display / keyframe / focus nudge 수준의 soft recovery만 허용합니다.
+- `handleInjectionRejected()`:
+  - input session reset, wakeup, keyframe, focus nudge는 가능하지만 앱 relaunch는 금지됩니다.
+- rebuild 완료 후:
+  - 자동 `restoreContent()` relaunch를 사용하지 않습니다.
+  - 다음 explicit launch 또는 정상 warm-start 흐름이 앱 상태를 이어갑니다.
 
 ### 3) `MirrorServer` & `ControlSocket` (Network & Protocol)
 - **역할**: NanoWSD 기반으로 동작하는 WebSocket / HTTP 서버 및 통신 제어 소켓입니다.
@@ -123,7 +144,20 @@ graph TD
    val targetPipeline = if (pane == "secondary") secondaryPipeline else primaryPipeline
    targetPipeline.launchAppFromWebLauncher(pkgName, componentName)
    ```
-4. **완전 독립 기동**: `launchAppFromWebLauncher`는 다른 파이프라인의 자원 해제나 화면 전환 등에 전혀 관여하지 않고, 오직 자신의 가상 디스플레이에 지정된 앱을 쉘(`am start`)로 기동합니다.
+4. **완전 독립 기동**: `launchAppFromWebLauncher`는 다른 파이프라인의 자원 해제나 화면 전환 등에 전혀 관여하지 않고, 오직 자신의 가상 디스플레이에서 fresh launch preparation 이후 앱을 준비합니다.
+5. **첫 런칭 후 generation 동기화**:
+   - encoder rebuild 시 cached SPS/PPS를 비우고 새 stream generation을 시작합니다.
+   - `streamReady=true / firstFrameReady=false` 메타데이터가 먼저 전파되고, 실제 첫 프레임 이후에만 `firstFrameReady=true`가 됩니다.
+6. **재시작 직후 same-app 예외 처리**:
+   - 미러링 중지 후 재시작한 경우, 첫 앱이 이전과 같은 패키지여도 command equivalence guard가 런칭 준비를 건너뛰지 않습니다.
+
+### 1.a) 현재 IME 정책
+- Accessibility 기반 입력 제어에서 IME 세션 기반 입력 제어로 운영 경로가 이행되었습니다.
+- remote editable 상태는 `androidFocusChanged`, `onStartInput`, `onFinishInput`, `sessionId` 기반으로 동기화됩니다.
+- 포커스 복구와 입력 라우팅은 local input bypass, stale-session protection, IME lifecycle 검증 중심으로 단순화되었습니다.
+- viewport 탭으로 원격 검색창 dismiss 의도를 추론하는 `tapOutside` 기능은 제거되었습니다.
+- `MirrorForegroundService`는 tapOutside 전용 `requestHideSelf()`, `finishComposingText()`, `KEYCODE_BACK` fallback 경로를 더 이상 가지지 않습니다.
+- 원격 IME 상태는 정상적인 `androidFocusChanged`, `onStartInput`, `onFinishInput` 수명주기 신호에만 의존합니다.
 
 ### 2) 뷰포트(Viewport) 변경 및 소멸 흐름 (Symmetric Viewport & Release Flow)
 1. **레이아웃 변경**: 클라이언트 브라우저의 레이아웃이 단독(Single) 혹은 분할(Split) 상태로 바뀝니다.
@@ -139,6 +173,12 @@ graph TD
        return
    }
    ```
+
+### 2.a) 브라우저 재연결 / 미러링 재시작 흐름
+1. 브라우저가 다시 연결되면 `onBrowserConnected()`가 primary/secondary 파이프라인을 다시 활성화합니다.
+2. 각 파이프라인은 fresh launch preparation 상태로 전환됩니다.
+3. 다음 앱 런칭 시 stale display affinity, stale `currentApp`, stale `lastFrameRenderedTime`, stale SPS/PPS 캐시를 그대로 믿지 않습니다.
+4. 첫 generation의 첫 프레임이 오기 전까지 브라우저는 pending 상태를 유지하며 black-screen commit을 피합니다.
 
 ---
 

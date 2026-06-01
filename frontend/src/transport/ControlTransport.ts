@@ -161,6 +161,8 @@ export class ControlTransport {
     socketId: number;
     connectAttempt: number;
     readyState: number;
+    readyForControl: boolean;
+    controlSessionId: number;
     pendingMessages: number;
     messageListeners: number;
     connectionListeners: number;

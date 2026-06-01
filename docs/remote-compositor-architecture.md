@@ -2,6 +2,12 @@
 
 Castla is a remote Android workspace compositor, not phone-screen mirroring. The phone display and Tesla browser display remain independent by keeping at least one persistent VirtualDisplay alive for the remote environment.
 
+Current production note:
+
+- the long-term target architecture in `app/src/main/java/com/castla/mirror/compositor` still exists
+- but the live production orchestration path is still centered on `MirrorForegroundService.MirroringPipeline`
+- recent stability work has focused on stream generation resets, fresh launch preparation, SPS/PPS clearing/replay, and removing `tapOutside`
+
 ## 1. High-Level Architecture
 
 The target shape is:
@@ -111,6 +117,13 @@ The Android server now emits:
 
 The browser commits viewport layout only when `firstFrameReady` is true. Until then, the viewport stays pending to avoid stale frames and black-screen layout commits.
 
+This rule is now important for restart stability as well:
+
+- mirroring restart or browser reconnect starts a fresh generation
+- first launch after restart must not reuse stale `firstFrameReady` assumptions
+- same-app launch dedupe is bypassed once when fresh launch preparation is required
+- fresh SPS/PPS and keyframe/IDR delivery are required before the browser commits the generation visually
+
 ## 11. State Machine Implementations
 
 `LifecycleStateMachine` tracks:
@@ -142,6 +155,8 @@ The existing `MirrorServer` remains the compatibility host while these boundarie
 
 `ImeBridge` sends `commitText`, `setComposingText`, `deleteSurroundingText`, and `finishComposingText`. `ControlSocket` accepts these messages and maps them to existing text/composition injection paths.
 
+`tapOutside` is no longer part of the IME protocol. Castla does not infer remote dismiss intent from viewport taps anymore; IME focus transitions are driven by normal `androidFocusChanged`, `onStartInput`, and `onFinishInput` lifecycle signals. In the live production path, focus/editable synchronization has moved away from accessibility-dependent heuristics and toward explicit IME session-based state tracking.
+
 ## 16. Accessibility Focus Manager
 
 `AccessibilityFocusManager` models editable focus and selection changes. It replaces fallback behavior based on failed touches with explicit focus state as the migration continues.
@@ -161,6 +176,13 @@ The architecture avoids frequent VD destruction and task relaunches. Samsung and
 ## 20. Recovery/Reconnect Strategy
 
 WebSocket reconnects request keyframes without destroying the VD. Encoder failure is handled by rebuilding the encoder surface and reattaching it to the existing VD. Browser layout waits for first frame in the new generation.
+
+Additional current constraints:
+
+- recovery must not force-stop apps
+- recovery must not use automatic app relaunch loops
+- watchdog and inject-reject handling are soft-recovery only
+- first app launch after mirroring restart uses fresh launch preparation so stale display/stream state does not block Maps or other same-app launches
 
 ## 21. Performance Optimization Strategy
 

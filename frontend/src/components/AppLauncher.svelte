@@ -24,6 +24,7 @@
 
   type DropZone = 'favorite' | 'autorun' | 'primary' | 'secondary' | 'remove' | '';
   const APP_CACHE_KEY = 'castla_cached_apps_v1';
+  const AUTORUN_SESSION_KEY = 'castla_autorun_done';
 
   const groups = [
     ['PAIR', 'App Pairs', '#00e5ff'],
@@ -48,6 +49,7 @@
   let notice = '';
   let noticeTimer: number | undefined;
   let launchedOnce = false;
+  let autoClosePending = false;
 
   let pressTimer = 0;
   let pressedApp: AppInfo | null = null;
@@ -80,6 +82,12 @@
   });
 
   $: hasVisibleStream = Array.from($compositorStore.viewports.values()).some((viewport) => viewport.committed);
+  $: if (autoClosePending && hasVisibleStream) {
+    requestAnimationFrame(() => {
+      drawerOpen = false;
+      autoClosePending = false;
+    });
+  }
   $: {
     void drawerRevision;
     pairApps = getPairApps(appPairs, apps);
@@ -121,16 +129,24 @@
 
   function launch(app: AppInfo, pane: PaneId = 'primary') {
     launchedOnce = true;
+    autoClosePending = true;
     if (pane === 'primary') setSingle('primary');
     else setSplit(true);
     runtime.launchApp(app.packageName, pane, app.componentName, app.category === 'VIDEO' || app.isWeb === true);
     runtime.requestKeyframe(pane);
-    drawerOpen = false;
+    drawerOpen = true;
     toast(`${app.label} launching`);
+
+    setTimeout(() => {
+      if (autoClosePending && !hasVisibleStream) {
+        drawerOpen = true;
+      }
+    }, 8000);
   }
 
   function launchPair(left: AppInfo, right: AppInfo) {
     launchedOnce = true;
+    autoClosePending = true;
     setSplit(true);
     runtime.launchApp(left.packageName, 'primary', left.componentName, left.category === 'VIDEO' || left.isWeb === true);
     runtime.requestKeyframe('primary');
@@ -138,8 +154,14 @@
       runtime.launchApp(right.packageName, 'secondary', right.componentName, right.category === 'VIDEO' || right.isWeb === true);
       runtime.requestKeyframe('secondary');
     }, 260);
-    drawerOpen = false;
+    drawerOpen = true;
     toast(`${left.label} + ${right.label}`);
+
+    setTimeout(() => {
+      if (autoClosePending && !hasVisibleStream) {
+        drawerOpen = true;
+      }
+    }, 8000);
   }
 
   function activateApp(app: AppInfo) {
@@ -334,8 +356,20 @@
   }
 
   function runAutorunOnce() {
-    if (sessionStorage.getItem('castla_autorun_done') === '1') return;
-    sessionStorage.setItem('castla_autorun_done', '1');
+    if ((window as any).castlaAutorunDone) return;
+    if (sessionStorage.getItem(AUTORUN_SESSION_KEY) === '1') {
+      (window as any).castlaAutorunDone = true;
+      return;
+    }
+
+    if (hasVisibleStream) {
+      (window as any).castlaAutorunDone = true;
+      sessionStorage.setItem(AUTORUN_SESSION_KEY, '1');
+      return;
+    }
+
+    (window as any).castlaAutorunDone = true;
+    sessionStorage.setItem(AUTORUN_SESSION_KEY, '1');
     const primary = apps.find((app) => app.packageName === primaryAutorun);
     const secondary = apps.find((app) => app.packageName === secondaryAutorun);
     if (primary && secondary) launchPair(primary, secondary);
@@ -561,10 +595,20 @@
   }
 </script>
 
-<div class:hidden={launchedOnce || hasVisibleStream} class="standby">
-  <div class="status-mark">✓</div>
+<div class:hidden={hasVisibleStream} class="standby">
+  <div class="status-mark">
+    {#if autoClosePending}
+      <span class="loading-spinner"></span>
+    {:else}
+      ✓
+    {/if}
+  </div>
   <div class="standby-logo">CASTLA</div>
-  <p>Ready to Stream. Open the sidebar drawer to launch an app.</p>
+  {#if autoClosePending}
+    <p>Launching application... Establishing high-fidelity stream link.</p>
+  {:else}
+    <p>Ready to Stream. Open the sidebar drawer to launch an app.</p>
+  {/if}
   <div class="server-pill"><span></span>SERVER ACTIVE</div>
 </div>
 
@@ -736,6 +780,20 @@
     color: #8c74ff;
     font-size: 52px;
     margin-bottom: 34px;
+  }
+
+  .loading-spinner {
+    width: 36px;
+    height: 36px;
+    border: 3px solid rgb(40 201 255 / 0.25);
+    border-top: 3px solid #8c74ff;
+    border-radius: 50%;
+    animation: spin-glorious 1s linear infinite;
+  }
+
+  @keyframes spin-glorious {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
   }
 
   .standby-logo {
