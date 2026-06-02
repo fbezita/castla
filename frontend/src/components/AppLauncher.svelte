@@ -44,6 +44,7 @@
   const RECENT_APPS_KEY = "castla_recent_apps_v1";
   const ACTIVE_TAB_KEY = "castla_launch_hub_active_tab";
   const MAX_RECENT_APPS = 8;
+  const DRAWER_HANDLE_HOTZONE = 56;
 
   const groups = [
     ["PAIR", "App Pairs", "#00e5ff"],
@@ -102,6 +103,7 @@
   let pairTargetCandidate = $state("");
   let autoScrollVelocity = $state(0);
   let autoScrollFrame = $state<number | undefined>(undefined);
+  let drawerAutoCollapsedForDrag = $state(false);
 
   // Lifecycle bindings
   onMount(() => {
@@ -224,6 +226,78 @@
     if (group === "FAVORITES") return favoritePackages.includes(app.packageName);
     if (group === "OTHER") return !["NAVIGATION", "VIDEO", "MUSIC"].includes(app.category ?? "");
     return app.category === group;
+  }
+
+  function setLayoutMode(mode: LayoutMode) {
+    const store = get(compositorStore);
+    const primary = store.viewports.get("primary");
+    const secondary = store.viewports.get("secondary");
+    if (!primary || !secondary) return;
+
+    if (mode === store.layoutMode) return;
+    
+    compositorStore.update((state) => {
+      const viewports = new Map(state.viewports);
+      if (mode === "single") {
+        viewports.forEach((viewport, key) =>
+          viewports.set(key, { ...viewport, visible: key === "primary" }),
+        );
+      } else {
+        viewports.forEach((viewport, key) =>
+          viewports.set(key, {
+            ...viewport,
+            visible: key === "primary" || key === "secondary",
+          }),
+        );
+      }
+      return {
+        ...state,
+        viewports,
+        layoutMode: mode,
+        popup:
+          mode === "popup"
+            ? { ...state.popup, visible: true }
+            : { ...state.popup, visible: false },
+      };
+    });
+  }
+
+  function swap() {
+    const store = get(compositorStore);
+    const primaryPkg = store.activePrimaryApp;
+    const secondaryPkg = store.activeSecondaryApp;
+    const primary = store.viewports.get("primary");
+    const secondary = store.viewports.get("secondary");
+    if (!primary || !secondary) return;
+
+    if (primaryPkg && secondaryPkg) {
+      const pairsRaw = localStorage.getItem("castla_app_pairs");
+      if (pairsRaw) {
+        try {
+          const pairs = JSON.parse(pairsRaw);
+          if (Array.isArray(pairs)) {
+            const updated = pairs.map((pair) => {
+              if (
+                Array.isArray(pair.apps) &&
+                ((pair.apps[0] === primaryPkg && pair.apps[1] === secondaryPkg) ||
+                  (pair.apps[0] === secondaryPkg && pair.apps[1] === primaryPkg))
+              ) {
+                return { ...pair, apps: [secondaryPkg, primaryPkg] };
+              }
+              return pair;
+            });
+            localStorage.setItem("castla_app_pairs", JSON.stringify(updated));
+          }
+        } catch {}
+      }
+
+      const layoutMode = store.layoutMode === "popup" ? "popup" : "split";
+      startLaunchSequence({
+        primaryPkg: secondaryPkg,
+        secondaryPkg: primaryPkg,
+        layoutMode: layoutMode,
+      });
+    }
   }
 
   class StaleLaunchSequenceError extends Error {
@@ -1168,6 +1242,7 @@
   function updateDropZone(x: number, y: number) {
     // If hovering inside the drawer list bounds
     if (isPointInsideDrawer(x, y)) {
+      reopenDrawerForDrag();
       drawerDimmed = false;
       const hoveredTab = getHoveredLauncherTab(x, y);
       if (hoveredTab) {
@@ -1196,6 +1271,16 @@
       }
       return;
     }
+
+    if (gestureState === "dragging" && isPointNearDrawerHandle(x, y)) {
+      reopenDrawerForDrag();
+      drawerDimmed = false;
+      clearPairHoverState();
+      dropZone = "";
+      return;
+    }
+
+    collapseDrawerForDrag();
 
     // Outside the drawer we only activate dimming while over a real drop zone.
     drawerDimmed = false;
@@ -1322,7 +1407,11 @@
   function getExternalDropZone(x: number, y: number): DropZone {
     const w = window.innerWidth;
     const h = window.innerHeight;
-    const usableRight = drawerElement?.getBoundingClientRect().left ?? w;
+    const drawerLeft =
+      drawerOpen && drawerElement
+        ? drawerElement.getBoundingClientRect().left
+        : w;
+    const usableRight = drawerLeft;
     const bottomInset = 20;
     const bottomZoneHeight = 120;
     const sideInset = 20;
@@ -1357,6 +1446,7 @@
   function beginDraggingSession() {
     gestureState = "dragging";
     draggingApp = pressedApp;
+    drawerAutoCollapsedForDrag = false;
     attachDragListeners();
     if (dragSourceElement && activePointerId !== null) {
       try {
@@ -1412,8 +1502,36 @@
     activePointerId = null;
     dropZone = "";
     drawerDimmed = false;
+    drawerAutoCollapsedForDrag = false;
     pressMoved = false;
     pairTarget = null;
+  }
+
+  function isPointNearDrawerHandle(x: number, y: number): boolean {
+    if (!drawerElement) return false;
+    const rect = drawerElement.getBoundingClientRect();
+    const handleLeft = rect.left - DRAWER_HANDLE_HOTZONE;
+    const handleRight = rect.left + 12;
+    const handleTop = rect.top + rect.height * 0.28;
+    const handleBottom = rect.bottom - rect.height * 0.28;
+    return (
+      x >= handleLeft &&
+      x <= handleRight &&
+      y >= handleTop &&
+      y <= handleBottom
+    );
+  }
+
+  function collapseDrawerForDrag() {
+    if (gestureState !== "dragging" || !drawerOpen) return;
+    drawerOpen = false;
+    drawerAutoCollapsedForDrag = true;
+  }
+
+  function reopenDrawerForDrag() {
+    if (gestureState !== "dragging" || !drawerAutoCollapsedForDrag) return;
+    drawerOpen = true;
+    drawerAutoCollapsedForDrag = false;
   }
 
   function attachDragListeners() {
@@ -1502,6 +1620,31 @@
       </button>
     </div>
   </header>
+
+  <div class="drawer-layout-controls">
+    <button
+      class:active={$compositorStore.layoutMode === "single"}
+      onclick={() => setLayoutMode("single")}
+    >
+      Single
+    </button>
+    <button
+      class:active={$compositorStore.layoutMode === "split"}
+      onclick={() => setLayoutMode("split")}
+    >
+      Split
+    </button>
+    <button
+      class:active={$compositorStore.layoutMode === "popup"}
+      onclick={() => setLayoutMode("popup")}
+    >
+      Popup
+    </button>
+    <div class="layout-divider"></div>
+    <button class="swap-btn" onclick={swap} title="Swap active windows">
+      ⇄
+    </button>
+  </div>
 
   <div class="search-row">
     <input
@@ -1979,5 +2122,65 @@
   .browse-accordion {
     display: grid;
     gap: 8px;
+  }
+  .drawer-layout-controls {
+    margin: 8px 12px 14px;
+    padding: 4px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.2);
+  }
+
+  .drawer-layout-controls button {
+    flex: 1;
+    height: 28px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.16s ease, color 0.16s ease, transform 0.1s ease;
+  }
+
+  .drawer-layout-controls button:hover {
+    color: rgba(255, 255, 255, 0.9);
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  .drawer-layout-controls button.active {
+    background: rgba(0, 229, 255, 0.14);
+    color: #7cf1ff;
+    border: 1px solid rgba(0, 229, 255, 0.18);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+  }
+
+  .layout-divider {
+    width: 1px;
+    height: 16px;
+    background: rgba(255, 255, 255, 0.08);
+    margin: 0 4px;
+  }
+
+  .drawer-layout-controls .swap-btn {
+    flex: 0 0 32px;
+    font-size: 13px;
+    font-weight: bold;
+    color: rgba(0, 229, 255, 0.7);
+  }
+
+  .drawer-layout-controls .swap-btn:hover {
+    color: #7cf1ff;
+    background: rgba(0, 229, 255, 0.08);
+    transform: scale(1.05);
+  }
+
+  .drawer-layout-controls .swap-btn:active {
+    transform: scale(0.95);
   }
 </style>

@@ -22,11 +22,25 @@
   const POPUP_MARGIN = 16;
   const PROVISIONAL_LAYOUT_SETTLE_MS = 220;
 
+
   type PopupResizeEdge = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
+
+  interface FrozenLayoutState {
+    layoutMode: LayoutMode;
+    visibleViewports: ViewportModel[];
+    paneStyles: Record<string, string>;
+    popup: PopupLayoutState;
+    fullPane?: PaneId;
+    popupPane?: PaneId;
+    splitRatio: number;
+  }
+
+  let frozenLayoutState: FrozenLayoutState | null = null;
+  let safetyReleaseTimer = 0;
 
   let host: HTMLDivElement;
   let resizer: HTMLButtonElement;
-  let toolbar: HTMLDivElement;
+
   let popupBody: HTMLDivElement;
   let resizeObserver: ResizeObserver;
   let resizingSplit = false;
@@ -51,17 +65,7 @@
     origin: PopupLayoutState;
   } | null = null;
 
-  let toolbarX = 350;
-  let toolbarY = 18;
-  let toolbarInteracting = false;
-  let toolbarDrag: {
-    pointerId: number;
-    startX: number;
-    startY: number;
-    originX: number;
-    originY: number;
-  } | null = null;
-  let toolbarDragMoved = false;
+
 
   let tempPopupX = 0;
   let tempPopupY = 0;
@@ -73,17 +77,12 @@
       hostRect = host.getBoundingClientRect();
       touchRouter.updateHost(hostRect);
       clampPopupToHost();
-      if (!resizingSplit && !popupInteracting) {
+      if (!resizingSplit && !popupInteracting && !layoutTransitionActive) {
         dispatchLayout();
       }
     });
     resizeObserver.observe(host);
     hostRect = host.getBoundingClientRect();
-
-    // Centering the layout toolbar initially based on host resolution
-    const hostWidth = hostRect.width || window.innerWidth;
-    toolbarX = Math.round((hostWidth - 320) / 2);
-    toolbarY = 18;
 
     touchRouter.updateHost(hostRect);
     clampPopupToHost();
@@ -100,15 +99,14 @@
     window.removeEventListener("pointermove", dragPopupMove);
     window.removeEventListener("pointerup", endPopupDrag);
     window.removeEventListener("pointercancel", endPopupDrag);
-    window.removeEventListener("pointermove", dragToolbarMove);
-    window.removeEventListener("pointerup", endToolbarDrag);
-    window.removeEventListener("pointercancel", endToolbarDrag);
+
     window.removeEventListener("pointermove", resizePopupMove);
     window.removeEventListener("pointerup", endPopupResize);
     window.removeEventListener("pointercancel", endPopupResize);
+    window.clearTimeout(safetyReleaseTimer);
   });
 
-  let toolbarHidden = false;
+
 
   $: if (!popupInteracting) {
     tempPopupX = $compositorStore.popup.x;
@@ -155,6 +153,61 @@
     0,
     Math.round($compositorStore.popup.height - POPUP_HEADER_HEIGHT),
   );
+  $: layoutTransitionActive = isLayoutTransitionActive(
+    $compositorStore.launchSequence.state,
+  );
+
+  function handleTransitionChange(active: boolean) {
+    window.clearTimeout(safetyReleaseTimer);
+    if (active) {
+      if (!frozenLayoutState) {
+        frozenLayoutState = {
+          layoutMode: $compositorStore.layoutMode,
+          visibleViewports: Array.from($compositorStore.viewports.values()).map(v => ({ ...v })),
+          paneStyles: {
+            primary: paneStyle("primary"),
+            secondary: paneStyle("secondary"),
+          },
+          popup: { ...$compositorStore.popup },
+          fullPane: fullPane,
+          popupPane: popupPane,
+          splitRatio: $compositorStore.splitRatio,
+        };
+        console.info(`[COMPOSITOR_BARRIER] event=freeze state=${$compositorStore.launchSequence.state} layout=${$compositorStore.layoutMode}`);
+
+        // 6초 세이프 가드 타이머 시작 (어떤 원인으로든 6초 이상 배리어가 가두지 않도록 보장)
+        safetyReleaseTimer = window.setTimeout(() => {
+          if (frozenLayoutState) {
+            console.warn("[COMPOSITOR_BARRIER] event=safety_unfreeze_timeout stuck protection triggered!");
+            frozenLayoutState = null;
+          }
+        }, 6000);
+      }
+    } else {
+      if (frozenLayoutState) {
+        console.info(`[COMPOSITOR_BARRIER] event=release state=${$compositorStore.launchSequence.state}`);
+        frozenLayoutState = null;
+      }
+    }
+  }
+
+  $: handleTransitionChange(layoutTransitionActive);
+
+
+
+  $: currentSplitActive = frozenLayoutState ? (frozenLayoutState.layoutMode === "split" && frozenLayoutState.visibleViewports.some(v => v.pane === "primary" && v.visible) && frozenLayoutState.visibleViewports.some(v => v.pane === "secondary" && v.visible)) : splitActive;
+  $: currentFullPopupActive = frozenLayoutState ? (frozenLayoutState.layoutMode === "popup" && frozenLayoutState.visibleViewports.some(v => v.pane === "primary" && v.visible) && frozenLayoutState.visibleViewports.some(v => v.pane === "secondary" && v.visible)) : fullPopupActive;
+  $: currentPopupVisible = frozenLayoutState ? (frozenLayoutState.layoutMode === "popup" && frozenLayoutState.popup.visible) : popupVisible;
+  $: currentPopupMinimized = frozenLayoutState ? (frozenLayoutState.popup.minimized) : popupMinimized;
+  $: currentTempPopupX = frozenLayoutState ? frozenLayoutState.popup.x : tempPopupX;
+  $: currentTempPopupY = frozenLayoutState ? frozenLayoutState.popup.y : tempPopupY;
+  $: currentTempPopupWidth = frozenLayoutState ? frozenLayoutState.popup.width : tempPopupWidth;
+  $: currentTempPopupHeight = frozenLayoutState ? frozenLayoutState.popup.height : tempPopupHeight;
+  $: currentVisibleViewports = frozenLayoutState ? frozenLayoutState.visibleViewports : visibleViewports;
+  $: currentFullViewport = frozenLayoutState ? frozenLayoutState.visibleViewports.find(v => v.pane === "primary") : fullViewport;
+  $: currentPopupViewport = frozenLayoutState ? frozenLayoutState.visibleViewports.find(v => v.pane === "secondary") : popupViewport;
+  $: currentPrimaryViewport = frozenLayoutState ? frozenLayoutState.visibleViewports.find(v => v.pane === "primary") : primaryViewport;
+  $: currentSecondaryViewport = frozenLayoutState ? frozenLayoutState.visibleViewports.find(v => v.pane === "secondary") : secondaryViewport;
   $: layoutMetrics = computeSplitLayoutMetrics(
     hostRect.width,
     hostRect.height,
@@ -177,12 +230,16 @@
 
   $: if (host && layoutTrigger) {
     updateChrome();
-    if (!resizingSplit && !popupInteracting) {
+    if (!resizingSplit && !popupInteracting && !layoutTransitionActive) {
       dispatchLayout();
     }
   }
 
-  $: if (splitActive && secondaryViewport?.committed === true) {
+  $: if (
+    splitActive &&
+    secondaryViewport?.committed === true &&
+    !layoutTransitionActive
+  ) {
     dispatchLayout(true);
   }
 
@@ -207,7 +264,6 @@
     }
 
     if (mode === $compositorStore.layoutMode) return;
-    toolbarHidden = false; // Reset hidden state when manually changing layout mode
     activeTouchPanes.clear();
     touchRouter.reset();
     compositorStore.update((state) => {
@@ -414,73 +470,7 @@
     logPopupState($compositorStore.popup);
   }
 
-  function beginToolbarDrag(event: PointerEvent) {
-    const target = event.target as HTMLElement;
-    if (
-      target.closest("button") &&
-      !target.closest(".toolbar-drag-handle") &&
-      !target.closest(".layout-toolbar-collapsed")
-    )
-      return;
 
-    event.preventDefault();
-    event.stopPropagation();
-    const el = event.currentTarget as HTMLElement;
-    el.setPointerCapture?.(event.pointerId);
-    toolbarInteracting = true;
-    toolbarDragMoved = false; // Reset drag movement state
-
-    toolbarDrag = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      originX: toolbarX,
-      originY: toolbarY,
-    };
-
-    window.addEventListener("pointermove", dragToolbarMove);
-    window.addEventListener("pointerup", endToolbarDrag, { once: true });
-    window.addEventListener("pointercancel", endToolbarDrag, { once: true });
-  }
-
-  function dragToolbarMove(event: PointerEvent) {
-    if (!toolbarDrag || event.pointerId !== toolbarDrag.pointerId) return;
-
-    // Set dragMoved true if moved more than 6px
-    if (
-      Math.hypot(
-        event.clientX - toolbarDrag.startX,
-        event.clientY - toolbarDrag.startY,
-      ) > 6
-    ) {
-      toolbarDragMoved = true;
-    }
-
-    const nextX = toolbarDrag.originX + (event.clientX - toolbarDrag.startX);
-    const nextY = toolbarDrag.originY + (event.clientY - toolbarDrag.startY);
-
-    // Dynamic boundary bounds depending on exact measured collapsed/expanded widths without hardcoded dimensions
-    const toolbarWidth = toolbar ? toolbar.getBoundingClientRect().width : 320;
-    const currentWidth = toolbarHidden ? 44 : toolbarWidth;
-    const offset = toolbarHidden ? (toolbarWidth - 44) : 0;
-
-    const maxBoundX = Math.max(10, hostRect.width - currentWidth - 10 - offset);
-    const minBoundX = 10 - offset;
-    const maxBoundY = Math.max(10, hostRect.height - 60);
-
-    toolbarX = clamp(nextX, minBoundX, maxBoundX);
-    toolbarY = clamp(nextY, 10, maxBoundY);
-  }
-
-  function endToolbarDrag(event?: PointerEvent) {
-    if (toolbarDrag && event && toolbarDrag.pointerId !== event.pointerId)
-      return;
-    toolbarDrag = null;
-    toolbarInteracting = false;
-    window.removeEventListener("pointermove", dragToolbarMove);
-    window.removeEventListener("pointerup", endToolbarDrag);
-    window.removeEventListener("pointercancel", endToolbarDrag);
-  }
 
   function beginPopupResize(event: PointerEvent, edge: PopupResizeEdge) {
     if (!popupVisible) return;
@@ -972,7 +962,15 @@
     return null;
   }
 
+  function handleBarrierInput(event: PointerEvent) {
+    console.info(`[COMPOSITOR_BARRIER] event=blocked_input reason=transition-active clientX=${event.clientX} clientY=${event.clientY}`);
+  }
+
   function handlePointer(event: PointerEvent) {
+    if (layoutTransitionActive || frozenLayoutState) {
+      console.info(`[COMPOSITOR_BARRIER] event=blocked_input reason=transition-active clientX=${event.clientX} clientY=${event.clientY}`);
+      return;
+    }
     if (resizingSplit || popupInteracting) return;
     const target = event.target as HTMLElement | null;
     const action =
@@ -985,18 +983,15 @@
     // Handle UI elements separately without injecting Android touch events
     if (
       target?.closest(".split-resizer") ||
-      target?.closest(".layout-toolbar") ||
       target?.closest(".popup-header") ||
       target?.closest(".popup-resize-handle")
     ) {
       if (action === "down") {
         const uiReason = target?.closest(".split-resizer")
           ? "split-resizer"
-          : target?.closest(".layout-toolbar")
-            ? "ui"
-            : target?.closest(".popup-header")
-              ? "popup-header"
-              : "resize";
+          : target?.closest(".popup-header")
+            ? "popup-header"
+            : "resize";
         logTouchRoute(event, "-", undefined, uiReason as any);
       }
       return;
@@ -1058,9 +1053,6 @@
         ratio,
       ).boundaryPercent;
       resizer.style.left = `${boundaryValue}%`;
-    }
-    if (toolbar) {
-      toolbar.style.opacity = dualPaneReady ? "1" : "0.82";
     }
   }
 
@@ -1171,6 +1163,23 @@
     panes.forEach((pane) => runtime.requestKeyframe(pane));
   }
 
+  function isLayoutTransitionActive(
+    state: (typeof $compositorStore.launchSequence)["state"],
+  ): boolean {
+    return state !== "IDLE" && state !== "RUNNING" && state !== "FAILED" && (state as string) !== "DEGRADED";
+  }
+
+
+
+  function getCurrentPaneStyle(pane: PaneId): string {
+    if (frozenLayoutState) {
+      return frozenLayoutState.paneStyles[pane] ?? paneStyle(pane);
+    }
+    return paneStyle(pane);
+  }
+
+
+
   function computeSplitLayoutMetrics(
     width: number,
     height: number,
@@ -1235,28 +1244,28 @@
   on:pointercancel={handlePointer}
   on:lostpointercapture={handlePointer}
 >
-  {#if splitActive}
-    {#each visibleViewports as viewport (viewport.pane)}
+  {#if currentSplitActive}
+    {#each currentVisibleViewports as viewport (viewport.pane)}
       <ViewportPane
         {viewport}
         {runtime}
-        paneStyle={paneStyle(viewport.pane)}
+        paneStyle={getCurrentPaneStyle(viewport.pane)}
         fitMode="fill"
       />
     {/each}
-  {:else if fullPopupActive && fullViewport}
+  {:else if currentFullPopupActive && currentFullViewport}
     <ViewportPane
-      viewport={fullViewport}
+      viewport={currentFullViewport}
       {runtime}
-      paneStyle={paneStyle(fullViewport.pane)}
+      paneStyle={getCurrentPaneStyle(currentFullViewport.pane)}
       fitMode="contain"
     />
-    {#if popupVisible && popupViewport}
-      {#if popupMinimized}
+    {#if currentPopupVisible && currentPopupViewport}
+      {#if currentPopupMinimized}
         <!-- Minimized premium circular floating app icon bubble -->
         <div
           class="popup-minimized-bubble"
-          style={`left:${$compositorStore.popup.x}px;top:${$compositorStore.popup.y}px;`}
+          style={`left:${frozenLayoutState ? frozenLayoutState.popup.x : $compositorStore.popup.x}px;top:${frozenLayoutState ? frozenLayoutState.popup.y : $compositorStore.popup.y}px;`}
           role="button"
           tabindex="0"
           aria-label="Restore minimized popup display"
@@ -1278,7 +1287,7 @@
         <!-- Original expanded popup window markup with real app title -->
         <div
           class="popup-window"
-          style={`left:${tempPopupX}px;top:${tempPopupY}px;width:${tempPopupWidth}px;height:${tempPopupHeight}px;`}
+          style={`left:${currentTempPopupX}px;top:${currentTempPopupY}px;width:${currentTempPopupWidth}px;height:${currentTempPopupHeight}px;`}
         >
           <div
             class="popup-header"
@@ -1306,11 +1315,11 @@
             bind:this={popupBody}
             class="popup-body"
             style={popupInteracting
-              ? `width:${$compositorStore.popup.width}px;height:${Math.max(0, $compositorStore.popup.height - POPUP_HEADER_HEIGHT)}px;`
+              ? `width:${currentTempPopupWidth}px;height:${Math.max(0, currentTempPopupHeight - POPUP_HEADER_HEIGHT)}px;`
               : ""}
           >
             <ViewportPane
-              viewport={popupViewport}
+              viewport={currentPopupViewport}
               {runtime}
               paneStyle="left:0;top:0;width:100%;height:100%;"
               fitMode="fill"
@@ -1368,77 +1377,19 @@
       {/if}
     {/if}
   {:else}
-    {#each visibleViewports as viewport (viewport.pane)}
+    {#each currentVisibleViewports as viewport (viewport.pane)}
       <ViewportPane
         {viewport}
         {runtime}
-        paneStyle={paneStyle(viewport.pane)}
+        paneStyle={getCurrentPaneStyle(viewport.pane)}
         fitMode="contain"
       />
     {/each}
   {/if}
 
-  {#if dualPaneReady}
-    {#if toolbarHidden}
-      <!-- Collapsed mini draggable toolbar handle, similar to sidebar handle but draggable -->
-      <button
-        class="layout-toolbar-collapsed"
-        style={`left:${toolbarX + 276}px;top:${toolbarY}px;cursor:move;touch-action:none;`}
-        on:pointerdown={beginToolbarDrag}
-        on:click={() => (toolbarHidden = false)}
-        title="Show layout toolbar"
-        aria-label="Show layout toolbar"
-      >
-        <span class="collapsed-icon">▤</span>
-      </button>
-    {:else}
-      <div
-        bind:this={toolbar}
-        class="layout-toolbar"
-        role="toolbar"
-        tabindex="-1"
-        style={`left:${toolbarX}px;top:${toolbarY}px;transform:none;touch-action:none;`}
-      >
-        <button
-          class:active={$compositorStore.layoutMode === "single"}
-          on:click={() => setLayoutMode("single")}
-        >
-          Single
-        </button>
-        <button
-          class:active={$compositorStore.layoutMode === "split"}
-          on:click={() => setLayoutMode("split")}
-        >
-          Split
-        </button>
-        <button
-          class:active={$compositorStore.layoutMode === "popup"}
-          on:click={() => setLayoutMode("popup")}
-        >
-          Popup
-        </button>
-        <button title="Swap" on:click={swap}>⇄</button>
-        {#if fullPopupActive && (!$compositorStore.popup.visible || $compositorStore.popup.minimized)}
-          <button title="Restore popup" on:click={restorePopup}>□</button>
-        {/if}
-        <button
-          class="toolbar-drag-handle"
-          title="Drag to move, Tap to hide"
-          aria-label="Drag to move, Tap to hide"
-          on:pointerdown={beginToolbarDrag}
-          on:click={() => {
-            if (!toolbarDragMoved) {
-              toolbarHidden = true;
-            }
-          }}
-        >
-          <span class="handle-dots">⋮⋮</span>
-        </button>
-      </div>
-    {/if}
-  {/if}
 
-  {#if splitActive}
+
+  {#if currentSplitActive}
     <button
       bind:this={resizer}
       class="split-resizer"
@@ -1446,6 +1397,16 @@
       aria-label="Resize split"
       on:pointerdown={beginResize}
     ></button>
+  {/if}
+
+  {#if layoutTransitionActive || frozenLayoutState}
+    <div class="compositor-barrier-overlay" role="presentation" on:pointerdown|stopPropagation|preventDefault={handleBarrierInput}>
+      <div class="premium-loader">
+        <div class="loader-circle"></div>
+        <div class="loader-pulse"></div>
+      </div>
+      <p class="barrier-text">화면 레이아웃 최적화 중...</p>
+    </div>
   {/if}
 </div>
 
@@ -1458,45 +1419,11 @@
     overflow: hidden;
   }
 
-  .layout-toolbar {
-    position: absolute;
-    top: 18px;
-    left: 50%;
-    z-index: 38;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 10px;
-    border: 1px solid rgb(255 255 255 / 0.14);
-    border-radius: 18px;
-    background: rgb(12 22 34 / 0.94);
-    box-shadow: 0 10px 26px rgb(0 0 0 / 0.35);
-    transform: translateX(-50%);
-    backdrop-filter: blur(8px);
-  }
-
-  .layout-toolbar button,
   .popup-action,
   .popup-resize-handle {
     border: 0;
     background: transparent;
     color: white;
-  }
-
-  .layout-toolbar button {
-    min-width: 30px;
-    height: 30px;
-    padding: 0 10px;
-    border-radius: 999px;
-    background: rgb(255 255 255 / 0.08);
-    font-size: 12px;
-    font-weight: 700;
-    cursor: pointer;
-  }
-
-  .layout-toolbar button.active {
-    background: rgb(57 223 255 / 0.24);
-    color: #7cf1ff;
   }
 
   .split-resizer {
@@ -1745,88 +1672,63 @@
     }
   }
 
-  /* Collapsed mini toolbar handle styling */
-  .layout-toolbar-collapsed {
+
+
+  .compositor-barrier-overlay {
     position: absolute;
-    z-index: 38;
-    width: 44px;
-    height: 44px;
-    border-radius: 50%;
-    border: 2px solid rgba(0, 229, 255, 0.45);
-    background: radial-gradient(
-      circle at center,
-      rgb(16 32 50 / 0.96) 0%,
-      rgb(4 10 18 / 0.98) 100%
-    );
-    box-shadow:
-      0 8px 24px rgba(0, 0, 0, 0.55),
-      0 0 12px rgba(0, 229, 255, 0.25),
-      inset 0 0 8px rgba(0, 229, 255, 0.1);
+    inset: 0;
+    z-index: 36;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
-    cursor: move;
-    touch-action: none;
-    transition:
-      transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1),
-      border-color 0.2s ease,
-      box-shadow 0.2s ease;
-    padding: 0;
+    background: radial-gradient(circle at center, rgba(12, 22, 34, 0.7) 0%, rgba(4, 8, 14, 0.92) 100%);
+    backdrop-filter: blur(16px) saturate(120%);
+    gap: 20px;
+    animation: fadeInBarrier 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
   }
 
-  .layout-toolbar-collapsed:hover {
-    transform: scale(1.1);
-    border-color: rgba(0, 229, 255, 0.85);
-    box-shadow:
-      0 10px 28px rgba(0, 0, 0, 0.65),
-      0 0 16px rgba(0, 229, 255, 0.4);
+  .premium-loader {
+    position: relative;
+    width: 60px;
+    height: 60px;
   }
 
-  .layout-toolbar-collapsed:active {
-    transform: scale(0.95);
-  }
-
-  .collapsed-icon {
-    color: #7cf1ff;
-    font-size: 18px;
-    pointer-events: none;
-  }
-
-  /* Drag and Hide handle button inside active toolbar styling */
-  .toolbar-drag-handle {
-    width: 30px;
-    height: 30px;
+  .loader-circle {
+    box-sizing: border-box;
+    width: 100%;
+    height: 100%;
+    border: 3px solid rgba(0, 229, 255, 0.08);
+    border-top: 3px solid #00e5ff;
     border-radius: 50%;
-    background: rgba(255, 255, 255, 0.08);
-    border: 0;
-    color: #9ea3ad;
-    cursor: move;
-    touch-action: none;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition:
-      background 0.2s,
-      color 0.2s,
-      transform 0.1s;
-    margin-left: 4px;
-    padding: 0;
+    animation: spin 1s cubic-bezier(0.5, 0.1, 0.5, 0.9) infinite;
   }
 
-  .toolbar-drag-handle:hover {
-    background: rgba(0, 229, 255, 0.18);
-    color: #7cf1ff;
+  .loader-pulse {
+    position: absolute;
+    inset: 10px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(0, 229, 255, 0.2) 0%, transparent 70%);
+    animation: pulseGlow 1.8s ease-in-out infinite;
   }
 
-  .toolbar-drag-handle:active {
-    transform: scale(0.92);
+  .barrier-text {
+    color: #e2e8f0;
+    font-family: "Outfit", "Inter", sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+    opacity: 0.9;
   }
 
-  .handle-dots {
-    font-size: 14px;
-    font-weight: bold;
-    pointer-events: none;
-    line-height: 1;
-    transform: translateY(-1px);
+  @keyframes fadeInBarrier {
+    from { opacity: 0; backdrop-filter: blur(0px); }
+    to { opacity: 1; backdrop-filter: blur(16px); }
+  }
+
+  @keyframes pulseGlow {
+    0%, 100% { transform: scale(0.85); opacity: 0.5; }
+    50% { transform: scale(1.15); opacity: 1; filter: drop-shadow(0 0 8px rgba(0, 229, 255, 0.5)); }
   }
 </style>
