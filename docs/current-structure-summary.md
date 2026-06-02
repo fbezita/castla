@@ -1,6 +1,6 @@
 # Castla Current Structure Summary
 
-Last updated: 2026-06-01
+Last updated: 2026-06-02
 
 This document is a handoff summary for the next refactoring pass.
 
@@ -154,6 +154,36 @@ Frontend runtime responsibilities are split like this:
   - owns control/video transports
   - tracks generations and pane health
   - currently still emits decoder recovery signals on frame rejection/stall
+
+### Current Launcher Structure
+
+The launcher path is no longer treated as a single Svelte monolith.
+
+- `frontend/src/components/AppLauncher.svelte`
+  - owns launcher orchestration, drag session lifecycle, drawer scroll lock/unlock, and final drop resolution
+- `frontend/src/components/LauncherTabs.svelte`
+  - owns top tabs, active tab highlight, and drag-time tab drop hints
+- `frontend/src/components/AppRow.svelte`
+  - owns compact card rows for `Auto Run`, `Starred`, and `Recent`
+- `frontend/src/components/CategoryAccordion.svelte`
+  - owns `Browse` category accordions and the denser app-list presentation
+- `frontend/src/components/DragDropOverlay.svelte`
+  - owns left/right/bottom dropzone visuals, trash guidance, and drag ghost rendering
+- `frontend/src/components/PairDialog.svelte`
+  - owns app-pair swap/dissolve editing UI
+
+The launcher's gesture model is also stricter now:
+
+- normal browsing remains native-scroll first
+- long-press enters an explicit drag session
+- only the active drag session locks global touch scroll
+- tab hover changes visuals during drag, but actual starred/autorun mutation happens only on drop
+- drawer auto-scroll runs on `requestAnimationFrame` rather than `pointermove` bursts
+
+This means the live launcher UX is now intentionally split into two modes:
+
+- **browse mode**: light, native-feeling scroll and denser app scanning
+- **drag mode**: deterministic ghost, drawer-aware auto-scroll, and explicit drop targets
 
 ## Touch Path Today
 

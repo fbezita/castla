@@ -4,8 +4,16 @@
   import { compositorStore } from "../stores/compositorStore";
   import type { PaneId } from "../protocol";
 
-  export let runtime: StreamRuntime;
+  // Modular components imported for robust Svelte 5 structure
+  import LauncherTabs from "./LauncherTabs.svelte";
+  import AppRow from "./AppRow.svelte";
+  import CategoryAccordion from "./CategoryAccordion.svelte";
+  import DragDropOverlay from "./DragDropOverlay.svelte";
+  import PairDialog from "./PairDialog.svelte";
 
+  let { runtime } = $props<{ runtime: StreamRuntime }>();
+
+  // Types definitions
   interface AppInfo {
     packageName: string;
     label: string;
@@ -28,14 +36,9 @@
   }
 
   type LaunchHubTab = "autorun" | "starred" | "recent" | "browse";
+  type DropZone = "favorite" | "autorun" | "primary" | "secondary" | "remove" | "";
+  type GestureState = "idle" | "pressing" | "dragging";
 
-  type DropZone =
-    | "favorite"
-    | "autorun"
-    | "primary"
-    | "secondary"
-    | "remove"
-    | "";
   const APP_CACHE_KEY = "castla_cached_apps_v1";
   const AUTORUN_SESSION_KEY = "castla_autorun_done";
   const RECENT_APPS_KEY = "castla_recent_apps_v1";
@@ -50,142 +53,151 @@
     ["OTHER", "All Apps", "#9ea3ad"],
   ] as const;
 
-  let apps: AppInfo[] = readCachedApps();
-  let loading = apps.length === 0;
-  let error = "";
-  let drawerOpen = true;
-  let drawerElement: HTMLElement;
-  let drawerListElement: HTMLDivElement;
-  let search = "";
-  let activeTab = readActiveTab();
-  let expandedCategory = "";
-  let favorites = readArray("castla_favorites");
-  let recentEntries = readRecentLaunches();
-  let appPairs = readPairs();
-  let primaryAutorun = localStorage.getItem("castla_autorun_primary") ?? "";
-  let secondaryAutorun = localStorage.getItem("castla_autorun_secondary") ?? "";
-  let notice = "";
-  let noticeTimer: number | undefined;
-  let launchedOnce = false;
-  let autoClosePending = false;
+  // Reactivity State Declarations using Svelte 5 $state Rune
+  let apps = $state<AppInfo[]>(readCachedApps());
+  let loading = $state(readCachedApps().length === 0);
+  let error = $state("");
+  let drawerOpen = $state(true);
+  let drawerElement = $state<HTMLElement | null>(null);
+  let drawerListElement = $state<HTMLDivElement | null>(null);
+  let search = $state("");
+  let activeTab = $state<LaunchHubTab>(readActiveTab());
+  let expandedCategory = $state("");
+  let favorites = $state<string[]>(readArray("castla_favorites"));
+  let recentEntries = $state<RecentLaunchRecord[]>(readRecentLaunches());
+  let appPairs = $state<AppPairRecord[]>(readPairs());
+  let primaryAutorun = $state(localStorage.getItem("castla_autorun_primary") ?? "");
+  let secondaryAutorun = $state(localStorage.getItem("castla_autorun_secondary") ?? "");
+  let notice = $state("");
+  let noticeTimer = $state<number | undefined>(undefined);
+  let launchedOnce = $state(false);
+  let autoClosePending = $state(false);
 
-  let pressTimer = 0;
-  let pressedApp: AppInfo | null = null;
-  let draggingApp: AppInfo | null = null;
-  let dragX = 0;
-  let dragY = 0;
-  let dropZone: DropZone = "";
-  let drawerDimmed = false;
-  let pressStartX = 0;
-  let pressStartY = 0;
-  let pressMoved = false;
-  let pairTarget: AppInfo | null = null;
-  let pairMenuOpen = "";
-  let editingPair: AppInfo | null = null;
-  let drawerRevision = 0;
-  let pairApps: AppInfo[] = [];
-  let searchableApps: AppInfo[] = [];
-  let displayApps: AppInfo[] = [];
-  let groupedApps: Array<{
-    key: string;
-    title: string;
-    color: string;
-    items: AppInfo[];
-  }> = [];
-  let starredApps: AppInfo[] = [];
-  let recentApps: AppInfo[] = [];
-  let autorunApps: AppInfo[] = [];
-  let browseGroups: Array<{
-    key: string;
-    title: string;
-    color: string;
-    items: AppInfo[];
-  }> = [];
-  let activePanelApps: AppInfo[] = [];
-  let activePanelTitle = "";
-  let activePanelDescription = "";
-  let activePanelEmpty = "";
+  // Gesture Tracker States
+  let pressTimer = $state(0);
+  let pressedApp = $state<AppInfo | null>(null);
+  let draggingApp = $state<AppInfo | null>(null);
+  let dragX = $state(0);
+  let dragY = $state(0);
+  let dropZone = $state<DropZone>("");
+  let drawerDimmed = $state(false);
+  let pressStartX = $state(0);
+  let pressStartY = $state(0);
+  let pressMoved = $state(false);
+  let gestureState = $state<GestureState>("idle");
+  let dragSourceElement = $state<HTMLElement | null>(null);
+  let previousDrawerTouchAction = $state("");
+  let activePointerId = $state<number | null>(null);
+  let previousBodyTouchAction = $state("");
+  let previousHtmlTouchAction = $state("");
+  let previousBodyOverscrollBehavior = $state("");
+  let previousHtmlOverscrollBehavior = $state("");
+  let pairTarget = $state<AppInfo | null>(null);
+  let pairMenuOpen = $state("");
+  let editingPair = $state<AppInfo | null>(null);
+  let drawerRevision = $state(0);
+  let pairTargetTimer = $state<number | undefined>(undefined);
+  let pairTargetCandidate = $state("");
+  let autoScrollVelocity = $state(0);
+  let autoScrollFrame = $state<number | undefined>(undefined);
 
+  // Lifecycle bindings
   onMount(() => {
     if (apps.length > 0) {
       runAutorunOnce();
     }
     loadApps();
   });
+
   onDestroy(() => {
     window.clearTimeout(pressTimer);
     window.clearTimeout(noticeTimer);
+    window.clearTimeout(pairTargetTimer);
+    stopAutoScrollDrawer();
+    detachDragListeners();
   });
 
-  $: hasVisibleStream = Array.from($compositorStore.viewports.values()).some(
-    (viewport) => viewport.committed,
+  // Derived state calculations using Svelte 5 $derived Rune
+  let hasVisibleStream = $derived(
+    Array.from($compositorStore.viewports.values()).some((viewport) => viewport.committed)
   );
-  $: if (autoClosePending && hasVisibleStream) {
-    requestAnimationFrame(() => {
-      drawerOpen = false;
-      autoClosePending = false;
-    });
-  }
-  $: {
+
+  let pairApps = $derived.by(() => {
     void drawerRevision;
-    pairApps = getPairApps(appPairs, apps);
-    searchableApps = [...pairApps, ...apps];
-    displayApps = searchableApps.filter((app) =>
-      app.label.toLowerCase().includes(search.trim().toLowerCase()),
-    );
-    starredApps = favorites
-      .map((packageName) =>
-        displayApps.find((app) => app.packageName === packageName),
-      )
-      .filter(Boolean) as AppInfo[];
-    recentApps = recentEntries
-      .map((entry) =>
-        displayApps.find((app) => app.packageName === entry.packageName),
-      )
-      .filter(Boolean) as AppInfo[];
-    autorunApps = getAutorunApps(displayApps, apps, pairApps);
-    groupedApps = groups
+    return getPairApps(appPairs, apps);
+  });
+
+  let searchableApps = $derived([...pairApps, ...apps]);
+
+  let displayApps = $derived(
+    searchableApps.filter((app) =>
+      app.label.toLowerCase().includes(search.trim().toLowerCase())
+    )
+  );
+
+  let starredApps = $derived(
+    favorites
+      .map((packageName) => displayApps.find((app) => app.packageName === packageName))
+      .filter(Boolean) as AppInfo[]
+  );
+
+  let recentApps = $derived(
+    recentEntries
+      .map((entry) => displayApps.find((app) => app.packageName === entry.packageName))
+      .filter(Boolean) as AppInfo[]
+  );
+
+  let autorunApps = $derived(getAutorunApps(displayApps, apps, pairApps));
+
+  let groupedApps = $derived(
+    groups
       .map(([key, title, color]) => ({
         key,
         title,
         color,
         items: displayApps.filter((app) => belongsToGroup(app, key, favorites)),
       }))
-      .filter((group) => group.items.length > 0);
-    browseGroups = groupedApps;
-    if (activeTab === "autorun") {
-      activePanelApps = autorunApps;
-      activePanelTitle = "Auto Run";
-      activePanelDescription = "Ready when the session starts";
-      activePanelEmpty = "Set one app or app pair to auto-run on connect.";
-    } else if (activeTab === "starred") {
-      activePanelApps = starredApps;
-      activePanelTitle = "Starred";
-      activePanelDescription = "Your keep-close launch list";
-      activePanelEmpty = "Star apps to pin them in your launcher lane.";
-    } else if (activeTab === "recent") {
-      activePanelApps = recentApps;
-      activePanelTitle = "Recent";
-      activePanelDescription = "Return to what you used last";
-      activePanelEmpty = "Launch an app once to build your recent history.";
-    } else {
-      activePanelApps = [];
-      activePanelTitle = "";
-      activePanelDescription = "";
-      activePanelEmpty = "";
-    }
-  }
-  $: if (activeTab === "browse") {
-    if (search.trim().length > 0) {
-      const stillVisible = browseGroups.some(
-        (group) => group.key === expandedCategory,
-      );
-      if (!stillVisible) expandedCategory = browseGroups[0]?.key ?? "";
-    } else if (!browseGroups.some((group) => group.key === expandedCategory)) {
-      expandedCategory = "";
-    }
-  }
+      .filter((group) => group.items.length > 0)
+  );
 
+  let browseGroups = $derived(groupedApps);
+
+  let activePanelApps = $derived.by(() => {
+    if (activeTab === "autorun") return autorunApps;
+    if (activeTab === "starred") return starredApps;
+    if (activeTab === "recent") return recentApps;
+    return [];
+  });
+
+  let activePanelEmpty = $derived.by(() => {
+    if (activeTab === "autorun") return "Set one app or app pair to auto-run on connect.";
+    if (activeTab === "starred") return "Star apps to pin them in your launcher lane.";
+    if (activeTab === "recent") return "Launch an app once to build your recent history.";
+    return "";
+  });
+
+  // Effects bindings using Svelte 5 $effect Rune
+  $effect(() => {
+    if (autoClosePending && hasVisibleStream) {
+      requestAnimationFrame(() => {
+        drawerOpen = false;
+        autoClosePending = false;
+      });
+    }
+  });
+
+  $effect(() => {
+    if (activeTab === "browse") {
+      if (search.trim().length > 0) {
+        const stillVisible = browseGroups.some((group) => group.key === expandedCategory);
+        if (!stillVisible) expandedCategory = browseGroups[0]?.key ?? "";
+      } else if (!browseGroups.some((group) => group.key === expandedCategory)) {
+        expandedCategory = "";
+      }
+    }
+  });
+
+  // Core Data Actions
   async function loadApps() {
     try {
       const response = await fetch("/api/apps");
@@ -205,16 +217,10 @@
     }
   }
 
-  function belongsToGroup(
-    app: AppInfo,
-    group: string,
-    favoritePackages: string[],
-  ) {
+  function belongsToGroup(app: AppInfo, group: string, favoritePackages: string[]) {
     if (group === "PAIR") return app.isPair === true;
-    if (group === "FAVORITES")
-      return favoritePackages.includes(app.packageName);
-    if (group === "OTHER")
-      return !["NAVIGATION", "VIDEO", "MUSIC"].includes(app.category ?? "");
+    if (group === "FAVORITES") return favoritePackages.includes(app.packageName);
+    if (group === "OTHER") return !["NAVIGATION", "VIDEO", "MUSIC"].includes(app.category ?? "");
     return app.category === group;
   }
 
@@ -274,12 +280,8 @@
 
   function activateApp(app: AppInfo) {
     if (app.isPair) {
-      const left = app.left
-        ? apps.find((candidate) => candidate.packageName === app.left)
-        : undefined;
-      const right = app.right
-        ? apps.find((candidate) => candidate.packageName === app.right)
-        : undefined;
+      const left = app.left ? apps.find((c) => c.packageName === app.left) : undefined;
+      const right = app.right ? apps.find((c) => c.packageName === app.right) : undefined;
       if (left && right) {
         launchPair(left, right);
         return;
@@ -292,26 +294,13 @@
     compositorStore.update((state) => {
       const viewports = new Map(state.viewports);
       const primary = viewports.get("primary") ?? {
-        pane: "primary" as PaneId,
-        width: 1280,
-        height: 720,
-        committed: false,
-        generation: 0,
-        visible: true,
+        pane: "primary", width: 1280, height: 720, committed: false, generation: 0, visible: true
       };
       const secondary = viewports.get("secondary") ?? {
-        pane: "secondary" as PaneId,
-        width: 1280,
-        height: 720,
-        committed: false,
-        generation: 0,
-        visible: false,
+        pane: "secondary", width: 1280, height: 720, committed: false, generation: 0, visible: false
       };
       viewports.set("primary", { ...primary, visible: pane === "primary" });
-      viewports.set("secondary", {
-        ...secondary,
-        visible: pane === "secondary",
-      });
+      viewports.set("secondary", { ...secondary, visible: pane === "secondary" });
       return { ...state, viewports, layoutMode: "single" };
     });
   }
@@ -320,20 +309,10 @@
     compositorStore.update((state) => {
       const viewports = new Map(state.viewports);
       const primary = viewports.get("primary") ?? {
-        pane: "primary" as PaneId,
-        width: 1280,
-        height: 720,
-        committed: false,
-        generation: 0,
-        visible: true,
+        pane: "primary", width: 1280, height: 720, committed: false, generation: 0, visible: true
       };
       const secondary = viewports.get("secondary") ?? {
-        pane: "secondary" as PaneId,
-        width: 1280,
-        height: 720,
-        committed: false,
-        generation: 0,
-        visible: false,
+        pane: "secondary", width: 1280, height: 720, committed: false, generation: 0, visible: false
       };
       viewports.set("primary", { ...primary, visible: true });
       viewports.set("secondary", { ...secondary, visible: active });
@@ -358,18 +337,11 @@
     touchDrawer();
   }
 
-  function getPairApps(
-    pairs: AppPairRecord[],
-    availableApps: AppInfo[],
-  ): AppInfo[] {
+  function getPairApps(pairs: AppPairRecord[], availableApps: AppInfo[]): AppInfo[] {
     const result: AppInfo[] = [];
     for (const pair of pairs) {
-      const leftApp = availableApps.find(
-        (app) => app.packageName === pair.left,
-      );
-      const rightApp = availableApps.find(
-        (app) => app.packageName === pair.right,
-      );
+      const leftApp = availableApps.find((app) => app.packageName === pair.left);
+      const rightApp = availableApps.find((app) => app.packageName === pair.right);
       if (!leftApp || !rightApp) continue;
       result.push({
         packageName: `pair:${pair.left}:${pair.right}`,
@@ -391,18 +363,14 @@
     }
     const exists = appPairs.some(
       (pair) =>
-        (pair.left === source.packageName &&
-          pair.right === target.packageName) ||
+        (pair.left === source.packageName && pair.right === target.packageName) ||
         (pair.left === target.packageName && pair.right === source.packageName),
     );
     if (exists) {
       toast("This App Pair already exists");
       return;
     }
-    appPairs = [
-      ...appPairs,
-      { left: source.packageName, right: target.packageName },
-    ];
+    appPairs = [...appPairs, { left: source.packageName, right: target.packageName }];
     localStorage.setItem("castla_app_pairs", JSON.stringify(appPairs));
     touchDrawer();
     openPairEdit({
@@ -424,18 +392,10 @@
 
   function swapEditingPair() {
     if (!editingPair?.left || !editingPair?.right) return;
-    editingPair = {
-      ...editingPair,
-      left: editingPair.right,
-      right: editingPair.left,
-    };
+    editingPair = { ...editingPair, left: editingPair.right, right: editingPair.left };
   }
 
-  function persistPair(
-    app: AppInfo,
-    previousLeft?: string,
-    previousRight?: string,
-  ) {
+  function persistPair(app: AppInfo, previousLeft?: string, previousRight?: string) {
     if (!app.left || !app.right) return;
     const oldLeft = previousLeft ?? app.left;
     const oldRight = previousRight ?? app.right;
@@ -446,9 +406,7 @@
         (pair.left === oldRight && pair.right === oldLeft),
     );
     if (index >= 0) {
-      appPairs = appPairs.map((pair, pairIndex) =>
-        pairIndex === index ? nextPair : pair,
-      );
+      appPairs = appPairs.map((pair, idx) => (idx === index ? nextPair : pair));
     } else {
       appPairs = [...appPairs, nextPair];
     }
@@ -458,11 +416,8 @@
 
   function saveEditingPair() {
     if (!editingPair?.left || !editingPair?.right) return;
-    const nextPair = editingPair;
-    const original = getPairApps(appPairs, apps).find(
-      (app) => app.packageName === nextPair.packageName,
-    );
-    persistPair(nextPair, original?.left, original?.right);
+    const original = getPairApps(appPairs, apps).find((app) => app.packageName === editingPair!.packageName);
+    persistPair(editingPair, original?.left, original?.right);
     editingPair = null;
     toast("App Pair updated");
   }
@@ -470,11 +425,7 @@
   function removePair(app: AppInfo) {
     if (!app.left || !app.right) return;
     appPairs = appPairs.filter(
-      (pair) =>
-        !(
-          (pair.left === app.left && pair.right === app.right) ||
-          (pair.left === app.right && pair.right === app.left)
-        ),
+      (pair) => !((pair.left === app.left && pair.right === app.right) || (pair.left === app.right && pair.right === app.left))
     );
     localStorage.setItem("castla_app_pairs", JSON.stringify(appPairs));
     favorites = favorites.filter((pkg) => pkg !== app.packageName);
@@ -489,14 +440,6 @@
     if (editingPair?.packageName === app.packageName) editingPair = null;
     pairMenuOpen = "";
     toast("App Pair dissolved");
-  }
-
-  function cancelEditingPair() {
-    editingPair = null;
-  }
-
-  function togglePairMenu(app: AppInfo) {
-    pairMenuOpen = pairMenuOpen === app.packageName ? "" : app.packageName;
   }
 
   function toggleAutorun(packageName: string) {
@@ -515,11 +458,7 @@
 
   function isAutorunPair(app: AppInfo) {
     return Boolean(
-      app.isPair &&
-        app.left &&
-        app.right &&
-        primaryAutorun === app.left &&
-        secondaryAutorun === app.right,
+      app.isPair && app.left && app.right && primaryAutorun === app.left && secondaryAutorun === app.right
     );
   }
 
@@ -540,42 +479,28 @@
     toggleAutorun(app.packageName);
   }
 
-  function getAutorunApps(
-    visibleApps: AppInfo[],
-    availableApps: AppInfo[],
-    availablePairs: AppInfo[],
-  ): AppInfo[] {
+  function getAutorunApps(visibleApps: AppInfo[], availableApps: AppInfo[], availablePairs: AppInfo[]): AppInfo[] {
     const items: AppInfo[] = [];
     if (primaryAutorun && secondaryAutorun) {
-      const pair = availablePairs.find(
-        (app) => app.left === primaryAutorun && app.right === secondaryAutorun,
-      );
+      const pair = availablePairs.find((app) => app.left === primaryAutorun && app.right === secondaryAutorun);
       if (pair) {
-        const visiblePair = visibleApps.find(
-          (app) => app.packageName === pair.packageName,
-        );
+        const visiblePair = visibleApps.find((app) => app.packageName === pair.packageName);
         if (visiblePair) return [visiblePair];
       }
     }
     if (primaryAutorun) {
-      const primary = visibleApps.find(
-        (app) => app.packageName === primaryAutorun,
-      );
+      const primary = visibleApps.find((app) => app.packageName === primaryAutorun);
       if (primary) items.push(primary);
     }
     if (secondaryAutorun && secondaryAutorun !== primaryAutorun) {
-      const secondary = visibleApps.find(
-        (app) => app.packageName === secondaryAutorun,
-      );
+      const secondary = visibleApps.find((app) => app.packageName === secondaryAutorun);
       if (secondary) items.push(secondary);
     }
     return items;
   }
 
   function getRecentMeta(packageName: string) {
-    const entry = recentEntries.find(
-      (item) => item.packageName === packageName,
-    );
+    const entry = recentEntries.find((item) => item.packageName === packageName);
     return entry ? formatRelativeTime(entry.lastUsedAt) : "";
   }
 
@@ -604,14 +529,10 @@
   }
 
   function isAppAutorun(app: AppInfo) {
-    return (
-      (!app.isPair &&
-        (primaryAutorun === app.packageName ||
-          secondaryAutorun === app.packageName)) ||
-      isAutorunPair(app)
-    );
+    return (!app.isPair && (primaryAutorun === app.packageName || secondaryAutorun === app.packageName)) || isAutorunPair(app);
   }
 
+  // Storage and Reading Utilities
   function readRecentLaunches(): RecentLaunchRecord[] {
     try {
       const value = JSON.parse(localStorage.getItem(RECENT_APPS_KEY) ?? "[]");
@@ -619,16 +540,11 @@
       if (value.every((item) => typeof item === "string")) {
         return value
           .filter((item): item is string => typeof item === "string")
-          .map((packageName, index) => ({
-            packageName,
-            lastUsedAt: Date.now() - index * 60_000,
-          }));
+          .map((packageName, index) => ({ packageName, lastUsedAt: Date.now() - index * 60_000 }));
       }
       return value.filter(
         (item): item is RecentLaunchRecord =>
-          item &&
-          typeof item.packageName === "string" &&
-          typeof item.lastUsedAt === "number",
+          item && typeof item.packageName === "string" && typeof item.lastUsedAt === "number",
       );
     } catch {
       return [];
@@ -637,219 +553,7 @@
 
   function readActiveTab(): LaunchHubTab {
     const value = localStorage.getItem(ACTIVE_TAB_KEY);
-    return value === "autorun" ||
-      value === "starred" ||
-      value === "recent" ||
-      value === "browse"
-      ? value
-      : "autorun";
-  }
-
-  function runAutorunOnce() {
-    if ((window as any).castlaAutorunDone) return;
-    if (sessionStorage.getItem(AUTORUN_SESSION_KEY) === "1") {
-      (window as any).castlaAutorunDone = true;
-      return;
-    }
-
-    if (hasVisibleStream) {
-      (window as any).castlaAutorunDone = true;
-      sessionStorage.setItem(AUTORUN_SESSION_KEY, "1");
-      return;
-    }
-
-    (window as any).castlaAutorunDone = true;
-    sessionStorage.setItem(AUTORUN_SESSION_KEY, "1");
-    const primary = apps.find((app) => app.packageName === primaryAutorun);
-    const secondary = apps.find((app) => app.packageName === secondaryAutorun);
-    if (primary && secondary) launchPair(primary, secondary);
-    else if (primary) launch(primary, "primary");
-  }
-
-  function startPress(event: PointerEvent, app: AppInfo) {
-    const target = event.target as HTMLElement;
-    // Functional buttons should not trigger app selection
-    if (target.closest("button")) return;
-    pairMenuOpen = "";
-
-    // Do not call preventDefault to allow smooth scrolling. Pointer capture is deferred to long press trigger.
-    const currentTarget = event.currentTarget as HTMLElement;
-    const pointerId = event.pointerId;
-
-    pressedApp = app;
-    pressStartX = event.clientX;
-    pressStartY = event.clientY;
-    pressMoved = false;
-    dragX = event.clientX;
-    dragY = event.clientY;
-    window.clearTimeout(pressTimer);
-    pressTimer = window.setTimeout(() => {
-      draggingApp = pressedApp;
-      if (draggingApp && currentTarget) {
-        try {
-          currentTarget.setPointerCapture(pointerId);
-        } catch {}
-      }
-      navigator.vibrate?.(50);
-      drawerOpen = true;
-      updateDropZone(dragX, dragY);
-    }, 700); // Tuned response to 700ms
-  }
-
-  function movePress(event: PointerEvent) {
-    if (!pressedApp && !draggingApp) return;
-    dragX = event.clientX;
-    dragY = event.clientY;
-    // Restored standard 10px threshold for precise drag-and-drop response
-    if (Math.hypot(dragX - pressStartX, dragY - pressStartY) > 10) {
-      pressMoved = true;
-      if (!draggingApp) {
-        // Pointer moved beyond scroll threshold before long press, cancel selection timer
-        window.clearTimeout(pressTimer);
-        pressedApp = null;
-      }
-    }
-    if (draggingApp) {
-      autoScrollDrawer(dragY);
-      updateDropZone(dragX, dragY);
-    }
-  }
-
-  // Clean handler for pointercancel events to completely isolate native scrolling from activation
-  function cancelPress(event?: PointerEvent) {
-    window.clearTimeout(pressTimer);
-    if (event?.currentTarget instanceof HTMLElement) {
-      try {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      } catch {}
-    }
-    pressedApp = null;
-    draggingApp = null;
-    dropZone = "";
-    drawerDimmed = false;
-    pressMoved = false;
-    pairTarget = null;
-  }
-
-  function endPress(event?: PointerEvent) {
-    window.clearTimeout(pressTimer);
-    if (draggingApp) {
-      if (pairTarget) createPair(draggingApp, pairTarget);
-      else if (dropZone) applyDrop(draggingApp, dropZone);
-    } else if (pressedApp && !pressMoved) {
-      activateApp(pressedApp);
-    }
-    if (event?.currentTarget instanceof HTMLElement) {
-      try {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      } catch {}
-    }
-    pressedApp = null;
-    draggingApp = null;
-    dropZone = "";
-    drawerDimmed = false;
-    pressMoved = false;
-    pairTarget = null;
-  }
-
-  function updateDropZone(x: number, y: number) {
-    if (isPointInsideDrawer(x, y)) {
-      pairTarget = findPairTarget(x, y);
-      dropZone = "";
-      drawerDimmed = false;
-      return;
-    }
-    pairTarget = null;
-    drawerDimmed = true;
-    const w = window.innerWidth;
-    const h = window.innerHeight;
-    if (y < h * 0.16 && x < w * 0.5) dropZone = "favorite";
-    else if (y < h * 0.16) dropZone = "autorun";
-    else if (y > h * 0.86) dropZone = "remove";
-    else if (x < w * 0.5) dropZone = "primary";
-    else dropZone = "secondary";
-  }
-
-  function autoScrollDrawer(y: number) {
-    if (!drawerListElement || !drawerOpen) return;
-    const rect = drawerListElement.getBoundingClientRect();
-    const edgeSize = 88;
-    const maxStep = 16;
-    if (y > rect.bottom - edgeSize && y < rect.bottom + 24) {
-      const intensity = Math.min(1, (y - (rect.bottom - edgeSize)) / edgeSize);
-      drawerListElement.scrollTop += Math.ceil(maxStep * intensity);
-    } else if (y < rect.top + edgeSize && y > rect.top - 24) {
-      const intensity = Math.min(1, (rect.top + edgeSize - y) / edgeSize);
-      drawerListElement.scrollTop -= Math.ceil(maxStep * intensity);
-    }
-  }
-
-  function applyDrop(app: AppInfo, zone: DropZone) {
-    if (app.isPair && app.left && app.right) {
-      if (zone === "autorun") {
-        primaryAutorun = app.left;
-        secondaryAutorun = app.right;
-        updateStorage("castla_autorun_primary", primaryAutorun);
-        updateStorage("castla_autorun_secondary", secondaryAutorun);
-        touchDrawer();
-        toast(`${app.label} set to Auto-run`);
-        return;
-      }
-      if (zone === "remove") {
-        removePair(app);
-        return;
-      }
-    }
-    if (zone === "favorite") {
-      toggleFavorite(app.packageName);
-      toast(
-        favorites.includes(app.packageName)
-          ? "Favorite updated"
-          : "Favorite removed",
-      );
-    } else if (zone === "autorun") {
-      toggleAutorun(app.packageName);
-      toast("Auto-run updated");
-    } else if (zone === "primary") {
-      launch(app, "primary");
-    } else if (zone === "secondary") {
-      launch(app, "secondary");
-    } else if (zone === "remove") {
-      favorites = favorites.filter((pkg) => pkg !== app.packageName);
-      if (primaryAutorun === app.packageName) primaryAutorun = "";
-      if (secondaryAutorun === app.packageName) secondaryAutorun = "";
-      localStorage.setItem("castla_favorites", JSON.stringify(favorites));
-      updateStorage("castla_autorun_primary", primaryAutorun);
-      updateStorage("castla_autorun_secondary", secondaryAutorun);
-      touchDrawer();
-      toast("Removed from shortcuts");
-    }
-  }
-
-  function isPointInsideDrawer(x: number, y: number): boolean {
-    if (!drawerElement || !drawerOpen) return false;
-    const rect = drawerElement.getBoundingClientRect();
-    return (
-      x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
-    );
-  }
-
-  function findPairTarget(x: number, y: number): AppInfo | null {
-    const hovered = document
-      .elementFromPoint(x, y)
-      ?.closest(".split-app-item") as HTMLElement | null;
-    const packageName = hovered?.dataset.packageName;
-    if (!packageName || !draggingApp || packageName === draggingApp.packageName)
-      return null;
-    const target = apps.find((app) => app.packageName === packageName);
-    if (!target || target.isPair) return null;
-    return target;
-  }
-
-  function toast(message: string) {
-    notice = message;
-    clearTimeout(noticeTimer);
-    noticeTimer = window.setTimeout(() => (notice = ""), 2600);
+    return value === "autorun" || value === "starred" || value === "recent" || value === "browse" ? value : "autorun";
   }
 
   function readArray(key: string): string[] {
@@ -863,16 +567,11 @@
 
   function readPairs(): AppPairRecord[] {
     try {
-      const value = JSON.parse(
-        localStorage.getItem("castla_app_pairs") ?? "[]",
-      );
+      const value = JSON.parse(localStorage.getItem("castla_app_pairs") ?? "[]");
       if (!Array.isArray(value)) return [];
       return value.filter(
         (pair): pair is AppPairRecord =>
-          pair &&
-          typeof pair.left === "string" &&
-          typeof pair.right === "string" &&
-          pair.left !== pair.right,
+          pair && typeof pair.left === "string" && typeof pair.right === "string" && pair.left !== pair.right,
       );
     } catch {
       return [];
@@ -897,9 +596,385 @@
     drawerRevision += 1;
   }
 
+  function runAutorunOnce() {
+    if ((window as any).castlaAutorunDone) return;
+    if (sessionStorage.getItem(AUTORUN_SESSION_KEY) === "1") {
+      (window as any).castlaAutorunDone = true;
+      return;
+    }
+    if (hasVisibleStream) {
+      (window as any).castlaAutorunDone = true;
+      sessionStorage.setItem(AUTORUN_SESSION_KEY, "1");
+      return;
+    }
+    (window as any).castlaAutorunDone = true;
+    sessionStorage.setItem(AUTORUN_SESSION_KEY, "1");
+    const primary = apps.find((app) => app.packageName === primaryAutorun);
+    const secondary = apps.find((app) => app.packageName === secondaryAutorun);
+    if (primary && secondary) launchPair(primary, secondary);
+    else if (primary) launch(primary, "primary");
+  }
+
+  // -------------------------------------------------------------
+  // Highly-tuned Pointer Gestures Pipeline for In-vehicle Screens
+  // -------------------------------------------------------------
+  function startPress(event: PointerEvent, app: AppInfo, element: HTMLElement) {
+    // Buttons inside elements should never trigger drag start
+    const target = event.target as HTMLElement;
+    if (target.closest("button")) return;
+    pairMenuOpen = "";
+
+    const pointerId = event.pointerId;
+    activePointerId = pointerId;
+
+    pressedApp = app;
+    dragSourceElement = element;
+    gestureState = "pressing";
+    pressStartX = event.clientX;
+    pressStartY = event.clientY;
+    pressMoved = false;
+    dragX = event.clientX;
+    dragY = event.clientY;
+
+    window.clearTimeout(pressTimer);
+    // Optimized 450ms longpress threshold for brisk vehicle control response
+    pressTimer = window.setTimeout(() => {
+      if (gestureState !== "pressing" || !pressedApp) return;
+      beginDraggingSession();
+    }, 450);
+  }
+
+  function movePress(event: PointerEvent) {
+    if (gestureState === "idle") return;
+    if (activePointerId !== null && event.pointerId !== activePointerId) return;
+    dragX = event.clientX;
+    dragY = event.clientY;
+
+    // Advanced 48px anti-jitter threshold for stable control when car shakes
+    if (Math.hypot(dragX - pressStartX, dragY - pressStartY) > 48) {
+      pressMoved = true;
+      if (gestureState === "pressing") {
+        window.clearTimeout(pressTimer);
+        gestureState = "idle";
+        pressedApp = null;
+        dragSourceElement = null;
+        activePointerId = null;
+        return;
+      }
+    }
+
+    if (gestureState === "dragging") {
+      if (event.cancelable) {
+        event.preventDefault();
+      }
+      updateAutoScrollVelocity(dragY);
+      updateDropZone(dragX, dragY);
+    }
+  }
+
+  function cancelPress(event?: PointerEvent) {
+    if (gestureState === "dragging" && event && event.currentTarget !== window) {
+      return;
+    }
+    window.clearTimeout(pressTimer);
+    resetGestureState();
+  }
+
+  function endPress(event?: PointerEvent) {
+    window.clearTimeout(pressTimer);
+    if (gestureState === "dragging" && draggingApp) {
+      if (pairTarget) {
+        createPair(draggingApp, pairTarget);
+      } else if (dropZone) {
+        applyDrop(draggingApp, dropZone);
+      }
+    } else if (gestureState === "pressing" && pressedApp && !pressMoved) {
+      activateApp(pressedApp);
+    }
+
+    resetGestureState();
+  }
+
+  // Update drops zone coordinates mapping with hover-stabilized pair target recognition
+  function updateDropZone(x: number, y: number) {
+    // If hovering inside the drawer list bounds
+    if (isPointInsideDrawer(x, y)) {
+      drawerDimmed = false;
+      const hoveredTab = getHoveredLauncherTab(x, y);
+      if (hoveredTab) {
+        clearPairHoverState();
+        dropZone = hoveredTab === "autorun" ? "autorun" : hoveredTab === "starred" ? "favorite" : "";
+        return;
+      }
+
+      const candidate = findPairTarget(x, y);
+
+      dropZone = "";
+      if (candidate) {
+        if (pairTarget?.packageName !== candidate.packageName && pairTargetCandidate !== candidate.packageName) {
+          window.clearTimeout(pairTargetTimer);
+          pairTarget = null;
+          pairTargetCandidate = candidate.packageName;
+          // Hover stabilization: only trigger merge target after hovering for 260ms
+          pairTargetTimer = window.setTimeout(() => {
+            pairTarget = candidate;
+            pairTargetCandidate = "";
+            pairTargetTimer = undefined;
+          }, 260);
+        }
+      } else {
+        clearPairHoverState();
+      }
+      return;
+    }
+
+    // Outside the drawer we only activate dimming while over a real drop zone.
+    drawerDimmed = false;
+
+    // Outer screen regions for launching panes or removal
+    clearPairHoverState();
+    dropZone = getExternalDropZone(x, y);
+    drawerDimmed = dropZone !== "";
+  }
+
+  // Self-calibrating automatic vertical scroll when dragging apps
+  function updateAutoScrollVelocity(y: number) {
+    if (!drawerListElement || !drawerOpen) {
+      stopAutoScrollDrawer();
+      return;
+    }
+    const rect = drawerListElement.getBoundingClientRect();
+    const edgeSize = 88;
+    const maxStep = 22;
+    if (y > rect.bottom - edgeSize && y < rect.bottom + 24) {
+      const intensity = Math.min(1, (y - (rect.bottom - edgeSize)) / edgeSize);
+      autoScrollVelocity = Math.ceil(maxStep * intensity * intensity);
+    } else if (y < rect.top + edgeSize && y > rect.top - 24) {
+      const intensity = Math.min(1, (rect.top + edgeSize - y) / edgeSize);
+      autoScrollVelocity = -Math.ceil(maxStep * intensity * intensity);
+    } else {
+      autoScrollVelocity = 0;
+    }
+
+    if (autoScrollVelocity !== 0 && autoScrollFrame === undefined) {
+      autoScrollDrawer();
+    } else if (autoScrollVelocity === 0) {
+      stopAutoScrollDrawer();
+    }
+  }
+
+  function autoScrollDrawer() {
+    if (!drawerListElement || !drawerOpen || gestureState !== "dragging" || autoScrollVelocity === 0) {
+      stopAutoScrollDrawer();
+      return;
+    }
+
+    drawerListElement.scrollTop += autoScrollVelocity;
+    autoScrollFrame = requestAnimationFrame(autoScrollDrawer);
+  }
+
+  function stopAutoScrollDrawer() {
+    autoScrollVelocity = 0;
+    if (autoScrollFrame !== undefined) {
+      cancelAnimationFrame(autoScrollFrame);
+      autoScrollFrame = undefined;
+    }
+  }
+
+  function applyDrop(app: AppInfo, zone: DropZone) {
+    if (app.isPair && app.left && app.right) {
+      if (zone === "autorun") {
+        primaryAutorun = app.left;
+        secondaryAutorun = app.right;
+        updateStorage("castla_autorun_primary", primaryAutorun);
+        updateStorage("castla_autorun_secondary", secondaryAutorun);
+        touchDrawer();
+        toast(`${app.label} set to Auto-run`);
+        return;
+      }
+      if (zone === "remove") {
+        removePair(app);
+        return;
+      }
+    }
+
+    if (zone === "favorite") {
+      toggleFavorite(app.packageName);
+      toast(favorites.includes(app.packageName) ? "Favorite updated" : "Favorite removed");
+    } else if (zone === "autorun") {
+      toggleAutorun(app.packageName);
+      toast("Auto-run updated");
+    } else if (zone === "primary") {
+      launch(app, "primary");
+    } else if (zone === "secondary") {
+      launch(app, "secondary");
+    } else if (zone === "remove") {
+      favorites = favorites.filter((pkg) => pkg !== app.packageName);
+      if (primaryAutorun === app.packageName) primaryAutorun = "";
+      if (secondaryAutorun === app.packageName) secondaryAutorun = "";
+      localStorage.setItem("castla_favorites", JSON.stringify(favorites));
+      updateStorage("castla_autorun_primary", primaryAutorun);
+      updateStorage("castla_autorun_secondary", secondaryAutorun);
+      touchDrawer();
+      toast("Removed from shortcuts");
+    }
+  }
+
+  function isPointInsideDrawer(x: number, y: number): boolean {
+    if (!drawerElement || !drawerOpen) return false;
+    const rect = drawerElement.getBoundingClientRect();
+    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+  }
+
+  function getHoveredLauncherTab(x: number, y: number): LaunchHubTab | null {
+    const tab = document.elementFromPoint(x, y)?.closest("[data-launcher-tab]") as HTMLElement | null;
+    const value = tab?.dataset.launcherTab;
+    return value === "autorun" || value === "starred" || value === "recent" || value === "browse"
+      ? value
+      : null;
+  }
+
+  function getExternalDropZone(x: number, y: number): DropZone {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const usableRight = drawerElement?.getBoundingClientRect().left ?? w;
+    const topInset = 80;
+    const sideInset = 20;
+    const bottomInset = 20;
+    const bottomZoneHeight = 120;
+    const centerGap = 20;
+
+    const removeTop = h - bottomZoneHeight - bottomInset;
+    if (y >= removeTop && y <= h - bottomInset && x >= sideInset && x <= usableRight - sideInset) {
+      return "remove";
+    }
+
+    const verticalBottom = removeTop - centerGap;
+    if (y < topInset || y > verticalBottom) {
+      return "";
+    }
+
+    const midX = usableRight / 2;
+    const leftZoneRight = midX - centerGap / 2;
+    const rightZoneLeft = midX + centerGap / 2;
+
+    if (x >= sideInset && x <= leftZoneRight) {
+      return "primary";
+    }
+    if (x >= rightZoneLeft && x <= usableRight - sideInset) {
+      return "secondary";
+    }
+    return "";
+  }
+
+  function clearPairHoverState() {
+    window.clearTimeout(pairTargetTimer);
+    pairTargetTimer = undefined;
+    pairTargetCandidate = "";
+    pairTarget = null;
+  }
+
+  function preventTouchScroll(event: TouchEvent) {
+    if (gestureState === "dragging" && event.cancelable) {
+      event.preventDefault();
+    }
+  }
+
+  function beginDraggingSession() {
+    gestureState = "dragging";
+    draggingApp = pressedApp;
+    attachDragListeners();
+    if (dragSourceElement && activePointerId !== null) {
+      try {
+        dragSourceElement.setPointerCapture(activePointerId);
+      } catch {}
+      dragSourceElement.style.touchAction = "none";
+    }
+    if (drawerListElement) {
+      previousDrawerTouchAction = drawerListElement.style.touchAction;
+      drawerListElement.style.touchAction = "none";
+    }
+    previousBodyTouchAction = document.body.style.touchAction;
+    previousHtmlTouchAction = document.documentElement.style.touchAction;
+    previousBodyOverscrollBehavior = document.body.style.overscrollBehavior;
+    previousHtmlOverscrollBehavior = document.documentElement.style.overscrollBehavior;
+    document.body.style.touchAction = "none";
+    document.documentElement.style.touchAction = "none";
+    document.body.style.overscrollBehavior = "none";
+    document.documentElement.style.overscrollBehavior = "none";
+    navigator.vibrate?.(50);
+    drawerOpen = true;
+    updateDropZone(dragX, dragY);
+  }
+
+  function resetGestureState() {
+    window.clearTimeout(pairTargetTimer);
+    detachDragListeners();
+    stopAutoScrollDrawer();
+    pairTargetTimer = undefined;
+    pairTargetCandidate = "";
+    if (dragSourceElement && activePointerId !== null) {
+      try {
+        dragSourceElement.releasePointerCapture(activePointerId);
+      } catch {}
+      dragSourceElement.style.touchAction = "";
+    }
+    if (drawerListElement) {
+      drawerListElement.style.touchAction = previousDrawerTouchAction;
+    }
+    document.body.style.touchAction = previousBodyTouchAction;
+    document.documentElement.style.touchAction = previousHtmlTouchAction;
+    document.body.style.overscrollBehavior = previousBodyOverscrollBehavior;
+    document.documentElement.style.overscrollBehavior = previousHtmlOverscrollBehavior;
+    gestureState = "idle";
+    pressedApp = null;
+    draggingApp = null;
+    dragSourceElement = null;
+    previousDrawerTouchAction = "";
+    previousBodyTouchAction = "";
+    previousHtmlTouchAction = "";
+    previousBodyOverscrollBehavior = "";
+    previousHtmlOverscrollBehavior = "";
+    activePointerId = null;
+    dropZone = "";
+    drawerDimmed = false;
+    pressMoved = false;
+    pairTarget = null;
+  }
+
+  function attachDragListeners() {
+    window.addEventListener("pointermove", movePress, { passive: false });
+    window.addEventListener("pointerup", endPress);
+    window.addEventListener("pointercancel", cancelPress);
+    window.addEventListener("touchmove", preventTouchScroll, { passive: false });
+  }
+
+  function detachDragListeners() {
+    window.removeEventListener("pointermove", movePress);
+    window.removeEventListener("pointerup", endPress);
+    window.removeEventListener("pointercancel", cancelPress);
+    window.removeEventListener("touchmove", preventTouchScroll);
+  }
+
+  function findPairTarget(x: number, y: number): AppInfo | null {
+    const hovered = document.elementFromPoint(x, y)?.closest(".split-app-item") as HTMLElement | null;
+    const packageName = hovered?.dataset.packageName;
+    if (!packageName || !draggingApp || packageName === draggingApp.packageName) return null;
+    const target = apps.find((app) => app.packageName === packageName);
+    if (!target || target.isPair) return null;
+    return target;
+  }
+
+  function toast(message: string) {
+    notice = message;
+    clearTimeout(noticeTimer);
+    noticeTimer = window.setTimeout(() => (notice = ""), 2600);
+  }
+
   function triggerToggleDiagnostics() {
     (window as any).castlaDebug?.toggleDiagnostics?.();
   }
+
 </script>
 
 <div class:hidden={hasVisibleStream} class="standby">
@@ -925,32 +1000,35 @@
   class:dimmed={drawerDimmed}
   class:dragging={Boolean(draggingApp)}
   class="split-drawer"
-  on:contextmenu|preventDefault
+  oncontextmenu={(event) => event.preventDefault()}
 >
   <button
     class="split-handle"
-    on:click={() => (drawerOpen = !drawerOpen)}
+    onclick={() => (drawerOpen = !drawerOpen)}
     aria-label={drawerOpen ? "Close launcher" : "Open launcher"}
   >
     <span class="handle-chevron">{drawerOpen ? ">" : "<"}</span>
   </button>
+
   <header>
     <div class="drawer-heading">
       <strong>Launch Hub</strong>
     </div>
     <div class="drawer-meta">
-      <span class="drawer-count"
-        >{loading ? "Loading" : `${apps.length} apps`}</span
-      >
+      <span class="drawer-count">{loading ? "Loading" : `${apps.length} apps`}</span>
       <button
         class="diag-toggle-btn"
-        on:click|stopPropagation={triggerToggleDiagnostics}
+        onclick={(event) => {
+          event.stopPropagation();
+          triggerToggleDiagnostics();
+        }}
         title="Settings and diagnostics"
       >
         ⚙
       </button>
     </div>
   </header>
+
   <div class="search-row">
     <input
       bind:value={search}
@@ -958,112 +1036,45 @@
       autocomplete="off"
     />
   </div>
+
   {#if error}<div class="notice error">{error}</div>{/if}
   {#if notice}<div class="notice">{notice}</div>{/if}
-  <div bind:this={drawerListElement} class="split-app-list">
-    <nav class="hub-tabs" aria-label="Launch hub views">
-      <button
-        class:active={activeTab === "autorun"}
-        on:click={() => selectTab("autorun")}>Auto Run</button
-      >
-      <button
-        class:active={activeTab === "starred"}
-        on:click={() => selectTab("starred")}>Starred</button
-      >
-      <button
-        class:active={activeTab === "recent"}
-        on:click={() => selectTab("recent")}>Recent</button
-      >
-      <button
-        class:active={activeTab === "browse"}
-        on:click={() => selectTab("browse")}>Browse</button
-      >
-    </nav>
 
+  <LauncherTabs
+    {activeTab}
+    {selectTab}
+    {draggingApp}
+    {dropZone}
+  />
+
+  <div
+    bind:this={drawerListElement}
+    class="split-app-list"
+    class:no-scroll={draggingApp !== null}
+  >
     {#if activeTab !== "browse"}
       <section class="launcher-hero single-panel">
-        <div
-          class:priority={activeTab === "autorun"}
-          class="panel-shell rows-only"
-        >
+        <div class="panel-shell rows-only" class:priority={activeTab === "autorun"}>
           {#if activePanelApps.length > 0}
             <div class="launcher-row-list">
               {#each activePanelApps as app (app.packageName)}
-                <div
-                  class:priority={activeTab === "autorun"}
-                  class="launcher-row"
-                  title={app.label}
-                  on:click={() => activateApp(app)}
-                  on:keydown={(event) => {
-                    if (event.key === "Enter" || event.key === " ")
-                      activateApp(app);
-                  }}
-                  role="button"
-                  tabindex="0"
-                >
-                  {#if app.isPair && app.left && app.right}
-                    <div class="pair-icons row-pair-icon">
-                      <img
-                        class="app-pair-icon-left"
-                        src={`/api/icon?pkg=${encodeURIComponent(app.left)}`}
-                        alt=""
-                        loading="lazy"
-                        draggable="false"
-                      />
-                      <img
-                        class="app-pair-icon-right"
-                        src={`/api/icon?pkg=${encodeURIComponent(app.right)}`}
-                        alt=""
-                        loading="lazy"
-                        draggable="false"
-                      />
-                    </div>
-                  {:else}
-                    <img
-                      class="launcher-row-icon"
-                      src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`}
-                      alt=""
-                      loading="lazy"
-                      draggable="false"
-                    />
-                  {/if}
-                  <div class="launcher-row-text">
-                    <span class="launcher-row-title">{app.label}</span>
-                    {#if activeTab === "recent"}
-                      <span class="launcher-row-subtitle"
-                        >{getRecentMeta(app.packageName)}</span
-                      >
-                    {:else if activeTab === "autorun"}
-                      <span class="launcher-row-subtitle">Ready on startup</span
-                      >
-                    {/if}
-                  </div>
-                  <button
-                    class:active={isAppAutorun(app)}
-                    class="auto-pill"
-                    title="Toggle auto-run"
-                    on:click|stopPropagation={() => toggleAutorunForApp(app)}
-                    >AUTO</button
-                  >
-                  <button
-                    class:active={favorites.includes(app.packageName)}
-                    class="star"
-                    title="Toggle star"
-                    on:click|stopPropagation={() =>
-                      toggleFavorite(app.packageName)}>★</button
-                  >
-                  {#if app.isPair}
-                    <button
-                      class:active={pairMenuOpen === app.packageName}
-                      class="pair-settings"
-                      title="Pair settings"
-                      on:click|stopPropagation={() => openPairEdit(app)}
-                      >⚙️</button
-                    >
-                  {:else}
-                    <span class="control-spacer" aria-hidden="true"></span>
-                  {/if}
-                </div>
+                <!-- Modularized AppRow item with full touch gestures support -->
+                <AppRow
+                  {app}
+                  {activeTab}
+                  isStarred={favorites.includes(app.packageName)}
+                  isAutorun={isAppAutorun(app)}
+                  isDragActive={draggingApp !== null}
+                  recentMeta={getRecentMeta(app.packageName)}
+                  onLaunch={activateApp}
+                  onToggleStar={toggleFavorite}
+                  onToggleAutorun={toggleAutorunForApp}
+                  onOpenEdit={openPairEdit}
+                  onStartPress={startPress}
+                  onPointerMove={movePress}
+                  onPointerUp={endPress}
+                  onPointerCancel={cancelPress}
+                />
               {/each}
             </div>
           {:else}
@@ -1074,260 +1085,62 @@
     {:else}
       <section class="library-section">
         <div class="library-header">
-          <span
-            >{search
-              ? `${displayApps.length} matches`
-              : "All categories collapsed"}</span
-          >
+          <span>{search ? `${displayApps.length} matches` : "All categories collapsed"}</span>
         </div>
       </section>
+
       <div class="browse-accordion">
         {#each browseGroups as group (group.key)}
-          <section class="browse-group">
-            <button
-              class:expanded={expandedCategory === group.key}
-              class="browse-group-header"
-              on:click={() => toggleCategory(group.key)}
-            >
-              <div class="browse-group-label">
-                <span class="browse-chevron"
-                  >{expandedCategory === group.key ? "▼" : "▶"}</span
-                >
-                <span>{group.title}</span>
-              </div>
-              <span class="browse-count">{group.items.length}</span>
-            </button>
-            {#if expandedCategory === group.key}
-              <div class="browse-list">
-                {#each group.items as app (app.packageName)}
-                  <div
-                    data-package-name={app.isPair ? undefined : app.packageName}
-                    class:pair-target={pairTarget?.packageName ===
-                      app.packageName}
-                    class:merge-target={pairTarget?.packageName ===
-                      app.packageName && draggingApp !== null}
-                    class:drag-source={draggingApp?.packageName ===
-                      app.packageName}
-                    class="split-app-item compact"
-                    title={app.label}
-                    on:pointerdown={(event) => startPress(event, app)}
-                    on:pointermove={movePress}
-                    on:pointerup={endPress}
-                    on:pointercancel={cancelPress}
-                    on:keydown={(event) => {
-                      if (event.key === "Enter" || event.key === " ")
-                        activateApp(app);
-                    }}
-                    on:contextmenu|preventDefault
-                    role="button"
-                    tabindex="0"
-                  >
-                    {#if app.isPair && app.left && app.right}
-                      <div class="pair-icons split-pair-icon">
-                        <img
-                          class="app-pair-icon-left"
-                          src={`/api/icon?pkg=${encodeURIComponent(app.left)}`}
-                          alt=""
-                          loading="lazy"
-                          draggable="false"
-                        />
-                        <img
-                          class="app-pair-icon-right"
-                          src={`/api/icon?pkg=${encodeURIComponent(app.right)}`}
-                          alt=""
-                          loading="lazy"
-                          draggable="false"
-                        />
-                      </div>
-                    {:else}
-                      <img
-                        class="split-app-icon"
-                        src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`}
-                        alt=""
-                        loading="lazy"
-                        draggable="false"
-                      />
-                    {/if}
-                    <div class="launch-main"><span>{app.label}</span></div>
-                    <button
-                      class:active={isAppAutorun(app)}
-                      class="auto-pill"
-                      title="Auto-run"
-                      on:click|stopPropagation={() => toggleAutorunForApp(app)}
-                      >AUTO</button
-                    >
-                    <button
-                      class:active={favorites.includes(app.packageName)}
-                      class="star"
-                      title="Star"
-                      on:click|stopPropagation={() =>
-                        toggleFavorite(app.packageName)}>★</button
-                    >
-                    {#if app.isPair}
-                      <button
-                        class:active={pairMenuOpen === app.packageName}
-                        class="pair-settings"
-                        title="Pair settings"
-                        on:click|stopPropagation={() => openPairEdit(app)}
-                        >⚙️</button
-                      >
-                    {:else}
-                      <span class="control-spacer" aria-hidden="true"></span>
-                    {/if}
-                    {#if pairTarget?.packageName === app.packageName && draggingApp}
-                      <div class="merge-preview" aria-hidden="true">
-                        <div class="merge-icon incoming">
-                          <img
-                            src={`/api/icon?pkg=${encodeURIComponent(draggingApp.packageName)}`}
-                            alt=""
-                            draggable="false"
-                          />
-                        </div>
-                        <div class="merge-plus">+</div>
-                        <div class="merge-icon target">
-                          <img
-                            src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`}
-                            alt=""
-                            draggable="false"
-                          />
-                        </div>
-                        <div class="merge-result">
-                          <img
-                            class="merge-half left"
-                            src={`/api/icon?pkg=${encodeURIComponent(draggingApp.packageName)}`}
-                            alt=""
-                            draggable="false"
-                          />
-                          <img
-                            class="merge-half right"
-                            src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`}
-                            alt=""
-                            draggable="false"
-                          />
-                        </div>
-                      </div>
-                    {/if}
-                  </div>
-                {/each}
-              </div>
-            {/if}
-          </section>
+          <!-- Modularized Accordion for clean rendering -->
+          <CategoryAccordion
+            {group}
+            isExpanded={expandedCategory === group.key}
+            {draggingApp}
+            {pairTarget}
+            {favorites}
+            isAutorun={isAppAutorun}
+            onToggle={toggleCategory}
+            onLaunch={activateApp}
+            onToggleStar={toggleFavorite}
+            onToggleAutorun={toggleAutorunForApp}
+            onOpenEdit={openPairEdit}
+            onStartPress={startPress}
+            onPointerMove={movePress}
+            onPointerUp={endPress}
+            onPointerCancel={cancelPress}
+          />
         {/each}
       </div>
     {/if}
   </div>
 </aside>
 
-{#if draggingApp && !pairTarget}
-  <div class="drop-overlay">
-    <div
-      class:active={dropZone === "favorite"}
-      class:hidden={pairTarget !== null}
-      class="drop-zone shortcut favorite-zone"
-    >
-      <strong>★</strong><span>Star this app</span>
-    </div>
-    <div
-      class:active={dropZone === "autorun"}
-      class:hidden={pairTarget !== null}
-      class="drop-zone shortcut autorun-zone"
-    >
-      <strong>↯</strong><span>Set auto-run</span>
-    </div>
-    <div
-      class:active={dropZone === "primary"}
-      class:hidden={pairTarget !== null}
-      class="drop-zone primary-zone"
-    >
-      <strong>▰</strong><span>Primary(왼쪽)에 실행</span><small
-        >빈 화면 (VD_1)</small
-      >
-    </div>
-    <div
-      class:active={dropZone === "secondary"}
-      class:hidden={pairTarget !== null}
-      class="drop-zone secondary-zone"
-    >
-      <strong>▰</strong><span>Secondary(오른쪽)에 실행</span><small
-        >빈 화면 (VD_2)</small
-      >
-    </div>
-    <div
-      class:active={dropZone === "remove"}
-      class:hidden={pairTarget !== null}
-      class="drop-zone remove-zone"
-    >
-      <strong>⌫</strong><span>제거 / 휴지통</span>
-    </div>
-    <div class="drag-ghost" style={`left:${dragX}px;top:${dragY}px`}>
-      <img
-        src={`/api/icon?pkg=${encodeURIComponent(draggingApp.packageName)}`}
-        alt=""
-      />
-    </div>
-  </div>
+<!-- Modularized drag-and-drop tracker overlay -->
+{#if draggingApp}
+  <DragDropOverlay
+    {draggingApp}
+    {dragX}
+    {dragY}
+    {dropZone}
+    {pairTarget}
+    drawerLeft={drawerElement?.getBoundingClientRect().left ?? window.innerWidth}
+  />
 {/if}
 
+<!-- Modularized dialog configuration pair editor -->
 {#if editingPair}
-  {@const pair = editingPair}
-  <div
-    class="pair-dialog-overlay"
-    role="button"
-    tabindex="0"
-    aria-label="Close App Pair editor"
-    on:click|self={cancelEditingPair}
-    on:keydown={(event) => {
-      if (event.key === "Escape" || event.key === "Enter" || event.key === " ")
-        cancelEditingPair();
-    }}
-  >
-    <div
-      class="pair-dialog"
-      role="dialog"
-      aria-modal="true"
-      aria-label="App Pair editor"
-      tabindex="-1"
-    >
-      <header class="pair-dialog-header">
-        <strong>App Pair</strong>
-      </header>
-      <div class="pair-dialog-body">
-        <div class="pair-dialog-app">
-          <img
-            src={`/api/icon?pkg=${encodeURIComponent(pair.left ?? "")}`}
-            alt=""
-            draggable="false"
-          />
-          <span
-            >{apps.find((app) => app.packageName === pair.left)?.label ??
-              "Unknown"}</span
-          >
-        </div>
-        <button class="pair-dialog-swap" on:click={swapEditingPair}>⇄</button>
-        <div class="pair-dialog-app">
-          <img
-            src={`/api/icon?pkg=${encodeURIComponent(pair.right ?? "")}`}
-            alt=""
-            draggable="false"
-          />
-          <span
-            >{apps.find((app) => app.packageName === pair.right)?.label ??
-              "Unknown"}</span
-          >
-        </div>
-      </div>
-      <div class="pair-dialog-actions">
-        <button on:click={cancelEditingPair}>취소</button>
-        <button class="danger" on:click={() => removePair(pair)}
-          >분리하기</button
-        >
-        <button class="primary" on:click={saveEditingPair}>저장</button>
-      </div>
-    </div>
-  </div>
+  <PairDialog
+    {editingPair}
+    {apps}
+    onSwap={swapEditingPair}
+    onCancel={() => editingPair = null}
+    onRemove={removePair}
+    onSave={saveEditingPair}
+  />
 {/if}
 
 <style>
+  /* Base Glassmorphic Layouts & Aesthetics */
   .standby {
     position: absolute;
     inset: 0;
@@ -1337,13 +1150,9 @@
     justify-items: center;
     text-align: center;
     color: #eaf7ff;
-    background: radial-gradient(
-      circle at center,
-      #171724 0%,
-      #090a12 68%,
-      #06070d 100%
-    );
+    background: radial-gradient(circle at center, #131420 0%, #06070c 70%, #030407 100%);
     pointer-events: none;
+    transition: opacity 0.3s ease;
   }
 
   .standby.hidden {
@@ -1358,8 +1167,8 @@
     border: 3px solid #28c9ff;
     border-radius: 50%;
     box-shadow:
-      0 0 40px rgb(40 201 255 / 0.45),
-      inset 0 0 25px rgb(158 75 255 / 0.3);
+      0 0 35px rgb(40 201 255 / 0.35),
+      inset 0 0 20px rgb(158 75 255 / 0.2);
     color: #8c74ff;
     font-size: 52px;
     margin-bottom: 34px;
@@ -1371,21 +1180,17 @@
     border: 3px solid rgb(40 201 255 / 0.25);
     border-top: 3px solid #8c74ff;
     border-radius: 50%;
-    animation: spin-glorious 1s linear infinite;
+    animation: spin 1s linear infinite;
   }
 
-  @keyframes spin-glorious {
-    0% {
-      transform: rotate(0deg);
-    }
-    100% {
-      transform: rotate(360deg);
-    }
+  @keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
   }
 
   .standby-logo {
     font-size: 36px;
-    font-weight: 800;
+    font-weight: 900;
     letter-spacing: 8px;
     background: linear-gradient(90deg, #22d6ff, #bd5cff);
     -webkit-background-clip: text;
@@ -1406,9 +1211,9 @@
     gap: 9px;
     min-height: 36px;
     padding: 0 18px;
-    border: 1px solid rgb(255 255 255 / 0.12);
+    border: 1px solid rgb(255 255 255 / 0.08);
     border-radius: 18px;
-    background: rgb(255 255 255 / 0.06);
+    background: rgb(255 255 255 / 0.04);
     color: #e1e4ee;
     font-size: 12px;
     font-weight: 800;
@@ -1423,6 +1228,7 @@
     box-shadow: 0 0 10px #12d8ff;
   }
 
+  /* Premium Sidebar Drawer styling */
   .split-drawer {
     position: absolute;
     top: 0;
@@ -1433,13 +1239,14 @@
     display: flex;
     flex-direction: column;
     color: white;
-    background: rgb(18 18 28 / 0.97);
-    border-left: 1px solid rgb(255 255 255 / 0.1);
-    box-shadow: -8px 0 24px rgb(0 0 0 / 0.42);
+    background: rgba(13, 16, 27, 0.96);
+    backdrop-filter: blur(20px);
+    border-left: 1px solid rgba(255, 255, 255, 0.06);
+    box-shadow: -10px 0 32px rgba(0, 0, 0, 0.45);
     transition:
-      right 0.24s ease,
-      opacity 0.18s ease,
-      filter 0.18s ease;
+      right 0.26s cubic-bezier(0.4, 0, 0.2, 1),
+      opacity 0.2s ease,
+      filter 0.2s ease;
   }
 
   .split-drawer.open {
@@ -1451,10 +1258,11 @@
   }
 
   .split-drawer.dimmed {
-    opacity: 0.28;
-    filter: saturate(0.45);
+    opacity: 0.35;
+    filter: saturate(0.5) blur(1px);
   }
 
+  /* Interactive split handle with glow outline */
   .split-handle {
     position: absolute;
     left: -28px;
@@ -1462,17 +1270,21 @@
     width: 28px;
     height: 92px;
     transform: translateY(-50%);
-    border: 1px solid rgb(255 255 255 / 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.08);
     border-right: 0;
     border-radius: 14px 0 0 14px;
-    background: linear-gradient(
-      180deg,
-      rgb(22 24 35 / 0.96),
-      rgb(16 18 28 / 0.88)
-    );
+    background: linear-gradient(180deg, rgba(20, 24, 38, 0.98), rgba(12, 15, 24, 0.92));
     display: flex;
     align-items: center;
     justify-content: center;
+    cursor: pointer;
+    box-shadow: -4px 0 16px rgba(0, 0, 0, 0.2);
+    transition: background 0.2s ease, border-color 0.2s ease;
+  }
+
+  .split-handle:hover {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: rgba(255, 255, 255, 0.15);
   }
 
   .handle-chevron {
@@ -1483,32 +1295,34 @@
 
   header,
   .search-row {
-    padding: 12px 16px;
-    border-bottom: 1px solid rgb(255 255 255 / 0.1);
+    padding: 10px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  .search-row {
+    padding-left: 0;
+    padding-right: 0;
   }
 
   header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    min-height: 56px;
-    background: radial-gradient(
-        circle at top left,
-        rgb(55 127 255 / 0.12),
-        transparent 42%
-      ),
-      linear-gradient(180deg, rgb(255 255 255 / 0.03), transparent);
+    min-height: 40px;
+    padding-top: 6px;
+    padding-bottom: 6px;
+    background: radial-gradient(circle at top left, rgba(55, 127, 255, 0.08), transparent 50%),
+      linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent);
   }
 
   header strong {
-    font-size: 19px;
+    font-size: 16px;
     font-weight: 800;
     letter-spacing: -0.02em;
-  }
-
-  header span {
-    color: #a9adba;
-    font-size: 12px;
+    background: linear-gradient(90deg, #ffffff, #94a3b8);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
   }
 
   .drawer-heading {
@@ -1523,53 +1337,44 @@
   }
 
   .drawer-count {
-    color: #95a0b2;
-    font-size: 12px;
+    color: #94a3b8;
+    font-size: 11px;
     font-weight: 700;
     letter-spacing: 0.01em;
   }
 
   .diag-toggle-btn {
     border: none;
-    background: rgb(255 255 255 / 0.05);
-    color: rgb(255 255 255 / 0.74);
+    background: rgba(255, 255, 255, 0.04);
+    color: rgb(255 255 255 / 0.65);
     font-size: 15px;
-    width: 28px;
-    height: 28px;
+    width: 24px;
+    height: 24px;
     padding: 0;
     cursor: pointer;
-    border-radius: 999px;
-    transition:
-      background 0.2s ease,
-      transform 0.1s ease;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s ease, transform 0.1s ease, color 0.2s ease;
   }
 
   .diag-toggle-btn:hover {
-    background: rgb(255 255 255 / 0.1);
-    color: white;
-  }
-
-  .diag-toggle-btn:active {
-    transform: scale(0.9);
-  }
-
-  input,
-  button {
-    font: inherit;
-  }
-
-  button {
-    cursor: pointer;
+    background: rgba(255, 255, 255, 0.08);
+    color: #ffffff;
+    transform: rotate(45deg);
   }
 
   .search-row input {
+    box-sizing: border-box;
     width: 100%;
-    height: 38px;
-    border: 1px solid rgb(255 255 255 / 0.12);
+    height: 34px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 10px;
-    background: rgb(255 255 255 / 0.07);
+    background: rgba(255, 255, 255, 0.04);
     color: white;
     padding: 0 12px;
+    font-size: 12px;
     transition:
       border-color 0.2s ease,
       background 0.2s ease,
@@ -1578,59 +1383,51 @@
 
   .search-row input:focus {
     outline: none;
-    border-color: rgb(139 196 255 / 0.42);
-    background: rgb(255 255 255 / 0.09);
-    box-shadow: 0 0 0 3px rgb(139 196 255 / 0.1);
+    border-color: rgba(139, 196, 255, 0.35);
+    background: rgba(255, 255, 255, 0.06);
+    box-shadow: 0 0 0 3px rgba(139, 196, 255, 0.08);
+  }
+
+  .search-row {
+    margin: 0 12px;
   }
 
   .notice {
-    margin: 10px;
-    padding: 8px 10px;
+    margin: 8px 10px;
+    padding: 7px 9px;
     border-radius: 8px;
-    background: rgb(0 229 255 / 0.16);
+    background: rgba(0, 229, 255, 0.1);
+    border: 1px solid rgba(0, 229, 255, 0.15);
     font-size: 12px;
+    color: #00e5ff;
   }
 
   .notice.error {
-    background: rgb(255 70 70 / 0.2);
+    background: rgba(239, 68, 68, 0.1);
+    border-color: rgba(239, 68, 68, 0.15);
+    color: #f87171;
   }
 
   .split-app-list {
     flex: 1;
-    overflow: auto;
-    padding: 12px 10px 22px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 8px 10px 24px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
   }
 
-  .hub-tabs {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 6px;
-    padding: 0 0 12px;
-    margin-bottom: 8px;
+  .split-app-list.no-scroll {
+    touch-action: none !important;
   }
 
-  .hub-tabs button {
-    min-width: 0;
-    height: 34px;
-    padding: 0 4px;
-    border: 1px solid rgb(255 255 255 / 0.08);
-    border-radius: 999px;
-    background: rgb(255 255 255 / 0.05);
-    color: #b5bdcb;
-    font-size: 11px;
-    font-weight: 700;
-    white-space: nowrap;
-    letter-spacing: -0.01em;
-    transition:
-      background 0.16s ease,
-      border-color 0.16s ease,
-      color 0.16s ease;
+  .split-app-list::-webkit-scrollbar {
+    width: 4px;
   }
 
-  .hub-tabs button.active {
-    background: rgb(139 196 255 / 0.14);
-    border-color: rgb(139 196 255 / 0.26);
-    color: #f6f8fc;
+  .split-app-list::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 2px;
   }
 
   .launcher-hero {
@@ -1641,15 +1438,11 @@
 
   .panel-shell {
     padding: 10px;
-    border: 1px solid rgb(255 255 255 / 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.06);
     border-radius: 18px;
-    background: linear-gradient(
-        180deg,
-        rgb(255 255 255 / 0.06),
-        rgb(255 255 255 / 0.03)
-      ),
-      rgb(14 18 28 / 0.9);
-    box-shadow: 0 16px 28px rgb(0 0 0 / 0.16);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.01)),
+      rgba(11, 14, 24, 0.82);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.25);
   }
 
   .panel-shell.rows-only {
@@ -1657,12 +1450,9 @@
   }
 
   .panel-shell.priority {
-    background: linear-gradient(
-        180deg,
-        rgb(60 92 160 / 0.14),
-        rgb(255 255 255 / 0.03)
-      ),
-      rgb(14 18 28 / 0.94);
+    background: linear-gradient(180deg, rgba(60, 92, 160, 0.12), rgba(255, 255, 255, 0.01)),
+      rgba(11, 14, 24, 0.86);
+    border-color: rgba(60, 92, 160, 0.22);
   }
 
   .launcher-row-list {
@@ -1671,101 +1461,16 @@
     gap: 8px;
   }
 
-  .launcher-row {
-    display: grid;
-    grid-template-columns: 42px minmax(0, 1fr) auto 20px 18px;
-    align-items: center;
-    gap: 6px;
-    min-height: 50px;
-    padding: 8px 10px;
-    border: 1px solid rgb(255 255 255 / 0.06);
-    border-radius: 12px;
-    background: linear-gradient(
-        180deg,
-        rgb(255 255 255 / 0.05),
-        rgb(255 255 255 / 0.02)
-      ),
-      rgb(18 22 34 / 0.88);
-    color: white;
-    text-align: left;
-    transition:
-      transform 0.18s ease,
-      border-color 0.18s ease,
-      background 0.18s ease,
-      box-shadow 0.18s ease;
-  }
-
-  .launcher-row.priority {
-    min-height: 54px;
-    padding: 9px 10px;
-    background: linear-gradient(
-        180deg,
-        rgb(255 255 255 / 0.08),
-        rgb(255 255 255 / 0.03)
-      ),
-      rgb(22 27 40 / 0.95);
-  }
-
-  .launcher-row:hover,
-  .launcher-row:focus-visible {
-    border-color: rgb(139 196 255 / 0.42);
-    background: linear-gradient(
-        180deg,
-        rgb(139 196 255 / 0.12),
-        rgb(255 255 255 / 0.05)
-      ),
-      rgb(20 24 36 / 0.98);
-    box-shadow: 0 10px 20px rgb(0 0 0 / 0.18);
-    transform: translateY(-1px);
-    outline: none;
-  }
-
-  .launcher-row-text {
-    min-width: 0;
-    display: grid;
-    gap: 2px;
-  }
-
-  .launcher-row-title {
-    display: -webkit-box;
-    overflow: hidden;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    -webkit-box-orient: vertical;
-    font-size: 14px;
-    font-weight: 700;
-    line-height: 1.2;
-    word-break: keep-all;
-    overflow-wrap: normal;
-    text-overflow: ellipsis;
-  }
-
-  .launcher-row-subtitle {
-    color: #8f96a4;
-    font-size: 10px;
-    font-weight: 600;
-  }
-
-  .launcher-row-icon {
-    width: 40px;
-    height: 40px;
-    object-fit: contain;
-  }
-
-  .row-pair-icon {
-    width: 42px;
-    height: 34px;
-  }
-
   .quick-empty {
-    padding: 14px 2px 4px;
-    color: #8f96a4;
-    font-size: 13px;
+    padding: 18px 6px;
+    color: #64748b;
+    font-size: 12px;
+    text-align: center;
     line-height: 1.45;
   }
 
   .library-section {
-    margin: 2px 0 12px;
+    margin: 2px 0 10px;
   }
 
   .library-header {
@@ -1776,595 +1481,15 @@
   }
 
   .library-header span {
-    color: #8f96a4;
-    font-size: 12px;
+    color: #64748b;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
   }
 
   .browse-accordion {
     display: grid;
-    gap: 10px;
-  }
-
-  .browse-group {
-    border: 1px solid rgb(255 255 255 / 0.08);
-    border-radius: 16px;
-    background: rgb(255 255 255 / 0.04);
-    overflow: hidden;
-  }
-
-  .browse-group-header {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 13px 14px;
-    border: 0;
-    background: transparent;
-    color: #eef2f8;
-    font-size: 15px;
-    font-weight: 700;
-  }
-
-  .browse-group-header.expanded {
-    background: rgb(255 255 255 / 0.04);
-  }
-
-  .browse-group-label {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .browse-chevron {
-    color: #8f96a4;
-    font-size: 11px;
-  }
-
-  .browse-count {
-    color: #8f96a4;
-    font-size: 13px;
-    font-weight: 700;
-  }
-
-  .browse-list {
-    display: flex;
-    flex-direction: column;
     gap: 8px;
-    padding: 0 10px 10px;
-  }
-
-  .split-app-item {
-    position: relative;
-    display: grid;
-    grid-template-columns: 48px 1fr 28px 28px 28px;
-    align-items: center;
-    gap: 8px;
-    min-height: 60px;
-    padding: 10px 12px;
-    border: 1px solid rgb(255 255 255 / 0.06);
-    border-radius: 14px;
-    background: linear-gradient(
-        180deg,
-        rgb(255 255 255 / 0.06),
-        rgb(255 255 255 / 0.03)
-      ),
-      rgb(255 255 255 / 0.03);
-    user-select: none;
-    touch-action: pan-y;
-    -webkit-user-drag: none;
-    transition:
-      transform 0.18s ease,
-      box-shadow 0.18s ease,
-      background 0.18s ease;
-  }
-
-  .split-app-item.compact {
-    grid-template-columns: 40px minmax(0, 1fr) auto 20px 18px;
-    min-height: 44px;
-    padding: 6px 10px;
-    border-radius: 12px;
-  }
-
-  .split-app-item:hover,
-  .split-app-item:focus-visible {
-    background: linear-gradient(
-        180deg,
-        rgb(255 255 255 / 0.08),
-        rgb(255 255 255 / 0.05)
-      ),
-      rgb(255 255 255 / 0.04);
-    border-color: rgb(255 255 255 / 0.12);
-    box-shadow: 0 10px 22px rgb(0 0 0 / 0.14);
-    outline: none;
-  }
-
-  .split-app-item.drag-source {
-    opacity: 0.42;
-  }
-
-  .split-app-item.pair-target {
-    outline: 2px solid #00e5ff;
-    box-shadow:
-      0 0 0 1px rgb(0 229 255 / 0.25),
-      inset 0 0 24px rgb(0 229 255 / 0.18);
-    background: rgb(0 229 255 / 0.12);
-  }
-
-  .split-app-item.merge-target {
-    transform: scale(1.02);
-  }
-
-  .pair-icons {
-    position: relative;
-    width: 50px;
-    height: 42px;
-  }
-
-  .split-pair-icon {
-    overflow: visible;
-  }
-
-  .split-app-icon {
-    width: 36px;
-    height: 36px;
-    object-fit: contain;
-    -webkit-user-drag: none;
-    user-select: none;
-  }
-
-  .app-pair-icon-left,
-  .app-pair-icon-right {
-    position: absolute;
-    width: 30px;
-    height: 30px;
-    object-fit: contain;
-    border-radius: 10px;
-    background: rgb(18 22 34 / 0.92);
-    padding: 3px;
-    box-shadow: 0 8px 16px rgb(0 0 0 / 0.28);
-    -webkit-user-drag: none;
-    user-select: none;
-  }
-
-  .app-pair-icon-left {
-    left: 1px;
-    top: 6px;
-    z-index: 1;
-    opacity: 0.98;
-  }
-
-  .app-pair-icon-right {
-    left: 18px;
-    top: 6px;
-    z-index: 2;
-  }
-
-  .row-pair-icon .app-pair-icon-left,
-  .row-pair-icon .app-pair-icon-right {
-    width: 24px;
-    height: 24px;
-    padding: 2px;
-    border-radius: 9px;
-  }
-
-  .row-pair-icon .app-pair-icon-left {
-    left: 0;
-    top: 5px;
-  }
-
-  .row-pair-icon .app-pair-icon-right {
-    left: 16px;
-    top: 5px;
-  }
-
-  .split-app-item.compact .split-pair-icon {
-    width: 40px;
-    height: 32px;
-  }
-
-  .split-app-item.compact .split-pair-icon .app-pair-icon-left,
-  .split-app-item.compact .split-pair-icon .app-pair-icon-right {
-    width: 22px;
-    height: 22px;
-    padding: 2px;
-    border-radius: 8px;
-  }
-
-  .split-app-item.compact .split-pair-icon .app-pair-icon-left {
-    left: 0;
-    top: 5px;
-  }
-
-  .split-app-item.compact .split-pair-icon .app-pair-icon-right {
-    left: 14px;
-    top: 5px;
-  }
-
-  .launch-main,
-  .star,
-  .auto-pill {
-    border: 0;
-    color: white;
-    background: transparent;
-  }
-
-  .launch-main {
-    min-width: 0;
-    text-align: left;
-    font-size: 14px;
-    font-weight: 700;
-    cursor: pointer;
-  }
-
-  .launch-main span {
-    display: -webkit-box;
-    overflow: hidden;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    -webkit-box-orient: vertical;
-    word-break: keep-all;
-    overflow-wrap: normal;
-    text-overflow: ellipsis;
-    line-height: 1.2;
-  }
-
-  .star,
-  .auto-pill {
-    width: 22px;
-    height: 22px;
-    border-radius: 50%;
-    color: rgb(255 255 255 / 0.88);
-    font-size: 16px;
-    transition:
-      background 0.16s ease,
-      color 0.16s ease,
-      transform 0.16s ease;
-  }
-
-  .star:hover,
-  .auto-pill:hover,
-  .pair-settings:hover {
-    background: rgb(255 255 255 / 0.08);
-    transform: translateY(-1px);
-  }
-
-  .star.active {
-    color: #ffd56a;
-    text-shadow: none;
-    background: transparent;
-  }
-
-  .auto-pill {
-    width: auto;
-    min-width: 0;
-    padding: 0 5px;
-    border: 1px solid rgb(255 112 67 / 0.16);
-    border-radius: 999px;
-    background: rgb(255 112 67 / 0.08);
-    color: rgb(255 189 145 / 0.62);
-    font-size: 9px;
-    font-weight: 800;
-    letter-spacing: 0.04em;
-    justify-self: end;
-    margin-left: 10px;
-  }
-
-  .auto-pill.active {
-    color: #ffd0b7;
-    background: rgb(255 112 67 / 0.14);
-    border-color: rgb(255 112 67 / 0.28);
-    box-shadow: none;
-  }
-
-  .pair-settings {
-    width: 18px;
-    height: 18px;
-    border: 0;
-    border-radius: 50%;
-    background: transparent;
-    color: rgb(255 255 255 / 0.72);
-    font-size: 12px;
-    line-height: 1;
-  }
-
-  .pair-settings.active {
-    color: #00e5ff;
-    text-shadow: 0 0 12px rgb(0 229 255 / 0.42);
-  }
-
-  .control-spacer {
-    width: 18px;
-    height: 18px;
-  }
-
-  .merge-preview {
-    position: absolute;
-    inset: 0;
-    z-index: 2;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 10px;
-    border-radius: 8px;
-    background: linear-gradient(
-      90deg,
-      rgb(0 229 255 / 0.12),
-      rgb(0 229 255 / 0.04)
-    );
-    overflow: hidden;
-  }
-
-  .merge-icon,
-  .merge-result {
-    position: relative;
-    width: 34px;
-    height: 34px;
-    border-radius: 10px;
-    overflow: hidden;
-    background: rgb(255 255 255 / 0.14);
-    box-shadow: 0 6px 14px rgb(0 0 0 / 0.2);
-    flex: 0 0 auto;
-  }
-
-  .merge-icon img,
-  .merge-result img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
-  .merge-icon.incoming {
-    animation: merge-slide-in 0.36s ease both;
-  }
-
-  .merge-icon.target {
-    animation: merge-pulse 0.36s ease both;
-  }
-
-  .merge-plus {
-    color: #8ff3ff;
-    font-weight: 800;
-    font-size: 18px;
-  }
-
-  .merge-result {
-    margin-left: auto;
-  }
-
-  .merge-half {
-    position: absolute;
-    inset: 0;
-  }
-
-  .merge-half.left {
-    clip-path: inset(0 50% 0 0);
-  }
-
-  .merge-half.right {
-    clip-path: inset(0 0 0 50%);
-  }
-
-  @keyframes merge-slide-in {
-    from {
-      transform: translateX(-22px) scale(0.88);
-      opacity: 0.2;
-    }
-    to {
-      transform: translateX(0) scale(1);
-      opacity: 1;
-    }
-  }
-
-  @keyframes merge-pulse {
-    0% {
-      transform: scale(1);
-    }
-    50% {
-      transform: scale(1.08);
-    }
-    100% {
-      transform: scale(1);
-    }
-  }
-
-  .drop-overlay {
-    position: absolute;
-    inset: 0;
-    z-index: 95;
-    background: rgb(4 5 12 / 0.76);
-    backdrop-filter: blur(2px);
-    pointer-events: none;
-  }
-
-  .drop-zone {
-    position: absolute;
-    display: grid;
-    place-content: center;
-    justify-items: center;
-    border: 2px dashed rgb(255 255 255 / 0.18);
-    color: rgb(255 255 255 / 0.78);
-    background: rgb(10 12 20 / 0.32);
-  }
-
-  .drop-zone strong {
-    font-size: 34px;
-    margin-bottom: 6px;
-  }
-
-  .drop-zone span {
-    font-weight: 800;
-  }
-
-  .drop-zone small {
-    margin-top: 8px;
-    color: rgb(255 255 255 / 0.45);
-    font-size: 12px;
-  }
-
-  .shortcut {
-    top: 0;
-    width: 49%;
-    height: 13%;
-    border-radius: 0 0 18px 18px;
-  }
-
-  .favorite-zone {
-    left: 0;
-  }
-
-  .autorun-zone {
-    right: 0;
-  }
-
-  .primary-zone,
-  .secondary-zone {
-    top: 15%;
-    bottom: 15%;
-    width: 49%;
-    border-radius: 22px;
-  }
-
-  .primary-zone {
-    left: 0;
-    border-color: rgb(0 229 255 / 0.48);
-    color: #00e5ff;
-  }
-
-  .secondary-zone {
-    right: 0;
-    border-color: rgb(224 64 251 / 0.48);
-    color: #e040fb;
-  }
-
-  .remove-zone {
-    left: 0;
-    right: 0;
-    bottom: 0;
-    height: 13%;
-    border-radius: 18px 18px 0 0;
-    border-color: rgb(255 61 61 / 0.36);
-    color: #ff4343;
-  }
-
-  .drop-zone.active {
-    background: rgb(255 255 255 / 0.08);
-    box-shadow: inset 0 0 28px currentColor;
-  }
-
-  .drop-zone.hidden {
-    opacity: 0;
-  }
-
-  .drag-ghost {
-    position: absolute;
-    width: 78px;
-    height: 78px;
-    transform: translate(-50%, -50%);
-    display: grid;
-    place-items: center;
-    border-radius: 24px;
-    background: rgb(255 255 255 / 0.82);
-    box-shadow: 0 12px 34px rgb(0 0 0 / 0.45);
-    pointer-events: none;
-    z-index: 2;
-  }
-
-  .drag-ghost img {
-    width: 58px;
-    height: 58px;
-    object-fit: contain;
-  }
-
-  .pair-dialog-overlay {
-    position: absolute;
-    inset: 0;
-    z-index: 90;
-    display: grid;
-    place-items: center;
-    background: rgb(4 5 12 / 0.72);
-    backdrop-filter: blur(3px);
-  }
-
-  .pair-dialog {
-    width: min(320px, calc(100vw - 32px));
-    padding: 18px;
-    border: 1px solid rgb(255 255 255 / 0.12);
-    border-radius: 18px;
-    background: rgb(13 18 28 / 0.98);
-    color: white;
-    box-shadow: 0 18px 42px rgb(0 0 0 / 0.42);
-  }
-
-  .pair-dialog-header {
-    margin-bottom: 14px;
-  }
-
-  .pair-dialog-header strong {
-    font-size: 18px;
-  }
-
-  .pair-dialog-body {
-    display: grid;
-    grid-template-columns: 1fr 40px 1fr;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 16px;
-  }
-
-  .pair-dialog-app {
-    display: grid;
-    justify-items: center;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .pair-dialog-app img {
-    width: 54px;
-    height: 54px;
-    object-fit: contain;
-  }
-
-  .pair-dialog-app span {
-    max-width: 100%;
-    text-align: center;
-    font-size: 13px;
-    line-height: 1.3;
-    word-break: break-word;
-  }
-
-  .pair-dialog-swap {
-    width: 40px;
-    height: 40px;
-    border: 0;
-    border-radius: 999px;
-    background: rgb(255 255 255 / 0.12);
-    color: #00e5ff;
-    font-size: 20px;
-  }
-
-  .pair-dialog-actions {
-    display: flex;
-    gap: 8px;
-    justify-content: flex-end;
-  }
-
-  .pair-dialog-actions button {
-    height: 36px;
-    padding: 0 12px;
-    border: 0;
-    border-radius: 10px;
-    background: rgb(255 255 255 / 0.08);
-    color: white;
-  }
-
-  .pair-dialog-actions .danger {
-    color: #ff7d7d;
-    background: rgb(255 72 72 / 0.14);
-  }
-
-  .pair-dialog-actions .primary {
-    color: #031217;
-    background: #00e5ff;
-    font-weight: 700;
   }
 </style>

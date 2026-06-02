@@ -2922,9 +2922,9 @@ class MirrorForegroundService : Service() {
                             FileLogger.i("DISPLAY_DEBUG", "[$name] reuseVirtualDisplay id=$currentId resize=${w}x${h} dpi=$dpi")
                             FileLogger.i("DISPLAY_STATE", "[$name] reuseVirtualDisplay id=$currentId width=$w height=$h dpi=$dpi")
                             runBinderSafe { controller.resizeDisplay(w, h, dpi) }
-                            Log.i(TAG, "[DISPLAY_DEBUG] [$name] attaching surface to existing display id=$currentId surfacePresent=${surface != null}")
-                            FileLogger.i("DISPLAY_DEBUG", "[$name] setSurface existing id=$currentId surfacePresent=${surface != null}")
-                            FileLogger.i("DISPLAY_STATE", "[$name] setSurface existing id=$currentId surfacePresent=${surface != null}")
+                            Log.i(TAG, "[DISPLAY_DEBUG] [$name] attaching surface to existing display id=$currentId")
+                            FileLogger.i("DISPLAY_DEBUG", "[$name] setSurface existing id=$currentId")
+                            FileLogger.i("DISPLAY_STATE", "[$name] setSurface existing id=$currentId")
                             runBinderSafe { controller.setSurface(surface) }
                             displayId = currentId
                             activeId = currentId
@@ -2932,9 +2932,9 @@ class MirrorForegroundService : Service() {
                             isNewVd = false
                             success = true
                         } else {
-                            Log.i(TAG, "[DISPLAY_DEBUG] [$name] creating new VirtualDisplay target=${w}x${h} dpi=$dpi surfacePresent=${surface != null}")
-                            FileLogger.i("DISPLAY_DEBUG", "[$name] createVirtualDisplay target=${w}x${h} dpi=$dpi surfacePresent=${surface != null}")
-                            FileLogger.i("DISPLAY_STATE", "[$name] createVirtualDisplay width=$w height=$h dpi=$dpi surfacePresent=${surface != null}")
+                            Log.i(TAG, "[DISPLAY_DEBUG] [$name] creating new VirtualDisplay target=${w}x${h} dpi=$dpi")
+                            FileLogger.i("DISPLAY_DEBUG", "[$name] createVirtualDisplay target=${w}x${h} dpi=$dpi")
+                            FileLogger.i("DISPLAY_STATE", "[$name] createVirtualDisplay width=$w height=$h dpi=$dpi")
                             runBinderSafe { controller.releaseVirtualDisplay() }
                             runBinderSafe { controller.createVirtualDisplay(w, h, dpi, surface) }
                             if (controller.hasVirtualDisplay()) {
