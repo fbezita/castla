@@ -1,14 +1,15 @@
 <script lang="ts">
+  import { getAppPairPreviewPackages, type LayoutMode, type AppPair } from "../lib/appPair";
+
   // Type definition for application details
-  interface AppInfo {
+  interface AppInfo extends Partial<AppPair> {
     packageName: string;
     label: string;
     componentName?: string;
     category?: string;
     isWeb?: boolean;
-    left?: string;
-    right?: string;
     isPair?: boolean;
+    layoutMode?: LayoutMode;
   }
 
   // Strict Svelte 5 Props using $props Rune
@@ -59,6 +60,11 @@
       onStartPress(event, app, target);
     }
   }
+
+  function previewPackages(target: AppInfo): string[] {
+    if (!target.isPair || !target.layoutMode) return [];
+    return getAppPairPreviewPackages(target as any);
+  }
 </script>
 
 <div
@@ -75,23 +81,31 @@
   role="button"
   tabindex="0"
 >
-  {#if app.isPair && app.left && app.right}
+  {#if app.isPair && app.layoutMode && previewPackages(app).length > 1}
     <div class="pair-icons row-pair-icon">
       <img
         class="app-pair-icon-left"
-        src={`/api/icon?pkg=${encodeURIComponent(app.left)}`}
+        src={`/api/icon?pkg=${encodeURIComponent(previewPackages(app)[0])}`}
         alt=""
         loading="lazy"
         draggable="false"
       />
       <img
         class="app-pair-icon-right"
-        src={`/api/icon?pkg=${encodeURIComponent(app.right)}`}
+        src={`/api/icon?pkg=${encodeURIComponent(previewPackages(app)[1])}`}
         alt=""
         loading="lazy"
         draggable="false"
       />
     </div>
+  {:else if app.isPair && app.layoutMode && previewPackages(app).length === 1}
+    <img
+      class="launcher-row-icon"
+      src={`/api/icon?pkg=${encodeURIComponent(previewPackages(app)[0])}`}
+      alt=""
+      loading="lazy"
+      draggable="false"
+    />
   {:else}
     <img
       class="launcher-row-icon"

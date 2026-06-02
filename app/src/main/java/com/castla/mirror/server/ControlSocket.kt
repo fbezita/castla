@@ -39,6 +39,7 @@ class ControlSocket(
     }
 
     val debugId: Int = nextSocketId++
+    @Volatile var currentLaunchSeqId: Int = -1
     @Volatile var sessionId: Int = 0
         private set
     @Volatile var openTimeElapsedMs: Long = 0L
@@ -139,8 +140,25 @@ class ControlSocket(
                 }
                 "layout_update" -> {
                     val pipelinesArray = json.optJSONArray("pipelines")
+                    val seqId = json.optInt("seqId", -1)
                     if (pipelinesArray != null) {
                         Log.i(TAG, "layout_update received: ${pipelinesArray.toString()}")
+                        
+                        // Send layout_ack immediately as a receipt confirmation to prevent WebSocket thread blockages
+                        if (seqId != -1) {
+                            currentLaunchSeqId = seqId
+                            try {
+                                send(JSONObject().apply {
+                                    put("type", "layout_ack")
+                                    put("seqId", seqId)
+                                    put("success", true)
+                                }.toString())
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Failed to send layout_ack", e)
+                            }
+                        }
+                        
+                        // Execute heavy layout updates afterwards
                         server.onLayoutUpdate(pipelinesArray)
                     }
                 }
@@ -205,11 +223,45 @@ class ControlSocket(
                 "launchApp" -> {
                     val pkg = json.optString("pkg", "")
                     val pane = json.optString("pane", "primary")
+                    val seqId = json.optInt("seqId", -1)
                     val componentName = json.optString("componentName", "")
                         .takeIf { it.isNotEmpty() }
                     val isVideoApp = json.optBoolean("isVideoApp", false)
+                    
+                    // Extract sequence ID and dispatch launch_ack/failed feedback deterministically
+                    if (seqId != -1) {
+                        currentLaunchSeqId = seqId
+                    }
                     if (pkg.isNotEmpty()) {
+                        // Send launch_ack immediately to client to ensure the sequence flow doesn't block on app launch binder actions
+                        if (seqId != -1) {
+                            try {
+                                send(JSONObject().apply {
+                                    put("type", "launch_ack")
+                                    put("seqId", seqId)
+                                    put("pane", pane)
+                                    put("success", true)
+                                }.toString())
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Failed to send launch_ack", e)
+                            }
+                        }
+                        
+                        // Execute actual launch request afterwards
                         server.onAppLaunchRequest(pkg, componentName, pane, isVideoApp)
+                    } else {
+                        if (seqId != -1) {
+                            try {
+                                send(JSONObject().apply {
+                                    put("type", "launch_failed")
+                                    put("seqId", seqId)
+                                    put("pane", pane)
+                                    put("reason", "empty_package")
+                                }.toString())
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Failed to send launch_failed", e)
+                            }
+                        }
                     }
                 }
 

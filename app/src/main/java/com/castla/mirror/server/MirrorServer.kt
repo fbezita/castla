@@ -515,6 +515,10 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             put("instanceId", instanceId)
             put("controlSessionId", sessionId)
             put("verboseDiagnosticsEnabled", com.castla.mirror.ui.StreamSettings.load(context).verboseDiagnosticsEnabled)
+            // Announce handshake capability details to establish E2E ACK validation mode
+            put("protocolVersion", "1.1.0")
+            put("supportsAckFeatures", true)
+            put("supportsAck", true)
         }
         sendControlSocketAsync(socket, initMsg.toString(), "serverInit")
 
@@ -573,10 +577,22 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             .getOrPut(normalized) { AtomicInteger(0) }
             .incrementAndGet()
         firstFrameReady[normalized] = false
-        Log.i(TAG, "[FRAME_DEBUG] beginStreamGeneration channel=$normalized vdId=$vdId generation=$generation ${width}x$height")
+        // Log.i(TAG, "[FRAME_DEBUG] beginStreamGeneration channel=$normalized vdId=$vdId generation=$generation ${width}x$height")
         FileLogger.i("FRAME_DEBUG", "beginStreamGeneration channel=$normalized vdId=$vdId generation=$generation ${width}x$height")
         FileLogger.i("STREAM_GENERATION", "begin channel=$normalized vdId=$vdId generation=$generation width=$width height=$height")
         broadcastStreamMetadata(normalized, vdId, generation, width, height, streamReady = true, firstFrame = false)
+
+        // When VirtualDisplay is created and stream encoder engine starts, dispatch session_ready packet
+        val socket = synchronized(controlSocketLock) { activeControlSocket }
+        if (socket != null && socket.currentLaunchSeqId != -1) {
+            val response = JSONObject().apply {
+                put("type", "session_ready")
+                put("seqId", socket.currentLaunchSeqId)
+                put("pane", normalized)
+            }
+            sendControlSocketAsync(socket, response.toString(), "session_ready")
+        }
+
         return generation
     }
 
@@ -585,7 +601,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         if (firstFrameReady[normalized] == true) return
         firstFrameReady[normalized] = true
         val generation = streamGenerations[normalized]?.get() ?: 0
-        Log.i(TAG, "[FRAME_DEBUG] firstFrameReady channel=$normalized vdId=$vdId generation=$generation ${width}x$height")
+        // Log.i(TAG, "[FRAME_DEBUG] firstFrameReady channel=$normalized vdId=$vdId generation=$generation ${width}x$height")
         FileLogger.i("FRAME_DEBUG", "firstFrameReady channel=$normalized vdId=$vdId generation=$generation ${width}x$height")
         FileLogger.i("VD_FRAME", "firstFrameReady channel=$normalized vdId=$vdId generation=$generation width=$width height=$height")
         broadcastStreamMetadata(normalized, vdId, generation, width, height, streamReady = true, firstFrame = true)
@@ -673,7 +689,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         } else {
             cachedPrimarySpsPps = null
         }
-        Log.i(TAG, "[FRAME_DEBUG] Cleared cached SPS/PPS for $channel channel")
+        // Log.i(TAG, "[FRAME_DEBUG] Cleared cached SPS/PPS for $channel channel")
         FileLogger.i("FRAME_DEBUG", "clearCachedSpsPps channel=$channel")
         FileLogger.i("STREAM_GENERATION", "clearCachedSpsPps channel=$channel")
     }
@@ -700,10 +716,10 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
 
         if (seq <= 3 || isKeyFrame || seq % 120 == 0) {
             val generation = streamGenerations[normalized]?.get() ?: 0
-            Log.i(
-                TAG,
-                "[FRAME_DEBUG] broadcastFrame channel=$normalized generation=$generation seq=$seq key=$isKeyFrame bytes=${frame.size} sockets=${if (normalized == "secondary") secondaryVideoSockets.size else primaryVideoSockets.size}"
-            )
+            // Log.i(
+            //     TAG,
+            //     "[FRAME_DEBUG] broadcastFrame channel=$normalized generation=$generation seq=$seq key=$isKeyFrame bytes=${frame.size} sockets=${if (normalized == "secondary") secondaryVideoSockets.size else primaryVideoSockets.size}"
+            // )
             FileLogger.i("FRAME_DEBUG", "broadcastFrame channel=$normalized generation=$generation seq=$seq key=$isKeyFrame bytes=${frame.size} sockets=${if (normalized == "secondary") secondaryVideoSockets.size else primaryVideoSockets.size}")
             FileLogger.i("ENCODER_FRAME", "channel=$normalized generation=$generation seq=$seq key=$isKeyFrame bytes=${frame.size}")
         }

@@ -17,6 +17,9 @@
   import { ImeBridge } from "./ime/ImeBridge";
   import { triggerDump, isLoggingEnabled, setLoggingEnabled } from "./utils/debugLogger";
 
+  // References to tie components together for launch sequence state machine
+  let viewportHostRef: any = undefined;
+  let appLauncherRef: any = undefined;
   let runtime: StreamRuntime;
   let compositor: BrowserCompositor;
   let touchRouter: TouchRouter;
@@ -670,10 +673,10 @@
 
 <main class="app-shell">
   {#key `${runtimeEpoch}:${frontendResetEpoch}`}
-    <ViewportHost {touchRouter} {runtime} />
+    <ViewportHost bind:this={viewportHostRef} {touchRouter} {runtime} appLauncher={appLauncherRef} />
   {/key}
   {#key runtimeEpoch}
-    <AppLauncher {runtime} />
+    <AppLauncher bind:this={appLauncherRef} {runtime} viewportHost={viewportHostRef} />
   {/key}
   {#if showDiagnostics}
     <DiagnosticsOverlay />

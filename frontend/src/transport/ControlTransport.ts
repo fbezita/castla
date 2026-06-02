@@ -111,6 +111,12 @@ export class ControlTransport {
     return () => this.connectionListeners.delete(listener);
   }
 
+  hasPendingBufferedAmount(): boolean {
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    return socket.bufferedAmount > 0;
+  }
+
   send(message: Record<string, unknown>): void {
     const payload = JSON.stringify(message);
     if (this.socket?.readyState === WebSocket.OPEN && this.readyForControl) {

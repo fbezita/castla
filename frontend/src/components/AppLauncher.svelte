@@ -1,8 +1,15 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
+  import { get } from "svelte/store";
   import type { StreamRuntime } from "../runtime/StreamRuntime";
   import { compositorStore } from "../stores/compositorStore";
   import type { PaneId } from "../protocol";
+  import {
+    getAppPairKey,
+    normalizeAppPair,
+    type LayoutMode,
+    type AppPair,
+  } from "../lib/appPair";
 
   // Modular components imported for robust Svelte 5 structure
   import LauncherTabs from "./LauncherTabs.svelte";
@@ -11,23 +18,16 @@
   import DragDropOverlay from "./DragDropOverlay.svelte";
   import PairDialog from "./PairDialog.svelte";
 
-  let { runtime } = $props<{ runtime: StreamRuntime }>();
+  let { runtime, viewportHost = undefined } = $props<{ runtime: StreamRuntime; viewportHost?: any }>();
 
   // Types definitions
-  interface AppInfo {
+  interface AppInfo extends Partial<AppPair> {
     packageName: string;
     label: string;
     componentName?: string;
     category?: string;
     isWeb?: boolean;
-    left?: string;
-    right?: string;
     isPair?: boolean;
-  }
-
-  interface AppPairRecord {
-    left: string;
-    right: string;
   }
 
   interface RecentLaunchRecord {
@@ -65,13 +65,15 @@
   let expandedCategory = $state("");
   let favorites = $state<string[]>(readArray("castla_favorites"));
   let recentEntries = $state<RecentLaunchRecord[]>(readRecentLaunches());
-  let appPairs = $state<AppPairRecord[]>(readPairs());
+  let appPairs = $state<AppPair[]>(readAppPairs());
   let primaryAutorun = $state(localStorage.getItem("castla_autorun_primary") ?? "");
   let secondaryAutorun = $state(localStorage.getItem("castla_autorun_secondary") ?? "");
+  let autorunLayoutMode = $state<LayoutMode>(readAutorunLayoutMode());
   let notice = $state("");
   let noticeTimer = $state<number | undefined>(undefined);
   let launchedOnce = $state(false);
   let autoClosePending = $state(false);
+  let launchSeqCounter = $state(0);
 
   // Gesture Tracker States
   let pressTimer = $state(0);
@@ -94,7 +96,7 @@
   let previousHtmlOverscrollBehavior = $state("");
   let pairTarget = $state<AppInfo | null>(null);
   let pairMenuOpen = $state("");
-  let editingPair = $state<AppInfo | null>(null);
+  let editingAppPair = $state<AppInfo | null>(null);
   let drawerRevision = $state(0);
   let pairTargetTimer = $state<number | undefined>(undefined);
   let pairTargetCandidate = $state("");
@@ -124,7 +126,7 @@
 
   let pairApps = $derived.by(() => {
     void drawerRevision;
-    return getPairApps(appPairs, apps);
+    return getAppPairApps(appPairs, apps);
   });
 
   let searchableApps = $derived([...pairApps, ...apps]);
@@ -147,7 +149,7 @@
       .filter(Boolean) as AppInfo[]
   );
 
-  let autorunApps = $derived(getAutorunApps(displayApps, apps, pairApps));
+  let autorunApps = $derived(getAutorunApps(displayApps, pairApps));
 
   let groupedApps = $derived(
     groups
@@ -224,22 +226,418 @@
     return app.category === group;
   }
 
+  class StaleLaunchSequenceError extends Error {
+    constructor() {
+      super("stale-continuation");
+      this.name = "StaleLaunchSequenceError";
+    }
+  }
+
+  function nextLaunchSeqId(): number {
+    launchSeqCounter += 1;
+    return launchSeqCounter;
+  }
+
+  function isStale(seqId: number): boolean {
+    return get(compositorStore).launchSequence.id !== seqId;
+  }
+
+  function assertCurrent(seqId: number) {
+    if (isStale(seqId)) {
+      throw new StaleLaunchSequenceError();
+    }
+  }
+
+  function setLaunchState(
+    seqId: number,
+    state: typeof $compositorStore.launchSequence.state,
+    error?: string,
+    degradedReason?: typeof $compositorStore.launchSequence.degradedReason
+  ) {
+    compositorStore.update((curr) => {
+      if (curr.launchSequence.id !== seqId) return curr;
+      console.info(`[LAUNCH_SM] seq=${seqId} state=${state} primary=${curr.launchSequence.primaryPkg} secondary=${curr.launchSequence.secondaryPkg || ""} degradedReason=${degradedReason || ""}`);
+      return {
+        ...curr,
+        launchSequence: {
+          ...curr.launchSequence,
+          state,
+          error,
+          degradedReason: degradedReason !== undefined ? degradedReason : curr.launchSequence.degradedReason,
+        },
+      };
+    });
+  }
+
+  // Await layout_ack packet from backend
+  function waitForLayoutAck(seqId: number, expectedMode: string, timeoutMs = 5000): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const unsub = runtime.onAckMessage((msg) => {
+        if (isStale(seqId)) { unsub(); reject(new StaleLaunchSequenceError()); return; }
+        if (msg.type === "layout_ack" && msg.seqId === seqId) {
+          unsub();
+          if (msg.success) resolve();
+          else reject(new Error("layout_ack_failed"));
+        }
+      });
+      setTimeout(() => {
+        unsub();
+        if (isStale(seqId)) {
+          reject(new StaleLaunchSequenceError());
+        } else {
+          reject(new Error("layout_ack_timeout"));
+        }
+      }, timeoutMs);
+    });
+  }
+
+  // Await launch_ack packet from backend (Catches launch_failed explicitly)
+  function waitForLaunchAck(seqId: number, pane: "primary" | "secondary", timeoutMs = 5000): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const unsub = runtime.onAckMessage((msg) => {
+        if (isStale(seqId)) { unsub(); reject(new StaleLaunchSequenceError()); return; }
+        if (msg.type === "launch_ack" && msg.seqId === seqId && msg.pane === pane) {
+          unsub();
+          if (msg.success) resolve();
+          else reject(new Error("launch_failure"));
+        } else if (msg.type === "launch_failed" && msg.seqId === seqId && msg.pane === pane) {
+          unsub();
+          reject(new Error("launch_failure"));
+        }
+      });
+      setTimeout(() => {
+        unsub();
+        if (isStale(seqId)) {
+          reject(new StaleLaunchSequenceError());
+        } else {
+          reject(new Error("launch_failure"));
+        }
+      }, timeoutMs);
+    });
+  }
+
+  // Await session_ready packet from backend
+  function waitForSessionReady(seqId: number, pane: "primary" | "secondary", timeoutMs = 6000): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const unsub = runtime.onAckMessage((msg) => {
+        if (isStale(seqId)) { unsub(); reject(new StaleLaunchSequenceError()); return; }
+        if (msg.type === "session_ready" && msg.seqId === seqId && msg.pane === pane) {
+          unsub();
+          resolve();
+        }
+      });
+      setTimeout(() => {
+        unsub();
+        if (isStale(seqId)) {
+          reject(new StaleLaunchSequenceError());
+        } else {
+          reject(new Error("session_timeout"));
+        }
+      }, timeoutMs);
+    });
+  }
+
+  // Await stream commitment with strict generation validation
+  function waitForStreamsToCommit(
+    seqId: number,
+    hasSecondary: boolean,
+    primaryStartGen: number,
+    secondaryStartGen: number,
+    timeoutMs = 8000
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const unsub = compositorStore.subscribe((state) => {
+        if (isStale(seqId)) { unsub(); reject(new StaleLaunchSequenceError()); return; }
+
+        const primary = state.viewports.get("primary");
+        const secondary = state.viewports.get("secondary");
+
+        const primaryReady = primary ? (primary.committed && primary.generation > primaryStartGen) : true;
+        const secondaryReady = hasSecondary && secondary ? (secondary.committed && secondary.generation > secondaryStartGen) : true;
+
+        if (primaryReady && secondaryReady) {
+          unsub();
+          resolve();
+        }
+      });
+
+      setTimeout(() => {
+        unsub();
+        reject(new Error("stream_timeout"));
+      }, timeoutMs);
+    });
+  }
+
+  // Single orchestrator function to handle end-to-end launch sequence deterministically
+  export async function startLaunchSequence(request: {
+    primaryPkg: string;
+    secondaryPkg?: string;
+    layoutMode: "single" | "split" | "popup";
+  }) {
+    const seqId = nextLaunchSeqId();
+    
+    // Capture initial viewport generations for strict stream validation
+    const storeSnapshot = get(compositorStore);
+    const primViewport = storeSnapshot.viewports.get("primary");
+    const secViewport = storeSnapshot.viewports.get("secondary");
+    const primaryStartGen = primViewport ? primViewport.generation : 0;
+    const secondaryStartGen = secViewport ? secViewport.generation : 0;
+    
+    console.info(`[LAUNCH_SM] seq=${seqId} state=LAYOUT_ALIGNING primary=${request.primaryPkg} secondary=${request.secondaryPkg ?? ""} layout=${request.layoutMode}`);
+    
+    let degradedReasonVal: 'launch_failure' | 'session_timeout' | 'stream_timeout' | '' = '';
+    const startedAt = Date.now();
+    let layoutAlignMs = 0;
+    let layoutAckMs = 0;
+    let primaryLaunchAckMs = 0;
+    let primarySessionReadyMs = 0;
+    let streamCommitMs = 0;
+
+    // 1. Force Reset committed=false to clean frame remnants of previous session
+    compositorStore.update((state) => {
+      const viewports = new Map(state.viewports);
+      const primary = viewports.get("primary") ?? { pane: "primary", width: 1280, height: 720, committed: false, generation: 0, visible: true };
+      const secondary = viewports.get("secondary") ?? { pane: "secondary", width: 1280, height: 720, committed: false, generation: 0, visible: false };
+      
+      viewports.set("primary", { ...primary, visible: true, committed: false });
+      viewports.set("secondary", { ...secondary, visible: Boolean(request.secondaryPkg), committed: false });
+
+      let nextPopup = { ...state.popup };
+      if (request.layoutMode === "popup") {
+        nextPopup = {
+          ...state.popup,
+          visible: true,
+          minimized: false,
+        };
+      }
+
+      return {
+        ...state,
+        viewports,
+        layoutMode: request.layoutMode,
+        activePrimaryApp: request.primaryPkg,
+        activeSecondaryApp: request.secondaryPkg ?? "",
+        popup: nextPopup,
+        launchSequence: {
+          id: seqId,
+          primaryPkg: request.primaryPkg,
+          secondaryPkg: request.secondaryPkg,
+          layoutMode: request.layoutMode,
+          state: "LAYOUT_ALIGNING",
+          startedAt,
+          degradedReason: '',
+          primaryStartGen,
+          secondaryStartGen,
+        }
+      };
+    });
+
+    await tick();
+
+    try {
+      // 2. Dispatch Layout and Await local socket flushing completion
+      const currentStore = get(compositorStore);
+      if (viewportHost) {
+        await viewportHost.dispatchLayoutNow(request.layoutMode, currentStore.splitRatio, currentStore.popup, seqId);
+      }
+      layoutAlignMs = Date.now() - startedAt;
+      
+      // 3. Await Backend Layout ACK if backend supports ACK features, fallback otherwise
+      assertCurrent(seqId);
+      setLaunchState(seqId, "LAYOUT_SENT");
+      
+      if (runtime.isAckSupported()) {
+        try {
+          await waitForLayoutAck(seqId, request.layoutMode);
+        } catch (err) {
+          if (err instanceof StaleLaunchSequenceError) throw err;
+          console.warn(`[LAUNCH_SM_LAYOUT_TIMEOUT] seq=${seqId} Layout ACK failed or timed out, proceeding degraded`, err);
+          degradedReasonVal = "layout_timeout";
+        }
+      }
+      layoutAckMs = Date.now() - startedAt;
+      
+      assertCurrent(seqId);
+      setLaunchState(seqId, "LAYOUT_ACKED");
+
+      // 4. Launch Primary App & Await ACK
+      setLaunchState(seqId, "LAUNCHING_PRIMARY");
+      console.info(`[APP_LAUNCH] seq=${seqId} pane=primary package=${request.primaryPkg}`);
+      runtime.launchApp(request.primaryPkg, "primary", undefined, false, seqId);
+      
+      assertCurrent(seqId);
+      setLaunchState(seqId, "PRIMARY_LAUNCH_SENT");
+      
+      if (runtime.isAckSupported()) {
+        try {
+          await waitForLaunchAck(seqId, "primary");
+        } catch (err) {
+          if (err instanceof StaleLaunchSequenceError) throw err;
+          console.warn(`[LAUNCH_SM_PRIMARY_TIMEOUT] seq=${seqId} Primary Launch ACK failed, continuing degraded`, err);
+          degradedReasonVal = "launch_failure";
+        }
+      }
+      primaryLaunchAckMs = Date.now() - startedAt;
+      
+      assertCurrent(seqId);
+      setLaunchState(seqId, "PRIMARY_LAUNCH_ACKED");
+      
+      // 5. Await Primary Session Ready
+      if (runtime.isAckSupported()) {
+        try {
+          await waitForSessionReady(seqId, "primary");
+        } catch (err) {
+          if (err instanceof StaleLaunchSequenceError) throw err;
+          console.warn(`[LAUNCH_SM_SESSION_TIMEOUT] seq=${seqId} Primary Session Ready failed, continuing degraded`, err);
+          degradedReasonVal = "session_timeout";
+        }
+      }
+      primarySessionReadyMs = Date.now() - startedAt;
+      
+      assertCurrent(seqId);
+      setLaunchState(seqId, "PRIMARY_SESSION_READY");
+
+      let secondaryLaunchFailed = false;
+
+      // 6. Launch Secondary App if present & Await ACK + Ready
+      if (request.secondaryPkg) {
+        try {
+          setLaunchState(seqId, "LAUNCHING_SECONDARY");
+          console.info(`[APP_LAUNCH] seq=${seqId} pane=secondary package=${request.secondaryPkg}`);
+          
+          const secondaryApp = apps.find((app) => app.packageName === request.secondaryPkg);
+          runtime.launchApp(
+            request.secondaryPkg,
+            "secondary",
+            secondaryApp?.componentName,
+            secondaryApp?.category === "VIDEO" || secondaryApp?.isWeb === true,
+            seqId
+          );
+          
+          assertCurrent(seqId);
+          setLaunchState(seqId, "SECONDARY_LAUNCH_SENT");
+          
+          if (runtime.isAckSupported()) {
+            await waitForLaunchAck(seqId, "secondary");
+            assertCurrent(seqId);
+            setLaunchState(seqId, "SECONDARY_LAUNCH_ACKED");
+            
+            await waitForSessionReady(seqId, "secondary");
+            assertCurrent(seqId);
+            setLaunchState(seqId, "SECONDARY_SESSION_READY");
+          }
+        } catch (err) {
+          if (err instanceof StaleLaunchSequenceError) throw err;
+          console.error(`[LAUNCH_SM_SECONDARY_FAIL] seq=${seqId} Secondary pane launch failed, continuing degraded`, err);
+          secondaryLaunchFailed = true;
+          degradedReasonVal = err.message.includes("session_timeout") ? "session_timeout" : "launch_failure";
+        }
+      }
+
+      // 7. Await Video Frame Commits (Gen-strict Promise Awaiter)
+      setLaunchState(seqId, "STREAM_COMMITTING");
+      try {
+        await waitForStreamsToCommit(
+          seqId,
+          Boolean(request.secondaryPkg) && !secondaryLaunchFailed,
+          primaryStartGen,
+          secondaryStartGen
+        );
+      } catch (err) {
+        if (err instanceof StaleLaunchSequenceError) throw err;
+        console.warn(`[STREAM_COMMIT_TIMEOUT] seq=${seqId} Streams failed to commit in time, falling back to degraded`);
+        secondaryLaunchFailed = true;
+        degradedReasonVal = "stream_timeout";
+      }
+      streamCommitMs = Date.now() - startedAt;
+      
+      assertCurrent(seqId);
+      
+      // 8. Commit metrics timing object for E2E diagnostics
+      const totalLaunchMs = Date.now() - startedAt;
+      const metrics: LaunchMetrics = {
+        layoutAlignMs,
+        layoutAckMs,
+        primaryLaunchAckMs,
+        primarySessionReadyMs,
+        streamCommitMs,
+        totalLaunchMs,
+      };
+
+      // 9. Final Steady-State transition (RUNNING or DEGRADED)
+      const nextState = secondaryLaunchFailed ? "DEGRADED" : "RUNNING";
+      
+      compositorStore.update((curr) => {
+        if (curr.launchSequence.id !== seqId) return curr;
+        return {
+          ...curr,
+          launchSequence: {
+            ...curr.launchSequence,
+            state: nextState,
+            degradedReason: degradedReasonVal,
+            metrics,
+          }
+        };
+      });
+      console.info(`[LAUNCH_SM_SUCCESS] seq=${seqId} state=${nextState} (E2E ACK sequence completed) degradedReason=${degradedReasonVal} totalTime=${totalLaunchMs}ms`);
+      
+    } catch (err) {
+      if (err instanceof StaleLaunchSequenceError) {
+        console.warn(`[LAUNCH_SM_ABORT] seq=${seqId} Sequence was aborted by a newer launch`);
+        return;
+      }
+      
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[LAUNCH_SM_FAIL] seq=${seqId} state=FAILED degradedReason=${degradedReasonVal} error=${errorMsg}`);
+      setLaunchState(seqId, "FAILED", errorMsg, degradedReasonVal);
+    }
+  }
+
   function launch(app: AppInfo, pane: PaneId = "primary") {
     launchedOnce = true;
     autoClosePending = true;
     recordRecentLaunch(app.packageName);
-    if (pane === "primary") setSingle("primary");
-    else setSplit(true);
-    runtime.launchApp(
-      app.packageName,
-      pane,
-      app.componentName,
-      app.category === "VIDEO" || app.isWeb === true,
-    );
-    runtime.requestKeyframe(pane);
+    
+    if (pane === "primary") {
+      compositorStore.update((state) => ({
+        ...state,
+        activePrimaryApp: app.packageName,
+        activeSecondaryApp: "",
+        layoutMode: "single",
+      }));
+      setSingle("primary");
+      
+      startLaunchSequence({
+        primaryPkg: app.packageName,
+        secondaryPkg: undefined,
+        layoutMode: "single",
+      });
+    } else {
+      const activePrimary = $compositorStore.activePrimaryApp;
+      if (activePrimary) {
+        startLaunchSequence({
+          primaryPkg: activePrimary,
+          secondaryPkg: app.packageName,
+          layoutMode: "split",
+        });
+      } else {
+        compositorStore.update((state) => ({
+          ...state,
+          activePrimaryApp: app.packageName,
+          activeSecondaryApp: "",
+          layoutMode: "single",
+        }));
+        setSingle("primary");
+        startLaunchSequence({
+          primaryPkg: app.packageName,
+          secondaryPkg: undefined,
+          layoutMode: "single",
+        });
+      }
+    }
+    
     drawerOpen = true;
     toast(`${app.label} launching`);
-
     setTimeout(() => {
       if (autoClosePending && !hasVisibleStream) {
         drawerOpen = true;
@@ -247,29 +645,59 @@
     }, 8000);
   }
 
-  function launchPair(left: AppInfo, right: AppInfo) {
+  function setPopupLayout() {
+    compositorStore.update((state) => {
+      const viewports = new Map(state.viewports);
+      const primary = viewports.get("primary") ?? {
+        pane: "primary", width: 1280, height: 720, committed: false, generation: 0, visible: true
+      };
+      const secondary = viewports.get("secondary") ?? {
+        pane: "secondary", width: 1280, height: 720, committed: false, generation: 0, visible: false
+      };
+      viewports.set("primary", { ...primary, visible: true });
+      viewports.set("secondary", { ...secondary, visible: true });
+      return {
+        ...state,
+        viewports,
+        layoutMode: "popup",
+        popup: { ...state.popup, visible: true, minimized: false },
+      };
+    });
+  }
+
+  function launchAppPair(record: AppPair) {
     launchedOnce = true;
     autoClosePending = true;
-    recordRecentLaunch(`pair:${left.packageName}:${right.packageName}`);
-    setSplit(true);
-    runtime.launchApp(
-      left.packageName,
-      "primary",
-      left.componentName,
-      left.category === "VIDEO" || left.isWeb === true,
-    );
-    runtime.requestKeyframe("primary");
-    setTimeout(() => {
-      runtime.launchApp(
-        right.packageName,
-        "secondary",
-        right.componentName,
-        right.category === "VIDEO" || right.isWeb === true,
-      );
-      runtime.requestKeyframe("secondary");
-    }, 260);
+    recordRecentLaunch(`workspace:${getAppPairKey(record)}`);
+    const [app0_pkg, app1_pkg] = record.apps;
+    const primary = apps.find((app) => app.packageName === app0_pkg);
+    const secondary = apps.find((app) => app.packageName === app1_pkg);
+    if (!primary || !secondary) return;
+
+    const currentMode = $compositorStore.layoutMode;
+    const layout = record.layoutMode ?? (currentMode === "popup" ? "popup" : "split");
+    
+    if (layout === "popup") {
+      compositorStore.update((state) => {
+        return {
+          ...state,
+          popup: {
+            ...state.popup,
+            visible: true,
+            minimized: false,
+          }
+        };
+      });
+    }
+
+    startLaunchSequence({
+      primaryPkg: primary.packageName,
+      secondaryPkg: secondary.packageName,
+      layoutMode: layout === "popup" ? "popup" : "split",
+    });
+
     drawerOpen = true;
-    toast(`${left.label} + ${right.label}`);
+    toast(`${primary.label} + ${secondary.label}`);
 
     setTimeout(() => {
       if (autoClosePending && !hasVisibleStream) {
@@ -280,10 +708,9 @@
 
   function activateApp(app: AppInfo) {
     if (app.isPair) {
-      const left = app.left ? apps.find((c) => c.packageName === app.left) : undefined;
-      const right = app.right ? apps.find((c) => c.packageName === app.right) : undefined;
-      if (left && right) {
-        launchPair(left, right);
+      const appPair = appPairFromAppInfo(app);
+      if (appPair) {
+        launchAppPair(appPair);
         return;
       }
     }
@@ -301,7 +728,7 @@
       };
       viewports.set("primary", { ...primary, visible: pane === "primary" });
       viewports.set("secondary", { ...secondary, visible: pane === "secondary" });
-      return { ...state, viewports, layoutMode: "single" };
+      return { ...state, viewports, layoutMode: "single", popup: { ...state.popup, visible: false } };
     });
   }
 
@@ -316,7 +743,12 @@
       };
       viewports.set("primary", { ...primary, visible: true });
       viewports.set("secondary", { ...secondary, visible: active });
-      return { ...state, viewports, layoutMode: active ? "split" : "single" };
+      return {
+        ...state,
+        viewports,
+        layoutMode: active ? "split" : "single",
+        popup: active ? { ...state.popup, visible: false } : state.popup,
+      };
     });
   }
 
@@ -337,74 +769,65 @@
     touchDrawer();
   }
 
-  function getPairApps(pairs: AppPairRecord[], availableApps: AppInfo[]): AppInfo[] {
+  function getAppPairApps(pairs: AppPair[], availableApps: AppInfo[]): AppInfo[] {
     const result: AppInfo[] = [];
     for (const pair of pairs) {
-      const leftApp = availableApps.find((app) => app.packageName === pair.left);
-      const rightApp = availableApps.find((app) => app.packageName === pair.right);
-      if (!leftApp || !rightApp) continue;
+      if (!pair.apps || pair.apps.length !== 2) continue;
+      const [appA_pkg, appB_pkg] = pair.apps;
+      const appA = availableApps.find((app) => app.packageName === appA_pkg);
+      const appB = availableApps.find((app) => app.packageName === appB_pkg);
+      if (!appA || !appB) continue;
       result.push({
-        packageName: `pair:${pair.left}:${pair.right}`,
-        label: `${leftApp.label} + ${rightApp.label}`,
+        packageName: `workspace:${getAppPairKey(pair)}`,
+        label: `${appA.label} + ${appB.label}`,
         category: "PAIR",
         isPair: true,
-        left: pair.left,
-        right: pair.right,
+        layoutMode: pair.layoutMode,
+        apps: pair.apps,
       });
     }
     return result;
   }
 
-  function createPair(source: AppInfo, target: AppInfo) {
-    if (source.isPair || target.isPair) return;
-    if (source.packageName === target.packageName) {
+  function createAppPair(source: AppInfo, target?: AppInfo) {
+    if (source.isPair || target?.isPair) return;
+    if (target && source.packageName === target.packageName) {
       toast("Choose a different app");
       return;
     }
-    const exists = appPairs.some(
-      (pair) =>
-        (pair.left === source.packageName && pair.right === target.packageName) ||
-        (pair.left === target.packageName && pair.right === source.packageName),
-    );
-    if (exists) {
-      toast("This App Pair already exists");
-      return;
-    }
-    appPairs = [...appPairs, { left: source.packageName, right: target.packageName }];
-    localStorage.setItem("castla_app_pairs", JSON.stringify(appPairs));
-    touchDrawer();
-    openPairEdit({
-      packageName: `pair:${source.packageName}:${target.packageName}`,
+    if (!target) return;
+    editingAppPair = {
+      packageName: "workspace:new",
       label: `${source.label} + ${target.label}`,
       category: "PAIR",
       isPair: true,
-      left: source.packageName,
-      right: target.packageName,
-    });
-    toast(`${source.label} + ${target.label}`);
-  }
-
-  function openPairEdit(app: AppInfo) {
-    if (!app.left || !app.right) return;
-    editingPair = { ...app };
+      layoutMode: "split",
+      apps: [source.packageName, target.packageName],
+    };
     pairMenuOpen = "";
   }
 
-  function swapEditingPair() {
-    if (!editingPair?.left || !editingPair?.right) return;
-    editingPair = { ...editingPair, left: editingPair.right, right: editingPair.left };
+  function openAppPairEditor(app?: AppInfo) {
+    if (!app) {
+      editingAppPair = {
+        packageName: "workspace:new",
+        label: "New App Pair",
+        category: "PAIR",
+        isPair: true,
+        layoutMode: "split",
+      };
+      pairMenuOpen = "";
+      return;
+    }
+    if (!app.isPair) return;
+    editingAppPair = { ...app };
+    pairMenuOpen = "";
   }
 
-  function persistPair(app: AppInfo, previousLeft?: string, previousRight?: string) {
-    if (!app.left || !app.right) return;
-    const oldLeft = previousLeft ?? app.left;
-    const oldRight = previousRight ?? app.right;
-    const nextPair = { left: app.left, right: app.right };
-    const index = appPairs.findIndex(
-      (pair) =>
-        (pair.left === oldLeft && pair.right === oldRight) ||
-        (pair.left === oldRight && pair.right === oldLeft),
-    );
+  function persistAppPair(nextPair: AppPair, previousKey?: string) {
+    const index = previousKey
+      ? appPairs.findIndex((pair) => getAppPairKey(pair) === previousKey)
+      : -1;
     if (index >= 0) {
       appPairs = appPairs.map((pair, idx) => (idx === index ? nextPair : pair));
     } else {
@@ -414,38 +837,44 @@
     touchDrawer();
   }
 
-  function saveEditingPair() {
-    if (!editingPair?.left || !editingPair?.right) return;
-    const original = getPairApps(appPairs, apps).find((app) => app.packageName === editingPair!.packageName);
-    persistPair(editingPair, original?.left, original?.right);
-    editingPair = null;
+  function saveAppPair(nextDraft: AppPair) {
+    if (!editingAppPair) return;
+    const original = appPairFromAppInfo(editingAppPair);
+    persistAppPair(nextDraft, original ? getAppPairKey(original) : undefined);
+    editingAppPair = null;
     toast("App Pair updated");
   }
 
-  function removePair(app: AppInfo) {
-    if (!app.left || !app.right) return;
-    appPairs = appPairs.filter(
-      (pair) => !((pair.left === app.left && pair.right === app.right) || (pair.left === app.right && pair.right === app.left))
-    );
+  function removeAppPair(app: AppInfo) {
+    const target = appPairFromAppInfo(app);
+    if (!target) return;
+    appPairs = appPairs.filter((pair) => getAppPairKey(pair) !== getAppPairKey(target));
     localStorage.setItem("castla_app_pairs", JSON.stringify(appPairs));
     favorites = favorites.filter((pkg) => pkg !== app.packageName);
     localStorage.setItem("castla_favorites", JSON.stringify(favorites));
-    if (primaryAutorun === app.left && secondaryAutorun === app.right) {
+    const [appA, appB] = target.apps;
+    if (
+      primaryAutorun === appA &&
+      secondaryAutorun === appB
+    ) {
       primaryAutorun = "";
       secondaryAutorun = "";
+      autorunLayoutMode = "split";
       updateStorage("castla_autorun_primary", primaryAutorun);
       updateStorage("castla_autorun_secondary", secondaryAutorun);
+      updateStorage("castla_autorun_layout_mode", "");
     }
     touchDrawer();
-    if (editingPair?.packageName === app.packageName) editingPair = null;
+    if (editingAppPair?.packageName === app.packageName) editingAppPair = null;
     pairMenuOpen = "";
-    toast("App Pair dissolved");
+    toast("App Pair removed");
   }
 
   function toggleAutorun(packageName: string) {
     if (primaryAutorun === packageName || secondaryAutorun === packageName) {
       if (primaryAutorun === packageName) primaryAutorun = "";
       if (secondaryAutorun === packageName) secondaryAutorun = "";
+      autorunLayoutMode = "single";
     } else if (!primaryAutorun) {
       primaryAutorun = packageName;
     } else {
@@ -453,36 +882,57 @@
     }
     updateStorage("castla_autorun_primary", primaryAutorun);
     updateStorage("castla_autorun_secondary", secondaryAutorun);
+    updateStorage(
+      "castla_autorun_layout_mode",
+      primaryAutorun ? autorunLayoutMode : "",
+    );
     touchDrawer();
   }
 
-  function isAutorunPair(app: AppInfo) {
+  function isAutorunAppPair(app: AppInfo) {
+    if (!app.isPair || !app.apps) return false;
+    const [appA, appB] = app.apps;
     return Boolean(
-      app.isPair && app.left && app.right && primaryAutorun === app.left && secondaryAutorun === app.right
+      primaryAutorun === appA &&
+      secondaryAutorun === appB &&
+      autorunLayoutMode === (app.layoutMode ?? "split")
     );
   }
 
   function toggleAutorunForApp(app: AppInfo) {
-    if (app.isPair && app.left && app.right) {
-      if (isAutorunPair(app)) {
+    if (app.isPair && app.apps) {
+      const [appA, appB] = app.apps;
+      if (isAutorunAppPair(app)) {
         primaryAutorun = "";
         secondaryAutorun = "";
+        autorunLayoutMode = "split";
       } else {
-        primaryAutorun = app.left;
-        secondaryAutorun = app.right;
+        primaryAutorun = appA;
+        secondaryAutorun = appB;
+        autorunLayoutMode = app.layoutMode ?? "split";
       }
       updateStorage("castla_autorun_primary", primaryAutorun);
       updateStorage("castla_autorun_secondary", secondaryAutorun);
+      updateStorage(
+        "castla_autorun_layout_mode",
+        primaryAutorun ? autorunLayoutMode : "",
+      );
       touchDrawer();
       return;
     }
     toggleAutorun(app.packageName);
   }
 
-  function getAutorunApps(visibleApps: AppInfo[], availableApps: AppInfo[], availablePairs: AppInfo[]): AppInfo[] {
+  function getAutorunApps(visibleApps: AppInfo[], availablePairs: AppInfo[]): AppInfo[] {
     const items: AppInfo[] = [];
     if (primaryAutorun && secondaryAutorun) {
-      const pair = availablePairs.find((app) => app.left === primaryAutorun && app.right === secondaryAutorun);
+      const pair = availablePairs.find(
+        (app) =>
+          app.apps &&
+          app.apps[0] === primaryAutorun &&
+          app.apps[1] === secondaryAutorun &&
+          (app.layoutMode ?? "split") === autorunLayoutMode,
+      );
       if (pair) {
         const visiblePair = visibleApps.find((app) => app.packageName === pair.packageName);
         if (visiblePair) return [visiblePair];
@@ -529,7 +979,22 @@
   }
 
   function isAppAutorun(app: AppInfo) {
-    return (!app.isPair && (primaryAutorun === app.packageName || secondaryAutorun === app.packageName)) || isAutorunPair(app);
+    return (!app.isPair && (primaryAutorun === app.packageName || secondaryAutorun === app.packageName)) || isAutorunAppPair(app);
+  }
+
+  function readAutorunLayoutMode(): LayoutMode {
+    const value = localStorage.getItem("castla_autorun_layout_mode");
+    return value === "split" || value === "popup"
+      ? value
+      : "split";
+  }
+
+  function appPairFromAppInfo(app: AppInfo): AppPair | null {
+    if (!app.apps || app.apps.length !== 2) return null;
+    return {
+      apps: app.apps,
+      layoutMode: app.layoutMode,
+    };
   }
 
   // Storage and Reading Utilities
@@ -565,14 +1030,13 @@
     }
   }
 
-  function readPairs(): AppPairRecord[] {
+  function readAppPairs(): AppPair[] {
     try {
       const value = JSON.parse(localStorage.getItem("castla_app_pairs") ?? "[]");
       if (!Array.isArray(value)) return [];
-      return value.filter(
-        (pair): pair is AppPairRecord =>
-          pair && typeof pair.left === "string" && typeof pair.right === "string" && pair.left !== pair.right,
-      );
+      return value
+        .map((pair) => normalizeAppPair(pair))
+        .filter((pair): pair is AppPair => pair !== null);
     } catch {
       return [];
     }
@@ -611,7 +1075,12 @@
     sessionStorage.setItem(AUTORUN_SESSION_KEY, "1");
     const primary = apps.find((app) => app.packageName === primaryAutorun);
     const secondary = apps.find((app) => app.packageName === secondaryAutorun);
-    if (primary && secondary) launchPair(primary, secondary);
+    if (primary && secondary) {
+      launchAppPair({
+        layoutMode: autorunLayoutMode,
+        apps: [primary.packageName, secondary.packageName],
+      });
+    }
     else if (primary) launch(primary, "primary");
   }
 
@@ -684,7 +1153,7 @@
     window.clearTimeout(pressTimer);
     if (gestureState === "dragging" && draggingApp) {
       if (pairTarget) {
-        createPair(draggingApp, pairTarget);
+        createWorkspace(draggingApp, pairTarget);
       } else if (dropZone) {
         applyDrop(draggingApp, dropZone);
       }
@@ -782,18 +1251,21 @@
   }
 
   function applyDrop(app: AppInfo, zone: DropZone) {
-    if (app.isPair && app.left && app.right) {
+    if (app.isPair && app.apps) {
+      const [appA, appB] = app.apps;
       if (zone === "autorun") {
-        primaryAutorun = app.left;
-        secondaryAutorun = app.right;
+        primaryAutorun = appA;
+        secondaryAutorun = appB;
+        autorunLayoutMode = app.layoutMode ?? "split";
         updateStorage("castla_autorun_primary", primaryAutorun);
         updateStorage("castla_autorun_secondary", secondaryAutorun);
+        updateStorage("castla_autorun_layout_mode", autorunLayoutMode);
         touchDrawer();
         toast(`${app.label} set to Auto-run`);
         return;
       }
       if (zone === "remove") {
-        removePair(app);
+        removeAppPair(app);
         return;
       }
     }
@@ -807,7 +1279,20 @@
     } else if (zone === "primary") {
       launch(app, "primary");
     } else if (zone === "secondary") {
-      launch(app, "secondary");
+      const activePrimary = $compositorStore.activePrimaryApp;
+      if (activePrimary) {
+        // Leverage the consolidated E2E ACK launch state machine instead of timing-based launches
+        const currentMode = $compositorStore.layoutMode;
+        const layoutMode = currentMode === "popup" ? "popup" : "split";
+        startLaunchSequence({
+          primaryPkg: activePrimary,
+          secondaryPkg: app.packageName,
+          layoutMode: layoutMode,
+        });
+      } else {
+        console.info(`[APP_LAUNCH] Pane: secondary, Package: ${app.packageName}, SessionReady: false (primary missing, fallback launch)`);
+        launch(app, "secondary");
+      }
     } else if (zone === "remove") {
       favorites = favorites.filter((pkg) => pkg !== app.packageName);
       if (primaryAutorun === app.packageName) primaryAutorun = "";
@@ -838,32 +1323,21 @@
     const w = window.innerWidth;
     const h = window.innerHeight;
     const usableRight = drawerElement?.getBoundingClientRect().left ?? w;
-    const topInset = 80;
-    const sideInset = 20;
     const bottomInset = 20;
     const bottomZoneHeight = 120;
-    const centerGap = 20;
+    const sideInset = 20;
 
     const removeTop = h - bottomZoneHeight - bottomInset;
     if (y >= removeTop && y <= h - bottomInset && x >= sideInset && x <= usableRight - sideInset) {
       return "remove";
     }
 
-    const verticalBottom = removeTop - centerGap;
-    if (y < topInset || y > verticalBottom) {
-      return "";
+    const hoveredPane = document.elementFromPoint(x, y)?.closest(".viewport-pane") as HTMLElement | null;
+    const pane = hoveredPane?.dataset.pane;
+    if (pane === "primary" || pane === "secondary") {
+      return pane;
     }
 
-    const midX = usableRight / 2;
-    const leftZoneRight = midX - centerGap / 2;
-    const rightZoneLeft = midX + centerGap / 2;
-
-    if (x >= sideInset && x <= leftZoneRight) {
-      return "primary";
-    }
-    if (x >= rightZoneLeft && x <= usableRight - sideInset) {
-      return "secondary";
-    }
     return "";
   }
 
@@ -977,7 +1451,7 @@
 
 </script>
 
-<div class:hidden={hasVisibleStream} class="standby">
+<div class:hidden={hasVisibleStream || launchedOnce} class="standby">
   <div class="status-mark">
     {#if autoClosePending}
       <span class="loading-spinner"></span>
@@ -1069,7 +1543,7 @@
                   onLaunch={activateApp}
                   onToggleStar={toggleFavorite}
                   onToggleAutorun={toggleAutorunForApp}
-                  onOpenEdit={openPairEdit}
+                  onOpenEdit={openAppPairEditor}
                   onStartPress={startPress}
                   onPointerMove={movePress}
                   onPointerUp={endPress}
@@ -1103,7 +1577,7 @@
             onLaunch={activateApp}
             onToggleStar={toggleFavorite}
             onToggleAutorun={toggleAutorunForApp}
-            onOpenEdit={openPairEdit}
+            onOpenEdit={openAppPairEditor}
             onStartPress={startPress}
             onPointerMove={movePress}
             onPointerUp={endPress}
@@ -1128,14 +1602,13 @@
 {/if}
 
 <!-- Modularized dialog configuration pair editor -->
-{#if editingPair}
+{#if editingAppPair}
   <PairDialog
-    {editingPair}
+    editingPair={editingAppPair}
     {apps}
-    onSwap={swapEditingPair}
-    onCancel={() => editingPair = null}
-    onRemove={removePair}
-    onSave={saveEditingPair}
+    onCancel={() => (editingAppPair = null)}
+    onRemove={removeAppPair}
+    onSave={saveAppPair}
   />
 {/if}
 
@@ -1279,12 +1752,24 @@
     justify-content: center;
     cursor: pointer;
     box-shadow: -4px 0 16px rgba(0, 0, 0, 0.2);
-    transition: background 0.2s ease, border-color 0.2s ease;
+    opacity: 0.55; /* Default transparent when drawer is closed to reduce clutter */
+    transition: background 0.2s ease, border-color 0.2s ease, opacity 0.2s ease;
   }
 
-  .split-handle:hover {
-    background: rgba(255, 255, 255, 0.06);
-    border-color: rgba(255, 255, 255, 0.15);
+  .split-drawer:not(.open) .split-handle {
+    opacity: 0.55 !important;
+  }
+
+  .split-drawer.open .split-handle {
+    opacity: 1 !important; /* Fully opaque when drawer is open */
+  }
+
+  @media (hover: hover) {
+    .split-handle:hover {
+      opacity: 1 !important; /* Fully visible on hover interaction only on hover-capable pointer devices to prevent sticky hover on touch screens */
+      background: rgba(255, 255, 255, 0.06);
+      border-color: rgba(255, 255, 255, 0.15);
+    }
   }
 
   .handle-chevron {
@@ -1327,8 +1812,11 @@
 
   .drawer-heading {
     display: flex;
-    align-items: baseline;
+    align-items: center;
+    gap: 10px;
   }
+
+
 
   .drawer-meta {
     display: flex;

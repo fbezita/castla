@@ -1,17 +1,18 @@
 <script lang="ts">
-  // Type definition for application details
-  interface AppInfo {
+  import { getAppPairPreviewPackages, type LayoutMode, type AppPair } from "../lib/appPair";
+
+  interface AppInfo extends Partial<AppPair> {
     packageName: string;
     label: string;
     componentName?: string;
     category?: string;
     isWeb?: boolean;
-    left?: string;
-    right?: string;
     isPair?: boolean;
+    layoutMode?: LayoutMode;
   }
 
-  // Strict Svelte 5 Props using $props Rune
+  type DropZone = "favorite" | "autorun" | "primary" | "secondary" | "remove" | "";
+
   let {
     draggingApp,
     dragX,
@@ -23,68 +24,108 @@
     draggingApp: AppInfo;
     dragX: number;
     dragY: number;
-    dropZone: string;
+    dropZone: DropZone;
     pairTarget: AppInfo | null;
     drawerLeft: number;
   }>();
+
+  type HighlightRect = {
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  };
+
+  let targetRect = $state<HighlightRect | null>(null);
+
+  $effect(() => {
+    void dragX;
+    void dragY;
+    void dropZone;
+    void drawerLeft;
+    targetRect = resolveHighlightRect(dropZone);
+  });
+
+  function resolveHighlightRect(zone: DropZone): HighlightRect | null {
+    if (zone !== "primary" && zone !== "secondary" && zone !== "remove") {
+      return null;
+    }
+
+    if (zone === "remove") {
+      const sideInset = 20;
+      const bottomInset = 20;
+      const bottomZoneHeight = 120;
+      return {
+        left: sideInset,
+        top: window.innerHeight - bottomZoneHeight - bottomInset,
+        width: Math.max(0, drawerLeft - sideInset * 2),
+        height: bottomZoneHeight,
+      };
+    }
+
+    const paneElement = document.querySelector(`.viewport-pane[data-pane="${zone}"]`) as HTMLElement | null;
+    if (paneElement) {
+      const rect = paneElement.getBoundingClientRect();
+      return {
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+      };
+    }
+
+    return null;
+  }
+
+  function zoneLabel(zone: DropZone): string {
+    if (zone === "primary") return "Selected Window";
+    if (zone === "secondary") return "Selected Window";
+    if (zone === "remove") return "Release to remove";
+    return "";
+  }
+
+  function previewPackages(app: AppInfo): string[] {
+    if (!app.isPair || !app.layoutMode) return [];
+    return getAppPairPreviewPackages(app as any);
+  }
 </script>
 
-<!-- Renders the dropzone overlays only when dragging -->
-<div class="drop-overlay" class:hide-zones={Boolean(pairTarget)} style={`--drawer-left: ${drawerLeft}px`}>
-  <!-- Left execution target (Primary Pane) -->
-  <div
-    class="drop-zone primary-zone"
-    class:active={dropZone === "primary"}
-  >
-    <div class="zone-card">
-      <span class="zone-icon">▰</span>
-      <strong>Primary (Left Screen)</strong>
-      <small>Launch in VD_1</small>
+<div class="drop-overlay" class:hide-zones={Boolean(pairTarget)}>
+  {#if targetRect}
+    <div
+      class:remove-highlight={dropZone === "remove"}
+      class="window-highlight"
+      style={`left:${targetRect.left}px;top:${targetRect.top}px;width:${targetRect.width}px;height:${targetRect.height}px;`}
+    >
+      <div class="highlight-frame"></div>
+      <div class="highlight-glow"></div>
+      <div class="highlight-label">{zoneLabel(dropZone)}</div>
     </div>
-  </div>
-
-  <!-- Right execution target (Secondary Pane) -->
-  <div
-    class="drop-zone secondary-zone"
-    class:active={dropZone === "secondary"}
-  >
-    <div class="zone-card">
-      <span class="zone-icon">▰</span>
-      <strong>Secondary (Right Screen)</strong>
-      <small>Launch in VD_2</small>
-    </div>
-  </div>
-
-  <!-- Dissolve / Garbage removal target (Remove Pane) -->
-  <div
-    class="drop-zone remove-zone"
-    class:active={dropZone === "remove"}
-  >
-    <div class="zone-card danger-card">
-      <span class="zone-icon">⌫</span>
-      <strong>Trash / Dissolve</strong>
-      <small>Remove shortcut or pair</small>
-    </div>
-  </div>
+  {/if}
 </div>
 
-<!-- Hovering draggable app ghost tracking the pointer coordinates - Rendered independently from pairTarget to prevent unmounting -->
 <div class="drag-ghost" style={`left: ${dragX}px; top: ${dragY}px`}>
-  {#if draggingApp.isPair && draggingApp.left && draggingApp.right}
+  {#if draggingApp.isPair && draggingApp.layoutMode && previewPackages(draggingApp).length > 1}
     <div class="ghost-pair-icons">
       <img
         class="ghost-pair-left"
-        src={`/api/icon?pkg=${encodeURIComponent(draggingApp.left)}`}
+        src={`/api/icon?pkg=${encodeURIComponent(previewPackages(draggingApp)[0])}`}
         alt=""
         draggable="false"
       />
       <img
         class="ghost-pair-right"
-        src={`/api/icon?pkg=${encodeURIComponent(draggingApp.right)}`}
+        src={`/api/icon?pkg=${encodeURIComponent(previewPackages(draggingApp)[1])}`}
         alt=""
         draggable="false"
       />
     </div>
+  {:else if draggingApp.isPair && draggingApp.layoutMode && previewPackages(draggingApp).length === 1}
+    <img
+      src={`/api/icon?pkg=${encodeURIComponent(previewPackages(draggingApp)[0])}`}
+      alt=""
+      draggable="false"
+    />
   {:else}
     <img
       src={`/api/icon?pkg=${encodeURIComponent(draggingApp.packageName)}`}
@@ -100,19 +141,15 @@
     inset: 0;
     z-index: 80;
     pointer-events: none !important;
-    animation: fadeOverlay 0.25s cubic-bezier(0.4, 0, 0.2, 1) forwards;
-    transition: opacity 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    animation: fadeOverlay 0.18s ease forwards;
+    transition: opacity 0.18s ease;
   }
 
-  /* Smoothly fade out zones when hovering over a merge target */
   .drop-overlay.hide-zones {
     opacity: 0 !important;
-    pointer-events: none !important;
   }
 
-  /* Force pointer-events none on all descendent overlays to preempt event hijacking */
   .drop-overlay *,
-  .drop-zone,
   .drag-ghost {
     pointer-events: none !important;
   }
@@ -120,119 +157,75 @@
   @keyframes fadeOverlay {
     from {
       background-color: rgba(0, 0, 0, 0);
-      backdrop-filter: blur(0px);
     }
     to {
-      background-color: rgba(6, 8, 14, 0.45);
-      backdrop-filter: blur(4px);
+      background-color: rgba(6, 8, 14, 0.18);
     }
   }
 
-  .drop-zone {
+  .window-highlight {
     position: absolute;
-    border: 2px dashed rgba(255, 255, 255, 0.12);
-    border-radius: 20px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(255, 255, 255, 0.01);
-    transition:
-      border-color 0.25s cubic-bezier(0.4, 0, 0.2, 1),
-      background-color 0.25s cubic-bezier(0.4, 0, 0.2, 1),
-      box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1),
-      transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    border-radius: 22px;
+    overflow: hidden;
   }
 
-  .primary-zone,
-  .secondary-zone {
-    top: 80px;
-    bottom: 140px;
+  .highlight-frame,
+  .highlight-glow {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
   }
 
-  .primary-zone {
-    left: 20px;
-    width: calc((var(--drawer-left) - 60px) / 2);
+  .highlight-frame {
+    border: 2px solid rgba(139, 196, 255, 0.88);
+    background:
+      linear-gradient(180deg, rgba(139, 196, 255, 0.16), rgba(139, 196, 255, 0.05)),
+      rgba(255, 255, 255, 0.03);
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.08),
+      0 0 0 1px rgba(139, 196, 255, 0.12);
   }
 
-  .secondary-zone {
-    left: calc(40px + ((var(--drawer-left) - 60px) / 2));
-    width: calc((var(--drawer-left) - 60px) / 2);
+  .highlight-glow {
+    box-shadow:
+      0 0 0 9999px rgba(1, 4, 10, 0.08),
+      0 0 36px rgba(139, 196, 255, 0.35),
+      inset 0 0 24px rgba(139, 196, 255, 0.16);
   }
 
-  .zone-card {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    color: #94a3b8;
-    text-align: center;
-    transform: translateY(0);
-    transition: transform 0.2s ease;
+  .window-highlight.remove-highlight .highlight-frame {
+    border-color: rgba(239, 68, 68, 0.9);
+    background:
+      linear-gradient(180deg, rgba(239, 68, 68, 0.12), rgba(239, 68, 68, 0.04)),
+      rgba(255, 255, 255, 0.02);
   }
 
-  .zone-icon {
-    font-size: 32px;
-    color: #64748b;
-    transition: color 0.2s ease;
+  .window-highlight.remove-highlight .highlight-glow {
+    box-shadow:
+      0 0 0 9999px rgba(1, 4, 10, 0.08),
+      0 0 36px rgba(239, 68, 68, 0.28),
+      inset 0 0 24px rgba(239, 68, 68, 0.14);
   }
 
-  .drop-zone strong {
-    font-size: 15px;
+  .highlight-label {
+    position: absolute;
+    top: 16px;
+    left: 16px;
+    padding: 7px 10px;
+    border-radius: 999px;
+    background: rgba(8, 16, 28, 0.84);
+    color: #eef7ff;
+    font-size: 12px;
     font-weight: 700;
+    letter-spacing: 0.02em;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.24);
   }
 
-  .drop-zone small {
-    font-size: 11px;
-    color: #64748b;
-  }
-
-  /* Active hover states for zones */
-  .drop-zone.active {
-    border-style: solid;
-    background-color: rgba(139, 196, 255, 0.08);
-    border-color: #8bc4ff;
-    box-shadow: 0 0 24px rgba(139, 196, 255, 0.15);
-    transform: scale(1.01);
-  }
-
-  .drop-zone.active .zone-card {
-    transform: translateY(-2px);
-    color: #ffffff;
-  }
-
-  .drop-zone.active .zone-icon {
-    color: #8bc4ff;
-  }
-
-  .remove-zone {
-    left: 20px;
-    right: calc(100vw - var(--drawer-left) + 20px);
-    bottom: 20px;
-    height: 120px;
-    border-color: rgba(239, 68, 68, 0.15);
-    background: rgba(239, 68, 68, 0.01);
-  }
-
-  .remove-zone.active {
-    background-color: rgba(239, 68, 68, 0.08);
-    border-color: #ef4444;
-    box-shadow: 0 0 24px rgba(239, 68, 68, 0.15);
-  }
-
-  .remove-zone.active .zone-icon {
-    color: #ef4444;
-  }
-
-  .remove-zone.active .zone-card {
-    color: #ffffff;
-  }
-
-  /* Drag ghost icon mapping */
   .drag-ghost {
     position: fixed;
     width: 58px;
     height: 58px;
-    margin-left: -29px; /* Centered offsets */
+    margin-left: -29px;
     margin-top: -29px;
     pointer-events: none;
     z-index: 99;

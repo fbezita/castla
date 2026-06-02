@@ -2,64 +2,163 @@
   import { onDestroy, onMount, tick } from "svelte";
   import {
     compositorStore,
+    type LayoutMode,
+    type PopupLayoutState,
     type ViewportModel,
   } from "../stores/compositorStore";
   import ViewportPane from "./ViewportPane.svelte";
   import type { TouchRouter } from "../touch/TouchRouter";
+  import { mapViewportPoint } from "../touch/TouchRouter";
   import type { StreamRuntime } from "../runtime/StreamRuntime";
   import type { PaneId } from "../protocol";
 
   export let touchRouter: TouchRouter;
   export let runtime: StreamRuntime;
+  export let appLauncher: any = undefined;
+
+  const POPUP_HEADER_HEIGHT = 40;
+  const POPUP_MIN_WIDTH = 240;
+  const POPUP_MIN_HEIGHT = 160;
+  const POPUP_MARGIN = 16;
+  const PROVISIONAL_LAYOUT_SETTLE_MS = 220;
+
+  type PopupResizeEdge = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
 
   let host: HTMLDivElement;
   let resizer: HTMLButtonElement;
-  let controls: HTMLDivElement;
+  let toolbar: HTMLDivElement;
+  let popupBody: HTMLDivElement;
   let resizeObserver: ResizeObserver;
-  let resizing = false;
+  let resizingSplit = false;
+  let popupInteracting = false;
   let hostRect = new DOMRect();
   let layoutTrigger = "";
   let layoutFlushScheduled = false;
   let provisionalLayoutTimer = 0;
   const activeTouchPanes = new Map<number, PaneId>();
-  const PROVISIONAL_LAYOUT_SETTLE_MS = 220;
+  let popupDrag: {
+    pointerId: number;
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+  } | null = null;
+  let popupResize: {
+    pointerId: number;
+    edge: PopupResizeEdge;
+    startX: number;
+    startY: number;
+    origin: PopupLayoutState;
+  } | null = null;
+
+  let toolbarX = 350;
+  let toolbarY = 18;
+  let toolbarInteracting = false;
+  let toolbarDrag: {
+    pointerId: number;
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+  } | null = null;
+  let toolbarDragMoved = false;
+
+  let tempPopupX = 0;
+  let tempPopupY = 0;
+  let tempPopupWidth = 0;
+  let tempPopupHeight = 0;
 
   onMount(() => {
     resizeObserver = new ResizeObserver(() => {
       hostRect = host.getBoundingClientRect();
       touchRouter.updateHost(hostRect);
-      if (!resizing) {
+      clampPopupToHost();
+      if (!resizingSplit && !popupInteracting) {
         dispatchLayout();
       }
     });
     resizeObserver.observe(host);
     hostRect = host.getBoundingClientRect();
+
+    // Centering the layout toolbar initially based on host resolution
+    const hostWidth = hostRect.width || window.innerWidth;
+    toolbarX = Math.round((hostWidth - 320) / 2);
+    toolbarY = 18;
+
     touchRouter.updateHost(hostRect);
+    clampPopupToHost();
     dispatchLayout();
   });
 
   onDestroy(() => {
     resizeObserver?.disconnect();
-    resizing = false;
     activeTouchPanes.clear();
     window.clearTimeout(provisionalLayoutTimer);
     window.removeEventListener("pointermove", resizeMove);
     window.removeEventListener("pointerup", endResize);
     window.removeEventListener("pointercancel", endResize);
+    window.removeEventListener("pointermove", dragPopupMove);
+    window.removeEventListener("pointerup", endPopupDrag);
+    window.removeEventListener("pointercancel", endPopupDrag);
+    window.removeEventListener("pointermove", dragToolbarMove);
+    window.removeEventListener("pointerup", endToolbarDrag);
+    window.removeEventListener("pointercancel", endToolbarDrag);
+    window.removeEventListener("pointermove", resizePopupMove);
+    window.removeEventListener("pointerup", endPopupResize);
+    window.removeEventListener("pointercancel", endPopupResize);
   });
 
-  $: visibleViewports = Array.from($compositorStore.viewports.values()).filter(
-    (viewport) => viewport.visible,
+  let toolbarHidden = false;
+
+  $: if (!popupInteracting) {
+    tempPopupX = $compositorStore.popup.x;
+    tempPopupY = $compositorStore.popup.y;
+    tempPopupWidth = $compositorStore.popup.width;
+    tempPopupHeight = $compositorStore.popup.height;
+  }
+
+  $: allViewports = Array.from($compositorStore.viewports.values());
+  $: visibleViewports = allViewports.filter((viewport) => viewport.visible);
+  $: primaryViewport = allViewports.find(
+    (viewport) => viewport.pane === "primary",
   );
+  $: secondaryViewport = allViewports.find(
+    (viewport) => viewport.pane === "secondary",
+  );
+  $: dualPaneReady = Boolean(primaryViewport && secondaryViewport);
   $: splitActive =
-    $compositorStore.layoutMode === "split" && visibleViewports.length >= 2;
-  $: leftPane = $compositorStore.splitReversed ? "secondary" : "primary";
-  $: rightPane = $compositorStore.splitReversed ? "primary" : "secondary";
-  $: layoutMetrics = computeLayoutMetrics(
+    dualPaneReady &&
+    $compositorStore.layoutMode === "split" &&
+    primaryViewport?.visible === true &&
+    secondaryViewport?.visible === true;
+  $: fullPopupActive =
+    dualPaneReady &&
+    $compositorStore.layoutMode === "popup" &&
+    primaryViewport?.visible === true &&
+    secondaryViewport?.visible === true;
+
+  // Viewport mapping is physically fixed
+  $: leftPane = "primary";
+  $: rightPane = "secondary";
+  $: fullPane = "primary";
+  $: popupPane = "secondary";
+  $: fullViewport = allViewports.find(
+    (viewport) => viewport.pane === "primary",
+  );
+  $: popupViewport = allViewports.find(
+    (viewport) => viewport.pane === "secondary",
+  );
+
+  $: popupVisible = fullPopupActive && $compositorStore.popup.visible;
+  $: popupMinimized = popupVisible && $compositorStore.popup.minimized;
+  $: popupBodyHeight = Math.max(
+    0,
+    Math.round($compositorStore.popup.height - POPUP_HEADER_HEIGHT),
+  );
+  $: layoutMetrics = computeSplitLayoutMetrics(
     hostRect.width,
     hostRect.height,
     $compositorStore.splitRatio,
-    $compositorStore.splitReversed,
   );
   $: boundary = layoutMetrics.boundaryPercent;
   $: layoutTrigger = [
@@ -67,7 +166,7 @@
     Math.round(hostRect.height),
     $compositorStore.layoutMode,
     $compositorStore.splitRatio.toFixed(4),
-    $compositorStore.splitReversed ? "reversed" : "normal",
+    `${$compositorStore.popup.visible ? 1 : 0}:${$compositorStore.popup.minimized ? 1 : 0}:${Math.round($compositorStore.popup.x)}:${Math.round($compositorStore.popup.y)}:${Math.round($compositorStore.popup.width)}:${Math.round($compositorStore.popup.height)}`,
     visibleViewports
       .map(
         (viewport) =>
@@ -75,56 +174,71 @@
       )
       .join("|"),
   ].join(";");
+
   $: if (host && layoutTrigger) {
-    updateSplitChrome();
-    if (!resizing) {
+    updateChrome();
+    if (!resizingSplit && !popupInteracting) {
       dispatchLayout();
     }
   }
 
-  function paneStyle(pane: string): string {
-    if (!splitActive) return "left:0;right:0;width:100%;";
-    const { leftPercent, rightPercent } = layoutMetrics;
-    if (!$compositorStore.splitReversed) {
-      if (pane === "secondary")
+  $: if (splitActive && secondaryViewport?.committed === true) {
+    dispatchLayout(true);
+  }
+
+  function paneStyle(pane: PaneId): string {
+    if (splitActive) {
+      const { leftPercent, rightPercent } = layoutMetrics;
+      if (pane === "secondary") {
         return `left:${leftPercent}%;right:0;width:${rightPercent}%;`;
+      }
       return `left:0;width:${leftPercent}%;right:auto;`;
     }
-    if (pane === "secondary") return `left:0;width:${leftPercent}%;right:auto;`;
-    return `left:${leftPercent}%;right:0;width:${rightPercent}%;`;
+    return "left:0;top:0;width:100%;height:100%;";
   }
 
-  function beginResize(event: PointerEvent) {
-    event.preventDefault();
+  function setLayoutMode(mode: LayoutMode) {
+    if (!dualPaneReady) return;
+
+    // Restore popup window if the mode is already popup and user clicks popup tab again
+    if (mode === "popup" && $compositorStore.layoutMode === "popup") {
+      restorePopup();
+      return;
+    }
+
+    if (mode === $compositorStore.layoutMode) return;
+    toolbarHidden = false; // Reset hidden state when manually changing layout mode
     activeTouchPanes.clear();
     touchRouter.reset();
-    resizing = true;
-    updateSplitChrome();
-    window.addEventListener("pointermove", resizeMove);
-    window.addEventListener("pointerup", endResize, { once: true });
-    window.addEventListener("pointercancel", endResize, { once: true });
-  }
-
-  function resizeMove(event: PointerEvent) {
-    if (!resizing || !host) return;
-    const rect = host.getBoundingClientRect();
-    const pos = clamp((event.clientX - rect.left) / rect.width, 0.22, 0.78);
-    const nextRatio = $compositorStore.splitReversed ? 1 - pos : pos;
-    localStorage.setItem("castla_split_ratio", String(nextRatio));
-    compositorStore.update((state) => ({ ...state, splitRatio: nextRatio }));
-    updateSplitChrome(nextRatio);
-  }
-
-  function endResize() {
-    resizing = false;
-    window.removeEventListener("pointermove", resizeMove);
-    window.removeEventListener("pointerup", endResize);
-    window.removeEventListener("pointercancel", endResize);
+    compositorStore.update((state) => {
+      const viewports = new Map(state.viewports);
+      if (mode === "single") {
+        viewports.forEach((viewport, key) =>
+          viewports.set(key, { ...viewport, visible: key === "primary" }),
+        );
+      } else {
+        viewports.forEach((viewport, key) =>
+          viewports.set(key, {
+            ...viewport,
+            visible: key === "primary" || key === "secondary",
+          }),
+        );
+      }
+      return {
+        ...state,
+        viewports,
+        layoutMode: mode,
+        popup:
+          mode === "popup"
+            ? { ...state.popup, visible: true }
+            : { ...state.popup, visible: false },
+      };
+    });
+    // console.info(`[LAYOUT] mode=${mode}`);
     scheduleLayoutFlush();
-    visibleViewports.forEach((viewport) =>
-      runtime.requestKeyframe(viewport.pane),
-    );
-    touchRouter.reset();
+    if (mode === "popup") {
+      requestPaneKeyframes("primary", "secondary");
+    }
   }
 
   function expand(pane: PaneId) {
@@ -137,38 +251,524 @@
       );
       return { ...state, viewports, layoutMode: "single" };
     });
+    // console.info(`[LAYOUT] mode=single`);
     scheduleLayoutFlush();
     runtime.requestKeyframe(pane);
   }
 
-  function expandLeft() {
-    expand(leftPane as PaneId);
-  }
-
-  function expandRight() {
-    expand(rightPane as PaneId);
-  }
-
   function swap() {
+    if (!dualPaneReady) return;
     activeTouchPanes.clear();
     touchRouter.reset();
-    compositorStore.update((state) => ({
-      ...state,
-      splitReversed: !state.splitReversed,
-    }));
-    updateSplitChrome();
+
+    const primaryPkg = $compositorStore.activePrimaryApp;
+    const secondaryPkg = $compositorStore.activeSecondaryApp;
+
+    if (primaryPkg && secondaryPkg) {
+      // Swap apps in saved AppPairs too
+      const pairsRaw = localStorage.getItem("castla_app_pairs");
+      if (pairsRaw) {
+        try {
+          const pairs = JSON.parse(pairsRaw);
+          if (Array.isArray(pairs)) {
+            const updated = pairs.map((pair) => {
+              if (
+                Array.isArray(pair.apps) &&
+                ((pair.apps[0] === primaryPkg &&
+                  pair.apps[1] === secondaryPkg) ||
+                  (pair.apps[0] === secondaryPkg &&
+                    pair.apps[1] === primaryPkg))
+              ) {
+                return { ...pair, apps: [secondaryPkg, primaryPkg] };
+              }
+              // Support legacy WorkspaceRecord migration
+              if (
+                (pair.primaryApp === primaryPkg &&
+                  pair.secondaryApp === secondaryPkg) ||
+                (pair.primaryApp === secondaryPkg &&
+                  pair.secondaryApp === primaryPkg)
+              ) {
+                return {
+                  ...pair,
+                  primaryApp: secondaryPkg,
+                  secondaryApp: primaryPkg,
+                };
+              }
+              return pair;
+            });
+            localStorage.setItem("castla_app_pairs", JSON.stringify(updated));
+          }
+        } catch {}
+      }
+
+      // Delegate to E2E ACK launch state machine instead of timing-based manual launches
+      if (appLauncher) {
+        const layoutMode = $compositorStore.layoutMode === "popup" ? "popup" : "split";
+        appLauncher.startLaunchSequence({
+          primaryPkg: secondaryPkg,
+          secondaryPkg: primaryPkg,
+          layoutMode: layoutMode,
+        });
+      } else {
+        // Fallback for edge cases without appLauncher ref
+        console.warn("[SWAP] appLauncher ref missing, falling back to manual swap");
+        compositorStore.update((state) => ({
+          ...state,
+          activePrimaryApp: secondaryPkg,
+          activeSecondaryApp: primaryPkg,
+        }));
+        dispatchLayout(true);
+        runtime.launchApp(secondaryPkg, "primary", undefined, false);
+        runtime.requestKeyframe("primary");
+        setTimeout(() => {
+          runtime.launchApp(primaryPkg, "secondary", undefined, false);
+          runtime.requestKeyframe("secondary");
+        }, 80);
+        scheduleLayoutFlush();
+      }
+    }
+  }
+
+  function beginResize(event: PointerEvent) {
+    event.preventDefault();
+    activeTouchPanes.clear();
+    touchRouter.reset();
+    resizingSplit = true;
+    updateChrome();
+    window.addEventListener("pointermove", resizeMove);
+    window.addEventListener("pointerup", endResize, { once: true });
+    window.addEventListener("pointercancel", endResize, { once: true });
+  }
+
+  function resizeMove(event: PointerEvent) {
+    if (!resizingSplit || !host) return;
+    const rect = host.getBoundingClientRect();
+    const pos = clamp((event.clientX - rect.left) / rect.width, 0.22, 0.78);
+    const nextRatio = pos;
+    localStorage.setItem("castla_split_ratio", String(nextRatio));
+    compositorStore.update((state) => ({ ...state, splitRatio: nextRatio }));
+    updateChrome(nextRatio);
+  }
+
+  function endResize() {
+    resizingSplit = false;
+    window.removeEventListener("pointermove", resizeMove);
+    window.removeEventListener("pointerup", endResize);
+    window.removeEventListener("pointercancel", endResize);
+    scheduleLayoutFlush();
+    requestPaneKeyframes("primary", "secondary");
+    touchRouter.reset();
+  }
+
+  function beginPopupDrag(event: PointerEvent) {
+    if (!popupVisible) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const header = event.currentTarget as HTMLElement;
+    header.setPointerCapture?.(event.pointerId);
+    popupInteracting = true;
+    activeTouchPanes.clear();
+    touchRouter.reset();
+    popupDrag = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: $compositorStore.popup.x,
+      originY: $compositorStore.popup.y,
+    };
+    window.addEventListener("pointermove", dragPopupMove);
+    window.addEventListener("pointerup", endPopupDrag, { once: true });
+    window.addEventListener("pointercancel", endPopupDrag, { once: true });
+  }
+
+  function dragPopupMove(event: PointerEvent) {
+    if (!popupDrag || event.pointerId !== popupDrag.pointerId) return;
+    const nextPopup = constrainPopup({
+      ...$compositorStore.popup,
+      x: popupDrag.originX + (event.clientX - popupDrag.startX),
+      y: popupDrag.originY + (event.clientY - popupDrag.startY),
+    });
+    applyPopupState(nextPopup, false);
+  }
+
+  function endPopupDrag(event?: PointerEvent) {
+    if (popupDrag && event && popupDrag.pointerId !== event.pointerId) return;
+
+    // Tap detection: trigger restore if pointer was tapped with minimal dragging movement
+    if (popupDrag && event && $compositorStore.popup.minimized) {
+      const distance = Math.hypot(
+        event.clientX - popupDrag.startX,
+        event.clientY - popupDrag.startY,
+      );
+      if (distance < 6) {
+        restorePopup();
+      }
+    }
+
+    popupDrag = null;
+    popupInteracting = false;
+    window.removeEventListener("pointermove", dragPopupMove);
+    window.removeEventListener("pointerup", endPopupDrag);
+    window.removeEventListener("pointercancel", endPopupDrag);
+    persistPopupState($compositorStore.popup);
+    logPopupState($compositorStore.popup);
+  }
+
+  function beginToolbarDrag(event: PointerEvent) {
+    const target = event.target as HTMLElement;
+    if (
+      target.closest("button") &&
+      !target.closest(".toolbar-drag-handle") &&
+      !target.closest(".layout-toolbar-collapsed")
+    )
+      return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    const el = event.currentTarget as HTMLElement;
+    el.setPointerCapture?.(event.pointerId);
+    toolbarInteracting = true;
+    toolbarDragMoved = false; // Reset drag movement state
+
+    toolbarDrag = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: toolbarX,
+      originY: toolbarY,
+    };
+
+    window.addEventListener("pointermove", dragToolbarMove);
+    window.addEventListener("pointerup", endToolbarDrag, { once: true });
+    window.addEventListener("pointercancel", endToolbarDrag, { once: true });
+  }
+
+  function dragToolbarMove(event: PointerEvent) {
+    if (!toolbarDrag || event.pointerId !== toolbarDrag.pointerId) return;
+
+    // Set dragMoved true if moved more than 6px
+    if (
+      Math.hypot(
+        event.clientX - toolbarDrag.startX,
+        event.clientY - toolbarDrag.startY,
+      ) > 6
+    ) {
+      toolbarDragMoved = true;
+    }
+
+    const nextX = toolbarDrag.originX + (event.clientX - toolbarDrag.startX);
+    const nextY = toolbarDrag.originY + (event.clientY - toolbarDrag.startY);
+
+    // Dynamic boundary bounds depending on exact measured collapsed/expanded widths without hardcoded dimensions
+    const toolbarWidth = toolbar ? toolbar.getBoundingClientRect().width : 320;
+    const currentWidth = toolbarHidden ? 44 : toolbarWidth;
+    const offset = toolbarHidden ? (toolbarWidth - 44) : 0;
+
+    const maxBoundX = Math.max(10, hostRect.width - currentWidth - 10 - offset);
+    const minBoundX = 10 - offset;
+    const maxBoundY = Math.max(10, hostRect.height - 60);
+
+    toolbarX = clamp(nextX, minBoundX, maxBoundX);
+    toolbarY = clamp(nextY, 10, maxBoundY);
+  }
+
+  function endToolbarDrag(event?: PointerEvent) {
+    if (toolbarDrag && event && toolbarDrag.pointerId !== event.pointerId)
+      return;
+    toolbarDrag = null;
+    toolbarInteracting = false;
+    window.removeEventListener("pointermove", dragToolbarMove);
+    window.removeEventListener("pointerup", endToolbarDrag);
+    window.removeEventListener("pointercancel", endToolbarDrag);
+  }
+
+  function beginPopupResize(event: PointerEvent, edge: PopupResizeEdge) {
+    if (!popupVisible) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const handle = event.currentTarget as HTMLElement;
+    handle.setPointerCapture?.(event.pointerId);
+    popupInteracting = true;
+    activeTouchPanes.clear();
+    touchRouter.reset();
+    popupResize = {
+      pointerId: event.pointerId,
+      edge,
+      startX: event.clientX,
+      startY: event.clientY,
+      origin: { ...$compositorStore.popup },
+    };
+
+    // Copy popup bounds to temporary state variables
+    tempPopupX = $compositorStore.popup.x;
+    tempPopupY = $compositorStore.popup.y;
+    tempPopupWidth = $compositorStore.popup.width;
+    tempPopupHeight = $compositorStore.popup.height;
+
+    window.addEventListener("pointermove", resizePopupMove);
+    window.addEventListener("pointerup", endPopupResize, { once: true });
+    window.addEventListener("pointercancel", endPopupResize, { once: true });
+  }
+
+  function resizePopupMove(event: PointerEvent) {
+    if (!popupResize || event.pointerId !== popupResize.pointerId) return;
+    const dx = event.clientX - popupResize.startX;
+    const dy = event.clientY - popupResize.startY;
+    let nextX = popupResize.origin.x;
+    let nextY = popupResize.origin.y;
+    let nextWidth = popupResize.origin.width;
+    let nextHeight = popupResize.origin.height;
+
+    if (popupResize.edge.includes("e")) {
+      nextWidth += dx;
+    }
+    if (popupResize.edge.includes("s")) {
+      nextHeight += dy;
+    }
+    if (popupResize.edge.includes("w")) {
+      nextWidth -= dx;
+      nextX += dx;
+    }
+    if (popupResize.edge.includes("n")) {
+      nextHeight -= dy;
+      nextY += dy;
+    }
+
+    // Constrain temporary bounds locally
+    const maxWidth = Math.max(
+      POPUP_MIN_WIDTH,
+      hostRect.width - POPUP_MARGIN * 2,
+    );
+    const maxHeight = Math.max(
+      POPUP_MIN_HEIGHT,
+      hostRect.height - POPUP_MARGIN * 2,
+    );
+    const width = clamp(nextWidth, POPUP_MIN_WIDTH, maxWidth);
+    const height = clamp(nextHeight, POPUP_MIN_HEIGHT, maxHeight);
+    const maxX = Math.max(POPUP_MARGIN, hostRect.width - width - POPUP_MARGIN);
+    const maxY = Math.max(
+      POPUP_MARGIN,
+      hostRect.height - height - POPUP_MARGIN,
+    );
+
+    tempPopupX = clamp(nextX, POPUP_MARGIN, maxX);
+    tempPopupY = clamp(nextY, POPUP_MARGIN, maxY);
+    tempPopupWidth = width;
+    tempPopupHeight = height;
+  }
+
+  function endPopupResize(event?: PointerEvent) {
+    if (popupResize && event && popupResize.pointerId !== event.pointerId)
+      return;
+    popupResize = null;
+    popupInteracting = false;
+    window.removeEventListener("pointermove", resizePopupMove);
+    window.removeEventListener("pointerup", endPopupResize);
+    window.removeEventListener("pointercancel", endPopupResize);
+
+    // Commit the final resized bounds and trigger render / layout dispatch at the very end
+    const finalPopup = {
+      ...$compositorStore.popup,
+      x: tempPopupX,
+      y: tempPopupY,
+      width: tempPopupWidth,
+      height: tempPopupHeight,
+    };
+    applyPopupState(finalPopup, true);
+
+    scheduleLayoutFlush();
+    if (popupPane) {
+      runtime.requestKeyframe(popupPane);
+    }
+  }
+
+  function minimizePopup() {
+    const current = $compositorStore.popup;
+    const targetX = current.x + current.width - 60;
+    const targetY = current.y + current.height - 60;
+
+    // Constrain the minimized 60px bubble within host bounds
+    const maxX = Math.max(POPUP_MARGIN, hostRect.width - 60 - POPUP_MARGIN);
+    const maxY = Math.max(POPUP_MARGIN, hostRect.height - 60 - POPUP_MARGIN);
+
+    const nextPopup = {
+      ...current,
+      x: clamp(targetX, POPUP_MARGIN, maxX),
+      y: clamp(targetY, POPUP_MARGIN, maxY),
+      minimized: true,
+    };
+    applyPopupState(nextPopup, true);
     scheduleLayoutFlush();
   }
 
-  function clamp(value: number, min: number, max: number) {
-    return Math.min(max, Math.max(min, value));
+  function restorePopup() {
+    const current = $compositorStore.popup;
+    const targetX = current.x + 60 - current.width;
+    const targetY = current.y + 60 - current.height;
+
+    const maxWidth = Math.max(
+      POPUP_MIN_WIDTH,
+      hostRect.width - POPUP_MARGIN * 2,
+    );
+    const maxHeight = Math.max(
+      POPUP_MIN_HEIGHT,
+      hostRect.height - POPUP_MARGIN * 2,
+    );
+    const width = clamp(current.width, POPUP_MIN_WIDTH, maxWidth);
+    const height = clamp(current.height, POPUP_MIN_HEIGHT, maxHeight);
+
+    const maxX = Math.max(POPUP_MARGIN, hostRect.width - width - POPUP_MARGIN);
+    const maxY = Math.max(
+      POPUP_MARGIN,
+      hostRect.height - height - POPUP_MARGIN,
+    );
+
+    const nextPopup = {
+      ...current,
+      visible: true,
+      minimized: false,
+      x: clamp(targetX, POPUP_MARGIN, maxX),
+      y: clamp(targetY, POPUP_MARGIN, maxY),
+    };
+    applyPopupState(nextPopup, true);
+    scheduleLayoutFlush();
+    if (popupPane) {
+      runtime.requestKeyframe(popupPane);
+    }
+  }
+
+  function toggleMinimizePopup(event: MouseEvent | PointerEvent) {
+    event.stopPropagation();
+    if ($compositorStore.popup.minimized) {
+      restorePopup();
+    } else {
+      minimizePopup();
+    }
+  }
+
+  function hidePopup() {
+    const nextPopup = { ...$compositorStore.popup, visible: false };
+    applyPopupState(nextPopup, true);
+    scheduleLayoutFlush();
+  }
+
+  function hideSecondary() {
+    activeTouchPanes.clear();
+    touchRouter.reset();
+    compositorStore.update((state) => {
+      const viewports = new Map(state.viewports);
+      viewports.forEach((viewport, key) =>
+        viewports.set(key, { ...viewport, visible: key === "primary" }),
+      );
+      return {
+        ...state,
+        viewports,
+        layoutMode: "single",
+        popup: { ...state.popup, visible: false },
+      };
+    });
+    // console.info("[LAYOUT] mode=single (secondary hidden via hideSecondary)");
+    scheduleLayoutFlush();
+    runtime.requestKeyframe("primary");
+  }
+
+  interface CachedAppInfo {
+    packageName: string;
+    label: string;
+  }
+
+  function getRealAppLabel(packageName: string): string {
+    if (!packageName) return "Sub Window";
+    if (packageName.startsWith("workspace:")) return "App Pair";
+
+    try {
+      const cached = localStorage.getItem("castla_cached_apps_v1");
+      if (cached) {
+        const parsed = JSON.parse(cached) as CachedAppInfo[];
+        if (Array.isArray(parsed)) {
+          const matched = parsed.find((app) => app.packageName === packageName);
+          if (matched && matched.label) {
+            return matched.label;
+          }
+        }
+      }
+    } catch {}
+
+    // Fallback parser if not found in local storage cache
+    const parts = packageName.split(".");
+    const lastPart = parts[parts.length - 1];
+    if (!lastPart) return "Sub Window";
+    return lastPart.charAt(0).toUpperCase() + lastPart.slice(1);
   }
 
   function shouldDelayProvisionalLayout(): boolean {
-    if (resizing) return false;
-    const hasCommittedStream = visibleViewports.some((viewport) => viewport.committed);
+    if (resizingSplit || popupInteracting) return false;
+    const hasCommittedStream = visibleViewports.some(
+      (viewport) => viewport.committed,
+    );
     if (hasCommittedStream) return false;
     return runtime.currentAppLaunchSequence() === 0;
+  }
+
+  // Explicit immediate layout dispatch to backend with control queue promise resolution
+  export function dispatchLayoutNow(
+    mode: LayoutMode,
+    splitRatio: number,
+    popup: PopupLayoutState,
+    seqId?: number
+  ): Promise<void> {
+    return new Promise((resolve) => {
+      if (!host) {
+        resolve();
+        return;
+      }
+      
+      const rect = hostRect.width > 0 && hostRect.height > 0 ? hostRect : host.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        resolve();
+        return;
+      }
+      const alignedHeight = align16(rect.height);
+
+      console.info(`[LAYOUT_DISPATCH] seq=${seqId ?? $compositorStore.launchSequence.id} mode=${mode} splitRatio=${splitRatio.toFixed(4)} popupVisible=${popup.visible}`);
+
+      if (mode === "popup" && primaryViewport && secondaryViewport) {
+        const popupWidth = align16(popup.width);
+        const popupHeight = align16(popup.visible && !popup.minimized ? Math.max(POPUP_MIN_HEIGHT, popup.height - POPUP_HEADER_HEIGHT) : rect.height);
+        runtime.sendLayout([
+          { id: "primary", width: align16(rect.width), height: alignedHeight, visible: true },
+          { id: "secondary", width: popupWidth, height: popupHeight, visible: popup.visible && !popup.minimized }
+        ], seqId);
+      } else if (mode === "split") {
+        const layoutMetrics = computeSplitLayoutMetrics(rect.width, rect.height, splitRatio);
+        runtime.sendLayout([
+          { id: "primary", width: layoutMetrics.primaryWidth, height: alignedHeight, visible: true },
+          { id: "secondary", width: layoutMetrics.secondaryWidth, height: alignedHeight, visible: true }
+        ], seqId);
+      } else {
+        const activePane = visibleViewports[0]?.pane ?? "primary";
+        const hiddenPane = activePane === "primary" ? "secondary" : "primary";
+        const alignedWidth = align16(rect.width);
+        runtime.sendLayout([
+          { id: activePane, width: alignedWidth, height: alignedHeight, visible: true },
+          { id: hiddenPane, width: alignedWidth, height: alignedHeight, visible: false }
+        ], seqId);
+      }
+
+      // Explicitly wait until the socket bufferedAmount drops to 0, ensuring complete network flush
+      const checkInterval = setInterval(() => {
+        if (!runtime.hasPendingBufferedAmount()) {
+          clearInterval(checkInterval);
+          resolve();
+        }
+      }, 5);
+
+      // Safe guard guard-timeout to prevent blocking forever if disconnected
+      setTimeout(() => {
+        clearInterval(checkInterval);
+        resolve();
+      }, 100);
+    });
   }
 
   function dispatchLayout(forceImmediate = false) {
@@ -191,53 +791,190 @@
         : host.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
     const alignedHeight = align16(rect.height);
-    if (!splitActive) {
-      const activePane = visibleViewports[0]?.pane ?? "primary";
-      const hiddenPane: PaneId =
-        activePane === "primary" ? "secondary" : "primary";
-      const alignedWidth = align16(rect.width);
+
+    if (fullPopupActive && fullViewport && popupViewport) {
+      const fullPaneId = fullViewport.pane as PaneId;
+      const popupPaneId = popupViewport.pane as PaneId;
+      const popupWidth = align16($compositorStore.popup.width);
+      const popupHeight = align16(
+        popupVisible && !popupMinimized
+          ? Math.max(POPUP_MIN_HEIGHT, popupBodyHeight)
+          : rect.height,
+      );
       runtime.sendLayout([
         {
-          id: activePane,
-          width: alignedWidth,
+          id: fullPaneId,
+          width: align16(rect.width),
           height: alignedHeight,
           visible: true,
         },
         {
-          id: hiddenPane,
-          width: alignedWidth,
-          height: alignedHeight,
-          visible: false,
+          id: popupPaneId,
+          width: popupWidth,
+          height: popupHeight,
+          visible: popupVisible && !popupMinimized,
         },
       ]);
+      // console.info(`[LAYOUT] mode=popup`);
       return;
     }
 
-    const { primaryWidth, secondaryWidth } = layoutMetrics;
+    if (splitActive) {
+      const { primaryWidth, secondaryWidth } = layoutMetrics;
+      runtime.sendLayout([
+        {
+          id: leftPane,
+          width: primaryWidth,
+          height: alignedHeight,
+          visible: true,
+        },
+        {
+          id: rightPane,
+          width: secondaryWidth,
+          height: alignedHeight,
+          visible: true,
+        },
+      ]);
+      // console.info(`[LAYOUT] mode=split`);
+      return;
+    }
+
+    const activePane = visibleViewports[0]?.pane ?? "primary";
+    const hiddenPane: PaneId =
+      activePane === "primary" ? "secondary" : "primary";
+    const alignedWidth = align16(rect.width);
     runtime.sendLayout([
       {
-        id: leftPane,
-        width: leftPane === "primary" ? primaryWidth : secondaryWidth,
+        id: activePane,
+        width: alignedWidth,
         height: alignedHeight,
         visible: true,
       },
       {
-        id: rightPane,
-        width: rightPane === "primary" ? primaryWidth : secondaryWidth,
+        id: hiddenPane,
+        width: alignedWidth,
         height: alignedHeight,
-        visible: true,
+        visible: false,
       },
     ]);
+    // console.info(`[LAYOUT] mode=single`);
+  }
+
+  // Exact DOMRect based viewport hit testing
+  function findPaneByCoords(
+    clientX: number,
+    clientY: number,
+  ): {
+    pane: PaneId;
+    element: HTMLElement;
+    fitMode: "contain" | "fill";
+  } | null {
+    if (!host) return null;
+
+    // Check popup window rect first if popup mode active
+    if (fullPopupActive && popupVisible && !popupMinimized) {
+      const popupEl = host.querySelector(".popup-window") as HTMLElement;
+      if (popupEl) {
+        const rect = popupEl.getBoundingClientRect();
+        if (
+          clientX >= rect.left &&
+          clientX <= rect.right &&
+          clientY >= rect.top &&
+          clientY <= rect.bottom
+        ) {
+          const target = document.elementFromPoint(
+            clientX,
+            clientY,
+          ) as HTMLElement | null;
+          if (
+            target?.closest(".popup-header") ||
+            target?.closest(".popup-resize-handle")
+          ) {
+            return null;
+          }
+          const paneEl = popupEl.querySelector(".viewport-pane") as HTMLElement;
+          if (paneEl)
+            return { pane: "secondary", element: paneEl, fitMode: "fill" };
+        }
+      }
+
+      const fullEl = host.querySelector(
+        `.viewport-pane[data-pane="primary"]`,
+      ) as HTMLElement;
+      if (fullEl) {
+        const rect = fullEl.getBoundingClientRect();
+        if (
+          clientX >= rect.left &&
+          clientX <= rect.right &&
+          clientY >= rect.top &&
+          clientY <= rect.bottom
+        ) {
+          return { pane: "primary", element: fullEl, fitMode: "contain" };
+        }
+      }
+    }
+
+    // Check split panes rects if split mode active
+    if (splitActive) {
+      const leftEl = host.querySelector(
+        `.viewport-pane[data-pane="primary"]`,
+      ) as HTMLElement;
+      const rightEl = host.querySelector(
+        `.viewport-pane[data-pane="secondary"]`,
+      ) as HTMLElement;
+      if (leftEl) {
+        const rect = leftEl.getBoundingClientRect();
+        if (
+          clientX >= rect.left &&
+          clientX <= rect.right &&
+          clientY >= rect.top &&
+          clientY <= rect.bottom
+        ) {
+          return { pane: "primary", element: leftEl, fitMode: "fill" };
+        }
+      }
+      if (rightEl) {
+        const rect = rightEl.getBoundingClientRect();
+        if (
+          clientX >= rect.left &&
+          clientX <= rect.right &&
+          clientY >= rect.top &&
+          clientY <= rect.bottom
+        ) {
+          return { pane: "secondary", element: rightEl, fitMode: "fill" };
+        }
+      }
+    }
+
+    // Default to active single pane if visible
+    const activeViewport = visibleViewports[0];
+    if (activeViewport) {
+      const paneEl = host.querySelector(
+        `.viewport-pane[data-pane="${activeViewport.pane}"]`,
+      ) as HTMLElement;
+      if (paneEl) {
+        const rect = paneEl.getBoundingClientRect();
+        if (
+          clientX >= rect.left &&
+          clientX <= rect.right &&
+          clientY >= rect.top &&
+          clientY <= rect.bottom
+        ) {
+          return {
+            pane: activeViewport.pane,
+            element: paneEl,
+            fitMode: "contain",
+          };
+        }
+      }
+    }
+
+    return null;
   }
 
   function handlePointer(event: PointerEvent) {
-    if (resizing) return;
+    if (resizingSplit || popupInteracting) return;
     const target = event.target as HTMLElement | null;
-    if (target?.closest(".split-resizer") || target?.closest(".split-controls"))
-      return;
-
-    // Map pointerdown to 'down', pointermove to 'move', and pointerup/pointercancel/lostpointercapture to 'up'
-    // to guarantee all active states are gracefully finalized if the browser strips pointer control.
     const action =
       event.type === "pointerdown"
         ? "down"
@@ -245,23 +982,57 @@
           ? "move"
           : "up";
 
-    const paneElement = target?.closest<HTMLElement>(".viewport-pane");
+    // Handle UI elements separately without injecting Android touch events
+    if (
+      target?.closest(".split-resizer") ||
+      target?.closest(".layout-toolbar") ||
+      target?.closest(".popup-header") ||
+      target?.closest(".popup-resize-handle")
+    ) {
+      if (action === "down") {
+        const uiReason = target?.closest(".split-resizer")
+          ? "split-resizer"
+          : target?.closest(".layout-toolbar")
+            ? "ui"
+            : target?.closest(".popup-header")
+              ? "popup-header"
+              : "resize";
+        logTouchRoute(event, "-", undefined, uiReason as any);
+      }
+      return;
+    }
+
     const pointerKey = event.pointerId & 0xff;
-    const pane =
-      (paneElement?.dataset.pane as PaneId | undefined) ??
-      activeTouchPanes.get(pointerKey);
-    if (!pane) return;
-    const viewport = visibleViewports.find((entry) => entry.pane === pane);
+    const routing = findPaneByCoords(event.clientX, event.clientY);
+
+    // Utilize activePointer map if dragging ongoing to capture out-of-bounds pointer capture
+    const pane = routing?.pane ?? activeTouchPanes.get(pointerKey);
+    const paneElement =
+      routing?.element ??
+      (pane
+        ? (host.querySelector(
+            `.viewport-pane[data-pane="${pane}"]`,
+          ) as HTMLElement)
+        : null);
+    const fitMode = routing?.fitMode ?? (splitActive ? "fill" : "contain");
+
+    if (!pane || !paneElement) {
+      if (action === "down") {
+        logTouchRoute(event, "-", undefined, "outside");
+      }
+      return;
+    }
+
+    const viewport = allViewports.find((entry) => entry.pane === pane);
     if (!viewport) return;
+
     if (action === "down") {
       activeTouchPanes.set(pointerKey, pane);
+      logTouchRoute(event, pane, viewport, "video", paneElement, fitMode);
     }
-    touchRouter.pointer(
-      event,
-      viewport,
-      splitActive ? "fill" : "contain",
-      paneElement ?? undefined,
-    );
+
+    touchRouter.pointer(event, viewport, fitMode, paneElement);
+
     if (action === "up") {
       activeTouchPanes.delete(pointerKey);
     }
@@ -279,27 +1050,131 @@
     dispatchLayout(true);
   }
 
-  function updateSplitChrome(ratio = $compositorStore.splitRatio) {
-    if (!splitActive) return;
-    const boundaryValue = computeLayoutMetrics(
-      hostRect.width,
-      hostRect.height,
-      ratio,
-      $compositorStore.splitReversed,
-    ).boundaryPercent;
-    if (resizer) {
+  function updateChrome(ratio = $compositorStore.splitRatio) {
+    if (splitActive && resizer) {
+      const boundaryValue = computeSplitLayoutMetrics(
+        hostRect.width,
+        hostRect.height,
+        ratio,
+      ).boundaryPercent;
       resizer.style.left = `${boundaryValue}%`;
     }
-    if (controls) {
-      controls.style.left = `${boundaryValue}%`;
+    if (toolbar) {
+      toolbar.style.opacity = dualPaneReady ? "1" : "0.82";
     }
   }
 
-  function computeLayoutMetrics(
+  function constrainPopup(popup: PopupLayoutState): PopupLayoutState {
+    const currentWidth = popup.minimized ? 60 : popup.width;
+    const currentHeight = popup.minimized ? 60 : popup.height;
+
+    const maxWidth = Math.max(
+      POPUP_MIN_WIDTH,
+      hostRect.width - POPUP_MARGIN * 2,
+    );
+    const maxHeight = Math.max(
+      POPUP_MIN_HEIGHT,
+      hostRect.height - POPUP_MARGIN * 2,
+    );
+    const width = clamp(popup.width, POPUP_MIN_WIDTH, maxWidth);
+    const height = clamp(popup.height, POPUP_MIN_HEIGHT, maxHeight);
+
+    const maxX = Math.max(
+      POPUP_MARGIN,
+      hostRect.width - currentWidth - POPUP_MARGIN,
+    );
+    const maxY = Math.max(
+      POPUP_MARGIN,
+      hostRect.height - currentHeight - POPUP_MARGIN,
+    );
+
+    return {
+      ...popup,
+      width,
+      height,
+      x: clamp(popup.x, POPUP_MARGIN, maxX),
+      y: clamp(popup.y, POPUP_MARGIN, maxY),
+    };
+  }
+
+  function clampPopupToHost() {
+    if (!hostRect.width || !hostRect.height) return;
+    const nextPopup = constrainPopup($compositorStore.popup);
+    if (!isSamePopup(nextPopup, $compositorStore.popup)) {
+      applyPopupState(nextPopup, true);
+    }
+  }
+
+  function applyPopupState(nextPopup: PopupLayoutState, persist: boolean) {
+    compositorStore.update((state) => ({ ...state, popup: nextPopup }));
+    if (persist) {
+      persistPopupState(nextPopup);
+      logPopupState(nextPopup);
+    }
+  }
+
+  function persistPopupState(popup: PopupLayoutState) {
+    localStorage.setItem("castla_full_popup_state", JSON.stringify(popup));
+  }
+
+  function logPopupState(popup: PopupLayoutState) {
+    console.info(
+      `[POPUP] x=${Math.round(popup.x)} y=${Math.round(popup.y)} width=${Math.round(popup.width)} height=${Math.round(popup.height)} minimized=${popup.minimized}`,
+    );
+  }
+
+  function logTouchRoute(
+    event: PointerEvent,
+    pane: PaneId | "-",
+    viewport?: ViewportModel,
+    reason:
+      | "video"
+      | "popup-header"
+      | "resize"
+      | "outside"
+      | "ui"
+      | "split-resizer" = "video",
+    surface?: HTMLElement,
+    fitMode: "contain" | "fill" = "contain",
+  ) {
+    let normalizedX = "-";
+    let normalizedY = "-";
+    if (pane !== "-" && viewport && surface) {
+      const mapped = mapViewportPoint(
+        event.clientX,
+        event.clientY,
+        surface.getBoundingClientRect(),
+        viewport.width,
+        viewport.height,
+        fitMode,
+        reason !== "video" || event.type !== "pointerdown",
+      );
+      if (mapped) {
+        normalizedX = mapped.x.toFixed(4);
+        normalizedY = mapped.y.toFixed(4);
+      }
+    }
+    console.info(
+      `[TOUCH_ROUTE] clientX=${Math.round(event.clientX)} clientY=${Math.round(event.clientY)} targetSlot=${describeTargetSlot(pane)} normalizedX=${normalizedX} normalizedY=${normalizedY} reason=${reason}`,
+    );
+  }
+
+  function describeTargetSlot(pane: PaneId | "-"): string {
+    if (pane === "-") return "-";
+    if (fullPopupActive) {
+      return pane === "primary" ? "full" : "popup";
+    }
+    return pane === "primary" ? "left" : "right";
+  }
+
+  function requestPaneKeyframes(...panes: PaneId[]) {
+    panes.forEach((pane) => runtime.requestKeyframe(pane));
+  }
+
+  function computeSplitLayoutMetrics(
     width: number,
     height: number,
     ratio: number,
-    reversed: boolean,
   ) {
     const safeWidth = Math.max(0, Math.round(width));
     const safeHeight = Math.max(0, Math.round(height));
@@ -307,7 +1182,7 @@
       return {
         primaryWidth: 0,
         secondaryWidth: 0,
-        leftPercent: reversed ? 50 : 50,
+        leftPercent: 50,
         rightPercent: 50,
         boundaryPercent: 50,
       };
@@ -324,14 +1199,29 @@
     return {
       primaryWidth: alignedPrimaryWidth,
       secondaryWidth: alignedSecondaryWidth,
-      leftPercent: reversed ? secondaryPercent : primaryPercent,
-      rightPercent: reversed ? primaryPercent : secondaryPercent,
-      boundaryPercent: reversed ? secondaryPercent : primaryPercent,
+      leftPercent: primaryPercent,
+      rightPercent: secondaryPercent,
+      boundaryPercent: primaryPercent,
     };
   }
 
   function align16(value: number): number {
     return Math.max(320, (Math.round(value) + 15) & ~15);
+  }
+
+  function clamp(value: number, min: number, max: number): number {
+    return Math.min(max, Math.max(min, value));
+  }
+
+  function isSamePopup(a: PopupLayoutState, b: PopupLayoutState): boolean {
+    return (
+      a.visible === b.visible &&
+      a.minimized === b.minimized &&
+      Math.round(a.x) === Math.round(b.x) &&
+      Math.round(a.y) === Math.round(b.y) &&
+      Math.round(a.width) === Math.round(b.width) &&
+      Math.round(a.height) === Math.round(b.height)
+    );
   }
 </script>
 
@@ -345,14 +1235,208 @@
   on:pointercancel={handlePointer}
   on:lostpointercapture={handlePointer}
 >
-  {#each visibleViewports as viewport (viewport.pane)}
+  {#if splitActive}
+    {#each visibleViewports as viewport (viewport.pane)}
+      <ViewportPane
+        {viewport}
+        {runtime}
+        paneStyle={paneStyle(viewport.pane)}
+        fitMode="fill"
+      />
+    {/each}
+  {:else if fullPopupActive && fullViewport}
     <ViewportPane
-      {viewport}
+      viewport={fullViewport}
       {runtime}
-      paneStyle={paneStyle(viewport.pane)}
-      fitMode={splitActive ? "fill" : "contain"}
+      paneStyle={paneStyle(fullViewport.pane)}
+      fitMode="contain"
     />
-  {/each}
+    {#if popupVisible && popupViewport}
+      {#if popupMinimized}
+        <!-- Minimized premium circular floating app icon bubble -->
+        <div
+          class="popup-minimized-bubble"
+          style={`left:${$compositorStore.popup.x}px;top:${$compositorStore.popup.y}px;`}
+          role="button"
+          tabindex="0"
+          aria-label="Restore minimized popup display"
+          on:pointerdown={beginPopupDrag}
+        >
+          <img
+            class="minimized-app-icon"
+            src={`/api/icon?pkg=${encodeURIComponent($compositorStore.activeSecondaryApp)}`}
+            alt="App Icon"
+            draggable="false"
+            on:error={(e) => {
+              const target = e.currentTarget as HTMLImageElement;
+              target.style.display = "none";
+            }}
+          />
+          <span class="minimized-badge-dot"></span>
+        </div>
+      {:else}
+        <!-- Original expanded popup window markup with real app title -->
+        <div
+          class="popup-window"
+          style={`left:${tempPopupX}px;top:${tempPopupY}px;width:${tempPopupWidth}px;height:${tempPopupHeight}px;`}
+        >
+          <div
+            class="popup-header"
+            role="button"
+            tabindex="0"
+            aria-label="Drag popup window"
+            on:pointerdown={beginPopupDrag}
+            on:dblclick={toggleMinimizePopup}
+          >
+            <div class="popup-title">
+              {getRealAppLabel($compositorStore.activeSecondaryApp)}
+            </div>
+            <div class="popup-actions">
+              <button
+                class="popup-action"
+                title="최소화"
+                on:click={minimizePopup}>−</button
+              >
+              <button class="popup-action" title="닫기" on:click={hidePopup}
+                >×</button
+              >
+            </div>
+          </div>
+          <div
+            bind:this={popupBody}
+            class="popup-body"
+            style={popupInteracting
+              ? `width:${$compositorStore.popup.width}px;height:${Math.max(0, $compositorStore.popup.height - POPUP_HEADER_HEIGHT)}px;`
+              : ""}
+          >
+            <ViewportPane
+              viewport={popupViewport}
+              {runtime}
+              paneStyle="left:0;top:0;width:100%;height:100%;"
+              fitMode="fill"
+            />
+          </div>
+          <button
+            class="popup-resize-handle edge-n"
+            aria-label="Resize popup north"
+            title="Resize popup north"
+            on:pointerdown={(event) => beginPopupResize(event, "n")}
+          ></button>
+          <button
+            class="popup-resize-handle edge-s"
+            aria-label="Resize popup south"
+            title="Resize popup south"
+            on:pointerdown={(event) => beginPopupResize(event, "s")}
+          ></button>
+          <button
+            class="popup-resize-handle edge-e"
+            aria-label="Resize popup east"
+            title="Resize popup east"
+            on:pointerdown={(event) => beginPopupResize(event, "e")}
+          ></button>
+          <button
+            class="popup-resize-handle edge-w"
+            aria-label="Resize popup west"
+            title="Resize popup west"
+            on:pointerdown={(event) => beginPopupResize(event, "w")}
+          ></button>
+          <button
+            class="popup-resize-handle corner-ne"
+            aria-label="Resize popup northeast"
+            title="Resize popup northeast"
+            on:pointerdown={(event) => beginPopupResize(event, "ne")}
+          ></button>
+          <button
+            class="popup-resize-handle corner-nw"
+            aria-label="Resize popup northwest"
+            title="Resize popup northwest"
+            on:pointerdown={(event) => beginPopupResize(event, "nw")}
+          ></button>
+          <button
+            class="popup-resize-handle corner-se"
+            aria-label="Resize popup southeast"
+            title="Resize popup southeast"
+            on:pointerdown={(event) => beginPopupResize(event, "se")}
+          ></button>
+          <button
+            class="popup-resize-handle corner-sw"
+            aria-label="Resize popup southwest"
+            title="Resize popup southwest"
+            on:pointerdown={(event) => beginPopupResize(event, "sw")}
+          ></button>
+        </div>
+      {/if}
+    {/if}
+  {:else}
+    {#each visibleViewports as viewport (viewport.pane)}
+      <ViewportPane
+        {viewport}
+        {runtime}
+        paneStyle={paneStyle(viewport.pane)}
+        fitMode="contain"
+      />
+    {/each}
+  {/if}
+
+  {#if dualPaneReady}
+    {#if toolbarHidden}
+      <!-- Collapsed mini draggable toolbar handle, similar to sidebar handle but draggable -->
+      <button
+        class="layout-toolbar-collapsed"
+        style={`left:${toolbarX + 276}px;top:${toolbarY}px;cursor:move;touch-action:none;`}
+        on:pointerdown={beginToolbarDrag}
+        on:click={() => (toolbarHidden = false)}
+        title="Show layout toolbar"
+        aria-label="Show layout toolbar"
+      >
+        <span class="collapsed-icon">▤</span>
+      </button>
+    {:else}
+      <div
+        bind:this={toolbar}
+        class="layout-toolbar"
+        role="toolbar"
+        tabindex="-1"
+        style={`left:${toolbarX}px;top:${toolbarY}px;transform:none;touch-action:none;`}
+      >
+        <button
+          class:active={$compositorStore.layoutMode === "single"}
+          on:click={() => setLayoutMode("single")}
+        >
+          Single
+        </button>
+        <button
+          class:active={$compositorStore.layoutMode === "split"}
+          on:click={() => setLayoutMode("split")}
+        >
+          Split
+        </button>
+        <button
+          class:active={$compositorStore.layoutMode === "popup"}
+          on:click={() => setLayoutMode("popup")}
+        >
+          Popup
+        </button>
+        <button title="Swap" on:click={swap}>⇄</button>
+        {#if fullPopupActive && (!$compositorStore.popup.visible || $compositorStore.popup.minimized)}
+          <button title="Restore popup" on:click={restorePopup}>□</button>
+        {/if}
+        <button
+          class="toolbar-drag-handle"
+          title="Drag to move, Tap to hide"
+          aria-label="Drag to move, Tap to hide"
+          on:pointerdown={beginToolbarDrag}
+          on:click={() => {
+            if (!toolbarDragMoved) {
+              toolbarHidden = true;
+            }
+          }}
+        >
+          <span class="handle-dots">⋮⋮</span>
+        </button>
+      </div>
+    {/if}
+  {/if}
 
   {#if splitActive}
     <button
@@ -362,15 +1446,6 @@
       aria-label="Resize split"
       on:pointerdown={beginResize}
     ></button>
-    <div
-      bind:this={controls}
-      class="split-controls"
-      style={`left:${boundary}%`}
-    >
-      <button title="왼쪽 전체 확대" on:click={expandLeft}>↖</button>
-      <button title="좌우 변경" on:click={swap}>⟳</button>
-      <button title="오른쪽 전체 확대" on:click={expandRight}>↗</button>
-    </div>
   {/if}
 </div>
 
@@ -381,6 +1456,47 @@
     height: 100%;
     background: #05070a;
     overflow: hidden;
+  }
+
+  .layout-toolbar {
+    position: absolute;
+    top: 18px;
+    left: 50%;
+    z-index: 38;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    border: 1px solid rgb(255 255 255 / 0.14);
+    border-radius: 18px;
+    background: rgb(12 22 34 / 0.94);
+    box-shadow: 0 10px 26px rgb(0 0 0 / 0.35);
+    transform: translateX(-50%);
+    backdrop-filter: blur(8px);
+  }
+
+  .layout-toolbar button,
+  .popup-action,
+  .popup-resize-handle {
+    border: 0;
+    background: transparent;
+    color: white;
+  }
+
+  .layout-toolbar button {
+    min-width: 30px;
+    height: 30px;
+    padding: 0 10px;
+    border-radius: 999px;
+    background: rgb(255 255 255 / 0.08);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .layout-toolbar button.active {
+    background: rgb(57 223 255 / 0.24);
+    color: #7cf1ff;
   }
 
   .split-resizer {
@@ -419,34 +1535,298 @@
     background: #13dff5;
   }
 
-  .split-controls {
+  .popup-window {
     position: absolute;
-    top: 28px;
-    z-index: 36;
+    z-index: 37;
+    display: flex;
+    flex-direction: column;
+    overflow: visible;
+    border: 1px solid rgb(255 255 255 / 0.14);
+    border-radius: 16px;
+    background: rgb(4 10 18 / 0.94);
+    box-shadow: 0 18px 40px rgb(0 0 0 / 0.42);
+    backdrop-filter: blur(12px);
+  }
+
+  .popup-header {
     display: flex;
     align-items: center;
-    gap: 5px;
-    padding: 7px 9px;
-    border: 1px solid rgb(255 255 255 / 0.14);
-    border-radius: 18px;
-    background: rgb(12 22 34 / 0.94);
-    box-shadow: 0 10px 26px rgb(0 0 0 / 0.35);
-    transform: translateX(-50%);
+    justify-content: space-between;
+    gap: 12px;
+    height: 40px;
+    padding: 0 12px;
+    border-bottom: 1px solid rgb(255 255 255 / 0.08);
+    cursor: grab;
+    user-select: none;
+    touch-action: none;
   }
 
-  .split-controls button {
+  .popup-title {
+    color: #8feeff;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .popup-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .popup-action {
+    width: 28px;
+    height: 28px;
+    border-radius: 999px;
+    background: rgb(255 255 255 / 0.08);
+    font-size: 16px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 0;
+    padding: 0;
+  }
+
+  .popup-body {
+    position: relative;
+    flex: 1;
+    min-height: 120px;
+    overflow: hidden;
+    border-radius: 0 0 16px 16px;
+  }
+
+  .popup-resize-handle {
+    position: absolute;
+    z-index: 2;
+    padding: 0;
+    touch-action: none;
+    cursor: nwse-resize;
+  }
+
+  .edge-n,
+  .edge-s {
+    left: 16px;
+    right: 16px;
+    height: 10px;
+    cursor: ns-resize;
+  }
+
+  .edge-n {
+    top: -5px;
+  }
+
+  .edge-s {
+    bottom: -5px;
+  }
+
+  .edge-e,
+  .edge-w {
+    top: 16px;
+    bottom: 16px;
+    width: 10px;
+    cursor: ew-resize;
+  }
+
+  .edge-e {
+    right: -5px;
+  }
+
+  .edge-w {
+    left: -5px;
+  }
+
+  .corner-ne,
+  .corner-nw,
+  .corner-se,
+  .corner-sw {
+    width: 16px;
+    height: 16px;
+  }
+
+  .corner-ne {
+    top: -5px;
+    right: -5px;
+    cursor: nesw-resize;
+  }
+
+  .corner-nw {
+    top: -5px;
+    left: -5px;
+    cursor: nwse-resize;
+  }
+
+  .corner-se {
+    right: -5px;
+    bottom: -5px;
+    cursor: nwse-resize;
+  }
+
+  .corner-sw {
+    left: -5px;
+    bottom: -5px;
+    cursor: nesw-resize;
+  }
+
+  /* Minimized Circular Floating Bubble Styling */
+  .popup-minimized-bubble {
+    position: absolute;
+    z-index: 37;
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    border: 2px solid rgba(0, 229, 255, 0.45);
+    background: radial-gradient(
+      circle at center,
+      rgb(16 32 50 / 0.96) 0%,
+      rgb(4 10 18 / 0.98) 100%
+    );
+    box-shadow:
+      0 10px 28px rgba(0, 0, 0, 0.55),
+      0 0 16px rgba(0, 229, 255, 0.25),
+      inset 0 0 10px rgba(0, 229, 255, 0.1);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: grab;
+    touch-action: none;
+    transition:
+      transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1),
+      border-color 0.2s ease,
+      box-shadow 0.2s ease;
+  }
+
+  .popup-minimized-bubble:hover {
+    transform: scale(1.12);
+    border-color: rgba(0, 229, 255, 0.85);
+    box-shadow:
+      0 12px 32px rgba(0, 0, 0, 0.65),
+      0 0 24px rgba(0, 229, 255, 0.5),
+      inset 0 0 12px rgba(0, 229, 255, 0.2);
+  }
+
+  .popup-minimized-bubble:active {
+    cursor: grabbing;
+    transform: scale(0.96);
+  }
+
+  .minimized-app-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    object-fit: cover;
+    pointer-events: none;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  }
+
+  .minimized-badge-dot {
+    position: absolute;
+    bottom: 2px;
+    right: 2px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #00e5ff;
+    border: 2px solid #040a12;
+    box-shadow: 0 0 8px #00e5ff;
+    animation: neon-pulse 2s infinite ease-in-out;
+  }
+
+  @keyframes neon-pulse {
+    0%,
+    100% {
+      opacity: 0.85;
+      box-shadow: 0 0 6px #00e5ff;
+    }
+    50% {
+      opacity: 1;
+      box-shadow: 0 0 14px #00e5ff;
+    }
+  }
+
+  /* Collapsed mini toolbar handle styling */
+  .layout-toolbar-collapsed {
+    position: absolute;
+    z-index: 38;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: 2px solid rgba(0, 229, 255, 0.45);
+    background: radial-gradient(
+      circle at center,
+      rgb(16 32 50 / 0.96) 0%,
+      rgb(4 10 18 / 0.98) 100%
+    );
+    box-shadow:
+      0 8px 24px rgba(0, 0, 0, 0.55),
+      0 0 12px rgba(0, 229, 255, 0.25),
+      inset 0 0 8px rgba(0, 229, 255, 0.1);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: move;
+    touch-action: none;
+    transition:
+      transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1),
+      border-color 0.2s ease,
+      box-shadow 0.2s ease;
+    padding: 0;
+  }
+
+  .layout-toolbar-collapsed:hover {
+    transform: scale(1.1);
+    border-color: rgba(0, 229, 255, 0.85);
+    box-shadow:
+      0 10px 28px rgba(0, 0, 0, 0.65),
+      0 0 16px rgba(0, 229, 255, 0.4);
+  }
+
+  .layout-toolbar-collapsed:active {
+    transform: scale(0.95);
+  }
+
+  .collapsed-icon {
+    color: #7cf1ff;
+    font-size: 18px;
+    pointer-events: none;
+  }
+
+  /* Drag and Hide handle button inside active toolbar styling */
+  .toolbar-drag-handle {
     width: 30px;
     height: 30px;
-    border: 0;
     border-radius: 50%;
-    background: transparent;
-    color: #39dfff;
-    font-size: 20px;
-    font-weight: 800;
+    background: rgba(255, 255, 255, 0.08);
+    border: 0;
+    color: #9ea3ad;
+    cursor: move;
+    touch-action: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition:
+      background 0.2s,
+      color 0.2s,
+      transform 0.1s;
+    margin-left: 4px;
+    padding: 0;
   }
 
-  .split-controls button:nth-child(2) {
-    background: rgb(255 255 255 / 0.12);
-    color: white;
+  .toolbar-drag-handle:hover {
+    background: rgba(0, 229, 255, 0.18);
+    color: #7cf1ff;
+  }
+
+  .toolbar-drag-handle:active {
+    transform: scale(0.92);
+  }
+
+  .handle-dots {
+    font-size: 14px;
+    font-weight: bold;
+    pointer-events: none;
+    line-height: 1;
+    transform: translateY(-1px);
   }
 </style>

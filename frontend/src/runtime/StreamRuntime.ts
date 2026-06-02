@@ -42,6 +42,26 @@ export class StreamRuntime {
   private wasConnected = false;
   private started = false;
   private controlMessageCleanup?: () => void;
+  
+  // E2E ACK and handshake capabilities indicators
+  private ackListeners = new Set<(message: any) => void>();
+  private supportsAckFeatures = false;
+  private protocolVersion = "1.0.0";
+
+  onAckMessage(listener: (message: any) => void): () => void {
+    this.ackListeners.add(listener);
+    return () => this.ackListeners.delete(listener);
+  }
+
+  setHandshakeInfo(version: string, supportsAck: boolean): void {
+    this.protocolVersion = version;
+    this.supportsAckFeatures = supportsAck;
+    console.info(`[HANDSHAKE] Backend Protocol=${version} AckSupported=${supportsAck}`);
+  }
+
+  isAckSupported(): boolean {
+    return this.supportsAckFeatures;
+  }
   private static readonly noisyDecoderEvents = new Set([
     "metadata",
     "configFrame",
@@ -93,20 +113,37 @@ export class StreamRuntime {
     this.started = true;
     this.control.connect();
     this.controlMessageCleanup = this.control.onMessage((message) => {
-      if ((message as { type?: string }).type === "serverInit") {
+      const type = (message as { type?: string }).type;
+
+      if (type === "serverInit") {
         this.serverInstanceId = String(
           (message as { instanceId?: unknown }).instanceId ?? "unknown",
         );
         this.controlSessionId = Number(
           (message as { controlSessionId?: unknown }).controlSessionId ?? 0,
         );
+        // Extract protocol capability flags from serverInit if present
+        const version = String((message as any).protocolVersion ?? "1.0.0");
+        const supportsAck = Boolean((message as any).supportsAck ?? (message as any).supportsAckFeatures ?? false);
+        this.setHandshakeInfo(version, supportsAck);
       }
-      if (message.type === "streamMetadata") {
+      if (type === "streamMetadata") {
         const metadata = message as StreamMetadata;
         this.generations.update(metadata);
       }
+
+      // Dispatch E2E ACK control packets directly to active promise listeners
+      if (
+        type === "layout_ack" ||
+        type === "launch_ack" ||
+        type === "session_ready" ||
+        type === "launch_failed"
+      ) {
+        this.ackListeners.forEach((listener) => listener(message));
+      }
+
       // Handle remote touchReset commands sent from the server watchdog to break client-side pointer locks
-      if (message.type === "touchReset") {
+      if (type === "touchReset") {
         const reason =
           (message as { reason?: string }).reason ?? "server_recovery";
         console.warn(
@@ -172,24 +209,33 @@ export class StreamRuntime {
   }
 
   sendLayout(
-    pipelines: Array<{
+    layout: Array<{
       id: PaneId;
       width: number;
       height: number;
       visible?: boolean;
     }>,
+    seqId?: number,
   ): void {
-    const normalized = pipelines.map((pipeline) => ({
-      id: pipeline.id,
-      width: Math.max(320, align16(pipeline.width)),
-      height: Math.max(320, align16(pipeline.height)),
-      visible: pipeline.visible ?? true,
-    }));
+    const normalized = layout.map((pipeline) => {
+      if (pipeline.id === "popup") {
+        return {
+          id: pipeline.id,
+          width: Math.max(320, align16(pipeline.width)),
+          height: Math.max(320, align16(pipeline.height)),
+          visible: pipeline.visible ?? true,
+          committed: true,
+        };
+      }
+      return {
+        id: pipeline.id,
+        width: Math.max(320, align16(pipeline.width)),
+        height: Math.max(320, align16(pipeline.height)),
+        visible: pipeline.visible ?? true,
+      };
+    });
     const signature = normalized
-      .map(
-        (pipeline) =>
-          `${pipeline.id}:${pipeline.width}x${pipeline.height}:${pipeline.visible ? 1 : 0}`,
-      )
+      .map((pipeline) => `${pipeline.id}:${pipeline.width}x${pipeline.height}:${pipeline.visible ? 1 : 0}`)
       .sort()
       .join("|");
     const nextVisibility = normalized
@@ -198,7 +244,7 @@ export class StreamRuntime {
       .join("|");
     this.lastLayoutVisibility = nextVisibility;
     this.lastLayout = normalized.map((pipeline) => ({ ...pipeline }));
-    if (signature === this.lastLayoutSignature) {
+    if (signature === this.lastLayoutSignature && seqId === undefined) {
       this.layoutDedupedCount += 1;
       return;
     }
@@ -207,6 +253,7 @@ export class StreamRuntime {
     this.control.send({
       type: "layout_update",
       pipelines: normalized,
+      seqId: seqId !== undefined ? seqId : undefined,
     });
   }
 
@@ -242,6 +289,10 @@ export class StreamRuntime {
     return this.sessionEpoch;
   }
 
+  hasPendingBufferedAmount(): boolean {
+    return this.control.hasPendingBufferedAmount();
+  }
+
   currentAppLaunchSequence(): number {
     return this.appLaunchSequence;
   }
@@ -251,6 +302,7 @@ export class StreamRuntime {
     pane: PaneId,
     componentName?: string,
     isVideoApp = false,
+    seqId?: number,
   ): void {
     this.appLaunchSequence += 1;
     // console.info("[CastlaSession] app_launch", {
@@ -269,6 +321,7 @@ export class StreamRuntime {
       pane,
       componentName,
       isVideoApp,
+      seqId: seqId !== undefined ? seqId : undefined,
     });
   }
 

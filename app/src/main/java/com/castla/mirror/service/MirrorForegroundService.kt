@@ -2404,6 +2404,7 @@ class MirrorForegroundService : Service() {
         
         // Timestamp of the last processed keyframe request to prevent coroutine and binder flood
         @Volatile var lastKeyframeRequestTime = 0L
+        @Volatile var firstFrameMetadataSent = false
         // Backup fields to remember the last valid viewport dimensions for self-healing recovery
         @Volatile var lastValidWidth: Int = 384
         @Volatile var lastValidHeight: Int = 672
@@ -2820,7 +2821,7 @@ class MirrorForegroundService : Service() {
             lastFrameRenderedTime = 0L
             mirrorServer?.clearCachedSpsPps(name)
             mirrorServer?.beginStreamGeneration(name, displayId, w, h)
-            var firstFrameMetadataSent = false
+            firstFrameMetadataSent = false
 
             if (videoEncoder != null || jpegEncoder != null) debugEncoderReleases += 1
             videoEncoder?.release(); videoEncoder = null
@@ -3009,7 +3010,7 @@ class MirrorForegroundService : Service() {
                             markServiceMutation("post_rebuild_keyframe")
                             videoEncoder?.requestKeyFrame()
                         }
-                        Log.i(TAG, "[FRAME_DEBUG] [$name] post-rebuild wakeup/keyframe displayId=$displayId codec=$currentCodecMode")
+                        // Log.i(TAG, "[FRAME_DEBUG] [$name] post-rebuild wakeup/keyframe displayId=$displayId codec=$currentCodecMode")
                         FileLogger.i("FRAME_DEBUG", "[$name] post-rebuild wakeup/keyframe displayId=$displayId codec=$currentCodecMode")
                         FileLogger.i("KEYFRAME_REQUEST", "[$name] postRebuild displayId=$displayId codec=$currentCodecMode")
                         Log.i(TAG, "[$name Pipeline] Requested post-rebuild wakeup/keyframe (codec: $currentCodecMode)")
@@ -3391,6 +3392,11 @@ class MirrorForegroundService : Service() {
                 if (correctedDisplayId >= 0 && service != null) {
                     executeAdaptiveWakeup(correctedDisplayId, cleanPkg, service)
                 }
+                val token = currentVdToken()
+                if (token != null) {
+                    firstFrameMetadataSent = false
+                    mirrorServer?.beginStreamGeneration(name, token.second, width, height)
+                }
                 return@withContext true
             }
             
@@ -3492,6 +3498,13 @@ class MirrorForegroundService : Service() {
                     requiresFreshLaunchPreparation = false
                     lastPreparedTargetPackage = cleanPkg
                     currentApp = packageOrComponent
+                    if (isEncoderActive) {
+                        val token = currentVdToken()
+                        if (token != null) {
+                            firstFrameMetadataSent = false
+                            mirrorServer?.beginStreamGeneration(name, token.second, width, height)
+                        }
+                    }
                     return@withContext true
                 }
 
@@ -3509,6 +3522,11 @@ class MirrorForegroundService : Service() {
                     scheduleDisplayRoutingDiagnostics(name, service, cleanPkg, targetDisplayId, "postlaunch", "realign_bypass", displayId)
                     executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
                     currentApp = packageOrComponent
+                    val token = currentVdToken()
+                    if (token != null) {
+                        firstFrameMetadataSent = false
+                        mirrorServer?.beginStreamGeneration(name, token.second, width, height)
+                    }
                     return@withContext true
                 }
 
@@ -3579,7 +3597,15 @@ class MirrorForegroundService : Service() {
 
                 requiresFreshLaunchPreparation = false
                 lastPreparedTargetPackage = cleanPkg
-                currentApp = packageOrComponent; return@withContext true
+                currentApp = packageOrComponent
+                if (isEncoderActive) {
+                    val token = currentVdToken()
+                    if (token != null) {
+                        firstFrameMetadataSent = false
+                        mirrorServer?.beginStreamGeneration(name, token.second, width, height)
+                    }
+                }
+                return@withContext true
             } catch (e: Exception) { Log.e(TAG, "[$name Pipeline] Component push crashed inside system shell launcher layer.", e); return@withContext false }
         }
 

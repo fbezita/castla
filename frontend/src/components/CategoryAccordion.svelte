@@ -1,14 +1,15 @@
 <script lang="ts">
+  import { getAppPairPreviewPackages, type LayoutMode, type AppPair } from "../lib/appPair";
+
   // Type definition for application details
-  interface AppInfo {
+  interface AppInfo extends Partial<AppPair> {
     packageName: string;
     label: string;
     componentName?: string;
     category?: string;
     isWeb?: boolean;
-    left?: string;
-    right?: string;
     isPair?: boolean;
+    layoutMode?: LayoutMode;
   }
 
   // Type definition for category group
@@ -67,6 +68,11 @@
       onLaunch(app);
     }
   }
+
+  function previewPackages(app: AppInfo): string[] {
+    if (!app.isPair || !app.layoutMode) return [];
+    return getAppPairPreviewPackages(app as any);
+  }
 </script>
 
 <section class="browse-group" style={`--category-color: ${group.color}`}>
@@ -102,23 +108,31 @@
           role="button"
           tabindex="0"
         >
-          {#if app.isPair && app.left && app.right}
+          {#if app.isPair && app.layoutMode && previewPackages(app).length > 1}
             <div class="pair-icons split-pair-icon">
               <img
                 class="app-pair-icon-left"
-                src={`/api/icon?pkg=${encodeURIComponent(app.left)}`}
+                src={`/api/icon?pkg=${encodeURIComponent(previewPackages(app)[0])}`}
                 alt=""
                 loading="lazy"
                 draggable="false"
               />
               <img
                 class="app-pair-icon-right"
-                src={`/api/icon?pkg=${encodeURIComponent(app.right)}`}
+                src={`/api/icon?pkg=${encodeURIComponent(previewPackages(app)[1])}`}
                 alt=""
                 loading="lazy"
                 draggable="false"
               />
             </div>
+          {:else if app.isPair && app.layoutMode && previewPackages(app).length === 1}
+            <img
+              class="split-app-icon"
+              src={`/api/icon?pkg=${encodeURIComponent(previewPackages(app)[0])}`}
+              alt=""
+              loading="lazy"
+              draggable="false"
+            />
           {:else}
             <img
               class="split-app-icon"

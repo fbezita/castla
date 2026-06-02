@@ -69,12 +69,19 @@
     hideSurface();
   }
 
+  let hasCommittedOnce = false;
+
   function markReady() {
     canvas.style.opacity = "1";
     video.style.opacity = "1";
+    hasCommittedOnce = true;
   }
 
   function hideSurface() {
+    // Keep last frame visible during transitions to achieve seamless switches without black blinks
+    if (hasCommittedOnce) {
+      return;
+    }
     if (canvas) canvas.style.opacity = "0";
     if (video) video.style.opacity = "0";
   }
