@@ -82,13 +82,13 @@
     onclick={() => onToggle(group.key)}
   >
     <div class="browse-group-label">
-      <span class="browse-chevron">{isExpanded ? "▼" : "▶"}</span>
+      <span class="browse-chevron">▶</span>
       <span>{group.title}</span>
     </div>
     <span class="browse-count">{group.items.length}</span>
   </button>
 
-  {#if isExpanded}
+  <div class="browse-list-wrapper" class:expanded={isExpanded}>
     <div class="browse-list">
       {#each group.items as app (app.packageName)}
         <div
@@ -223,7 +223,7 @@
         </div>
       {/each}
     </div>
-  {/if}
+  </div>
 </section>
 
 <style>
@@ -273,7 +273,12 @@
   .browse-chevron {
     color: var(--category-color, #8f96a4);
     font-size: 11px;
-    transition: transform 0.2s ease;
+    display: inline-block;
+    transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .browse-group-header.expanded .browse-chevron {
+    transform: rotate(90deg);
   }
 
   .browse-count {
@@ -282,7 +287,27 @@
     font-weight: 700;
   }
 
+  .browse-list-wrapper {
+    display: grid;
+    grid-template-rows: 0fr;
+    opacity: 0;
+    visibility: hidden;
+    overflow: hidden;
+    transition:
+      grid-template-rows 0.28s cubic-bezier(0.16, 1, 0.3, 1),
+      opacity 0.22s ease,
+      visibility 0.22s ease;
+    will-change: grid-template-rows, opacity;
+  }
+
+  .browse-list-wrapper.expanded {
+    grid-template-rows: 1fr;
+    opacity: 1;
+    visibility: visible;
+  }
+
   .browse-list {
+    min-height: 0;
     display: flex;
     flex-direction: column;
     gap: 2px;

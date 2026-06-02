@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import type { Language } from '../lib/i18n';
 import type { DiagnosticsDisplay, PaneId, ServerDiagnostics } from '../protocol';
 
 export type LayoutMode = 'single' | 'split' | 'popup';
@@ -66,6 +67,13 @@ export interface CompositorState {
   activeSecondaryApp: string;
   popup: PopupLayoutState;
   launchSequence: LaunchSequence; // Holds the active sequence and current state machine stage
+  language: Language;
+}
+
+function readStoredLanguage(): Language {
+  if (typeof localStorage === 'undefined') return 'ko';
+  const stored = localStorage.getItem('castla_language');
+  return stored === 'en' ? 'en' : 'ko';
 }
 
 function readStoredSplitRatio(): number {
@@ -125,7 +133,8 @@ export function createInitialCompositorState(): CompositorState {
       degradedReason: '',
       primaryStartGen: 0,
       secondaryStartGen: 0,
-    }
+    },
+    language: readStoredLanguage(),
   };
 }
 
@@ -133,4 +142,11 @@ export const compositorStore = writable<CompositorState>(createInitialCompositor
 
 export function resetCompositorStore(): void {
   compositorStore.set(createInitialCompositorState());
+}
+
+export function setLanguage(lang: Language): void {
+  if (typeof localStorage !== 'undefined') {
+    localStorage.setItem('castla_language', lang);
+  }
+  compositorStore.update((state) => ({ ...state, language: lang }));
 }

@@ -2,7 +2,8 @@
   import { onDestroy, onMount, tick } from "svelte";
   import { get } from "svelte/store";
   import type { StreamRuntime } from "../runtime/StreamRuntime";
-  import { compositorStore } from "../stores/compositorStore";
+  import { compositorStore, setLanguage } from "../stores/compositorStore";
+  import { t } from "../lib/i18n";
   import type { PaneId } from "../protocol";
   import {
     getAppPairKey,
@@ -164,7 +165,12 @@
       .filter((group) => group.items.length > 0)
   );
 
-  let browseGroups = $derived(groupedApps);
+  let browseGroups = $derived(
+    groupedApps.map(g => ({
+      ...g,
+      title: t($compositorStore.language, `group_${g.key}` as any)
+    }))
+  );
 
   let activePanelApps = $derived.by(() => {
     if (activeTab === "autorun") return autorunApps;
@@ -174,9 +180,9 @@
   });
 
   let activePanelEmpty = $derived.by(() => {
-    if (activeTab === "autorun") return "Set one app or app pair to auto-run on connect.";
-    if (activeTab === "starred") return "Star apps to pin them in your launcher lane.";
-    if (activeTab === "recent") return "Launch an app once to build your recent history.";
+    if (activeTab === "autorun") return t($compositorStore.language, "emptyAutorun");
+    if (activeTab === "starred") return t($compositorStore.language, "emptyStarred");
+    if (activeTab === "recent") return t($compositorStore.language, "emptyRecent");
     return "";
   });
 
@@ -1033,11 +1039,11 @@
     const minute = 60_000;
     const hour = 60 * minute;
     const day = 24 * hour;
-    if (elapsedMs < minute) return "Just now";
-    if (elapsedMs < hour) return `${Math.floor(elapsedMs / minute)} min ago`;
-    if (elapsedMs < day) return `${Math.floor(elapsedMs / hour)} hr ago`;
-    if (elapsedMs < day * 2) return "Yesterday";
-    return `${Math.floor(elapsedMs / day)} days ago`;
+    if (elapsedMs < minute) return t($compositorStore.language, "justNow");
+    if (elapsedMs < hour) return `${Math.floor(elapsedMs / minute)} ${t($compositorStore.language, "minAgo")}`;
+    if (elapsedMs < day) return `${Math.floor(elapsedMs / hour)} ${t($compositorStore.language, "hrAgo")}`;
+    if (elapsedMs < day * 2) return t($compositorStore.language, "yesterday");
+    return `${Math.floor(elapsedMs / day)} ${t($compositorStore.language, "daysAgo")}`;
   }
 
   function selectTab(tab: LaunchHubTab) {
@@ -1579,11 +1585,11 @@
   </div>
   <div class="standby-logo">CASTLA</div>
   {#if autoClosePending}
-    <p>Launching application... Establishing high-fidelity stream link.</p>
+    <p>{t($compositorStore.language, "standbyLaunching")}</p>
   {:else}
-    <p>Ready to Stream. Open the sidebar drawer to launch an app.</p>
+    <p>{t($compositorStore.language, "standbyReady")}</p>
   {/if}
-  <div class="server-pill"><span></span>SERVER ACTIVE</div>
+  <div class="server-pill"><span></span>{t($compositorStore.language, "serverActive")}</div>
 </div>
 
 <aside
@@ -1597,24 +1603,38 @@
   <button
     class="split-handle"
     onclick={() => (drawerOpen = !drawerOpen)}
-    aria-label={drawerOpen ? "Close launcher" : "Open launcher"}
+    aria-label={drawerOpen ? t($compositorStore.language, "closeLauncher") : t($compositorStore.language, "openLauncher")}
   >
     <span class="handle-chevron">{drawerOpen ? ">" : "<"}</span>
   </button>
 
   <header>
     <div class="drawer-heading">
-      <strong>Launch Hub</strong>
+      <strong>{t($compositorStore.language, "launchHub")}</strong>
     </div>
     <div class="drawer-meta">
-      <span class="drawer-count">{loading ? "Loading" : `${apps.length} apps`}</span>
+      <span class="drawer-count">{loading ? t($compositorStore.language, "loading") : `${apps.length} ${t($compositorStore.language, "appsCount")}`}</span>
+      <div class="lang-switcher">
+        <button
+          class:active={$compositorStore.language === "ko"}
+          onclick={() => setLanguage("ko")}
+        >
+          KO
+        </button>
+        <button
+          class:active={$compositorStore.language === "en"}
+          onclick={() => setLanguage("en")}
+        >
+          EN
+        </button>
+      </div>
       <button
         class="diag-toggle-btn"
         onclick={(event) => {
           event.stopPropagation();
           triggerToggleDiagnostics();
         }}
-        title="Settings and diagnostics"
+        title={t($compositorStore.language, "settingsDiagnostics")}
       >
         ⚙
       </button>
@@ -1626,22 +1646,22 @@
       class:active={$compositorStore.layoutMode === "single"}
       onclick={() => setLayoutMode("single")}
     >
-      Single
+      {t($compositorStore.language, "single")}
     </button>
     <button
       class:active={$compositorStore.layoutMode === "split"}
       onclick={() => setLayoutMode("split")}
     >
-      Split
+      {t($compositorStore.language, "split")}
     </button>
     <button
       class:active={$compositorStore.layoutMode === "popup"}
       onclick={() => setLayoutMode("popup")}
     >
-      Popup
+      {t($compositorStore.language, "popup")}
     </button>
     <div class="layout-divider"></div>
-    <button class="swap-btn" onclick={swap} title="Swap active windows">
+    <button class="swap-btn" onclick={swap} title={t($compositorStore.language, "swap")}>
       ⇄
     </button>
   </div>
@@ -1649,7 +1669,7 @@
   <div class="search-row">
     <input
       bind:value={search}
-      placeholder="Search or launch"
+      placeholder={t($compositorStore.language, "searchPlaceholder")}
       autocomplete="off"
     />
   </div>
@@ -1700,11 +1720,13 @@
         </div>
       </section>
     {:else}
-      <section class="library-section">
-        <div class="library-header">
-          <span>{search ? `${displayApps.length} matches` : "All categories collapsed"}</span>
-        </div>
-      </section>
+      {#if search}
+        <section class="library-section">
+          <div class="library-header">
+            <span>{displayApps.length} {t($compositorStore.language, "matches")}</span>
+          </div>
+        </section>
+      {/if}
 
       <div class="browse-accordion">
         {#each browseGroups as group (group.key)}
@@ -1848,7 +1870,7 @@
   .split-drawer {
     position: absolute;
     top: 0;
-    right: -300px;
+    right: 0;
     bottom: 0;
     width: 300px;
     z-index: 40;
@@ -1859,14 +1881,16 @@
     backdrop-filter: blur(20px);
     border-left: 1px solid rgba(255, 255, 255, 0.06);
     box-shadow: -10px 0 32px rgba(0, 0, 0, 0.45);
+    transform: translateX(100%);
+    will-change: transform, opacity;
     transition:
-      right 0.26s cubic-bezier(0.4, 0, 0.2, 1),
+      transform 0.28s cubic-bezier(0.16, 1, 0.3, 1),
       opacity 0.2s ease,
       filter 0.2s ease;
   }
 
   .split-drawer.open {
-    right: 0;
+    transform: translateX(0);
   }
 
   .split-drawer.dragging {
@@ -1965,6 +1989,40 @@
     display: flex;
     gap: 10px;
     align-items: center;
+  }
+
+  .lang-switcher {
+    display: flex;
+    align-items: center;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 8px;
+    padding: 2px;
+    gap: 1px;
+  }
+
+  .lang-switcher button {
+    border: 0;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.45);
+    font-size: 9px;
+    font-weight: 800;
+    height: 18px;
+    padding: 0 6px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
+  }
+
+  .lang-switcher button:hover {
+    color: rgba(255, 255, 255, 0.85);
+  }
+
+  .lang-switcher button.active {
+    background: rgba(0, 229, 255, 0.16);
+    color: #7cf1ff;
+    border: 1px solid rgba(0, 229, 255, 0.2);
+    box-shadow: 0 1px 4px rgba(0, 229, 255, 0.1);
   }
 
   .drawer-count {

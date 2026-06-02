@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { compositorStore } from "../stores/compositorStore";
+  import { t } from "../lib/i18n";
+
   // Strict Svelte 5 Props using $props Rune
   let {
     activeTab,
@@ -20,7 +23,7 @@
     class:drop-target={draggingApp && dropZone === "autorun"}
     onclick={() => selectTab("autorun")}
   >
-    <span class="tab-label">Auto Run</span>
+    <span class="tab-label">{t($compositorStore.language, "tab_autorun")}</span>
     {#if draggingApp && dropZone === "autorun"}
       <span class="drop-badge">DROP</span>
     {/if}
@@ -32,7 +35,7 @@
     class:drop-target={draggingApp && dropZone === "favorite"}
     onclick={() => selectTab("starred")}
   >
-    <span class="tab-label">Starred</span>
+    <span class="tab-label">{t($compositorStore.language, "tab_starred")}</span>
     {#if draggingApp && dropZone === "favorite"}
       <span class="drop-badge">DROP</span>
     {/if}
@@ -43,7 +46,7 @@
     class:active={activeTab === "recent"}
     onclick={() => selectTab("recent")}
   >
-    Recent
+    {t($compositorStore.language, "tab_recent")}
   </button>
 
   <button
@@ -51,13 +54,13 @@
     class:active={activeTab === "browse"}
     onclick={() => selectTab("browse")}
   >
-    Browse
+    {t($compositorStore.language, "tab_browse")}
   </button>
 </nav>
 
 {#if draggingApp && (dropZone === "autorun" || dropZone === "favorite")}
   <div class="drop-hint" aria-live="polite">
-    {dropZone === "autorun" ? "Release to add to Auto Run" : "Release to add to Starred"}
+    {dropZone === "autorun" ? t($compositorStore.language, "releaseAutoRun") : t($compositorStore.language, "releaseStarred")}
   </div>
 {/if}
 

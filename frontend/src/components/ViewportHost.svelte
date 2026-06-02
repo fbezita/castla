@@ -6,6 +6,7 @@
     type PopupLayoutState,
     type ViewportModel,
   } from "../stores/compositorStore";
+  import { t } from "../lib/i18n";
   import ViewportPane from "./ViewportPane.svelte";
   import type { TouchRouter } from "../touch/TouchRouter";
   import { mapViewportPoint } from "../touch/TouchRouter";
@@ -290,7 +291,6 @@
             : { ...state.popup, visible: false },
       };
     });
-    // console.info(`[LAYOUT] mode=${mode}`);
     scheduleLayoutFlush();
     if (mode === "popup") {
       requestPaneKeyframes("primary", "secondary");
@@ -307,7 +307,6 @@
       );
       return { ...state, viewports, layoutMode: "single" };
     });
-    // console.info(`[LAYOUT] mode=single`);
     scheduleLayoutFlush();
     runtime.requestKeyframe(pane);
   }
@@ -657,7 +656,6 @@
         popup: { ...state.popup, visible: false },
       };
     });
-    // console.info("[LAYOUT] mode=single (secondary hidden via hideSecondary)");
     scheduleLayoutFlush();
     runtime.requestKeyframe("primary");
   }
@@ -668,8 +666,8 @@
   }
 
   function getRealAppLabel(packageName: string): string {
-    if (!packageName) return "Sub Window";
-    if (packageName.startsWith("workspace:")) return "App Pair";
+    if (!packageName) return t($compositorStore.language, "subWindow");
+    if (packageName.startsWith("workspace:")) return t($compositorStore.language, "appPair");
 
     try {
       const cached = localStorage.getItem("castla_cached_apps_v1");
@@ -687,7 +685,7 @@
     // Fallback parser if not found in local storage cache
     const parts = packageName.split(".");
     const lastPart = parts[parts.length - 1];
-    if (!lastPart) return "Sub Window";
+    if (!lastPart) return t($compositorStore.language, "subWindow");
     return lastPart.charAt(0).toUpperCase() + lastPart.slice(1);
   }
 
@@ -805,7 +803,6 @@
           visible: popupVisible && !popupMinimized,
         },
       ]);
-      // console.info(`[LAYOUT] mode=popup`);
       return;
     }
 
@@ -825,7 +822,6 @@
           visible: true,
         },
       ]);
-      // console.info(`[LAYOUT] mode=split`);
       return;
     }
 
@@ -847,7 +843,6 @@
         visible: false,
       },
     ]);
-    // console.info(`[LAYOUT] mode=single`);
   }
 
   // Exact DOMRect based viewport hit testing
@@ -1303,10 +1298,10 @@
             <div class="popup-actions">
               <button
                 class="popup-action"
-                title="최소화"
+                title={t($compositorStore.language, "minimize")}
                 on:click={minimizePopup}>−</button
               >
-              <button class="popup-action" title="닫기" on:click={hidePopup}
+              <button class="popup-action" title={t($compositorStore.language, "close")} on:click={hidePopup}
                 >×</button
               >
             </div>
@@ -1405,7 +1400,7 @@
         <div class="loader-circle"></div>
         <div class="loader-pulse"></div>
       </div>
-      <p class="barrier-text">화면 레이아웃 최적화 중...</p>
+      <p class="barrier-text">{t($compositorStore.language, "barrierText")}</p>
     </div>
   {/if}
 </div>
