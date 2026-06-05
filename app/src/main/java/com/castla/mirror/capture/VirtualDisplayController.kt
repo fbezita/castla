@@ -133,7 +133,7 @@ class VirtualDisplayController(private val displayName: String) {
         val id = displayId
         if (id < 0) return
         try {
-            privilegedService?.wakeUpDisplay(id)
+            privilegedService?.keepVirtualDisplayAlive(id)
             // Log.i(TAG, "[$displayName] Forced VD $id display state to ON")
         } catch (e: Exception) {
             Log.w(TAG, "[$displayName] Failed to force VD $id awake", e)

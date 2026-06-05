@@ -1018,7 +1018,7 @@
 
     if (action === "down") {
       activeTouchPanes.set(pointerKey, pane);
-      logTouchRoute(event, pane, viewport, "video", paneElement, fitMode);
+      // logTouchRoute(event, pane, viewport, "video", paneElement, fitMode);
     }
 
     touchRouter.pointer(event, viewport, fitMode, paneElement);

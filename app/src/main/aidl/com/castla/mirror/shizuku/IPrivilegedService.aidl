@@ -117,6 +117,12 @@ interface IPrivilegedService {
     void wakeUpDisplay(int displayId) = 17;
 
     /**
+     * Keep a virtual display rendering without sending wake/input events that
+     * can leak onto the physical display.
+     */
+    void keepVirtualDisplayAlive(int displayId) = 37;
+
+    /**
      * Resize an existing virtual display without destroying it.
      * Activities receive a configuration change instead of being killed.
      */

@@ -172,6 +172,14 @@ class VirtualDisplayControllerTest {
     }
 
     @Test
+    fun `keepDisplayAwake uses VD-only keepalive path`() {
+        controller.keepDisplayAwake()
+
+        verify(exactly = 1) { mockService.keepVirtualDisplayAlive(42) }
+        verify(exactly = 0) { mockService.wakeUpDisplay(42) }
+    }
+
+    @Test
     fun `launchHomeOnDisplay returns false when displayId is negative`() {
         setField("displayId", -1)
         val result = controller.launchHomeOnDisplay()

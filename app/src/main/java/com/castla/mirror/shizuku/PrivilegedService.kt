@@ -1,5 +1,6 @@
 package com.castla.mirror.shizuku
 
+import android.content.Context
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -17,6 +18,7 @@ import android.view.InputDevice
 import android.view.InputEvent
 import android.view.MotionEvent
 import android.view.Surface
+import com.castla.mirror.ui.StreamSettings
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 
@@ -26,6 +28,26 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class PrivilegedService : IPrivilegedService.Stub() {
     private val tetheringExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private val verboseScreenOffLogging: Boolean by lazy {
+        runCatching {
+            val context = Class.forName("android.app.ActivityThread")
+                .getMethod("currentApplication")
+                .invoke(null) as? Context
+            context != null && StreamSettings.load(context).verboseDiagnosticsEnabled
+        }.getOrDefault(false)
+    }
+
+    private fun logScreenOffInfo(message: String) {
+        if (verboseScreenOffLogging) {
+            Log.i(TAG, message)
+        }
+    }
+
+    private fun logScreenOffWarn(message: String) {
+        if (verboseScreenOffLogging) {
+            Log.w(TAG, message)
+        }
+    }
 
     companion object {
         private const val TAG = "PrivilegedService"
@@ -2009,6 +2031,19 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     Log.e(TAG, "wakeUpDisplay shell fallback failed for display $displayId", ex)
                 }
             }
+        }
+    }
+
+    override fun keepVirtualDisplayAlive(displayId: Int) {
+        if (displayId <= 0) {
+            logScreenOffWarn("[SCREEN_OFF] [VD_KEEPALIVE] displayId=$displayId command=set-display-state ON targetPhysical=true skipped=true")
+            return
+        }
+        try {
+            execCommand("dumpsys power set-display-state $displayId ON")
+            logScreenOffInfo("[SCREEN_OFF] [VD_KEEPALIVE] displayId=$displayId command=set-display-state ON targetPhysical=false")
+        } catch (e: Exception) {
+            Log.e(TAG, "keepVirtualDisplayAlive failed for display $displayId", e)
         }
     }
     

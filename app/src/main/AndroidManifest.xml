@@ -85,6 +85,15 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".ui.ScreenOffBlackoutActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
+
         <service
             android:name=".service.MirrorForegroundService"
             android:foregroundServiceType="dataSync"
