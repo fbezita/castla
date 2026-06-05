@@ -244,12 +244,14 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    min-height: 58px;
     padding: 13px 14px;
     border: 0;
     background: transparent;
     color: #eef2f8;
     font-size: 15px;
     font-weight: 700;
+    line-height: 1;
     cursor: pointer;
     text-align: left;
     transition: background 0.2s ease;
@@ -268,11 +270,13 @@
     display: flex;
     align-items: center;
     gap: 10px;
+    min-height: 24px;
   }
 
   .browse-chevron {
     color: var(--category-color, #8f96a4);
     font-size: 11px;
+    line-height: 1;
     display: inline-block;
     transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
   }
@@ -285,6 +289,12 @@
     color: #8f96a4;
     font-size: 13px;
     font-weight: 700;
+    line-height: 1;
+    min-width: 18px;
+    text-align: right;
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
   }
 
   .browse-list-wrapper {
@@ -311,8 +321,12 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    padding: 6px 10px 8px;
+    padding: 0 10px;
     background: rgba(0, 0, 0, 0.08);
+  }
+
+  .browse-list-wrapper.expanded .browse-list {
+    padding: 6px 10px 8px;
   }
 
   .split-app-item {

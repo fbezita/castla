@@ -93,14 +93,27 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
     timeoutMs = 150
   ): Promise<void> {
     return new Promise((resolve, reject) => {
+      let primarySawRecommit = false;
+      let secondarySawRecommit = false;
       const unsub = compositorStore.subscribe((state) => {
         if (isStale(seqId)) { unsub(); reject(new StaleLaunchSequenceError()); return; }
 
         const primary = state.viewports.get('primary');
         const secondary = state.viewports.get('secondary');
 
-        const primaryReady = primary ? (primary.committed && primary.generation > primaryStartGen) : true;
-        const secondaryReady = hasSecondary && secondary ? (secondary.committed && secondary.generation > secondaryStartGen) : true;
+        if (primary?.committed) {
+          primarySawRecommit = true;
+        }
+        if (hasSecondary && secondary?.committed) {
+          secondarySawRecommit = true;
+        }
+
+        const primaryReady = primary
+          ? (primary.committed && (primary.generation > primaryStartGen || primarySawRecommit))
+          : true;
+        const secondaryReady = hasSecondary && secondary
+          ? (secondary.committed && (secondary.generation > secondaryStartGen || secondarySawRecommit))
+          : true;
 
         if (primaryReady && secondaryReady) {
           unsub();
@@ -266,6 +279,54 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
     // Verify it resolved with DEGRADED state and stream_timeout reason instead of breaking with FAILED
     expect(get(compositorStore).launchSequence.state).toBe('DEGRADED');
     expect(get(compositorStore).launchSequence.degradedReason).toBe('stream_timeout');
+  });
+
+  it('Scenario 2b: Should treat recommit on the same generation as success after a frontend-style reset', async () => {
+    const seqId = nextLaunchSeqId();
+    const primaryStartGen = 5;
+    const secondaryStartGen = 0;
+
+    compositorStore.set({
+      viewports: new Map([
+        ['primary', { pane: 'primary', width: 1280, height: 720, committed: false, generation: 5, visible: true }],
+        ['secondary', { pane: 'secondary', width: 1280, height: 720, committed: false, generation: 0, visible: false }]
+      ]),
+      diagnostics: [],
+      serverDiagnostics: null,
+      layoutMode: 'single',
+      splitRatio: 0.5,
+      activePrimaryApp: 'com.android.settings',
+      activeSecondaryApp: '',
+      popup: { visible: false, minimized: false, x: 0, y: 0, width: 0, height: 0 },
+      launchSequence: {
+        id: seqId,
+        primaryPkg: 'com.android.settings',
+        layoutMode: 'single',
+        state: 'STREAM_COMMITTING',
+        startedAt: Date.now(),
+        primaryStartGen,
+        secondaryStartGen,
+      }
+    });
+
+    const waitPromise = waitForStreamsToCommit(seqId, false, primaryStartGen, secondaryStartGen, 100);
+
+    setTimeout(() => {
+      compositorStore.update((state) => {
+        const viewports = new Map(state.viewports);
+        viewports.set('primary', {
+          pane: 'primary',
+          width: 1280,
+          height: 720,
+          committed: true,
+          generation: 5,
+          visible: true,
+        });
+        return { ...state, viewports };
+      });
+    }, 20);
+
+    await expect(waitPromise).resolves.toBeUndefined();
   });
 
   it('Scenario 3: Should fail immediately to FAILED state if non-recoverable launch_failed ACK arrives', async () => {

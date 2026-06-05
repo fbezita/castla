@@ -3,6 +3,7 @@
 </script>
 
 <script lang="ts">
+  import { onDestroy } from "svelte";
 
   import ViewportHost from "./components/ViewportHost.svelte";
   import DiagnosticsOverlay from "./components/DiagnosticsOverlay.svelte";
@@ -16,6 +17,11 @@
   import { TouchRouter } from "./touch/TouchRouter";
   import { ImeBridge } from "./ime/ImeBridge";
   import { triggerDump, isLoggingEnabled, setLoggingEnabled } from "./utils/debugLogger";
+  import {
+    readOverlayUiScalePreference,
+    writeOverlayUiScalePreference,
+    type OverlayUiScalePreference,
+  } from "./utils/overlayUiScalePreference";
 
   // References to tie components together for launch sequence state machine
   let viewportHostRef: any = undefined;
@@ -27,6 +33,8 @@
   let frontendResetEpoch = 0;
   let runtimeEpoch = 0;
   let showDiagnostics = false;
+  let overlayUiScalePreference: OverlayUiScalePreference = readOverlayUiScalePreference();
+  let overlayUiScale = 1;
   let frontendResetCleanup: (() => void) | undefined;
   const JMUXER_SCRIPT_SRC = "/js/jmuxer.min.js";
   const FRONTEND_BUILD_MARKER = "frontend_ime_guard_v4_20260601";
@@ -48,6 +56,16 @@
 
   function isVerboseFrontendDiagnostics(): boolean {
     return (window as any).__CASTLA_VERBOSE_DIAGNOSTICS__ === true;
+  }
+
+  function refreshOverlayUiScale(): void {
+    overlayUiScale = overlayUiScalePreference;
+  }
+
+  function updateOverlayUiScalePreference(nextPreference: OverlayUiScalePreference): void {
+    overlayUiScalePreference = nextPreference;
+    writeOverlayUiScalePreference(nextPreference);
+    refreshOverlayUiScale();
   }
 
   function verboseWarn(message: string, payload?: unknown) {
@@ -562,6 +580,11 @@
   }
 
   createRuntimeGraph();
+  refreshOverlayUiScale();
+  window.addEventListener("resize", refreshOverlayUiScale);
+  onDestroy(() => {
+    window.removeEventListener("resize", refreshOverlayUiScale);
+  });
 
   console.info("[CastlaSession] page_boot", {
     href: location.href,
@@ -606,6 +629,10 @@
       showDiagnostics = !showDiagnostics;
     },
   };
+
+  onDestroy(() => {
+    window.removeEventListener("resize", refreshOverlayUiScale);
+  });
 
   async function reloadJmuxerScript(): Promise<void> {
     console.info("[CastlaSession] reload_jmuxer_begin", {
@@ -675,12 +702,24 @@
   {#key `${runtimeEpoch}:${frontendResetEpoch}`}
     <ViewportHost bind:this={viewportHostRef} {touchRouter} {runtime} appLauncher={appLauncherRef} />
   {/key}
-  {#key runtimeEpoch}
-    <AppLauncher bind:this={appLauncherRef} {runtime} viewportHost={viewportHostRef} />
-  {/key}
-  {#if showDiagnostics}
-    <DiagnosticsOverlay />
-  {/if}
+  <div
+    class="overlay-ui-layer"
+    style={`--overlay-ui-scale: ${overlayUiScale}; --overlay-ui-inverse-scale: ${1 / overlayUiScale};`}
+  >
+    {#key runtimeEpoch}
+      <AppLauncher
+        bind:this={appLauncherRef}
+        {runtime}
+        viewportHost={viewportHostRef}
+        overlayUiScale={overlayUiScale}
+        overlayUiScalePreference={overlayUiScalePreference}
+        onOverlayUiScalePreferenceChange={updateOverlayUiScalePreference}
+      />
+    {/key}
+    {#if showDiagnostics}
+      <DiagnosticsOverlay />
+    {/if}
+  </div>
   <textarea
     class="ime-proxy"
     on:compositionstart={(event) => {
@@ -736,3 +775,19 @@
     on:blur={handleProxyBlur}
   ></textarea>
 </main>
+
+<style>
+  .overlay-ui-layer {
+    position: fixed;
+    inset: 0;
+    width: calc(100% * var(--overlay-ui-inverse-scale, 1));
+    height: calc(100% * var(--overlay-ui-inverse-scale, 1));
+    transform: scale(var(--overlay-ui-scale, 1));
+    transform-origin: top left;
+    pointer-events: none;
+  }
+
+  :global(.overlay-ui-layer > *) {
+    pointer-events: auto;
+  }
+</style>

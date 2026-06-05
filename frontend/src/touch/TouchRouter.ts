@@ -135,13 +135,13 @@ export class TouchRouter {
       });
     }
     if (action !== "down" && !this.activePointers.has(pointerId)) {
-      this.logAnomaly("non_down_without_active_pointer", {
-        action,
-        browserPointerId: event.pointerId,
-        remotePointerId: pointerId,
-        pane: viewport.pane,
-        activePointers: this.activePointers.size,
-      });
+      // this.logAnomaly("non_down_without_active_pointer", {
+      //   action,
+      //   browserPointerId: event.pointerId,
+      //   remotePointerId: pointerId,
+      //   pane: viewport.pane,
+      //   activePointers: this.activePointers.size,
+      // });
       return;
     }
 

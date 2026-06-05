@@ -6,6 +6,12 @@
   import { t } from "../lib/i18n";
   import type { PaneId } from "../protocol";
   import {
+    OVERLAY_UI_SCALE_MAX,
+    OVERLAY_UI_SCALE_MIN,
+    OVERLAY_UI_SCALE_STEP,
+    type OverlayUiScalePreference,
+  } from "../utils/overlayUiScalePreference";
+  import {
     getAppPairKey,
     normalizeAppPair,
     type LayoutMode,
@@ -19,7 +25,19 @@
   import DragDropOverlay from "./DragDropOverlay.svelte";
   import PairDialog from "./PairDialog.svelte";
 
-  let { runtime, viewportHost = undefined } = $props<{ runtime: StreamRuntime; viewportHost?: any }>();
+  let {
+    runtime,
+    viewportHost = undefined,
+    overlayUiScale,
+    overlayUiScalePreference,
+    onOverlayUiScalePreferenceChange,
+  } = $props<{
+    runtime: StreamRuntime;
+    viewportHost?: any;
+    overlayUiScale: number;
+    overlayUiScalePreference: OverlayUiScalePreference;
+    onOverlayUiScalePreferenceChange: (preference: OverlayUiScalePreference) => void;
+  }>();
 
   // Types definitions
   interface AppInfo extends Partial<AppPair> {
@@ -105,6 +123,7 @@
   let autoScrollVelocity = $state(0);
   let autoScrollFrame = $state<number | undefined>(undefined);
   let drawerAutoCollapsedForDrag = $state(false);
+  let settingsOpen = $state(false);
 
   // Lifecycle bindings
   onMount(() => {
@@ -426,14 +445,27 @@
     timeoutMs = 8000
   ): Promise<void> {
     return new Promise((resolve, reject) => {
+      let primarySawRecommit = false;
+      let secondarySawRecommit = false;
       const unsub = compositorStore.subscribe((state) => {
         if (isStale(seqId)) { unsub(); reject(new StaleLaunchSequenceError()); return; }
 
         const primary = state.viewports.get("primary");
         const secondary = state.viewports.get("secondary");
 
-        const primaryReady = primary ? (primary.committed && primary.generation > primaryStartGen) : true;
-        const secondaryReady = hasSecondary && secondary ? (secondary.committed && secondary.generation > secondaryStartGen) : true;
+        if (primary?.committed) {
+          primarySawRecommit = true;
+        }
+        if (hasSecondary && secondary?.committed) {
+          secondarySawRecommit = true;
+        }
+
+        const primaryReady = primary
+          ? (primary.committed && (primary.generation > primaryStartGen || primarySawRecommit))
+          : true;
+        const secondaryReady = hasSecondary && secondary
+          ? (secondary.committed && (secondary.generation > secondaryStartGen || secondarySawRecommit))
+          : true;
 
         if (primaryReady && secondaryReady) {
           unsub();
@@ -1573,6 +1605,45 @@
     (window as any).castlaDebug?.toggleDiagnostics?.();
   }
 
+  function settingsLabel(): string {
+    return $compositorStore.language === "ko" ? "설정" : "Settings";
+  }
+
+  function languageLabel(): string {
+    return $compositorStore.language === "ko" ? "언어" : "Language";
+  }
+
+  function uiScaleLabel(): string {
+    return "UI Scale";
+  }
+
+  function diagnosticsLabel(): string {
+    return $compositorStore.language === "ko" ? "진단" : "Diagnostics";
+  }
+
+  function diagnosticsActionLabel(): string {
+    return $compositorStore.language === "ko" ? "열기" : "Open";
+  }
+
+  function formatUiScaleOption(option: OverlayUiScalePreference): string {
+    return `${Math.round(option * 100)}%`;
+  }
+
+  function applyOverlayUiScalePreference(option: OverlayUiScalePreference) {
+    onOverlayUiScalePreferenceChange(option);
+    toast(`${uiScaleLabel()} ${formatUiScaleOption(option)}`);
+  }
+
+  function handleUiScaleSliderInput(event: Event) {
+    const target = event.currentTarget as HTMLInputElement;
+    applyOverlayUiScalePreference(Number(target.value));
+  }
+
+  function applyLanguage(language: "ko" | "en") {
+    setLanguage(language);
+    toast(language === "ko" ? "언어 KO" : "Language EN");
+  }
+
 </script>
 
 <div class:hidden={hasVisibleStream || launchedOnce} class="standby">
@@ -1614,32 +1685,70 @@
     </div>
     <div class="drawer-meta">
       <span class="drawer-count">{loading ? t($compositorStore.language, "loading") : `${apps.length} ${t($compositorStore.language, "appsCount")}`}</span>
-      <div class="lang-switcher">
-        <button
-          class:active={$compositorStore.language === "ko"}
-          onclick={() => setLanguage("ko")}
-        >
-          KO
-        </button>
-        <button
-          class:active={$compositorStore.language === "en"}
-          onclick={() => setLanguage("en")}
-        >
-          EN
-        </button>
-      </div>
       <button
-        class="diag-toggle-btn"
-        onclick={(event) => {
-          event.stopPropagation();
-          triggerToggleDiagnostics();
-        }}
+        class="settings-toggle-btn"
+        onclick={() => (settingsOpen = !settingsOpen)}
         title={t($compositorStore.language, "settingsDiagnostics")}
+        aria-expanded={settingsOpen}
       >
-        ⚙
+        {settingsLabel()}
       </button>
     </div>
   </header>
+
+  {#if settingsOpen}
+    <section class="drawer-settings">
+      <div class="settings-section">
+        <div class="settings-inline-row">
+          <div class="settings-inline-group">
+            <strong>{languageLabel()}</strong>
+            <div class="lang-switcher">
+              <button
+                class:active={$compositorStore.language === "ko"}
+                onclick={() => applyLanguage("ko")}
+              >
+                KO
+              </button>
+              <button
+                class:active={$compositorStore.language === "en"}
+                onclick={() => applyLanguage("en")}
+              >
+                EN
+              </button>
+            </div>
+          </div>
+          <div class="settings-inline-group diagnostics-inline-group">
+            <strong>{diagnosticsLabel()}</strong>
+            <button class="diag-toggle-btn" onclick={triggerToggleDiagnostics}>
+              {diagnosticsActionLabel()}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title-row">
+          <strong>{uiScaleLabel()}</strong>
+          <span>{formatUiScaleOption(overlayUiScalePreference)}</span>
+        </div>
+        <div class="scale-slider">
+          <input
+            type="range"
+            min={OVERLAY_UI_SCALE_MIN}
+            max={OVERLAY_UI_SCALE_MAX}
+            step={OVERLAY_UI_SCALE_STEP}
+            value={overlayUiScalePreference}
+            oninput={handleUiScaleSliderInput}
+          />
+          <div class="scale-slider-labels">
+            <span>100%</span>
+            <span>150%</span>
+            <span>200%</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  {/if}
 
   <div class="drawer-layout-controls">
     <button
@@ -2032,26 +2141,110 @@
     letter-spacing: 0.01em;
   }
 
+  .settings-toggle-btn,
   .diag-toggle-btn {
-    border: none;
+    border: 1px solid rgba(255, 255, 255, 0.08);
     background: rgba(255, 255, 255, 0.04);
     color: rgb(255 255 255 / 0.65);
-    font-size: 15px;
-    width: 24px;
+    font-size: 11px;
+    min-width: 24px;
     height: 24px;
-    padding: 0;
+    padding: 0 10px;
     cursor: pointer;
-    border-radius: 50%;
+    border-radius: 999px;
     display: flex;
     align-items: center;
     justify-content: center;
     transition: background 0.2s ease, transform 0.1s ease, color 0.2s ease;
   }
 
+  .settings-toggle-btn:hover,
   .diag-toggle-btn:hover {
     background: rgba(255, 255, 255, 0.08);
     color: #ffffff;
-    transform: rotate(45deg);
+  }
+
+  .drawer-settings {
+    margin: 6px 12px 8px;
+    padding: 10px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 14px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.01)),
+      rgba(11, 14, 24, 0.72);
+    display: grid;
+    gap: 10px;
+  }
+
+  .settings-section {
+    display: grid;
+    gap: 8px;
+  }
+
+  .settings-section + .settings-section {
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  .settings-inline-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .settings-inline-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .settings-inline-group strong {
+    font-size: 12px;
+    color: #f8fafc;
+    white-space: nowrap;
+  }
+
+  .diagnostics-inline-group {
+    margin-left: auto;
+  }
+
+  .settings-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .settings-title-row strong {
+    font-size: 12px;
+    color: #f8fafc;
+  }
+
+  .settings-title-row span {
+    font-size: 11px;
+    color: #94a3b8;
+  }
+
+  .scale-slider {
+    display: grid;
+    gap: 8px;
+  }
+
+  .scale-slider input[type="range"] {
+    width: 100%;
+    margin: 0;
+    accent-color: #00e5ff;
+  }
+
+  .scale-slider-labels {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    color: #94a3b8;
+    font-size: 11px;
+    font-weight: 700;
   }
 
   .search-row input {
@@ -2101,7 +2294,7 @@
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 8px 10px 24px;
+    padding: 4px 10px 24px;
     scrollbar-width: thin;
     scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
   }
@@ -2182,7 +2375,7 @@
     gap: 8px;
   }
   .drawer-layout-controls {
-    margin: 8px 12px 14px;
+    margin: 6px 12px 8px;
     padding: 4px;
     background: rgba(255, 255, 255, 0.04);
     border: 1px solid rgba(255, 255, 255, 0.06);
