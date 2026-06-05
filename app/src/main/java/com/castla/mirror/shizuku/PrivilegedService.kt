@@ -1869,80 +1869,99 @@ class PrivilegedService : IPrivilegedService.Stub() {
             val audioManager = context.getSystemService(android.media.AudioManager::class.java) ?: return
             val audioPolicyClass = Class.forName("android.media.audiopolicy.AudioPolicy")
             audioManager.javaClass
-                .getMethod("unregisterAudioPolicy", audioPolicyClass)
-                .invoke(audioManager, policy)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to unregister audio policy", e)
         }
     }
 
-    override fun destroy() {
-        stopSystemAudioCapture()
-        // Clean up resources and release all virtual displays
-        virtualDisplays.forEach { (displayId, vd) ->
-            cleanupVirtualDisplayResources(displayId, vd)
-        }
-        virtualDisplays.clear()
-        virtualDisplayNames.clear()
-    }
-
-    
-    private fun cleanupVirtualDisplayResources(displayId: Int, vd: android.hardware.display.VirtualDisplay) {
-        tetheringExecutor.execute {
+    private fun doCleanupVirtualDisplayResourcesSync(displayId: Int, vd: android.hardware.display.VirtualDisplay) {
+        try {
+            Log.i(TAG, "Cleaning up resources for virtual display: id=$displayId")
+            
+            val apps = getRunningTasksOnDisplay(displayId)
+            apps.forEach { app ->
+                if (app.isNotEmpty() && !app.contains("/") && app != "com.castla.mirror" && app != "com.castla.mirror.debug") {
+                    try {
+                        nativeForceStop(app)
+                        Log.i(TAG, "Successfully force-stopped app $app on display $displayId")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to force-stop app $app on display $displayId", e)
+                    }
+                }
+            }
+            
             try {
-                Log.i(TAG, "Cleaning up resources for virtual display: id=$displayId")
-                
-                val apps = getRunningTasksOnDisplay(displayId)
-                apps.forEach { app ->
-                    if (app.isNotEmpty() && !app.contains("/") && app != "com.castla.mirror" && app != "com.castla.mirror.debug") {
-                        try {
-                            nativeForceStop(app)
-                            Log.i(TAG, "Successfully force-stopped app $app on display $displayId")
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Failed to force-stop app $app on display $displayId", e)
-                        }
-                    }
+                if (windowManagerInstance != null && clearForcedDisplaySizeMethod != null) {
+                    clearForcedDisplaySizeMethod?.invoke(windowManagerInstance, displayId)
+                    Log.i(TAG, "Natively reset WindowManager size for display $displayId")
+                } else {
+                    execCommand("wm size reset -d $displayId")
                 }
-                
-                try {
-                    if (windowManagerInstance != null && clearForcedDisplaySizeMethod != null) {
-                        clearForcedDisplaySizeMethod?.invoke(windowManagerInstance, displayId)
-                        Log.i(TAG, "Natively reset WindowManager size for display $displayId")
-                    } else {
-                        execCommand("wm size reset -d $displayId")
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Native WindowManager size reset failed, falling back to shell", e)
-                    try { execCommand("wm size reset -d $displayId") } catch (_: Exception) {}
-                }
-
-                try {
-                    if (windowManagerInstance != null && clearForcedDisplayDensityForUserMethod != null) {
-                        clearForcedDisplayDensityForUserMethod?.invoke(windowManagerInstance, displayId, 0)
-                        Log.i(TAG, "Natively reset WindowManager density for display $displayId")
-                    } else {
-                        execCommand("wm density reset -d $displayId")
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Native WindowManager density reset failed, falling back to shell", e)
-                    try { execCommand("wm density reset -d $displayId") } catch (_: Exception) {}
-                }
-                
             } catch (e: Exception) {
-                Log.e(TAG, "Error in cleanupVirtualDisplayResources for display $displayId", e)
-            } finally {
-                try {
-                    vd.release()
-                    Log.i(TAG, "Virtual display released successfully: id=$displayId")
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to release VirtualDisplay object for id=$displayId", e)
+                Log.w(TAG, "Native WindowManager size reset failed, falling back to shell", e)
+                try { execCommand("wm size reset -d $displayId") } catch (_: Exception) {}
+            }
+
+            try {
+                if (windowManagerInstance != null && clearForcedDisplayDensityForUserMethod != null) {
+                    clearForcedDisplayDensityForUserMethod?.invoke(windowManagerInstance, displayId, 0)
+                    Log.i(TAG, "Natively reset WindowManager density for display $displayId")
+                } else {
+                    execCommand("wm density reset -d $displayId")
                 }
+            } catch (e: Exception) {
+                Log.w(TAG, "Native WindowManager density reset failed, falling back to shell", e)
+                try { execCommand("wm density reset -d $displayId") } catch (_: Exception) {}
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in cleanupVirtualDisplayResources for display $displayId", e)
+        } finally {
+            try {
+                vd.release()
+                Log.i(TAG, "Virtual display released successfully: id=$displayId")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to release VirtualDisplay object for id=$displayId", e)
             }
         }
     }
-    
 
-    
+    private fun cleanupVirtualDisplayResources(displayId: Int, vd: android.hardware.display.VirtualDisplay) {
+        tetheringExecutor.execute {
+            doCleanupVirtualDisplayResourcesSync(displayId, vd)
+        }
+    }
+
+    override fun destroy() {
+        Log.i(TAG, "[PRIVILEGED_SERVICE] release")
+        stopSystemAudioCapture()
+        val displaysToCleanup = virtualDisplays.toList()
+        virtualDisplays.clear()
+        virtualDisplayNames.clear()
+        displaysToCleanup.forEach { (displayId, vd) ->
+            try {
+                doCleanupVirtualDisplayResourcesSync(displayId, vd)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in destroy() cleaning display $displayId", e)
+            }
+        }
+        try {
+            if (displayWindowListenerRegistered && windowManagerInstance != null && unregisterDisplayWindowListenerMethod != null) {
+                unregisterDisplayWindowListenerMethod?.invoke(windowManagerInstance, displayWindowListenerProxy)
+                displayWindowListenerRegistered = false
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to unregister display window listener on destroy", e)
+        }
+        try {
+            tetheringExecutor.shutdownNow()
+        } catch (_: Exception) {}
+        try {
+            displayFocusExecutor.shutdownNow()
+        } catch (_: Exception) {}
+        System.exit(0)
+    }
+
     override fun wakeUpDisplay(displayId: Int) {
         val now = System.currentTimeMillis()
         val lastTime = lastWakeUpTimeMap[displayId] ?: 0L
@@ -2591,5 +2610,9 @@ class PrivilegedService : IPrivilegedService.Stub() {
             Log.e(TAG, "exec failed: $command", e)
             ""
         }
+    }
+
+    override fun getProcessPid(): Int {
+        return android.os.Process.myPid()
     }
 }

@@ -83,8 +83,9 @@ class TouchInjectorTest {
     @Test
     fun `virtual display injector receives routed events`() {
         val received = mutableListOf<List<Any>>()
-        injector.setVirtualDisplayInjector { motionEvent ->
+        injector.updateController { _, motionEvent ->
             received.add(listOf(motionEvent.action, motionEvent.x, motionEvent.y, motionEvent.getPointerId(0)))
+            true
         }
 
         injector.onTouchEvent(TouchEvent("down", 0.5f, 0.25f, 0))
@@ -97,12 +98,15 @@ class TouchInjectorTest {
     @Test
     fun `clearing virtual display injector falls back to normal injection`() {
         val vdReceived = mutableListOf<Any>()
-        injector.setVirtualDisplayInjector { _ -> vdReceived.add(true) }
+        injector.updateController { _, _ -> 
+            vdReceived.add(true)
+            true
+        }
         injector.onTouchEvent(TouchEvent("down", 0.5f, 0.5f, 0))
         assertEquals(1, vdReceived.size)
 
         // Clear VD injector
-        injector.setVirtualDisplayInjector(null)
+        injector.updateController(null)
         injector.onTouchEvent(TouchEvent("up", 0.5f, 0.5f, 0))
         // VD should NOT receive the second event
         assertEquals(1, vdReceived.size)

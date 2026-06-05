@@ -13,6 +13,7 @@ import android.os.HandlerThread
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.util.Log
+import com.castla.mirror.diagnostics.ResourceTracker
 import com.castla.mirror.shizuku.IPrivilegedService
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -134,15 +135,24 @@ class AudioCapture(
      * Returns true if Opus is available, false to fall back to PCM.
      */
     private fun trySetupOpusEncoder(onAudioData: (data: ByteArray) -> Unit): Boolean {
+        var tempCodec: MediaCodec? = null
+        var tempThread: HandlerThread? = null
         return try {
             val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, SAMPLE_RATE, CHANNEL_COUNT).apply {
                 setInteger(MediaFormat.KEY_BIT_RATE, OPUS_BITRATE)
             }
             val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS)
+            tempCodec = codec
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
 
+            ResourceTracker.trackCodecCreate(codec.hashCode(), "AudioCaptureCodec@${codec.hashCode()}")
+
             // Set up async callback before start() — matches VideoEncoder pattern
-            encoderThread = HandlerThread("AudioCapture-Opus").also { it.start() }
+            encoderThread = HandlerThread("AudioCapture-Opus").also {
+                it.start()
+                tempThread = it
+                ResourceTracker.trackThreadCreate(it.hashCode(), "AudioCapture-Opus@${it.hashCode()}")
+            }
             encoderHandler = Handler(encoderThread!!.looper)
 
             codec.setCallback(object : MediaCodec.Callback() {
@@ -218,10 +228,16 @@ class AudioCapture(
             true
         } catch (e: Exception) {
             Log.w(TAG, "Opus encoder unavailable, using raw PCM", e)
-            try { encoder?.stop() } catch (_: Exception) {}
-            try { encoder?.release() } catch (_: Exception) {}
+            tempCodec?.let { codec ->
+                ResourceTracker.trackCodecRelease(codec.hashCode(), "AudioCaptureCodec@${codec.hashCode()}")
+                try { codec.stop() } catch (_: Exception) {}
+                try { codec.release() } catch (_: Exception) {}
+            }
             encoder = null
-            encoderThread?.quitSafely()
+            tempThread?.let { thread ->
+                ResourceTracker.trackThreadRelease(thread.hashCode(), "AudioCapture-Opus@${thread.hashCode()}")
+                thread.quitSafely()
+            }
             encoderThread = null
             encoderHandler = null
             false
@@ -244,6 +260,8 @@ class AudioCapture(
     private fun startRemoteSubmixCapture(onAudioData: (data: ByteArray) -> Unit) {
         val pipe = remoteSubmixPipe ?: return
         captureThread = Thread({
+            val threadObj = Thread.currentThread()
+            ResourceTracker.trackThreadCreate(threadObj.hashCode(), "AudioCapture-RemoteSubmix@${threadObj.hashCode()}")
             val pcmBuffer = ByteArray(PCM_BUFFER_SIZE)
             val input = ParcelFileDescriptor.AutoCloseInputStream(pipe)
             try {
@@ -267,26 +285,33 @@ class AudioCapture(
                 if (isRunning) Log.w(TAG, "REMOTE_SUBMIX read error", e)
             } finally {
                 try { input.close() } catch (_: Exception) {}
+                ResourceTracker.trackThreadRelease(threadObj.hashCode(), "AudioCapture-RemoteSubmix@${threadObj.hashCode()}")
             }
         }, "AudioCapture-RemoteSubmix").also { it.start() }
     }
 
     private fun startRawPcmCapture(onAudioData: (data: ByteArray) -> Unit) {
         captureThread = Thread({
+            val threadObj = Thread.currentThread()
+            ResourceTracker.trackThreadCreate(threadObj.hashCode(), "AudioCapture-PCM@${threadObj.hashCode()}")
             val pcmBuffer = ByteArray(PCM_BUFFER_SIZE)
-            while (isRunning) {
-                val read = audioRecord?.read(pcmBuffer, 0, pcmBuffer.size) ?: -1
-                if (read > 0) {
-                    // 5-byte header: [0x01][tsMs u32 LE] + pcm data
-                    val tsMs = SystemClock.elapsedRealtime().toInt()
-                    val header = ByteBuffer.allocate(5).order(ByteOrder.LITTLE_ENDIAN)
-                    header.put(0x01.toByte())
-                    header.putInt(tsMs)
-                    val msg = ByteArray(5 + read)
-                    System.arraycopy(header.array(), 0, msg, 0, 5)
-                    System.arraycopy(pcmBuffer, 0, msg, 5, read)
-                    onAudioData(msg)
+            try {
+                while (isRunning) {
+                    val read = audioRecord?.read(pcmBuffer, 0, pcmBuffer.size) ?: -1
+                    if (read > 0) {
+                        // 5-byte header: [0x01][tsMs u32 LE] + pcm data
+                        val tsMs = SystemClock.elapsedRealtime().toInt()
+                        val header = ByteBuffer.allocate(5).order(ByteOrder.LITTLE_ENDIAN)
+                        header.put(0x01.toByte())
+                        header.putInt(tsMs)
+                        val msg = ByteArray(5 + read)
+                        System.arraycopy(header.array(), 0, msg, 0, 5)
+                        System.arraycopy(pcmBuffer, 0, msg, 5, read)
+                        onAudioData(msg)
+                    }
                 }
+            } finally {
+                ResourceTracker.trackThreadRelease(threadObj.hashCode(), "AudioCapture-PCM@${threadObj.hashCode()}")
             }
         }, "AudioCapture-PCM").also { it.start() }
     }
@@ -356,9 +381,15 @@ class AudioCapture(
         captureThread?.join(2000)
         captureThread = null
         try { encoder?.stop() } catch (_: Exception) {}
-        try { encoder?.release() } catch (_: Exception) {}
+        encoder?.let { codec ->
+            ResourceTracker.trackCodecRelease(codec.hashCode(), "AudioCaptureCodec@${codec.hashCode()}")
+            try { codec.release() } catch (_: Exception) {}
+        }
         encoder = null
-        encoderThread?.quitSafely()
+        encoderThread?.let { thread ->
+            ResourceTracker.trackThreadRelease(thread.hashCode(), "AudioCapture-Opus@${thread.hashCode()}")
+            thread.quitSafely()
+        }
         encoderThread = null
         encoderHandler = null
         try { audioRecord?.release() } catch (_: Exception) {}

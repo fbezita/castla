@@ -29,7 +29,8 @@ class PowerLockManager(private val context: Context) {
                 setReferenceCounted(false)
                 acquire()
             }
-            Log.i(TAG, "WakeLocks acquired successfully (CPU partial + Wi-Fi HighPerf)")
+            Log.i(TAG, "[WAKELOCK]\nacquire")
+            Log.i(TAG, "[WAKELOCK]\nisHeld=$isHeld")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to acquire wake locks", e)
         }
@@ -41,7 +42,8 @@ class PowerLockManager(private val context: Context) {
             wifiLock?.takeIf { it.isHeld }?.release()
             wakeLock = null
             wifiLock = null
-            Log.i(TAG, "WakeLocks released successfully")
+            Log.i(TAG, "[WAKELOCK]\nrelease")
+            Log.i(TAG, "[WAKELOCK]\nisHeld=$isHeld")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to release wake locks", e)
         }

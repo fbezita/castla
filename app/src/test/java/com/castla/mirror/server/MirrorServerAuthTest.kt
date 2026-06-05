@@ -23,6 +23,7 @@ class MirrorServerAuthTest {
     fun setup() {
         assetManager = mockk(relaxed = true)
         context = mockk(relaxed = true)
+        every { context.filesDir } returns java.io.File(".")
         every { context.assets } returns assetManager
         // Since we removed PIN, there is no sessionPin param and the second argument was removed.
         server = MirrorServer(context)

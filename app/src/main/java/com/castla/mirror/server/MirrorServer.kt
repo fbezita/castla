@@ -26,6 +26,7 @@ import com.castla.mirror.network.DeviceRelayDnsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 
 data class TouchEvent(
     val action: String,
@@ -1212,7 +1213,76 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         }
     }
 
+    fun closeAllSockets(reason: String) {
+        val primaryToClose: List<VideoStreamSocket>
+        val secondaryToClose: List<VideoStreamSocket>
+        val controlToClose: List<ControlSocket>
+        val audioToClose: List<AudioStreamSocket>
+        synchronized(controlSocketLock) {
+            controlToClose = controlSockets.toList()
+        }
+        primaryToClose = primaryVideoSockets.toList()
+        secondaryToClose = secondaryVideoSockets.toList()
+        audioToClose = audioSockets.toList()
+
+        // Offload the blocking socket writes to a background thread to prevent NetworkOnMainThreadException
+        val closeThread = Thread({
+            primaryToClose.forEach { socket ->
+                try {
+                    socket.close(fi.iki.elonen.NanoWSD.WebSocketFrame.CloseCode.NormalClosure, reason, false)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to close primary video socket", e)
+                }
+            }
+            secondaryToClose.forEach { socket ->
+                try {
+                    socket.close(fi.iki.elonen.NanoWSD.WebSocketFrame.CloseCode.NormalClosure, reason, false)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to close secondary video socket", e)
+                }
+            }
+            audioToClose.forEach { socket ->
+                try {
+                    socket.close(fi.iki.elonen.NanoWSD.WebSocketFrame.CloseCode.NormalClosure, reason, false)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to close audio socket", e)
+                }
+            }
+            controlToClose.forEach { socket ->
+                try {
+                    socket.close(fi.iki.elonen.NanoWSD.WebSocketFrame.CloseCode.NormalClosure, reason, false)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to close control socket", e)
+                }
+            }
+        }, "MirrorServerCloseSocketsThread")
+        closeThread.start()
+        try {
+            // Wait up to 300ms to allow close frames to be sent without blocking the main thread too long
+            closeThread.join(300)
+        } catch (_: Exception) {}
+        
+        primaryVideoSockets.clear()
+        secondaryVideoSockets.clear()
+        synchronized(controlSocketLock) {
+            controlSockets.clear()
+            activeControlSocket = null
+        }
+        audioSockets.clear()
+    }
+
     override fun stop() {
+        closeAllSockets("Server stop")
+        try {
+            controlSendExecutor.shutdown()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to shutdown controlSendExecutor", e)
+        }
+        try {
+            dnsScope.cancel()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to cancel dnsScope", e)
+        }
         if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
             // Offload super.stop() to a background thread to prevent NetworkOnMainThreadException
             val stopThread = Thread({

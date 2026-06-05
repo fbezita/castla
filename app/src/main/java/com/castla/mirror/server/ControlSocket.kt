@@ -57,13 +57,13 @@ class ControlSocket(
     override fun onOpen() {
         openTimeElapsedMs = SystemClock.elapsedRealtime()
         val assignedSessionId = server.registerControlSocket(this)
-        // Removed [InputDebug] onOpen log
+        com.castla.mirror.diagnostics.ResourceTracker.trackWebSocketCreate(this.hashCode(), "ControlSocket_$debugId")
     }
 
     override fun onClose(code: NanoWSD.WebSocketFrame.CloseCode?, reason: String?, initiatedByRemote: Boolean) {
         closeTimeElapsedMs = SystemClock.elapsedRealtime()
-        // Removed [InputDebug] onClose log
         server.unregisterControlSocket(this)
+        com.castla.mirror.diagnostics.ResourceTracker.trackWebSocketRelease(this.hashCode(), "ControlSocket_$debugId")
     }
 
     override fun onMessage(message: NanoWSD.WebSocketFrame) {
@@ -393,6 +393,7 @@ class ControlSocket(
             Log.w(TAG, "Control socket#$debugId sessionId=$sessionId exception", exception)
         }
         server.unregisterControlSocket(this)
+        com.castla.mirror.diagnostics.ResourceTracker.trackWebSocketRelease(this.hashCode(), "ControlSocket_$debugId")
     }
 
     fun attachSession(sessionId: Int) {

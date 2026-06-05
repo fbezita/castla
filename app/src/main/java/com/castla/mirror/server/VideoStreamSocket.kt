@@ -32,37 +32,43 @@ class VideoStreamSocket(
     @Volatile private var queueFlushCount = 0L
 
     private val sendThread = Thread({
-        while (!closed) {
-            try {
-                val data = sendQueue.take() // blocks until available
-                if (closed) break
-                send(data)
-                framesSent++
-                if (framesSent == 1L || framesSent % 1000 == 0L) {
-                    Log.i(TAG, "[$channel] frame=#$framesSent size=${data.size} dropped=$framesDropped flushes=$queueFlushCount queueSize=${sendQueue.size}")
+        try {
+            while (!closed) {
+                try {
+                    val data = sendQueue.take() // blocks until available
+                    if (closed) break
+                    send(data)
+                    framesSent++
+                    if (framesSent == 1L || framesSent % 1000 == 0L) {
+                        Log.i(TAG, "[$channel] frame=#$framesSent size=${data.size} dropped=$framesDropped flushes=$queueFlushCount queueSize=${sendQueue.size}")
+                    }
+                } catch (_: InterruptedException) {
+                    break
+                } catch (e: IOException) {
+                    if (e is java.net.SocketException || e.message?.contains("Socket closed") == true) {
+                        Log.i(TAG, "[$channel] Send thread socket closed cleanly")
+                    } else {
+                        Log.w(TAG, "Send failed, closing", e)
+                        MirrorDiagnostics.log(DiagnosticEvent.SOCKET_TIMEOUT, "[$channel] send IOException: ${e.message}")
+                    }
+                    closed = true
+                    try { close(NanoWSD.WebSocketFrame.CloseCode.GoingAway, "send error", false) }
+                    catch (_: Exception) {}
+                    break
+                } catch (e: Exception) {
+                    Log.w(TAG, "Unexpected send error", e)
                 }
-            } catch (_: InterruptedException) {
-                break
-            } catch (e: IOException) {
-                if (e is java.net.SocketException || e.message?.contains("Socket closed") == true) {
-                    Log.i(TAG, "[$channel] Send thread socket closed cleanly")
-                } else {
-                    Log.w(TAG, "Send failed, closing", e)
-                    MirrorDiagnostics.log(DiagnosticEvent.SOCKET_TIMEOUT, "[$channel] send IOException: ${e.message}")
-                }
-                closed = true
-                try { close(NanoWSD.WebSocketFrame.CloseCode.GoingAway, "send error", false) }
-                catch (_: Exception) {}
-                break
-            } catch (e: Exception) {
-                Log.w(TAG, "Unexpected send error", e)
             }
+        } finally {
+            com.castla.mirror.diagnostics.ResourceTracker.trackThreadRelease(Thread.currentThread().hashCode(), "WS-Video-Send_$channel")
         }
     }, "WS-Video-Send").apply { isDaemon = true }
 
     override fun onOpen() {
         Log.i(TAG, "onOpen channel=$channel")
         server.registerVideoSocket(channel, this)
+        com.castla.mirror.diagnostics.ResourceTracker.trackWebSocketCreate(this.hashCode(), "VideoStreamSocket_$channel")
+        com.castla.mirror.diagnostics.ResourceTracker.trackThreadCreate(sendThread.hashCode(), "WS-Video-Send_$channel")
         sendThread.start()
     }
 
@@ -70,6 +76,7 @@ class VideoStreamSocket(
         closed = true
         sendThread.interrupt()
         server.unregisterVideoSocket(channel, this)
+        com.castla.mirror.diagnostics.ResourceTracker.trackWebSocketRelease(this.hashCode(), "VideoStreamSocket_$channel")
     }
 
     override fun onMessage(message: NanoWSD.WebSocketFrame) {
@@ -90,6 +97,7 @@ class VideoStreamSocket(
         closed = true
         sendThread.interrupt()
         server.unregisterVideoSocket(channel, this)
+        com.castla.mirror.diagnostics.ResourceTracker.trackWebSocketRelease(this.hashCode(), "VideoStreamSocket_$channel")
     }
 
     /**

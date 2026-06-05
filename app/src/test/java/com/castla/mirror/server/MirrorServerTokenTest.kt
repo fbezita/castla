@@ -18,6 +18,7 @@ class MirrorServerTokenTest {
     @Before
     fun setup() {
         context = mockk(relaxed = true)
+        every { context.filesDir } returns java.io.File(".")
         server = MirrorServer(context) // Port 9090 default
     }
 

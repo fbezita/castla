@@ -224,7 +224,8 @@ class ShizukuSetup {
             bindingInProgress = false
             userServiceBound = true
             userServiceConnectedAtMs = SystemClock.elapsedRealtime()
-            Log.i(TAG, "Privileged service connected")
+            val pid = try { privilegedService?.processPid } catch (_: Exception) { -1 }
+            Log.i(TAG, "[PRIVILEGED_SERVICE]\nbind success pid=$pid")
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -235,6 +236,7 @@ class ShizukuSetup {
             _serviceConnected.value = false
             bindingInProgress = false
             userServiceBound = false
+            Log.i(TAG, "[PRIVILEGED_SERVICE]\nunbind")
             Log.i(TAG, "Privileged service disconnected (alive=${aliveMs}ms)")
             if (aliveMs < USER_SERVICE_QUICK_DEATH_MS) {
                 userServiceQuickDeaths += 1
@@ -273,7 +275,7 @@ class ShizukuSetup {
     }
 
     private val binderDeadListener = Shizuku.OnBinderDeadListener {
-        Log.i(TAG, "Shizuku binder dead")
+        Log.i(TAG, "[PRIVILEGED_SERVICE]\nbinderDied")
         MirrorDiagnostics.log(DiagnosticEvent.SHIZUKU_BINDER_DEAD)
         privilegedService = null
         _serviceConnected.value = false
@@ -637,9 +639,61 @@ class ShizukuSetup {
         }
     }
 
+    private fun runShizukuCommand(cmd: Array<String>): java.lang.Process? {
+        return try {
+            val newProcessMethod = Shizuku::class.java.getDeclaredMethod(
+                "newProcess",
+                Array<String>::class.java,
+                Array<String>::class.java,
+                String::class.java
+            ).apply { isAccessible = true }
+            newProcessMethod.invoke(null, cmd, null, null) as? java.lang.Process
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to invoke Shizuku.newProcess via reflection", e)
+            null
+        }
+    }
+
+    private fun getActivePrivilegedPids(): List<Int> {
+        if (!isAvailable() || !hasPermission()) return emptyList()
+        val appId = com.castla.mirror.BuildConfig.APPLICATION_ID
+        val pids = mutableListOf<Int>()
+        try {
+            val cmd = arrayOf("sh", "-c", "pgrep -x '$appId:privileged'")
+            val process = runShizukuCommand(cmd) ?: return emptyList()
+            val reader = java.io.BufferedReader(java.io.InputStreamReader(process.inputStream))
+            var line: String?
+            while (reader.readLine().also { line = it } != null) {
+                line?.trim()?.toIntOrNull()?.let { pids.add(it) }
+            }
+            process.waitFor()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get active privileged pids via Shizuku", e)
+        }
+        return pids
+    }
+
+    private fun terminateStalePrivilegedProcesses() {
+        if (!isAvailable() || !hasPermission()) return
+        val currentServicePid = try { privilegedService?.processPid } catch (_: Exception) { -1 }
+        val pids = getActivePrivilegedPids()
+        val stalePids = pids.filter { it != currentServicePid }
+        if (stalePids.isNotEmpty()) {
+            Log.i(TAG, "Terminating stale privileged processes: $stalePids (currentServicePid=$currentServicePid)")
+            try {
+                val cmd = arrayOf("sh", "-c", "kill -9 " + stalePids.joinToString(" "))
+                val process = runShizukuCommand(cmd)
+                process?.waitFor()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to kill stale privileged processes", e)
+            }
+        }
+    }
+
     fun forceResetBindingState() {
         Log.i(TAG, "Force resetting stuck Shizuku binding state (bindingInProgress was $bindingInProgress)")
         try {
+            Log.i(TAG, "[PRIVILEGED_SERVICE]\nunbind")
             runOnMainSync {
                 Shizuku.unbindUserService(serviceArgs, serviceConnection, true)
             }
@@ -665,10 +719,13 @@ class ShizukuSetup {
             return
         }
         try {
+            Log.i(TAG, "[PRIVILEGED_SERVICE]\nbind start")
+            terminateStalePrivilegedProcesses()
             bindingInProgress = true
             runOnMainSync {
                 if (pendingForceUnbind) {
                     try {
+                        Log.i(TAG, "[PRIVILEGED_SERVICE]\nunbind")
                         Shizuku.unbindUserService(serviceArgs, serviceConnection, true)
                         Log.i(TAG, "Force-unbound stale user-service record before rebind")
                     } catch (e: Exception) {
@@ -1151,9 +1208,11 @@ done
 """.trimIndent()
 
     fun release() {
+        Log.i(TAG, "[PRIVILEGED_SERVICE]\nrelease")
         cancelPendingRestartNotification()
         if (userServiceBound) {
             try {
+                Log.i(TAG, "[PRIVILEGED_SERVICE]\nunbind")
                 runOnMainSync {
                     Shizuku.unbindUserService(serviceArgs, serviceConnection, true)
                 }
@@ -1167,5 +1226,7 @@ done
         Shizuku.removeBinderDeadListener(binderDeadListener)
         Shizuku.removeRequestPermissionResultListener(permissionResultListener)
         releaseWifiLock()
+        
+        Log.i(TAG, "[PRIVILEGED_SERVICE]\nactivePrivilegedProcesses=${getActivePrivilegedPids()}")
     }
 }

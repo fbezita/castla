@@ -10,6 +10,7 @@ import android.media.projection.MediaProjectionManager
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Surface
+import com.castla.mirror.diagnostics.ResourceTracker
 
 class ScreenCaptureManager(private val context: Context) {
 
@@ -46,7 +47,11 @@ class ScreenCaptureManager(private val context: Context) {
 
     fun initProjection(resultCode: Int, data: Intent) {
         val projectionManager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        mediaProjection = projectionManager.getMediaProjection(resultCode, data)
+        val mp = projectionManager.getMediaProjection(resultCode, data)
+        mediaProjection = mp
+        mp?.let {
+            ResourceTracker.trackProjectionCreate(it.hashCode(), "MediaProjection@${it.hashCode()}")
+        }
         mediaProjection?.registerCallback(projectionCallback, null)
 
         // Get display metrics for capture resolution
@@ -64,7 +69,7 @@ class ScreenCaptureManager(private val context: Context) {
         val width = if (overrideWidth > 0) overrideWidth else captureWidth
         val height = if (overrideHeight > 0) overrideHeight else captureHeight
 
-        virtualDisplay = projection.createVirtualDisplay(
+        val vd = projection.createVirtualDisplay(
             VIRTUAL_DISPLAY_NAME,
             width,
             height,
@@ -74,6 +79,10 @@ class ScreenCaptureManager(private val context: Context) {
             null,
             null
         )
+        virtualDisplay = vd
+        vd?.let {
+            ResourceTracker.trackVirtualDisplayCreate(it.hashCode(), "VirtualDisplay@${it.hashCode()}")
+        }
 
         Log.i(TAG, "Capture started: ${width}x${height}")
         val displayId = virtualDisplay?.display?.displayId ?: -1
@@ -101,15 +110,21 @@ class ScreenCaptureManager(private val context: Context) {
     }
 
     fun stopCapture() {
-        virtualDisplay?.release()
+        virtualDisplay?.let { vd ->
+            ResourceTracker.trackVirtualDisplayRelease(vd.hashCode(), "VirtualDisplay@${vd.hashCode()}")
+            vd.release()
+        }
         virtualDisplay = null
         Log.i(TAG, "Capture stopped")
     }
 
     fun release() {
         stopCapture()
-        mediaProjection?.unregisterCallback(projectionCallback)
-        mediaProjection?.stop()
+        mediaProjection?.let { mp ->
+            ResourceTracker.trackProjectionRelease(mp.hashCode(), "MediaProjection@${mp.hashCode()}")
+            mp.unregisterCallback(projectionCallback)
+            mp.stop()
+        }
         mediaProjection = null
         Log.i(TAG, "Projection released")
     }

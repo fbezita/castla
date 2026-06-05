@@ -1385,6 +1385,7 @@ class MirrorForegroundService : Service() {
     private fun performCleanup(reason: String) {
         if (cleanupCompleted) return
         cleanupCompleted = true
+        Log.i("MirrorServiceCleanup", "begin")
         Log.i(TAG, "performCleanup() -> Starting central resource recycling sequencer. Reason: $reason")
         MirrorDiagnostics.endSession(terminalReason.get()?.let { "terminal:${it.name}" } ?: reason)
         isCleanupInProgress = true
@@ -1438,12 +1439,14 @@ class MirrorForegroundService : Service() {
             pipelines.values.reversed().forEach { pipeline -> 
                 try { kotlinx.coroutines.withTimeoutOrNull(1500L) { pipeline.release(forcePhysical = true) } } catch (e: Exception) { Log.e(TAG, "Error releasing pane (${pipeline.name})", e) } 
             }
+            Log.i("MirrorServiceCleanup", "encoderReleased=true")
             
             try { kotlinx.coroutines.withTimeoutOrNull(1000L) { pipelines.values.firstOrNull()?.controller?.getPrivilegedService()?.restoreStayAwakeMode() } } catch (_: Exception) {}
             pipelines.values.forEach { pipeline ->
                 try { pipeline.touchInjector?.detachController("perform_cleanup") } catch (_: Exception) {}
                 try { kotlinx.coroutines.withTimeoutOrNull(1000L) { pipeline.controller.release() } } catch (_: Exception) {}
             }
+            Log.i("MirrorServiceCleanup", "virtualDisplayReleased=true")
             
             try {
                 val svc = shizukuSetup?.privilegedService
@@ -1459,14 +1462,17 @@ class MirrorForegroundService : Service() {
             }
 
             try { kotlinx.coroutines.withTimeoutOrNull(1000L) { shizukuSetup?.release() } } catch (_: Exception) {}
+            Log.i("MirrorServiceCleanup", "projectionStopped=true")
             
             shizukuSetup = null
             try { serviceScope.cancel() } catch (_: Exception) {}
             try { compositionDispatcher.close() } catch (_: Exception) {}
             try { vdDispatcher.close() } catch (_: Exception) {}
+            Log.i("MirrorServiceCleanup", "threadsStopped=true")
 
             instance = null; isCleanupInProgress = false; isServiceRunning = false
             Log.i(TAG, "[Cleanup] Central resource recycling sequencer terminated successfully.")
+            Log.i("MirrorServiceCleanup", "done")
         }
     }
 
@@ -1764,7 +1770,12 @@ class MirrorForegroundService : Service() {
         
         val oldEncoders = pipelines.values.map {
             val vEnc = it.videoEncoder; val jEnc = it.jpegEncoder
-            it.videoEncoder = null; it.jpegEncoder = null; it.currentEncoderSurface = null
+            it.videoEncoder = null; it.jpegEncoder = null
+            it.currentEncoderSurface?.let { surf ->
+                com.castla.mirror.diagnostics.ResourceTracker.trackSurfaceRelease(surf.hashCode(), "VideoEncoderInputSurface@${surf.hashCode()}")
+                try { surf.release() } catch (_: Exception) {}
+            }
+            it.currentEncoderSurface = null
             vEnc to jEnc
         }
 
@@ -2722,6 +2733,10 @@ class MirrorForegroundService : Service() {
             if (videoEncoder != null || jpegEncoder != null) debugEncoderReleases += 1
             videoEncoder?.release(); videoEncoder = null
             jpegEncoder?.release(); jpegEncoder = null
+            currentEncoderSurface?.let { surf ->
+                com.castla.mirror.diagnostics.ResourceTracker.trackSurfaceRelease(surf.hashCode(), "VideoEncoderInputSurface@${surf.hashCode()}")
+                try { surf.release() } catch (_: Exception) {}
+            }
             currentEncoderSurface = null
             lastFrameRenderedTime = 0L
             try { touchInjector?.detachController("suspend_encoder") } catch (_: Exception) {}
@@ -2826,6 +2841,11 @@ class MirrorForegroundService : Service() {
             if (videoEncoder != null || jpegEncoder != null) debugEncoderReleases += 1
             videoEncoder?.release(); videoEncoder = null
             jpegEncoder?.release(); jpegEncoder = null
+            currentEncoderSurface?.let { surf ->
+                com.castla.mirror.diagnostics.ResourceTracker.trackSurfaceRelease(surf.hashCode(), "VideoEncoderInputSurface@${surf.hashCode()}")
+                try { surf.release() } catch (_: Exception) {}
+            }
+            currentEncoderSurface = null
             delay(50)
 
             var startEncoderTask: (() -> Unit)? = null
@@ -3803,6 +3823,17 @@ class MirrorForegroundService : Service() {
                     videoEncoder?.join()
                     jpegEncoder?.join()
 
+                    Log.i(TAG, "[CLEANUP_SURFACE_RELEASED]")
+                    currentEncoderSurface?.let { surf ->
+                        com.castla.mirror.diagnostics.ResourceTracker.trackSurfaceRelease(surf.hashCode(), "VideoEncoderInputSurface@${surf.hashCode()}")
+                        try { surf.release() } catch (_: Exception) {}
+                    }
+                    currentEncoderSurface = null
+
+                    try {
+                        videoEncoder?.release()
+                        jpegEncoder?.release()
+                    } catch (_: Exception) {}
                     videoEncoder = null                    
                     jpegEncoder = null                                        
                     
@@ -3813,9 +3844,6 @@ class MirrorForegroundService : Service() {
                         Log.w(TAG, "Failed to join resizeJob", e)
                     }
                     resizeJob = null
-                    
-                    Log.i(TAG, "[CLEANUP_SURFACE_RELEASED]")
-                    currentEncoderSurface = null
                     
                     try { touchInjector?.detachController("pipeline_release") } catch (_: Exception) {}
                     touchInjector?.release()

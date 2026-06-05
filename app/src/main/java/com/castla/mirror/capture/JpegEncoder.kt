@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
+import com.castla.mirror.diagnostics.ResourceTracker
 import java.io.ByteArrayOutputStream
 
 /**
@@ -45,9 +46,15 @@ class JpegEncoder(
     fun createInputSurface(): Surface {
         // RGBA_8888 방식이 하드웨어 디코더에 따라 호환되지 않는 경우가 있어
         // 오류를 뿜고 프레임(이미지)이 안 나올 수 있으므로 호환성이 높은 포맷으로 테스트
-        imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        imageReader = reader
+        val surface = reader.surface
+
+        ResourceTracker.trackImageReaderCreate(reader.hashCode(), "JpegImageReader@${reader.hashCode()}")
+        ResourceTracker.trackSurfaceCreate(surface.hashCode(), "JpegEncoderSurface@${surface.hashCode()}")
+
         Log.i(TAG, "JPEG encoder created: ${width}x${height} @ ${fps}fps, quality=$quality")
-        return imageReader!!.surface
+        return surface
     }
     
     fun setFps(newFps: Int) {
@@ -69,7 +76,10 @@ class JpegEncoder(
         if (released.get()) return
         val reader = imageReader ?: throw IllegalStateException("Call createInputSurface() first")
 
-        thread = HandlerThread("JpegEncoder").also { it.start() }
+        thread = HandlerThread("JpegEncoder").also {
+            it.start()
+            ResourceTracker.trackThreadCreate(it.hashCode(), "JpegEncoderThread@${it.hashCode()}")
+        }
         handler = Handler(thread!!.looper)
         isRunning = true
 
@@ -166,6 +176,7 @@ class JpegEncoder(
     fun join() {
         val threadToJoin = thread
         if (threadToJoin != null) {
+            ResourceTracker.trackThreadRelease(threadToJoin.hashCode(), "JpegEncoderThread@${threadToJoin.hashCode()}")
             try {
                 threadToJoin.quitSafely()
                 threadToJoin.join(2000L)
@@ -178,7 +189,16 @@ class JpegEncoder(
     }
 
     fun releaseReaderOnly() {
-        imageReader?.close()
+        imageReader?.let { reader ->
+            val surface = try { reader.surface } catch (_: Exception) { null }
+            surface?.let { surf ->
+                ResourceTracker.trackSurfaceRelease(surf.hashCode(), "JpegEncoderSurface@${surf.hashCode()}")
+            }
+            ResourceTracker.trackImageReaderRelease(reader.hashCode(), "JpegImageReader@${reader.hashCode()}")
+            try {
+                reader.close()
+            } catch (_: Exception) {}
+        }
         imageReader = null
         
         reusableBitmap?.recycle()

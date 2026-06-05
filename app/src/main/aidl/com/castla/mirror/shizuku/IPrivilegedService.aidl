@@ -204,5 +204,5 @@ interface IPrivilegedService {
      * Return the top activity flattened short string for the specified display, or empty string if unavailable.
      */
     String getTopActivityForDisplay(int displayId) = 35;
-
+    int getProcessPid() = 36;
 }

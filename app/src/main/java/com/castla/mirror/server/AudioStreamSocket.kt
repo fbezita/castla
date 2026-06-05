@@ -16,10 +16,12 @@ class AudioStreamSocket(
 
     override fun onOpen() {
         server.registerAudioSocket(this)
+        com.castla.mirror.diagnostics.ResourceTracker.trackWebSocketCreate(this.hashCode(), "AudioStreamSocket")
     }
 
     override fun onClose(code: NanoWSD.WebSocketFrame.CloseCode?, reason: String?, initiatedByRemote: Boolean) {
         server.unregisterAudioSocket(this)
+        com.castla.mirror.diagnostics.ResourceTracker.trackWebSocketRelease(this.hashCode(), "AudioStreamSocket")
     }
 
     override fun onMessage(message: NanoWSD.WebSocketFrame) {
@@ -39,6 +41,7 @@ class AudioStreamSocket(
             Log.w(TAG, "WebSocket exception", exception)
         }
         server.unregisterAudioSocket(this)
+        com.castla.mirror.diagnostics.ResourceTracker.trackWebSocketRelease(this.hashCode(), "AudioStreamSocket")
     }
 
     fun sendBinary(data: ByteArray) {

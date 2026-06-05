@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
+import com.castla.mirror.diagnostics.ResourceTracker
 import java.nio.ByteBuffer
 
 class VideoEncoder(
@@ -26,6 +27,7 @@ class VideoEncoder(
 
     private val released = java.util.concurrent.atomic.AtomicBoolean(false)
     private var codec: MediaCodec? = null
+    private var inputSurface: Surface? = null
     private var encoderThread: HandlerThread? = null
     private var encoderHandler: Handler? = null
     private var isRunning = false
@@ -129,6 +131,10 @@ class VideoEncoder(
         encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         val surface = encoder.createInputSurface()
         codec = encoder
+        inputSurface = surface
+
+        ResourceTracker.trackCodecCreate(encoder.hashCode(), "VideoEncoderCodec@${encoder.hashCode()}")
+        ResourceTracker.trackSurfaceCreate(surface.hashCode(), "VideoEncoderInputSurface@${surface.hashCode()}")
 
         Log.i(TAG, "Encoder created ($profileName): ${width}x${height} @ ${bitrate / 1000}kbps, ${fps}fps")
         return surface
@@ -139,7 +145,10 @@ class VideoEncoder(
     fun start(onEncodedFrame: (data: ByteArray, isKeyFrame: Boolean) -> Unit) {
         if (released.get()) return
         val encoder = codec ?: throw IllegalStateException("Call createInputSurface() first")
-        encoderThread = HandlerThread("VideoEncoder").also { it.start() }
+        encoderThread = HandlerThread("VideoEncoder").also {
+            it.start()
+            ResourceTracker.trackThreadCreate(it.hashCode(), "VideoEncoderThread@${it.hashCode()}")
+        }
         encoderHandler = Handler(encoderThread!!.looper)
         isRunning = true
 
@@ -255,17 +264,14 @@ class VideoEncoder(
 
     fun unregisterCallbacks() {
         try {
-            // no-op
-            // MediaCodec.setCallback(null)는 Running 상태에서
-            // Exynos CCodec에서 "Invalid to call at Running state"를 유발할 수 있음.
-            // late callback은 callback 내부의 released flag로 무시한다.            
-            // codec?.setCallback(null)
+            codec?.setCallback(null)
         } catch (_: Exception) {}
     }
 
     fun join() {
         val threadToJoin = encoderThread
         if (threadToJoin != null) {
+            ResourceTracker.trackThreadRelease(threadToJoin.hashCode(), "VideoEncoderThread@${threadToJoin.hashCode()}")
             try {
                 threadToJoin.quitSafely()
                 threadToJoin.join(2000L)
@@ -284,9 +290,12 @@ class VideoEncoder(
     }
 
     fun releaseCodecOnly() {
-        try {
-            codec?.release()
-        } catch (_: Exception) {}
+        codec?.let { encoder ->
+            ResourceTracker.trackCodecRelease(encoder.hashCode(), "VideoEncoderCodec@${encoder.hashCode()}")
+            try {
+                encoder.release()
+            } catch (_: Exception) {}
+        }
         codec = null
         lastAppliedBitrate = null
         lastAppliedTextMode = null
@@ -296,10 +305,19 @@ class VideoEncoder(
     fun release() {
         if (released.compareAndSet(false, true)) {
             stop()
-            join()            
             unregisterCallbacks()
             stopCodecOnly()
             releaseCodecOnly()
+
+            inputSurface?.let { surf ->
+                ResourceTracker.trackSurfaceRelease(surf.hashCode(), "VideoEncoderInputSurface@${surf.hashCode()}")
+                try {
+                    surf.release()
+                } catch (_: Exception) {}
+            }
+            inputSurface = null
+
+            join()
         }
     }
 }

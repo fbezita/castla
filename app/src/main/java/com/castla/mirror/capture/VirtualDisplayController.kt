@@ -6,6 +6,7 @@ import android.view.Surface
 import com.castla.mirror.diagnostics.FileLogger
 import com.castla.mirror.diagnostics.DiagnosticEvent
 import com.castla.mirror.diagnostics.MirrorDiagnostics
+import com.castla.mirror.diagnostics.ResourceTracker
 import com.castla.mirror.shizuku.IPrivilegedService
 
 /**
@@ -91,6 +92,7 @@ class VirtualDisplayController(private val displayName: String) {
                 displayId = id
                 totalCreateCount.incrementAndGet()
                 activeVirtualDisplayCount.incrementAndGet()
+                ResourceTracker.trackVirtualDisplayCreate(id, "VirtualDisplay@$id")
                 Log.i(TAG, "[$displayName] Virtual display created via Shizuku: id=$id, ${width}x${height}, surface attached")
                 Log.i(TAG, "$vdImeLogPrefix [VD] name=$displayName displayId=$id width=$width height=$height dpi=$dpi event=create")
                 FileLogger.i("VD", "$vdImeLogPrefix name=$displayName displayId=$id width=$width height=$height dpi=$dpi event=create")
@@ -336,6 +338,7 @@ class VirtualDisplayController(private val displayName: String) {
             }
             totalReleaseVirtualDisplayCount.incrementAndGet()
             activeVirtualDisplayCount.updateAndGet { count -> (count - 1).coerceAtLeast(0) }
+            ResourceTracker.trackVirtualDisplayRelease(releasedId, "VirtualDisplay@$releasedId")
             Log.i(TAG, "$vdImeLogPrefix [VD] name=$displayName displayId=$releasedId event=releaseVirtualDisplay")
             FileLogger.i("VD", "$vdImeLogPrefix name=$displayName displayId=$releasedId event=releaseVirtualDisplay")
             MirrorDiagnostics.log(DiagnosticEvent.VD_STOPPED, "id=$releasedId")
@@ -357,6 +360,7 @@ class VirtualDisplayController(private val displayName: String) {
                 Log.w(TAG, "[$displayName] Failed to release virtual display", e)
             }
             activeVirtualDisplayCount.updateAndGet { count -> (count - 1).coerceAtLeast(0) }
+            ResourceTracker.trackVirtualDisplayRelease(releasedId, "VirtualDisplay@$releasedId")
             Log.i(TAG, "$vdImeLogPrefix [VD] name=$displayName displayId=$releasedId event=release")
             FileLogger.i("VD", "$vdImeLogPrefix name=$displayName displayId=$releasedId event=release")
             MirrorDiagnostics.log(DiagnosticEvent.VD_STOPPED, "id=$releasedId (full release)")
