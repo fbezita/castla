@@ -1105,9 +1105,9 @@
   }
 
   function logPopupState(popup: PopupLayoutState) {
-    console.info(
-      `[POPUP] x=${Math.round(popup.x)} y=${Math.round(popup.y)} width=${Math.round(popup.width)} height=${Math.round(popup.height)} minimized=${popup.minimized}`,
-    );
+    // console.info(
+    //   `[POPUP] x=${Math.round(popup.x)} y=${Math.round(popup.y)} width=${Math.round(popup.width)} height=${Math.round(popup.height)} minimized=${popup.minimized}`,
+    // );
   }
 
   function logTouchRoute(
