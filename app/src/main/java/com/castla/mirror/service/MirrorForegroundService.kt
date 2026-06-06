@@ -54,12 +54,12 @@ import com.castla.mirror.policy.AutoScaleInput
 import com.castla.mirror.policy.AutoScalePolicy
 import com.castla.mirror.policy.CodecModeTransition
 import com.castla.mirror.policy.DisconnectPolicy
-import com.castla.mirror.policy.ScreenOffAction
 import com.castla.mirror.policy.ScreenOffLoopGuard
 import com.castla.mirror.policy.ScreenOffPolicy
 import com.castla.mirror.policy.ScreenOffRecoveryPlanner
 import com.castla.mirror.policy.ScreenOffReviveStrategy
 import com.castla.mirror.policy.ScreenOffState
+import com.castla.mirror.policy.ScreenOffEvent
 import com.castla.mirror.ui.ScreenOffBlackoutActivity
 import com.castla.mirror.diagnostics.DiagnosticEvent
 import com.castla.mirror.diagnostics.FileLogger
@@ -442,11 +442,11 @@ class MirrorForegroundService : Service() {
     private val screenOffLoopGuard = ScreenOffLoopGuard()
     private val screenOffReviveStrategy = ScreenOffReviveStrategy.select(Build.MANUFACTURER, Build.BRAND)
     private val keyguardManager by lazy { getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager }
-    @Volatile private var screenOffBlackoutActive = false
+    @Volatile private var isBlackoutActivityRunning = false
+    @Volatile private var blackoutActivityReady = false
     @Volatile private var screenOffReviveBurstInFlight = false
     @Volatile private var screenOffBlackoutStartedAtMs = 0L
     @Volatile private var screenOffReviveBurstJob: Job? = null
-    @Volatile private var pendingBlackoutRestore = false
 
     val isRunning: Boolean get() = mirrorServer != null
     val isPanelOffSupported: Boolean get() = screenOffPolicy.isPanelOffSupported
@@ -752,20 +752,15 @@ class MirrorForegroundService : Service() {
         if (pipelines.values.none { it.controller.hasVirtualDisplay() }) { Log.w(TAG, "turnPanelOffForMirroring: no active virtual display"); return false }
         if (screenOffPolicy.isScreenOff) { Log.d(TAG, "turnPanelOffForMirroring: already off"); return true }
 
-        powerLockManager.acquireWakeLocks()
-        val action = screenOffPolicy.onScreenOff(panelOffSupported = true)
-        logScreenState("Panel OFF requested via button (action=$action)")
-        executeScreenOffAction(action)
-        _panelOffStateFlow.value = screenOffPolicy.state
-        return screenOffPolicy.state == ScreenOffState.PANEL_OFF_ACTIVE
+        logScreenOffInfo("turnPanelOffForMirroring() requested via web/user button")
+        onPhoneScreenOff()
+        return screenOffPolicy.isScreenOff
     }
 
     fun restorePhysicalPanel() {
         if (!screenOffPolicy.isScreenOff) return
-        val action = screenOffPolicy.onScreenOn()
-        logScreenState("Panel ON requested via button (action=$action)")
-        executeScreenOnAction(action)
-        _panelOffStateFlow.value = screenOffPolicy.state
+        logScreenOffInfo("restorePhysicalPanel() requested via web/user button")
+        onUserRequestRestoreFromBlackout()
     }
 
     fun setBrowserConnectionListener(listener: ((Boolean) -> Unit)?) {
@@ -1295,23 +1290,122 @@ class MirrorForegroundService : Service() {
             return
         }
 
-        if (screenOffPolicy.state == ScreenOffState.ACTIVE) {
-            powerLockManager.acquireWakeLocks()
-            preparePipelinesForScreenOffRevive()
-            val action = screenOffPolicy.onScreenOff(panelOffSupported = screenOffPolicy.isPanelOffSupported)
-            executeScreenOffAction(action)
-            _panelOffStateFlow.value = screenOffPolicy.state
+        val currentState = screenOffPolicy.state
+        if (currentState == ScreenOffState.ACTIVE) {
+            handleFsmTransition(ScreenOffEvent.SCREEN_OFF)
         } else {
-            if (ScreenOffRecoveryPlanner.shouldDeferBlackoutRestoreUntilScreenOn(
-                    strategy = screenOffReviveStrategy,
-                    blackoutActive = screenOffBlackoutActive,
-                ) && source == ScreenOffLoopGuard.EventSource.USER
+            if (screenOffReviveStrategy == ScreenOffReviveStrategy.BLACKOUT_KEEP_ALIVE &&
+                (currentState == ScreenOffState.BLACKOUT_ACTIVE || currentState == ScreenOffState.BLACKOUT_PENDING) &&
+                source == ScreenOffLoopGuard.EventSource.USER
             ) {
-                logScreenOffInfo("[SCREEN_OFF] [USER_RESTORE] event=SCREEN_OFF state=${screenOffPolicy.state} phase=request reason=blackout_toggle")
-                requestScreenRestoreFromBlackoutToggle()
-                return
+                logScreenOffInfo("[SCREEN_OFF] [USER_RESTORE] event=SCREEN_OFF state=$currentState phase=request reason=power_button_click")
+                onUserRequestRestoreFromBlackout()
+            } else {
+                logScreenOffInfo("[SCREEN_OFF] [SCREEN_OFF_LOOP] event=SCREEN_OFF source=${source.name.lowercase()} state=$currentState ignored=already_off")
             }
-            logScreenOffInfo("[SCREEN_OFF] [SCREEN_OFF_LOOP] event=SCREEN_OFF source=${source.name.lowercase()} state=${screenOffPolicy.state} ignored=already_off")
+        }
+    }
+
+    private fun handleFsmTransition(event: ScreenOffEvent) {
+        val oldState = screenOffPolicy.state
+        val newState = screenOffPolicy.transition(event)
+        _panelOffStateFlow.value = newState
+
+        if (oldState != newState) {
+            logScreenOffInfo("[SCREEN_OFF] [FSM] transition: $oldState -> $newState on event $event")
+            applyStateActions(newState)
+
+            if (newState == ScreenOffState.ACTIVE && oldState != ScreenOffState.ACTIVE) {
+                executePhysicalDisplayWakeupAction()
+            }
+        } else {
+            logScreenOffInfo("[SCREEN_OFF] [FSM] ignored event $event in state $oldState")
+        }
+    }
+
+    private fun applyStateActions(state: ScreenOffState) {
+        when (state) {
+            ScreenOffState.ACTIVE -> {
+                stopScreenOffBlackout("fsm_active")
+                cancelScreenOffReviveBurst("fsm_active")
+                stopScreenOffReviveMonitor()
+                cancelPendingBrowserDisconnect("fsm_active")
+
+                if (ScreenOffRecoveryPlanner.shouldKeepVdKeepAliveRunningAfterScreenOn(screenOffReviveStrategy)) {
+                    scheduleVdKeepAliveStop()
+                } else {
+                    stopVdKeepAlive()
+                }
+
+                if (ScreenOffRecoveryPlanner.shouldRequestResumeBurst(screenOffReviveStrategy)) {
+                    requestScreenOnResumeBurst("fsm_active")
+                }
+            }
+            ScreenOffState.BLACKOUT_PENDING -> {
+                screenOffLoopGuard.markBlackoutStart(android.os.SystemClock.elapsedRealtime())
+                powerLockManager.acquireWakeLocks()
+                preparePipelinesForScreenOffRevive()
+
+                if (screenOffReviveStrategy == ScreenOffReviveStrategy.BLACKOUT_KEEP_ALIVE) {
+                    startScreenOffBlackout("fsm_blackout_pending")
+                    startVdKeepAlive()
+                    startScreenOffReviveMonitor()
+                    requestScreenOffReviveBurst("fsm_blackout_pending")
+                } else {
+                    startVdKeepAlive()
+                    executePhysicalPanelOffAction()
+                }
+            }
+            ScreenOffState.BLACKOUT_ACTIVE -> {
+                // Stable state.
+            }
+        }
+    }
+
+    private fun executePhysicalPanelOffAction() {
+        val anyController = pipelines.values.firstOrNull()?.controller
+        if (anyController?.isBound() == true) {
+            logPhysicalWakeBlocked("set_physical_display_power_false")
+            val suppressReentryUntil = screenOffLoopGuard.markPowerBurst(android.os.SystemClock.elapsedRealtime())
+            logScreenOffInfo("[SCREEN_OFF] [POWER_BURST] start")
+
+            serviceScope.launch {
+                var success = false
+                for (i in 1..10) {
+                    try { success = anyController.setPhysicalDisplayPower(false) } catch (_: Exception) {}
+                    kotlinx.coroutines.delay(100)
+                }
+                logScreenOffInfo("[SCREEN_OFF] [POWER_BURST] end suppressReentryUntil=$suppressReentryUntil success=$success")
+                serviceScope.launch(Dispatchers.Main) {
+                    if (success) {
+                        handleFsmTransition(ScreenOffEvent.ON_BLACKOUT_READY)
+                    } else {
+                        screenOffPolicy.markPanelOffFailed()
+                        startScreenOffBlackout("panel_off_fallback")
+                        startScreenOffReviveMonitor()
+                    }
+                }
+            }
+        } else {
+            Log.w(TAG, "Panel-off requested but VirtualDisplay binder architecture not stabilized yet.")
+            screenOffPolicy.markPanelOffFailed()
+            startScreenOffBlackout("panel_off_unbound_fallback")
+            startScreenOffReviveMonitor()
+        }
+    }
+
+    private fun executePhysicalDisplayWakeupAction() {
+        val service = pipelines.values.firstOrNull()?.controller?.getPrivilegedService()
+        serviceScope.launch {
+            try {
+                repeat(2) { attempt ->
+                    service?.wakeUpDisplay(0)
+                    logScreenOffInfo("[SCREEN_OFF] [USER_RESTORE] phase=request wake_display=0 attempt=$attempt success=requested")
+                    kotlinx.coroutines.delay(150L)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to execute physical wake-up pulse chain", e)
+            }
         }
     }
 
@@ -1326,123 +1420,31 @@ class MirrorForegroundService : Service() {
         }
     }
 
+    private fun isPhysicalScreenReallyOn(): Boolean {
+        val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        val defaultDisplay = dm.getDisplay(android.view.Display.DEFAULT_DISPLAY) ?: return false
+        return defaultDisplay.state == android.view.Display.STATE_ON
+    }
+
     private fun onPhoneScreenOn() {
         MirrorDiagnostics.log(DiagnosticEvent.SCREEN_ON)
         logScreenState("onPhoneScreenOn() called")
 
+        if (!isPhysicalScreenReallyOn()) {
+            logScreenOffInfo("[SCREEN_OFF] [SCREEN_ON] ignored because physical display is not STATE_ON")
+            return
+        }
+
         val source = screenOffLoopGuard.classifyScreenOn(android.os.SystemClock.elapsedRealtime())
         logScreenOffLoop("SCREEN_ON", source)
         if (source == ScreenOffLoopGuard.EventSource.SELF_INDUCED) {
-            if (!screenOffBlackoutActive) {
+            if (!isBlackoutActivityRunning) {
                 reassertPhysicalPanelOff("self_induced_screen_on")
             }
             return
         }
 
-        val sinceBlackoutStartMs = android.os.SystemClock.elapsedRealtime() - screenOffBlackoutStartedAtMs
-        if (ScreenOffRecoveryPlanner.shouldIgnoreTransientScreenOn(
-                strategy = screenOffReviveStrategy,
-                blackoutActive = screenOffBlackoutActive,
-                sinceBlackoutStartMs = sinceBlackoutStartMs,
-            )
-        ) {
-            logScreenOffInfo("[SCREEN_OFF] [SCREEN_OFF_LOOP] event=SCREEN_ON source=transient_blackout state=${screenOffPolicy.state} ignored=true sinceBlackoutStartMs=$sinceBlackoutStartMs")
-            return
-        }
-
-        if (screenOffBlackoutActive) {
-            pendingBlackoutRestore = false
-            cancelScreenOffReviveBurst("screen_on_event")
-            stopScreenOffBlackout("screen_on_event")
-        }
-
-        val action = screenOffPolicy.onScreenOn()
-        executeScreenOnAction(action)
-        _panelOffStateFlow.value = screenOffPolicy.state
-
-        cancelPendingBrowserDisconnect("screen_on")
-        if (mirrorServer?.isBrowserConnected() != true && browserConnected && !isCleanupInProgress) {
-            Log.w(TAG, "Screen ON -> Web display disconnected while screen was black. Scheduling deferred teardown.")
-            serviceScope.launch { onBrowserDisconnected(); browserConnectionListener?.invoke(false) }
-        }
-    }
-
-    private fun executeScreenOffAction(action: ScreenOffAction) {
-        when (action) {
-            ScreenOffAction.TURN_PANEL_OFF -> {
-                if (screenOffReviveStrategy == ScreenOffReviveStrategy.BLACKOUT_KEEP_ALIVE) {
-                    startScreenOffBlackout("turn_panel_off_strategy")
-                    executeScreenOffAction(screenOffPolicy.onPanelOffResult(success = false))
-                    return
-                }
-                val anyController = pipelines.values.firstOrNull()?.controller
-                if (anyController?.isBound() != true) {
-                    Log.w(TAG, "Panel-off requested but VirtualDisplay binder architecture not stabilized yet.")
-                    executeScreenOffAction(screenOffPolicy.onPanelOffResult(success = false))
-                    return
-                }
-                logPhysicalWakeBlocked("KEYCODE_WAKEUP")
-                logPhysicalWakeBlocked("dismiss-keyguard")
-
-                val suppressReentryUntil = screenOffLoopGuard.markPowerBurst(android.os.SystemClock.elapsedRealtime())
-                startVdKeepAlive()
-                logScreenOffInfo("[SCREEN_OFF] [POWER_BURST] start")
-
-                serviceScope.launch {
-                    var success = false
-                    for (i in 1..10) {
-                        try { success = anyController.setPhysicalDisplayPower(false) } catch (_: Exception) {}
-                        kotlinx.coroutines.delay(100)
-                    }
-                    logScreenOffInfo("[SCREEN_OFF] [POWER_BURST] end suppressReentryUntil=$suppressReentryUntil success=$success")
-                    serviceScope.launch(Dispatchers.Main) {
-                        val fallback = screenOffPolicy.onPanelOffResult(success)
-                        if (fallback != ScreenOffAction.NONE) executeScreenOffAction(fallback)
-                    }
-                }
-            }
-            ScreenOffAction.START_KEEP_ALIVE -> {
-                if (screenOffReviveStrategy == ScreenOffReviveStrategy.BLACKOUT_KEEP_ALIVE) {
-                    startScreenOffBlackout("start_keep_alive")
-                }
-                if (ScreenOffRecoveryPlanner.shouldRequestReviveBurst(action, screenOffReviveStrategy)) {
-                    requestScreenOffReviveBurst("start_keep_alive")
-                }
-                startVdKeepAlive()
-                startScreenOffReviveMonitor()
-            }
-            else -> {}
-        }
-    }
-
-    private fun executeScreenOnAction(action: ScreenOffAction) {
-        stopScreenOffBlackout("screen_on")
-        stopScreenOffReviveMonitor()
-        when (action) {
-            ScreenOffAction.RESTORE_PANEL -> {
-                stopVdKeepAlive()
-                val restored = pipelines.values.firstOrNull()?.controller?.setPhysicalDisplayPower(true) ?: false
-                if (ScreenOffRecoveryPlanner.shouldRequestResumeBurst(action, screenOffReviveStrategy)) {
-                    requestScreenOnResumeBurst("restore_panel")
-                } else {
-                    logScreenOffInfo("[SCREEN_OFF] [RESUME] reason=restore_panel skipped=strategy_${screenOffReviveStrategy.name.lowercase()}")
-                }
-                Log.i(TAG, "[ScreenOn] Physical panel power restoration executed. Success=$restored")
-            }
-            ScreenOffAction.STOP_KEEP_ALIVE -> {
-                if (ScreenOffRecoveryPlanner.shouldKeepVdKeepAliveRunningAfterScreenOn(action, screenOffReviveStrategy)) {
-                    logScreenOffInfo("[SCREEN_OFF] [RESUME] reason=stop_keep_alive retained=true strategy=${screenOffReviveStrategy.name.lowercase()}")
-                } else {
-                    scheduleVdKeepAliveStop(action)
-                }
-                if (ScreenOffRecoveryPlanner.shouldRequestResumeBurst(action, screenOffReviveStrategy)) {
-                    requestScreenOnResumeBurst("stop_keep_alive")
-                } else {
-                    logScreenOffInfo("[SCREEN_OFF] [RESUME] reason=stop_keep_alive skipped=strategy_${screenOffReviveStrategy.name.lowercase()}")
-                }
-            }
-            else -> {}
-        }
+        handleFsmTransition(ScreenOffEvent.SCREEN_ON)
     }
 
     private fun startVdKeepAlive() {
@@ -1468,8 +1470,8 @@ class MirrorForegroundService : Service() {
         stopAppExitMonitor()
     }
 
-    private fun scheduleVdKeepAliveStop(action: ScreenOffAction) {
-        val delayMs = ScreenOffRecoveryPlanner.keepAliveStopDelayMs(action, screenOffReviveStrategy)
+    private fun scheduleVdKeepAliveStop() {
+        val delayMs = ScreenOffRecoveryPlanner.keepAliveStopDelayMs(screenOffReviveStrategy)
         if (delayMs <= 0L) {
             stopVdKeepAlive()
             return
@@ -1548,10 +1550,26 @@ class MirrorForegroundService : Service() {
         logScreenOffInfo("[SCREEN_OFF] [PHYSICAL_WAKE_BLOCKED] command=$command")
     }
 
+    fun onBlackoutActivityReady() {
+        mainHandler.post {
+            logScreenOffInfo("[SCREEN_OFF] [BLACKOUT] blackout_activity_ready")
+            handleFsmTransition(ScreenOffEvent.ON_BLACKOUT_READY)
+        }
+    }
+
+    fun onUserRequestRestoreFromBlackout() {
+        mainHandler.post {
+            logScreenOffInfo("[SCREEN_OFF] [USER_RESTORE] reason=blackout_activity_double_tap")
+            handleFsmTransition(ScreenOffEvent.RESTORE_REQUEST)
+        }
+    }
+
     private fun startScreenOffBlackout(reason: String) {
-        if (screenOffBlackoutActive) return
-        screenOffBlackoutActive = true
+        if (isBlackoutActivityRunning) return
+        isBlackoutActivityRunning = true
+        blackoutActivityReady = false
         screenOffBlackoutStartedAtMs = android.os.SystemClock.elapsedRealtime()
+        screenOffLoopGuard.markBlackoutStart(screenOffBlackoutStartedAtMs)
         try {
             val intent = Intent(this, ScreenOffBlackoutActivity::class.java).apply {
                 action = ScreenOffBlackoutActivity.ACTION_START
@@ -1560,14 +1578,15 @@ class MirrorForegroundService : Service() {
             startActivity(intent)
             logScreenOffInfo("[SCREEN_OFF] [BLACKOUT] action=start reason=$reason")
         } catch (e: Exception) {
-            screenOffBlackoutActive = false
+            isBlackoutActivityRunning = false
             Log.w(TAG, "Failed to start screen-off blackout activity", e)
         }
     }
 
     private fun stopScreenOffBlackout(reason: String) {
-        if (!screenOffBlackoutActive) return
-        screenOffBlackoutActive = false
+        if (!isBlackoutActivityRunning) return
+        isBlackoutActivityRunning = false
+        blackoutActivityReady = false
         screenOffBlackoutStartedAtMs = 0L
         try {
             val intent = Intent(this, ScreenOffBlackoutActivity::class.java).apply {
@@ -1581,25 +1600,8 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    private fun requestScreenRestoreFromBlackoutToggle() {
-        pendingBlackoutRestore = true
-        cancelScreenOffReviveBurst("user_blackout_toggle_request")
-        stopScreenOffBlackout("user_blackout_toggle_request")
-        if (ScreenOffRecoveryPlanner.shouldDirectWakeOnBlackoutRestore(screenOffReviveStrategy)) {
-            val service = pipelines.values.firstOrNull()?.controller?.getPrivilegedService()
-            try {
-                service?.wakeUpDisplay(0)
-                logScreenOffInfo("[SCREEN_OFF] [USER_RESTORE] phase=request wake_display=0")
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to wake physical display from blackout toggle", e)
-            }
-        } else {
-            logScreenOffInfo("[SCREEN_OFF] [USER_RESTORE] phase=request wake_display=skipped strategy=${screenOffReviveStrategy.name.lowercase()}")
-        }
-    }
-
     private fun reassertPhysicalPanelOff(reason: String) {
-        if (screenOffPolicy.state != ScreenOffState.PANEL_OFF_ACTIVE) return
+        if (screenOffPolicy.state != ScreenOffState.BLACKOUT_ACTIVE || screenOffReviveStrategy != ScreenOffReviveStrategy.PANEL_OFF) return
         val controller = pipelines.values.firstOrNull()?.controller ?: return
         serviceScope.launch {
             val suppressReentryUntil = screenOffLoopGuard.markPowerBurst(android.os.SystemClock.elapsedRealtime())
@@ -1614,6 +1616,7 @@ class MirrorForegroundService : Service() {
     }
 
     private fun requestScreenOffReviveBurst(reason: String) {
+        if (screenOffReviveStrategy != ScreenOffReviveStrategy.BLACKOUT_KEEP_ALIVE) return
         if (screenOffReviveBurstInFlight) {
             logScreenOffInfo("[SCREEN_OFF] [REVIVE] reason=$reason skipped=in_flight")
             return
@@ -1622,7 +1625,14 @@ class MirrorForegroundService : Service() {
         screenOffReviveBurstJob?.cancel()
         screenOffReviveBurstJob = serviceScope.launch {
             try {
-                kotlinx.coroutines.delay(300L)
+                val startMs = android.os.SystemClock.elapsedRealtime()
+                var elapsed = 0L
+                while (!blackoutActivityReady && elapsed < 1500L) {
+                    kotlinx.coroutines.delay(50L)
+                    elapsed = android.os.SystemClock.elapsedRealtime() - startMs
+                }
+                logScreenOffInfo("[SCREEN_OFF] [REVIVE] reason=$reason waitCompleteReady=$blackoutActivityReady elapsed=${elapsed}ms")
+
                 repeat(1) { attempt ->
                     pipelines.values.forEach { pipeline ->
                         val controller = pipeline.controller
@@ -1639,7 +1649,6 @@ class MirrorForegroundService : Service() {
                     }
                     kotlinx.coroutines.delay(250L)
                 }
-                logScreenOffInfo("[SCREEN_OFF] [REVIVE] reason=$reason pulses=1 delayedMs=300")
             } finally {
                 screenOffReviveBurstInFlight = false
                 screenOffReviveBurstJob = null
@@ -1717,7 +1726,6 @@ class MirrorForegroundService : Service() {
         if (service == null || displayId < 0) return
         try {
             if (screenOffPolicy.isScreenOff) {
-                screenOffLoopGuard.markKeepAlive(android.os.SystemClock.elapsedRealtime())
                 service.keepVirtualDisplayAlive(displayId)
                 logScreenOffInfo("[SCREEN_OFF] [VD_KEEPALIVE] reason=$reason displayId=$displayId source=recovery")
             } else {
@@ -1753,7 +1761,7 @@ class MirrorForegroundService : Service() {
         MirrorDiagnostics.endSession(terminalReason.get()?.let { "terminal:${it.name}" } ?: reason)
         isCleanupInProgress = true
 
-        if (screenOffPolicy.state in listOf(ScreenOffState.PANEL_OFF_ACTIVE, ScreenOffState.PANEL_OFF_PENDING)) {
+        if (screenOffPolicy.isScreenOff && screenOffReviveStrategy == ScreenOffReviveStrategy.PANEL_OFF) {
             try { pipelines.values.firstOrNull()?.controller?.setPhysicalDisplayPower(true) } catch (_: Exception) {}
         }
         stopScreenOffBlackout("cleanup")

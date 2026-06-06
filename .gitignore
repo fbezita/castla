@@ -27,3 +27,4 @@ build.log
 *.mjs
 /.kotlin
 implementation_plan.md
+/log

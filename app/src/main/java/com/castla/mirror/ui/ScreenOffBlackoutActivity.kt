@@ -5,11 +5,15 @@ import android.content.Intent
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.view.GestureDetector
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
 
 class ScreenOffBlackoutActivity : Activity() {
+
+    private lateinit var gestureDetector: GestureDetector
 
     companion object {
         const val ACTION_START = "com.castla.mirror.action.SCREEN_OFF_BLACKOUT_START"
@@ -18,8 +22,21 @@ class ScreenOffBlackoutActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                try {
+                    com.castla.mirror.service.MirrorForegroundService.instance?.onUserRequestRestoreFromBlackout()
+                } catch (_: Exception) {}
+                return true
+            }
+        })
         applyBlackoutWindow()
         handleIntent(intent)
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        gestureDetector.onTouchEvent(event)
+        return super.onTouchEvent(event)
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -52,15 +69,21 @@ class ScreenOffBlackoutActivity : Activity() {
             setShowWhenLocked(true)
         } else {
             @Suppress("DEPRECATION")
-            window.addFlags(
-                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
-                )
+            window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED)
         }
         window.addFlags(
-            WindowManager.LayoutParams.FLAG_FULLSCREEN
+            WindowManager.LayoutParams.FLAG_FULLSCREEN or
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
         )
         window.attributes = window.attributes.apply {
             screenBrightness = 0f
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        try {
+            com.castla.mirror.service.MirrorForegroundService.instance?.onBlackoutActivityReady()
+        } catch (_: Exception) {}
     }
 }

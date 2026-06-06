@@ -39,10 +39,26 @@ class ScreenOffLoopGuardTest {
     fun `reset clears suppression state`() {
         guard.markPowerBurst(nowMs = 1_000L)
         guard.markKeepAlive(nowMs = 2_000L)
+        guard.markBlackoutStart(nowMs = 3_000L)
 
         guard.reset()
 
         assertEquals(ScreenOffLoopGuard.EventSource.USER, guard.classifyScreenOff(nowMs = 2_000L))
         assertEquals(ScreenOffLoopGuard.EventSource.USER, guard.classifyScreenOn(nowMs = 2_100L))
+        assertEquals(ScreenOffLoopGuard.EventSource.USER, guard.classifyScreenOn(nowMs = 3_100L))
+    }
+
+    @Test
+    fun `screen on shortly after blackout start is self induced`() {
+        guard.markBlackoutStart(nowMs = 5_000L)
+
+        assertEquals(ScreenOffLoopGuard.EventSource.SELF_INDUCED, guard.classifyScreenOn(nowMs = 5_500L))
+    }
+
+    @Test
+    fun `screen on long after blackout start is user induced`() {
+        guard.markBlackoutStart(nowMs = 5_000L)
+
+        assertEquals(ScreenOffLoopGuard.EventSource.USER, guard.classifyScreenOn(nowMs = 6_000L))
     }
 }
