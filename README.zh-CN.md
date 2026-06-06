@@ -7,7 +7,6 @@
   <p align="center">
     <a href="https://github.com/Suprhimp/castla/releases/latest"><img src="https://img.shields.io/github/v/release/Suprhimp/castla?style=flat-square" alt="Latest Release"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
-    <a href="https://ko-fi.com/suprhimp"><img src="https://img.shields.io/badge/Ko--fi-Support-ff5e5b?style=flat-square&logo=ko-fi&logoColor=white" alt="Ko-fi"></a>
   </p>
   <p align="center">
     <a href="README.md">English</a> · <a href="README.ko.md">한국어</a> · <a href="README.ja.md">日本語</a> · <a href="README.de.md">Deutsch</a> · <a href="README.es.md">Español</a> · <a href="README.fr.md">Français</a>
@@ -42,7 +41,7 @@ Castla是一款免费开源解决方案，通过本地WiFi网络将安卓手机�
 | **大屏导航** | **Waze**、Google地图等流畅运行，最高1080p @ 60fps |
 | **触控输入** | 通过Shizuku完整触控注入。从车载屏幕操控手机 |
 | **分屏浏览** | 双面板多任务。左边Waze，右边YouTube！ |
-| **虚拟显示器** | 无需亮屏即可在特斯拉上独立运行应用 |
+| **虚拟显示器** | 无需亮屏即可在特斯拉上独立运行应用（支持基于 Display 状态验证的三星 One UI 息屏镜像） |
 | **音频** | 系统音频捕获（Android 10+，实验性） |
 | **特斯拉自动检测** | BLE + 热点客户端检测自动连接 |
 | **自动热点** | 投屏开始/停止时自动开关热点 |
@@ -80,9 +79,7 @@ Castla是一款免费开源解决方案，通过本地WiFi网络将安卓手机�
 
 Castla **不收集任何数据**。详情请查看 [隐私政策](PRIVACY.md)。
 
-## 支持独立开发者
 
-<a href="https://ko-fi.com/suprhimp"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="在Ko-fi上支持"></a>
 
 ## 使用的开源项目
 

@@ -7,7 +7,6 @@
   <p align="center">
     <a href="https://github.com/Suprhimp/castla/releases/latest"><img src="https://img.shields.io/github/v/release/Suprhimp/castla?style=flat-square" alt="Latest Release"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
-    <a href="https://ko-fi.com/suprhimp"><img src="https://img.shields.io/badge/Ko--fi-Support-ff5e5b?style=flat-square&logo=ko-fi&logoColor=white" alt="Ko-fi"></a>
   </p>
   <p align="center">
     <a href="README.md">English</a> · <a href="README.ko.md">한국어</a> · <a href="README.ja.md">日本語</a> · <a href="README.zh-CN.md">中文</a> · <a href="README.es.md">Español</a> · <a href="README.fr.md">Français</a>
@@ -42,7 +41,7 @@ Castla ist eine kostenlose Open-Source-Lösung, die den Bildschirm deines Androi
 | **Navigation auf dem großen Bildschirm** | **Waze**, Google Maps und jede App flüssig bis 1080p @ 60fps |
 | **Touch-Eingabe** | Volle Touch-Injektion via Shizuku. Handy vom Autobildschirm steuern |
 | **Geteilte Ansicht** | Dual-Panel-Multitasking. Links Waze, rechts YouTube! |
-| **Virtuelles Display** | Apps unabhängig auf Tesla ausführen, ohne Handy-Bildschirm eingeschaltet |
+| **Virtuelles Display** | Apps unabhängig auf Tesla ausführen, ohne Handy-Bildschirm eingeschaltet (Unterstützt Samsung One UI Screen-off Mirroring über Display-Statusprüfung) |
 | **Audio** | System-Audio-Capture (Android 10+, experimentell) |
 | **Tesla Auto-Erkennung** | BLE + Hotspot-Client-Erkennung für automatische Verbindung |
 | **Auto-Hotspot** | Hotspot automatisch ein/aus beim Start/Stop des Mirrorings |
@@ -80,9 +79,7 @@ Beiträge sind willkommen! Details im [Contributing Guide](CONTRIBUTING.md).
 
 Castla sammelt **keinerlei Daten**. Siehe [Datenschutzerklärung](PRIVACY.md).
 
-## Indie-Entwickler unterstützen
 
-<a href="https://ko-fi.com/suprhimp"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Auf Ko-fi unterstützen"></a>
 
 ## Verwendete Open-Source-Projekte
 

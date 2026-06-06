@@ -7,7 +7,6 @@
   <p align="center">
     <a href="https://github.com/Suprhimp/castla/releases/latest"><img src="https://img.shields.io/github/v/release/Suprhimp/castla?style=flat-square" alt="Latest Release"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
-    <a href="https://ko-fi.com/suprhimp"><img src="https://img.shields.io/badge/Ko--fi-Support-ff5e5b?style=flat-square&logo=ko-fi&logoColor=white" alt="Ko-fi"></a>
   </p>
   <p align="center">
     <a href="README.md">English</a> · <a href="README.ko.md">한국어</a> · <a href="README.ja.md">日本語</a> · <a href="README.zh-CN.md">中文</a> · <a href="README.de.md">Deutsch</a> · <a href="README.es.md">Español</a>
@@ -42,7 +41,7 @@ Castla est une solution gratuite et open source qui diffuse l'écran de votre t�
 | **Navigation grand écran** | **Waze**, Google Maps et toute app jusqu'à 1080p @ 60fps |
 | **Saisie tactile** | Injection tactile complète via Shizuku. Contrôlez votre téléphone depuis l'écran de la voiture |
 | **Vue partagée** | Multitâche en double panneau. Waze à gauche, YouTube à droite ! |
-| **Écran virtuel** | Exécutez des apps indépendamment sur Tesla sans garder l'écran du téléphone allumé |
+| **Écran virtuel** | Exécutez des apps indépendamment sur Tesla sans garder l'écran du téléphone allumé (Prend en charge le mirroring écran éteint sur Samsung One UI via la vérification de l'état de l'écran) |
 | **Audio** | Capture audio système (Android 10+, expérimental) |
 | **Auto-détection Tesla** | BLE + détection des clients hotspot pour une connexion automatique |
 | **Auto Hotspot** | Activer/désactiver le hotspot automatiquement avec le miroir |
@@ -80,9 +79,7 @@ Les contributions sont les bienvenues ! Consultez le [Guide de Contribution](CON
 
 Castla **ne collecte aucune donnée**. Voir la [Politique de Confidentialité](PRIVACY.md).
 
-## Soutenir le développeur indie
 
-<a href="https://ko-fi.com/suprhimp"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Soutenir sur Ko-fi"></a>
 
 ## Construit avec
 

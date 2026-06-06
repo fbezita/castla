@@ -7,7 +7,6 @@
   <p align="center">
     <a href="https://github.com/Suprhimp/castla/releases/latest"><img src="https://img.shields.io/github/v/release/Suprhimp/castla?style=flat-square" alt="Latest Release"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
-    <a href="https://ko-fi.com/suprhimp"><img src="https://img.shields.io/badge/Ko--fi-Support-ff5e5b?style=flat-square&logo=ko-fi&logoColor=white" alt="Ko-fi"></a>
   </p>
   <p align="center">
     <a href="README.md">English</a> · <a href="README.ko.md">한국어</a> · <a href="README.zh-CN.md">中文</a> · <a href="README.de.md">Deutsch</a> · <a href="README.es.md">Español</a> · <a href="README.fr.md">Français</a>
@@ -42,7 +41,7 @@ Castlaは、ローカルWiFiネットワーク経由でAndroidスマートフォ
 | **大画面ナビゲーション** | **Waze**、Googleマップなど最大1080p @ 60fpsでスムーズに実行 |
 | **タッチ入力** | Shizukuによる完全なタッチインジェクション。車の画面からスマホを操作 |
 | **分割表示** | デュアルパネルマルチタスキング。左にWaze、右にYouTube！ |
-| **仮想ディスプレイ** | スマホ画面をオンにしなくてもテスラで独立してアプリ実行 |
+| **仮想ディスプレイ** | スマホ画面をオンにしなくてもテスラで独立してアプリ実行（Display state検証に基づくSamsung One UI画面オフミラーリングのサポート） |
 | **オーディオ** | システムオーディオキャプチャ（Android 10+、実験的） |
 | **テスラ自動検出** | BLE + ホットスポットクライアント検出で自動接続 |
 | **自動ホットスポット** | ミラーリング開始/停止時にホットスポットを自動オン/オフ |
@@ -80,9 +79,7 @@ Castlaは、ローカルWiFiネットワーク経由でAndroidスマートフォ
 
 Castlaは**一切のデータを収集しません**。詳細は[プライバシーポリシー](PRIVACY.md)をご確認ください。
 
-## インディー開発者をサポート
 
-<a href="https://ko-fi.com/suprhimp"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Ko-fiでサポート"></a>
 
 ## 使用しているオープンソース
 

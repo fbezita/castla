@@ -7,7 +7,6 @@
   <p align="center">
     <a href="https://github.com/Suprhimp/castla/releases/latest"><img src="https://img.shields.io/github/v/release/Suprhimp/castla?style=flat-square" alt="Latest Release"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
-    <a href="https://ko-fi.com/suprhimp"><img src="https://img.shields.io/badge/Ko--fi-Support-ff5e5b?style=flat-square&logo=ko-fi&logoColor=white" alt="Ko-fi"></a>
   </p>
   <p align="center">
     <a href="README.ko.md">한국어</a> · <a href="README.ja.md">日本語</a> · <a href="README.zh-CN.md">中文</a> · <a href="README.de.md">Deutsch</a> · <a href="README.es.md">Español</a> · <a href="README.fr.md">Français</a>
@@ -42,7 +41,7 @@ Castla is a free, open-source solution that streams your Android phone's screen 
 | **Navigation on Big Screen** | Run **Waze**, Google Maps, or any app smoothly up to 1080p @ 60fps. |
 | **Touch Input** | Full touch injection via Shizuku. Control your phone from the car screen. |
 | **Split View** | Dual-panel multitasking. Navigation (Waze) on the left, YouTube on the right! |
-| **Virtual Display** | Run apps independently on Tesla without keeping your phone screen turned on. |
+| **Virtual Display** | Run apps independently on Tesla without keeping your phone screen turned on. (Supports Samsung One UI screen-off mirroring via Display state verification) |
 | **Audio** | System audio capture (Android 10+, experimental). |
 | **Tesla Auto-Detect** | BLE + hotspot client detection for automatic, seamless connection. |
 | **Auto Hotspot** | Automatically toggle hotspot on/off when mirroring starts/stops. |
@@ -129,13 +128,7 @@ We welcome contributions! Please read the [Contributing Guide](CONTRIBUTING.md) 
 
 Castla collects **zero data**. No analytics, no crash reporting, no telemetry. All communication happens over your local network. See [Privacy Policy](PRIVACY.md) for details.
 
-## Support an Indie Developer
 
-I built Castla because I was frustrated by the lack of Android Auto in my Tesla. I decided to make it 100% free and open-source so everyone can enjoy a better driving experience.
-
-If Castla made your road trips better and helped you navigate with Waze on the big screen, consider buying me a coffee! Your support helps cover development costs and keeps the updates coming.
-
-<a href="https://ko-fi.com/suprhimp"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support on Ko-fi"></a>
 
 ## Built with
 

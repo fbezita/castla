@@ -7,7 +7,6 @@
   <p align="center">
     <a href="https://github.com/Suprhimp/castla/releases/latest"><img src="https://img.shields.io/github/v/release/Suprhimp/castla?style=flat-square" alt="Latest Release"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
-    <a href="https://ko-fi.com/suprhimp"><img src="https://img.shields.io/badge/Ko--fi-Support-ff5e5b?style=flat-square&logo=ko-fi&logoColor=white" alt="Ko-fi"></a>
   </p>
   <p align="center">
     <a href="README.md">English</a> · <a href="README.ko.md">한국어</a> · <a href="README.ja.md">日本語</a> · <a href="README.zh-CN.md">中文</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a>
@@ -42,7 +41,7 @@ Castla es una solución gratuita y de código abierto que transmite la pantalla 
 | **Navegación en pantalla grande** | **Waze**, Google Maps y cualquier app hasta 1080p @ 60fps |
 | **Entrada táctil** | Inyección táctil completa vía Shizuku. Controla tu teléfono desde la pantalla del coche |
 | **Vista dividida** | Multitarea en doble panel. ¡Waze a la izquierda, YouTube a la derecha! |
-| **Pantalla virtual** | Ejecuta apps independientemente en Tesla sin mantener la pantalla del teléfono encendida |
+| **Pantalla virtual** | Ejecuta apps independientemente en Tesla sin mantener la pantalla del teléfono encendida (Soporta el mirroring con pantalla apagada en Samsung One UI mediante la verificación del estado de la pantalla) |
 | **Audio** | Captura de audio del sistema (Android 10+, experimental) |
 | **Auto-detección Tesla** | BLE + detección de clientes hotspot para conexión automática |
 | **Auto Hotspot** | Activar/desactivar hotspot automáticamente al iniciar/detener |
@@ -80,9 +79,7 @@ Castla es una solución gratuita y de código abierto que transmite la pantalla 
 
 Castla **no recopila ningún dato**. Ver [Política de Privacidad](PRIVACY.md).
 
-## Apoyar al desarrollador indie
 
-<a href="https://ko-fi.com/suprhimp"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Apoyar en Ko-fi"></a>
 
 ## Construido con
 

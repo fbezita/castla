@@ -7,7 +7,6 @@
   <p align="center">
     <a href="https://github.com/Suprhimp/castla/releases/latest"><img src="https://img.shields.io/github/v/release/Suprhimp/castla?style=flat-square" alt="Latest Release"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
-    <a href="https://ko-fi.com/suprhimp"><img src="https://img.shields.io/badge/Ko--fi-Support-ff5e5b?style=flat-square&logo=ko-fi&logoColor=white" alt="Ko-fi"></a>
   </p>
   <p align="center">
     <a href="README.md">English</a> · <a href="README.ja.md">日本語</a> · <a href="README.zh-CN.md">中文</a> · <a href="README.de.md">Deutsch</a> · <a href="README.es.md">Español</a> · <a href="README.fr.md">Français</a>
@@ -42,7 +41,7 @@ Castla는 안드로이드 폰의 화면을 로컬 WiFi 네트워크를 통해 �
 | **큰 화면 내비게이션** | **네이버지도**, **T맵** 등 최대 1080p @ 60fps로 부드럽게 실행 |
 | **터치 입력** | Shizuku를 통한 완전한 터치 주입. 차량 화면에서 폰 조작 |
 | **분할 화면** | 듀얼 패널 멀티태스킹. 왼쪽에 네이버지도, 오른쪽에 YouTube! |
-| **가상 디스플레이** | 폰 화면을 켜두지 않아도 테슬라에서 독립적으로 앱 실행 |
+| **가상 디스플레이** | 폰 화면을 켜두지 않아도 테슬라에서 독립적으로 앱 실행 (Display state 검증 기반의 삼성 One UI 화면 꺼짐 미러링 지원) |
 | **오디오** | 시스템 오디오 캡처 (Android 10+, 실험적) |
 | **테슬라 자동 감지** | BLE + 핫스팟 클라이언트 감지로 자동 연결 |
 | **자동 핫스팟** | 미러링 시작/중지 시 핫스팟 자동 온/오프 |
@@ -90,15 +89,7 @@ cd castla
 
 Castla는 **어떠한 데이터도 수집하지 않습니다**. 분석, 크래시 리포트, 텔레메트리 없음. 자세한 내용은 [개인정보 처리방침](PRIVACY.md)을 확인하세요.
 
-## 인디 개발자 후원하기
 
-테슬라에 Android Auto가 없어서 답답했던 마음에 Castla를 만들었습니다. 모든 분이 더 나은 드라이빙 경험을 즐길 수 있도록 100% 무료 오픈소스로 공개합니다.
-
-Castla 덕분에 드라이브가 즐거워지셨다면 커피 한 잔 사주세요! 여러분의 후원이 개발 비용을 충당하고 꾸준한 업데이트를 가능하게 합니다.
-
-<a href="https://qr.kakaopay.com/Ej8mYEElE"><img src="https://img.shields.io/badge/카카오페이-후원하기-FFEB00?style=for-the-badge&logo=kakaotalk&logoColor=black" alt="카카오페이 후원"></a>
-
-<a href="https://ko-fi.com/suprhimp"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Ko-fi에서 후원"></a>
 
 ## 사용된 오픈소스
 
