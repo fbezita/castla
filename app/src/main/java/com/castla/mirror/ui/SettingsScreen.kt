@@ -108,7 +108,8 @@ fun SettingsScreen(
     isStreaming: Boolean,
     thermalStatus: Int = 0,
     onSettingsChanged: (StreamSettings) -> Unit,
-    onBackClick: () -> Unit
+    onBackClick: () -> Unit,
+    onCheckUpdate: () -> Unit
 ) {
     MeshGradientBackground {
         Column(
@@ -558,6 +559,31 @@ fun SettingsScreen(
                                 Text(stringResource(R.string.settings_copy_logs))
                             }
                         }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // App Update
+            SettingSection(title = stringResource(R.string.settings_update_section)) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = stringResource(R.string.settings_check_update_desc),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.White.copy(alpha = 0.7f),
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Button(
+                        onClick = onCheckUpdate,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(stringResource(R.string.settings_check_update))
                     }
                 }
             }

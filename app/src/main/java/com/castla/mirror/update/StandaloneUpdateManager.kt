@@ -22,6 +22,8 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import android.widget.Toast
+import com.castla.mirror.R
 
 /**
  * Standalone flavor: checks a remote JSON endpoint for the latest version.
@@ -58,12 +60,30 @@ class StandaloneUpdateManager : UpdateManager {
         startDownloadAndInstall(activity)
     }
 
-    override fun checkForUpdate(activity: ComponentActivity) {
+    override fun checkForUpdate(
+        activity: ComponentActivity,
+        force: Boolean,
+        onResult: ((Boolean) -> Unit)?
+    ) {
         // Set current version
         try {
             _currentVersion.value = activity.packageManager
                 .getPackageInfo(activity.packageName, 0).versionName ?: ""
         } catch (_: Exception) {}
+
+        // 24-hour rate limit guard for non-authenticated GitHub API requests
+        val prefs = activity.getSharedPreferences("castla_update_prefs", Context.MODE_PRIVATE)
+        val lastCheckTime = prefs.getLong("last_check_timestamp", 0L)
+        val currentTime = System.currentTimeMillis()
+        if (!force && currentTime - lastCheckTime < 86400000L) { // 24 hours
+            Log.i(TAG, "Skipping update check: last check was less than 24 hours ago.")
+            onResult?.invoke(false)
+            return
+        }
+
+        if (force) {
+            Toast.makeText(activity, activity.getString(R.string.settings_checking_update), Toast.LENGTH_SHORT).show()
+        }
 
         activity.lifecycleScope.launch {
             try {
@@ -86,15 +106,35 @@ class StandaloneUpdateManager : UpdateManager {
                         }
                     }
 
-                    _updateAvailable.value = isNewerVersion(
+                    val available = isNewerVersion(
                         current = _currentVersion.value,
                         remote = remoteVersion
                     )
+                    _updateAvailable.value = available
+
+                    if (available) {
+                        showForceUpdate.value = true
+                    } else if (force) {
+                        Toast.makeText(activity, activity.getString(R.string.toast_no_update_available), Toast.LENGTH_SHORT).show()
+                    }
 
                     Log.i(TAG, "Version check: current=${_currentVersion.value}, latest=$remoteVersion, updateAvailable=${_updateAvailable.value}")
+                    
+                    // Update last check timestamp on successful check
+                    prefs.edit().putLong("last_check_timestamp", currentTime).apply()
+                    onResult?.invoke(available)
+                } else {
+                    if (force) {
+                        Toast.makeText(activity, "Failed to connect to update server", Toast.LENGTH_SHORT).show()
+                    }
+                    onResult?.invoke(false)
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Version check failed, skipping", e)
+                if (force) {
+                    Toast.makeText(activity, "Error checking update: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+                onResult?.invoke(false)
             }
         }
     }

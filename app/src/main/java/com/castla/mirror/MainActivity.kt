@@ -317,7 +317,10 @@ class MainActivity : AppCompatActivity() {
                             streamSettings = newSettings
                             StreamSettings.save(this@MainActivity, newSettings)
                         },
-                        onBackClick = { showSettings = false }
+                        onBackClick = { showSettings = false },
+                        onCheckUpdate = {
+                            updateManager.checkForUpdate(this@MainActivity, force = true)
+                        }
                     )
                 } else {
                     CastlaScreen(

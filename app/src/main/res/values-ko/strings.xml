@@ -125,4 +125,11 @@
     <string name="btn_enable_accessibility">접근성 서비스 켜기</string>
     <string name="toast_ime_already_enabled">가상 키보드가 이미 활성화되어 있습니다.</string>
     <string name="toast_accessibility_already_enabled">접근성 서비스가 이미 허용되어 있습니다.</string>
+    
+    <!-- App Update -->
+    <string name="settings_update_section">앱 업데이트</string>
+    <string name="settings_check_update">업데이트 확인</string>
+    <string name="settings_check_update_desc">GitHub에서 더 새로운 버전이 있는지 수동으로 확인합니다.</string>
+    <string name="settings_checking_update">업데이트 확인 중...</string>
+    <string name="toast_no_update_available">이미 최신 버전을 사용하고 있습니다.</string>
 </resources>

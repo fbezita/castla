@@ -11,7 +11,11 @@ import androidx.compose.runtime.Composable
 interface UpdateManager {
 
     /** Call once in onCreate. Checks for updates and blocks UI if mandatory. */
-    fun checkForUpdate(activity: ComponentActivity)
+    fun checkForUpdate(
+        activity: ComponentActivity,
+        force: Boolean = false,
+        onResult: ((Boolean) -> Unit)? = null
+    )
 
     /** Forward onResume so Play Store flow can re-check stalled updates. */
     fun onResume(activity: ComponentActivity) {}

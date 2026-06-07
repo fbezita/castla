@@ -127,4 +127,11 @@
     <string name="btn_enable_accessibility">Enable Accessibility</string>
     <string name="toast_ime_already_enabled">Virtual keyboard is already enabled.</string>
     <string name="toast_accessibility_already_enabled">Accessibility service is already enabled.</string>
+    
+    <!-- App Update -->
+    <string name="settings_update_section">App Update</string>
+    <string name="settings_check_update">Check for Updates</string>
+    <string name="settings_check_update_desc">Manually check if a newer version is available on GitHub.</string>
+    <string name="settings_checking_update">Checking for updates...</string>
+    <string name="toast_no_update_available">You are already on the latest version.</string>
 </resources>
