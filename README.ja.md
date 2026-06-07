@@ -5,7 +5,7 @@
     <strong>Tesla向け究極のAndroid Auto代替アプリ。Waze、Googleマップ、Yahoo!カーナビをテスラのブラウザで直接表示。</strong>
   </p>
   <p align="center">
-    <a href="https://github.com/Suprhimp/castla/releases/latest"><img src="https://img.shields.io/github/v/release/Suprhimp/castla?style=flat-square" alt="Latest Release"></a>
+    <a href="https://github.com/fbezita/castla/releases/latest"><img src="https://img.shields.io/github/v/release/fbezita/castla?style=flat-square" alt="Latest Release"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
   </p>
   <p align="center">
@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/hero.jpg" width="700" alt="Castla - AndroidをTeslaにミラーリング">
+  <img src="docs/images/main.png" width="700" alt="Castla - AndroidをTeslaにミラーリング">
 </p>
 
 ---
@@ -58,7 +58,7 @@ Castlaは、ローカルWiFiネットワーク経由でAndroidスマートフォ
 
 ## インストール
 
-1. [Releases](https://github.com/Suprhimp/castla/releases/latest)にアクセス
+1. [Releases](https://github.com/fbezita/castla/releases/latest)にアクセス
 2. 最新の`.apk`ファイルをダウンロード
 3. Androidデバイスにインストール
 

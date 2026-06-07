@@ -5,7 +5,7 @@
     <strong>The ultimate Android Auto alternative for Tesla. Mirror Waze, Google Maps, and your phone screen directly to Tesla's browser.</strong>
   </p>
   <p align="center">
-    <a href="https://github.com/Suprhimp/castla/releases/latest"><img src="https://img.shields.io/github/v/release/Suprhimp/castla?style=flat-square" alt="Latest Release"></a>
+    <a href="https://github.com/fbezita/castla/releases/latest"><img src="https://img.shields.io/github/v/release/fbezita/castla?style=flat-square" alt="Latest Release"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
   </p>
   <p align="center">
@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/hero.jpg" width="700" alt="Castla mirroring Android to Tesla screen">
+  <img src="docs/images/main.png" width="700" alt="Castla mirroring Android to Tesla screen">
 </p>
 
 ---
@@ -40,8 +40,10 @@ Castla is a free, open-source solution that streams your Android phone's screen 
 |---------|---------|
 | **Navigation on Big Screen** | Run **Waze**, Google Maps, or any app smoothly up to 1080p @ 60fps. |
 | **Touch Input** | Full touch injection via Shizuku. Control your phone from the car screen. |
-| **Split View** | Dual-panel multitasking. Navigation (Waze) on the left, YouTube on the right! |
-| **Virtual Display** | Run apps independently on Tesla without keeping your phone screen turned on. (Supports Samsung One UI screen-off mirroring via Display state verification) |
+| **Text Input (Native IME)** | Support native Android IME (Samsung Keyboard, Gboard) inside trusted Virtual Displays. Falls back to Castla IME proxy. Accessibility Service removed to bypass banking app detections. |
+| **Layout Modes** | Supports **Single**, **Split** (dual-panel multitasking, e.g., Waze on left, YouTube on right), and **Popup** (resizable floating window) layouts. |
+| **Virtual Display** | Run apps independently on Tesla. Supports multi-VD symmetric control and Samsung One UI screen-off mirroring via Display state verification. |
+| **Self-Healing Watchdog** | Prevents black screen issues via 1s surface binding checks and Clean Launch Fallbacks on stagnation. |
 | **Audio** | System audio capture (Android 10+, experimental). |
 | **Tesla Auto-Detect** | BLE + hotspot client detection for automatic, seamless connection. |
 | **Auto Hotspot** | Automatically toggle hotspot on/off when mirroring starts/stops. |
@@ -60,14 +62,14 @@ Castla is a free, open-source solution that streams your Android phone's screen 
 
 ### Download APK
 
-1. Go to [Releases](https://github.com/Suprhimp/castla/releases/latest)
+1. Go to [Releases](https://github.com/fbezita/castla/releases/latest)
 2. Download the latest `.apk` file
 3. Install on your Android device
 
 ### Build from Source
 
 ```bash
-git clone https://github.com/Suprhimp/castla.git
+git clone https://github.com/fbezita/castla.git
 cd castla
 ./gradlew assembleDebug
 ```

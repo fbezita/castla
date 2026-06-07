@@ -5,7 +5,7 @@
     <strong>테슬라를 위한 궁극의 Android Auto 대안. 네이버지도, T맵을 테슬라 브라우저에서 바로.</strong>
   </p>
   <p align="center">
-    <a href="https://github.com/Suprhimp/castla/releases/latest"><img src="https://img.shields.io/github/v/release/Suprhimp/castla?style=flat-square" alt="Latest Release"></a>
+    <a href="https://github.com/fbezita/castla/releases/latest"><img src="https://img.shields.io/github/v/release/fbezita/castla?style=flat-square" alt="Latest Release"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
   </p>
   <p align="center">
@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/hero.jpg" width="700" alt="Castla - 안드로이드 화면을 테슬라에 미러링">
+  <img src="docs/images/main.png" width="700" alt="Castla - 안드로이드 화면을 테슬라에 미러링">
 </p>
 
 ---
@@ -40,8 +40,10 @@ Castla는 안드로이드 폰의 화면을 로컬 WiFi 네트워크를 통해 �
 |------|------|
 | **큰 화면 내비게이션** | **네이버지도**, **T맵** 등 최대 1080p @ 60fps로 부드럽게 실행 |
 | **터치 입력** | Shizuku를 통한 완전한 터치 주입. 차량 화면에서 폰 조작 |
-| **분할 화면** | 듀얼 패널 멀티태스킹. 왼쪽에 네이버지도, 오른쪽에 YouTube! |
-| **가상 디스플레이** | 폰 화면을 켜두지 않아도 테슬라에서 독립적으로 앱 실행 (Display state 검증 기반의 삼성 One UI 화면 꺼짐 미러링 지원) |
+| **텍스트 입력 (네이티브 IME)** | 신뢰할 수 있는 가상 디스플레이(Trusted VD) 내부에서 **네이티브 안드로이드 IME(삼성 키보드, Gboard 등) 직접 활성화** 지원. 자체 Castla IME 프록시는 폴백으로 작동하여 금융/보안 앱 탐지를 우회함. |
+| **레이아웃 모드** | **싱글(Single)**, **분할(Split)**(듀얼 패널 멀티태스킹, 예: 왼쪽에 네이버지도, 오른쪽에 YouTube), **팝업(Popup)**(크기 조절 가능한 플로팅 창) 레이아웃 지원. |
+| **가상 디스플레이** | 폰 화면을 켜두지 않아도 독립적으로 앱 실행. 다중 VD 대칭 제어 및 Display state 검증 기반의 삼성 One UI 화면 꺼짐 미러링 지원. |
+| **자가치유 와치독** | 프레임 정체 감지 및 1초 서피스 리바인드 검증을 통한 Clean Launch Fallback으로 블랙스크린 방지 탑재. |
 | **오디오** | 시스템 오디오 캡처 (Android 10+, 실험적) |
 | **테슬라 자동 감지** | BLE + 핫스팟 클라이언트 감지로 자동 연결 |
 | **자동 핫스팟** | 미러링 시작/중지 시 핫스팟 자동 온/오프 |
@@ -60,14 +62,14 @@ Castla는 안드로이드 폰의 화면을 로컬 WiFi 네트워크를 통해 �
 
 ### APK 다운로드
 
-1. [Releases](https://github.com/Suprhimp/castla/releases/latest)로 이동
+1. [Releases](https://github.com/fbezita/castla/releases/latest)로 이동
 2. 최신 `.apk` 파일 다운로드
 3. 안드로이드 기기에 설치
 
 ### 소스에서 빌드
 
 ```bash
-git clone https://github.com/Suprhimp/castla.git
+git clone https://github.com/fbezita/castla.git
 cd castla
 ./gradlew assembleDebug
 ```

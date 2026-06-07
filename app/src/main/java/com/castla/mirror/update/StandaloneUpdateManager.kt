@@ -32,7 +32,7 @@ class StandaloneUpdateManager : UpdateManager {
     companion object {
         private const val TAG = "StandaloneUpdate"
         private const val GITHUB_LATEST_RELEASE_URL =
-            "https://api.github.com/repos/Suprhimp/castla/releases/latest"
+            "https://api.github.com/repos/fbezita/castla/releases/latest"
         private const val CONNECT_TIMEOUT_MS = 5000
         private const val READ_TIMEOUT_MS = 5000
         private const val APK_FILE_NAME = "castla-update.apk"

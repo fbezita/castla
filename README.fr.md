@@ -5,7 +5,7 @@
     <strong>L'alternative ultime à Android Auto pour Tesla. Waze, Google Maps et votre écran directement dans le navigateur Tesla.</strong>
   </p>
   <p align="center">
-    <a href="https://github.com/Suprhimp/castla/releases/latest"><img src="https://img.shields.io/github/v/release/Suprhimp/castla?style=flat-square" alt="Latest Release"></a>
+    <a href="https://github.com/fbezita/castla/releases/latest"><img src="https://img.shields.io/github/v/release/fbezita/castla?style=flat-square" alt="Latest Release"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
   </p>
   <p align="center">
@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/hero.jpg" width="700" alt="Castla - Miroir Android sur écran Tesla">
+  <img src="docs/images/main.png" width="700" alt="Castla - Miroir Android sur écran Tesla">
 </p>
 
 ---
@@ -58,7 +58,7 @@ Castla est une solution gratuite et open source qui diffuse l'écran de votre t�
 
 ## Installation
 
-1. Allez sur [Releases](https://github.com/Suprhimp/castla/releases/latest)
+1. Allez sur [Releases](https://github.com/fbezita/castla/releases/latest)
 2. Téléchargez le dernier fichier `.apk`
 3. Installez sur votre appareil Android
 

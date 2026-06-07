@@ -5,7 +5,7 @@
     <strong>特斯拉的终极Android Auto替代方案。在特斯拉浏览器中直接投射高德地图、百度地图和手机屏幕。</strong>
   </p>
   <p align="center">
-    <a href="https://github.com/Suprhimp/castla/releases/latest"><img src="https://img.shields.io/github/v/release/Suprhimp/castla?style=flat-square" alt="Latest Release"></a>
+    <a href="https://github.com/fbezita/castla/releases/latest"><img src="https://img.shields.io/github/v/release/fbezita/castla?style=flat-square" alt="Latest Release"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
   </p>
   <p align="center">
@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/hero.jpg" width="700" alt="Castla - 将Android投射到Tesla屏幕">
+  <img src="docs/images/main.png" width="700" alt="Castla - 将Android投射到Tesla屏幕">
 </p>
 
 ---
@@ -58,7 +58,7 @@ Castla是一款免费开源解决方案，通过本地WiFi网络将安卓手机�
 
 ## 安装
 
-1. 前往 [Releases](https://github.com/Suprhimp/castla/releases/latest)
+1. 前往 [Releases](https://github.com/fbezita/castla/releases/latest)
 2. 下载最新 `.apk` 文件
 3. 安装到安卓设备
 
