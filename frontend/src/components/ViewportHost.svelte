@@ -7,6 +7,7 @@
     type ViewportModel,
   } from "../stores/compositorStore";
   import { t } from "../lib/i18n";
+  import { debugLog } from "../utils/debugLogger";
   import ViewportPane from "./ViewportPane.svelte";
   import type { TouchRouter } from "../touch/TouchRouter";
   import { mapViewportPoint } from "../touch/TouchRouter";
@@ -38,6 +39,17 @@
 
   let frozenLayoutState: FrozenLayoutState | null = null;
   let safetyReleaseTimer = 0;
+
+  function emitVerboseBarrierDiag(
+    message: string,
+    data: Record<string, unknown>,
+  ) {
+    if (!(window as Window & { __CASTLA_VERBOSE_DIAGNOSTICS__?: boolean }).__CASTLA_VERBOSE_DIAGNOSTICS__) {
+      return;
+    }
+    debugLog(`[COMPOSITOR_BARRIER] ${message}`, data);
+    runtime?.control?.sendFrontendDiag?.("COMPOSITOR_BARRIER", message, data);
+  }
 
   let host: HTMLDivElement;
   let resizer: HTMLButtonElement;
@@ -175,11 +187,18 @@
           splitRatio: $compositorStore.splitRatio,
         };
         console.info(`[COMPOSITOR_BARRIER] event=freeze state=${$compositorStore.launchSequence.state} layout=${$compositorStore.layoutMode}`);
+        emitVerboseBarrierDiag("freeze", {
+          state: $compositorStore.launchSequence.state,
+          layoutMode: $compositorStore.layoutMode,
+        });
 
         // 6초 세이프 가드 타이머 시작 (어떤 원인으로든 6초 이상 배리어가 가두지 않도록 보장)
         safetyReleaseTimer = window.setTimeout(() => {
           if (frozenLayoutState) {
             console.warn("[COMPOSITOR_BARRIER] event=safety_unfreeze_timeout stuck protection triggered!");
+            emitVerboseBarrierDiag("safety_unfreeze_timeout", {
+              state: $compositorStore.launchSequence.state,
+            });
             frozenLayoutState = null;
           }
         }, 6000);
@@ -187,6 +206,9 @@
     } else {
       if (frozenLayoutState) {
         console.info(`[COMPOSITOR_BARRIER] event=release state=${$compositorStore.launchSequence.state}`);
+        emitVerboseBarrierDiag("release", {
+          state: $compositorStore.launchSequence.state,
+        });
         frozenLayoutState = null;
       }
     }

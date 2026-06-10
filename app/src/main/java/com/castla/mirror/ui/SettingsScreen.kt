@@ -635,7 +635,13 @@ fun SettingsScreen(
 }
 
 private suspend fun shareLogs(context: Context) {
-    val files = withContext(Dispatchers.IO) { FileLogger.getLogFiles() }
+    val files = withContext(Dispatchers.IO) {
+        com.castla.mirror.service.MirrorForegroundService.instance
+            ?.getMirrorServer()
+            ?.requestFrontendDebugDump("native_share_logs")
+        kotlinx.coroutines.delay(350L)
+        FileLogger.getLogFiles()
+    }
     if (files.isEmpty()) {
         withContext(Dispatchers.Main) {
             Toast.makeText(context, R.string.settings_logs_empty, Toast.LENGTH_SHORT).show()

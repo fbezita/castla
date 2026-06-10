@@ -860,6 +860,13 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             put("type", "diagnostics")
         }.toString())
     }
+
+    fun requestFrontendDebugDump(reason: String) {
+        broadcastControlMessage(JSONObject().apply {
+            put("type", "requestFrontendDebugDump")
+            put("reason", reason)
+        }.toString())
+    }
     
     // Callbacks from ControlSocket
     fun onTouchEvent(event: TouchEvent) {

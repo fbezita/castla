@@ -95,8 +95,12 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
     return new Promise((resolve, reject) => {
       let primarySawRecommit = false;
       let secondarySawRecommit = false;
-      const unsub = compositorStore.subscribe((state) => {
-        if (isStale(seqId)) { unsub(); reject(new StaleLaunchSequenceError()); return; }
+      let primaryMetadataReady = false;
+      let secondaryMetadataReady = !hasSecondary;
+      let cleanup = () => {};
+      const tryResolve = () => {
+        const state = get(compositorStore);
+        if (isStale(seqId)) { cleanup(); reject(new StaleLaunchSequenceError()); return; }
 
         const primary = state.viewports.get('primary');
         const secondary = state.viewports.get('secondary');
@@ -109,20 +113,39 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
         }
 
         const primaryReady = primary
-          ? (primary.committed && (primary.generation > primaryStartGen || primarySawRecommit))
+          ? ((primary.committed && (primary.generation > primaryStartGen || primarySawRecommit)) || primaryMetadataReady)
           : true;
         const secondaryReady = hasSecondary && secondary
-          ? (secondary.committed && (secondary.generation > secondaryStartGen || secondarySawRecommit))
+          ? ((secondary.committed && (secondary.generation > secondaryStartGen || secondarySawRecommit)) || secondaryMetadataReady)
           : true;
 
         if (primaryReady && secondaryReady) {
-          unsub();
+          cleanup();
           resolve();
         }
+      };
+
+      const unsub = compositorStore.subscribe(() => {
+        tryResolve();
+      });
+      const ackUnsub = registerAckListener((msg) => {
+        if (isStale(seqId)) { cleanup(); reject(new StaleLaunchSequenceError()); return; }
+        if (msg.type === 'streamMetadata' && msg.sessionId === 'primary' && msg.firstFrameReady && msg.generation >= primaryStartGen) {
+          primaryMetadataReady = true;
+        }
+        if (hasSecondary && msg.type === 'streamMetadata' && msg.sessionId === 'secondary' && msg.firstFrameReady && msg.generation >= secondaryStartGen) {
+          secondaryMetadataReady = true;
+        }
+        tryResolve();
       });
 
-      setTimeout(() => {
+      cleanup = () => {
         unsub();
+        ackUnsub();
+      };
+
+      setTimeout(() => {
+        cleanup();
         reject(new Error('stream_timeout'));
       }, timeoutMs);
     });
@@ -323,6 +346,163 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
           visible: true,
         });
         return { ...state, viewports };
+      });
+    }, 20);
+
+    await expect(waitPromise).resolves.toBeUndefined();
+  });
+
+  it('Scenario 2c: Should recover from initial stream timeout after a single automatic relaunch', async () => {
+    const seqId = nextLaunchSeqId();
+    let degradedReasonVal: 'launch_failure' | 'session_timeout' | 'stream_timeout' | '' = '';
+
+    compositorStore.set({
+      viewports: new Map([
+        ['primary', { pane: 'primary', width: 1280, height: 720, committed: false, generation: 2, visible: true }],
+        ['secondary', { pane: 'secondary', width: 1280, height: 720, committed: false, generation: 0, visible: false }]
+      ]),
+      diagnostics: [],
+      serverDiagnostics: null,
+      layoutMode: 'single',
+      splitRatio: 0.5,
+      activePrimaryApp: 'com.android.settings',
+      activeSecondaryApp: '',
+      popup: { visible: false, minimized: false, x: 0, y: 0, width: 0, height: 0 },
+      launchSequence: {
+        id: seqId,
+        primaryPkg: 'com.android.settings',
+        layoutMode: 'single',
+        state: 'PRIMARY_SESSION_READY',
+        startedAt: Date.now(),
+        primaryStartGen: 2,
+        secondaryStartGen: 0,
+      }
+    });
+
+    const launchPromise = (async () => {
+      try {
+        compositorStore.update(state => ({
+          ...state,
+          launchSequence: { ...state.launchSequence, state: 'STREAM_COMMITTING' }
+        }));
+
+        try {
+          await waitForStreamsToCommit(seqId, false, 2, 0, 30);
+        } catch (err) {
+          if (err instanceof StaleLaunchSequenceError) throw err;
+
+          compositorStore.update((state) => {
+            const viewports = new Map(state.viewports);
+            const primary = viewports.get('primary');
+            if (primary) {
+              viewports.set('primary', { ...primary, committed: false });
+            }
+            return {
+              ...state,
+              viewports,
+              launchSequence: { ...state.launchSequence, state: 'LAUNCHING_PRIMARY' }
+            };
+          });
+
+          await waitForLaunchAck(seqId, 'primary');
+          compositorStore.update(state => ({
+            ...state,
+            launchSequence: { ...state.launchSequence, state: 'PRIMARY_LAUNCH_ACKED' }
+          }));
+
+          await waitForSessionReady(seqId, 'primary');
+          compositorStore.update(state => ({
+            ...state,
+            launchSequence: { ...state.launchSequence, state: 'PRIMARY_SESSION_READY' }
+          }));
+
+          const retryPrimaryStartGen = get(compositorStore).viewports.get('primary')?.generation ?? 0;
+          compositorStore.update(state => ({
+            ...state,
+            launchSequence: { ...state.launchSequence, state: 'STREAM_COMMITTING' }
+          }));
+          await waitForStreamsToCommit(seqId, false, retryPrimaryStartGen, 0, 80);
+        }
+
+        compositorStore.update(state => ({
+          ...state,
+          launchSequence: { ...state.launchSequence, state: 'RUNNING', degradedReason: degradedReasonVal }
+        }));
+      } catch (err) {
+        degradedReasonVal = err instanceof Error && err.message === 'stream_timeout'
+          ? 'stream_timeout'
+          : degradedReasonVal;
+        compositorStore.update(state => ({
+          ...state,
+          launchSequence: {
+            ...state.launchSequence,
+            state: 'DEGRADED',
+            degradedReason: degradedReasonVal || 'stream_timeout'
+          }
+        }));
+      }
+    })();
+
+    setTimeout(() => emitAckMessage({ type: 'launch_ack', seqId, pane: 'primary', success: true }), 45);
+    setTimeout(() => emitAckMessage({ type: 'session_ready', seqId, pane: 'primary' }), 55);
+    setTimeout(() => {
+      compositorStore.update((state) => {
+        const viewports = new Map(state.viewports);
+        viewports.set('primary', {
+          pane: 'primary',
+          width: 1280,
+          height: 720,
+          committed: true,
+          generation: 2,
+          visible: true,
+        });
+        return { ...state, viewports };
+      });
+    }, 65);
+
+    await expect(launchPromise).resolves.toBeUndefined();
+    expect(get(compositorStore).launchSequence.state).toBe('RUNNING');
+    expect(get(compositorStore).launchSequence.degradedReason).toBe('');
+  });
+
+  it('Scenario 2d: Should accept fresh firstFrameReady metadata even before compositor committed flips', async () => {
+    const seqId = nextLaunchSeqId();
+
+    compositorStore.set({
+      viewports: new Map([
+        ['primary', { pane: 'primary', width: 1280, height: 720, committed: false, generation: 7, visible: true }],
+        ['secondary', { pane: 'secondary', width: 1280, height: 720, committed: false, generation: 0, visible: false }]
+      ]),
+      diagnostics: [],
+      serverDiagnostics: null,
+      layoutMode: 'single',
+      splitRatio: 0.5,
+      activePrimaryApp: 'com.android.settings',
+      activeSecondaryApp: '',
+      popup: { visible: false, minimized: false, x: 0, y: 0, width: 0, height: 0 },
+      launchSequence: {
+        id: seqId,
+        primaryPkg: 'com.android.settings',
+        layoutMode: 'single',
+        state: 'STREAM_COMMITTING',
+        startedAt: Date.now(),
+        primaryStartGen: 7,
+        secondaryStartGen: 0,
+      }
+    });
+
+    const waitPromise = waitForStreamsToCommit(seqId, false, 7, 0, 80);
+
+    setTimeout(() => {
+      emitAckMessage({
+        type: 'streamMetadata',
+        sessionId: 'primary',
+        generation: 7,
+        firstFrameReady: true,
+        streamReady: true,
+        vdId: 3,
+        width: 1280,
+        height: 720,
       });
     }, 20);
 

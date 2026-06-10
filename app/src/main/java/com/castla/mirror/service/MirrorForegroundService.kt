@@ -3933,6 +3933,23 @@ class MirrorForegroundService : Service() {
                 FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision pkg=$cleanPkg freshPrep=$needsFreshLaunchPreparation sameAppGuard=false originalDisplayId=$originalDisplayId correctedDisplayId=$correctedDisplayId targetDisplayId=$targetDisplayId previousPkg=$previousPkg lastPrepared=$lastPreparedTargetPackage forceDisplayId=$forceDisplayId")
 
                 val matchingTaskIds = try { runBinderSafe(1000L) { service.getTaskIdsForPackage(cleanPkg).toList() } ?: emptyList() } catch (_: Exception) { emptyList() }
+                val tasklessActiveRelaunch = LaunchRecoveryPolicy.shouldForceFreshPreparationForTasklessRelaunch(
+                    targetPkg = cleanPkg,
+                    currentAppPkg = currentApp.substringBefore('/'),
+                    matchingTaskCount = matchingTaskIds.size,
+                    forceTaskRealign = forceTaskRealign,
+                    encoderActive = isEncoderActive,
+                    requiresFreshLaunchPreparation = needsFreshLaunchPreparation,
+                )
+                val effectiveNeedsFreshLaunchPreparation = needsFreshLaunchPreparation || tasklessActiveRelaunch
+                if (tasklessActiveRelaunch) {
+                    lastFrameRenderedTime = 0L
+                    requiresFreshLaunchPreparation = true
+                    FileLogger.i(
+                        "PIPELINE_DEBUG",
+                        "[$name] launchDecision tasklessActiveRelaunch=true pkg=$cleanPkg currentApp=$currentApp forceTaskRealign=$forceTaskRealign"
+                    )
+                }
                 val isWarmStart = matchingTaskIds.isNotEmpty()
                 scheduleDisplayRoutingDiagnostics(
                     pane = name,
@@ -3953,11 +3970,11 @@ class MirrorForegroundService : Service() {
                 // frequently forcing the primary Display 0 (MainActivity) to recede to the background Recents view.
                 if (isWarmStart && !forceColdStart) {
                     markServiceMutation("launch_component_warm_start")
-                    FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision warmStart=true pkg=$cleanPkg taskCount=${matchingTaskIds.size} targetDisplayId=$targetDisplayId freshPrep=$needsFreshLaunchPreparation")
+                    FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision warmStart=true pkg=$cleanPkg taskCount=${matchingTaskIds.size} targetDisplayId=$targetDisplayId freshPrep=$effectiveNeedsFreshLaunchPreparation")
                     scheduleDisplayRoutingDiagnostics(name, service, cleanPkg, targetDisplayId, "postlaunch", "warm_task_move", displayId)
                     // Trigger adaptive task residency-aware wakeup asynchronously instead of waiting on hardcoded timings
                     executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
-                    if (needsFreshLaunchPreparation) {
+                    if (effectiveNeedsFreshLaunchPreparation) {
                         mirrorServer?.onKeyframeRequest(name, "fresh_launch_prepare")
                     }
                     
@@ -3994,9 +4011,9 @@ class MirrorForegroundService : Service() {
                 // which locks display focus and causes a perpetual touch injection rejection loop.
                 val isAlreadyActiveApp = cleanPkg == currentApp.substringBefore('/')
                 val isEncoderActive = if (currentCodecMode == "mjpeg") jpegEncoder != null else videoEncoder != null
-                if (forceTaskRealign && isAlreadyActiveApp && isEncoderActive && !needsFreshLaunchPreparation) {
+                if (forceTaskRealign && isAlreadyActiveApp && isEncoderActive && !effectiveNeedsFreshLaunchPreparation) {
                     Log.w(TAG, "[$name Pipeline] Realignment requested for active app $cleanPkg. Bypassing native cold start to prevent WMS focus transition lock.")
-                    FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision realignBypass=true pkg=$cleanPkg targetDisplayId=$targetDisplayId freshPrep=$needsFreshLaunchPreparation")
+                    FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision realignBypass=true pkg=$cleanPkg targetDisplayId=$targetDisplayId freshPrep=$effectiveNeedsFreshLaunchPreparation")
                     scheduleDisplayRoutingDiagnostics(name, service, cleanPkg, targetDisplayId, "postlaunch", "realign_bypass", displayId)
                     executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
                     currentApp = packageOrComponent
@@ -4055,10 +4072,10 @@ class MirrorForegroundService : Service() {
                 // Force an immediate graphics wakeup sequence and request encoder keyframe for Cold-Start apps to prevent early stream corruption.
                 if (!isWarmStart || forceColdStart) {
                     markServiceMutation("launch_component_cold_start")
-                    FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision coldStartPath=true pkg=$cleanPkg targetDisplayId=$targetDisplayId freshPrep=$needsFreshLaunchPreparation forceColdStart=$forceColdStart")
+                    FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision coldStartPath=true pkg=$cleanPkg targetDisplayId=$targetDisplayId freshPrep=$effectiveNeedsFreshLaunchPreparation forceColdStart=$forceColdStart")
                     executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
                     markServiceMutation("launch_component_keyframe")
-                    mirrorServer?.onKeyframeRequest(name, if (needsFreshLaunchPreparation) "fresh_launch_prepare" else "launch_component")
+                    mirrorServer?.onKeyframeRequest(name, if (effectiveNeedsFreshLaunchPreparation) "fresh_launch_prepare" else "launch_component")
                 }
                 
                 // Trigger the 4-second frame-based watchdog for graceful recovery on cold start layout transition

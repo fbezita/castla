@@ -428,6 +428,9 @@
         }
         lastInstanceId = nextId;
       }
+      if (msg.type === "requestFrontendDebugDump") {
+        triggerDump(runtime, String((msg as any).reason ?? "native_share_logs"));
+      }
       if (msg.type === "ime" && msg.op === "androidFocusChanged") {
         const incomingSessionId = Number((msg as any).sessionId ?? 0);
         const active = (msg as any).focused === true;

@@ -5,6 +5,7 @@
   import { compositorStore, setLanguage } from "../stores/compositorStore";
   import { t } from "../lib/i18n";
   import type { PaneId } from "../protocol";
+  import { debugLog } from "../utils/debugLogger";
   import {
     OVERLAY_UI_SCALE_MAX,
     OVERLAY_UI_SCALE_MIN,
@@ -347,6 +348,54 @@
     }
   }
 
+  function emitVerboseLaunchDiag(
+    message: string,
+    data: Record<string, unknown>,
+  ) {
+    if (!(window as Window & { __CASTLA_VERBOSE_DIAGNOSTICS__?: boolean }).__CASTLA_VERBOSE_DIAGNOSTICS__) {
+      return;
+    }
+    debugLog(`[LAUNCH_SM] ${message}`, data);
+    runtime?.control?.sendFrontendDiag?.("LAUNCH_SM", message, data);
+  }
+
+  function buildLaunchSnapshot(seqId: number) {
+    const state = get(compositorStore);
+    const primary = state.viewports.get("primary");
+    const secondary = state.viewports.get("secondary");
+    return {
+      seqId,
+      launchState: state.launchSequence.state,
+      degradedReason: state.launchSequence.degradedReason ?? "",
+      layoutMode: state.layoutMode,
+      activePrimaryApp: state.activePrimaryApp,
+      activeSecondaryApp: state.activeSecondaryApp,
+      sessionEpoch: runtime.currentSessionEpoch(),
+      appLaunchSequence: runtime.currentAppLaunchSequence(),
+      controlBuffered: runtime.hasPendingBufferedAmount(),
+      primaryViewport: primary
+        ? {
+            committed: primary.committed,
+            generation: primary.generation,
+            visible: primary.visible,
+            width: primary.width,
+            height: primary.height,
+            firstFrameReady: runtime.generations.isFirstFrameReady("primary"),
+          }
+        : null,
+      secondaryViewport: secondary
+        ? {
+            committed: secondary.committed,
+            generation: secondary.generation,
+            visible: secondary.visible,
+            width: secondary.width,
+            height: secondary.height,
+            firstFrameReady: runtime.generations.isFirstFrameReady("secondary"),
+          }
+        : null,
+    };
+  }
+
   function setLaunchState(
     seqId: number,
     state: typeof $compositorStore.launchSequence.state,
@@ -356,6 +405,13 @@
     compositorStore.update((curr) => {
       if (curr.launchSequence.id !== seqId) return curr;
       console.info(`[LAUNCH_SM] seq=${seqId} state=${state} primary=${curr.launchSequence.primaryPkg} secondary=${curr.launchSequence.secondaryPkg || ""} degradedReason=${degradedReason || ""}`);
+      emitVerboseLaunchDiag("state", {
+        seqId,
+        state,
+        primaryPkg: curr.launchSequence.primaryPkg,
+        secondaryPkg: curr.launchSequence.secondaryPkg || "",
+        degradedReason: degradedReason || "",
+      });
       return {
         ...curr,
         launchSequence: {
@@ -442,13 +498,18 @@
     hasSecondary: boolean,
     primaryStartGen: number,
     secondaryStartGen: number,
-    timeoutMs = 8000
+    timeoutMs = 5000
   ): Promise<void> {
     return new Promise((resolve, reject) => {
       let primarySawRecommit = false;
       let secondarySawRecommit = false;
-      const unsub = compositorStore.subscribe((state) => {
-        if (isStale(seqId)) { unsub(); reject(new StaleLaunchSequenceError()); return; }
+      let primaryMetadataReady = false;
+      let secondaryMetadataReady = !hasSecondary;
+      let cleanup = () => {};
+
+      const tryResolve = () => {
+        const state = get(compositorStore);
+        if (isStale(seqId)) { cleanup(); reject(new StaleLaunchSequenceError()); return; }
 
         const primary = state.viewports.get("primary");
         const secondary = state.viewports.get("secondary");
@@ -461,23 +522,158 @@
         }
 
         const primaryReady = primary
-          ? (primary.committed && (primary.generation > primaryStartGen || primarySawRecommit))
+          ? (
+              (primary.committed && (primary.generation > primaryStartGen || primarySawRecommit)) ||
+              primaryMetadataReady
+            )
           : true;
         const secondaryReady = hasSecondary && secondary
-          ? (secondary.committed && (secondary.generation > secondaryStartGen || secondarySawRecommit))
+          ? (
+              (secondary.committed && (secondary.generation > secondaryStartGen || secondarySawRecommit)) ||
+              secondaryMetadataReady
+            )
           : true;
 
         if (primaryReady && secondaryReady) {
-          unsub();
+          cleanup();
           resolve();
         }
+      };
+
+      const unsub = compositorStore.subscribe(() => {
+        tryResolve();
+      });
+      const controlUnsub = runtime.control.onMessage((message) => {
+        if (isStale(seqId)) {
+          cleanup();
+          reject(new StaleLaunchSequenceError());
+          return;
+        }
+        if (message.type !== "streamMetadata") return;
+        if (message.sessionId === "primary" && message.firstFrameReady && message.generation >= primaryStartGen) {
+          primaryMetadataReady = true;
+        }
+        if (
+          hasSecondary &&
+          message.sessionId === "secondary" &&
+          message.firstFrameReady &&
+          message.generation >= secondaryStartGen
+        ) {
+          secondaryMetadataReady = true;
+        }
+        tryResolve();
       });
 
-      setTimeout(() => {
+      cleanup = () => {
         unsub();
+        controlUnsub();
+      };
+
+      setTimeout(() => {
+        cleanup();
         reject(new Error("stream_timeout"));
       }, timeoutMs);
     });
+  }
+
+  async function retryAfterStreamTimeout(
+    seqId: number,
+    request: {
+      primaryPkg: string;
+      secondaryPkg?: string;
+      layoutMode: "single" | "split" | "popup";
+    },
+  ): Promise<boolean> {
+    emitVerboseLaunchDiag("stream_recovery_begin", {
+      seqId,
+      primaryPkg: request.primaryPkg,
+      secondaryPkg: request.secondaryPkg ?? "",
+      layoutMode: request.layoutMode,
+      snapshot: buildLaunchSnapshot(seqId),
+    });
+
+    compositorStore.update((state) => {
+      if (state.launchSequence.id !== seqId) return state;
+      const viewports = new Map(state.viewports);
+      const primary = viewports.get("primary");
+      const secondary = viewports.get("secondary");
+      if (primary) {
+        viewports.set("primary", { ...primary, committed: false });
+      }
+      if (secondary && request.secondaryPkg) {
+        viewports.set("secondary", { ...secondary, committed: false });
+      }
+      return { ...state, viewports };
+    });
+
+    const retryPrimaryStartGen = get(compositorStore).viewports.get("primary")?.generation ?? 0;
+    const retrySecondaryStartGen = get(compositorStore).viewports.get("secondary")?.generation ?? 0;
+
+    setLaunchState(seqId, "LAUNCHING_PRIMARY");
+    const primaryLaunchAckPromise = runtime.isAckSupported()
+      ? waitForLaunchAck(seqId, "primary")
+      : null;
+    runtime.launchApp(request.primaryPkg, "primary", undefined, false, seqId);
+
+    assertCurrent(seqId);
+    setLaunchState(seqId, "PRIMARY_LAUNCH_SENT");
+
+    if (primaryLaunchAckPromise) {
+      await primaryLaunchAckPromise;
+      assertCurrent(seqId);
+      setLaunchState(seqId, "PRIMARY_LAUNCH_ACKED");
+
+      await waitForSessionReady(seqId, "primary");
+      assertCurrent(seqId);
+      setLaunchState(seqId, "PRIMARY_SESSION_READY");
+    }
+
+    if (request.secondaryPkg) {
+      setLaunchState(seqId, "LAUNCHING_SECONDARY");
+      const secondaryApp = apps.find((app) => app.packageName === request.secondaryPkg);
+      const secondaryLaunchAckPromise = runtime.isAckSupported()
+        ? waitForLaunchAck(seqId, "secondary")
+        : null;
+      runtime.launchApp(
+        request.secondaryPkg,
+        "secondary",
+        secondaryApp?.componentName,
+        secondaryApp?.category === "VIDEO" || secondaryApp?.isWeb === true,
+        seqId
+      );
+
+      assertCurrent(seqId);
+      setLaunchState(seqId, "SECONDARY_LAUNCH_SENT");
+
+      if (secondaryLaunchAckPromise) {
+        await secondaryLaunchAckPromise;
+        assertCurrent(seqId);
+        setLaunchState(seqId, "SECONDARY_LAUNCH_ACKED");
+
+        await waitForSessionReady(seqId, "secondary");
+        assertCurrent(seqId);
+        setLaunchState(seqId, "SECONDARY_SESSION_READY");
+      }
+    }
+
+    setLaunchState(seqId, "STREAM_COMMITTING");
+    await waitForStreamsToCommit(
+      seqId,
+      Boolean(request.secondaryPkg),
+      retryPrimaryStartGen,
+      retrySecondaryStartGen
+    );
+
+    emitVerboseLaunchDiag("stream_recovery_success", {
+      seqId,
+      primaryPkg: request.primaryPkg,
+      secondaryPkg: request.secondaryPkg ?? "",
+      retryPrimaryStartGen,
+      retrySecondaryStartGen,
+      snapshot: buildLaunchSnapshot(seqId),
+    });
+
+    return true;
   }
 
   // Single orchestrator function to handle end-to-end launch sequence deterministically
@@ -496,6 +692,14 @@
     const secondaryStartGen = secViewport ? secViewport.generation : 0;
     
     console.info(`[LAUNCH_SM] seq=${seqId} state=LAYOUT_ALIGNING primary=${request.primaryPkg} secondary=${request.secondaryPkg ?? ""} layout=${request.layoutMode}`);
+    emitVerboseLaunchDiag("sequence_start", {
+      seqId,
+      primaryPkg: request.primaryPkg,
+      secondaryPkg: request.secondaryPkg ?? "",
+      layoutMode: request.layoutMode,
+      primaryStartGen,
+      secondaryStartGen,
+    });
     
     let degradedReasonVal: 'launch_failure' | 'session_timeout' | 'stream_timeout' | '' = '';
     const startedAt = Date.now();
@@ -547,6 +751,10 @@
     await tick();
 
     try {
+      const layoutAckPromise = runtime.isAckSupported()
+        ? waitForLayoutAck(seqId, request.layoutMode)
+        : null;
+
       // 2. Dispatch Layout and Await local socket flushing completion
       const currentStore = get(compositorStore);
       if (viewportHost) {
@@ -558,12 +766,17 @@
       assertCurrent(seqId);
       setLaunchState(seqId, "LAYOUT_SENT");
       
-      if (runtime.isAckSupported()) {
+      if (layoutAckPromise) {
         try {
-          await waitForLayoutAck(seqId, request.layoutMode);
+          await layoutAckPromise;
         } catch (err) {
           if (err instanceof StaleLaunchSequenceError) throw err;
           console.warn(`[LAUNCH_SM_LAYOUT_TIMEOUT] seq=${seqId} Layout ACK failed or timed out, proceeding degraded`, err);
+          emitVerboseLaunchDiag("layout_timeout", {
+            seqId,
+            layoutMode: request.layoutMode,
+            error: err instanceof Error ? err.message : String(err),
+          });
           degradedReasonVal = "layout_timeout";
         }
       }
@@ -575,17 +788,25 @@
       // 4. Launch Primary App & Await ACK
       setLaunchState(seqId, "LAUNCHING_PRIMARY");
       console.info(`[APP_LAUNCH] seq=${seqId} pane=primary package=${request.primaryPkg}`);
+      const primaryLaunchAckPromise = runtime.isAckSupported()
+        ? waitForLaunchAck(seqId, "primary")
+        : null;
       runtime.launchApp(request.primaryPkg, "primary", undefined, false, seqId);
       
       assertCurrent(seqId);
       setLaunchState(seqId, "PRIMARY_LAUNCH_SENT");
       
-      if (runtime.isAckSupported()) {
+      if (primaryLaunchAckPromise) {
         try {
-          await waitForLaunchAck(seqId, "primary");
+          await primaryLaunchAckPromise;
         } catch (err) {
           if (err instanceof StaleLaunchSequenceError) throw err;
           console.warn(`[LAUNCH_SM_PRIMARY_TIMEOUT] seq=${seqId} Primary Launch ACK failed, continuing degraded`, err);
+          emitVerboseLaunchDiag("primary_launch_timeout", {
+            seqId,
+            primaryPkg: request.primaryPkg,
+            error: err instanceof Error ? err.message : String(err),
+          });
           degradedReasonVal = "launch_failure";
         }
       }
@@ -601,6 +822,11 @@
         } catch (err) {
           if (err instanceof StaleLaunchSequenceError) throw err;
           console.warn(`[LAUNCH_SM_SESSION_TIMEOUT] seq=${seqId} Primary Session Ready failed, continuing degraded`, err);
+          emitVerboseLaunchDiag("primary_session_timeout", {
+            seqId,
+            primaryPkg: request.primaryPkg,
+            error: err instanceof Error ? err.message : String(err),
+          });
           degradedReasonVal = "session_timeout";
         }
       }
@@ -618,6 +844,9 @@
           console.info(`[APP_LAUNCH] seq=${seqId} pane=secondary package=${request.secondaryPkg}`);
           
           const secondaryApp = apps.find((app) => app.packageName === request.secondaryPkg);
+          const secondaryLaunchAckPromise = runtime.isAckSupported()
+            ? waitForLaunchAck(seqId, "secondary")
+            : null;
           runtime.launchApp(
             request.secondaryPkg,
             "secondary",
@@ -629,8 +858,8 @@
           assertCurrent(seqId);
           setLaunchState(seqId, "SECONDARY_LAUNCH_SENT");
           
-          if (runtime.isAckSupported()) {
-            await waitForLaunchAck(seqId, "secondary");
+          if (secondaryLaunchAckPromise) {
+            await secondaryLaunchAckPromise;
             assertCurrent(seqId);
             setLaunchState(seqId, "SECONDARY_LAUNCH_ACKED");
             
@@ -641,6 +870,11 @@
         } catch (err) {
           if (err instanceof StaleLaunchSequenceError) throw err;
           console.error(`[LAUNCH_SM_SECONDARY_FAIL] seq=${seqId} Secondary pane launch failed, continuing degraded`, err);
+          emitVerboseLaunchDiag("secondary_launch_failure", {
+            seqId,
+            secondaryPkg: request.secondaryPkg ?? "",
+            error: err instanceof Error ? err.message : String(err),
+          });
           secondaryLaunchFailed = true;
           degradedReasonVal = err.message.includes("session_timeout") ? "session_timeout" : "launch_failure";
         }
@@ -648,6 +882,13 @@
 
       // 7. Await Video Frame Commits (Gen-strict Promise Awaiter)
       setLaunchState(seqId, "STREAM_COMMITTING");
+      emitVerboseLaunchDiag("stream_wait_begin", {
+        seqId,
+        hasSecondary: Boolean(request.secondaryPkg) && !secondaryLaunchFailed,
+        primaryStartGen,
+        secondaryStartGen,
+        snapshot: buildLaunchSnapshot(seqId),
+      });
       try {
         await waitForStreamsToCommit(
           seqId,
@@ -658,8 +899,26 @@
       } catch (err) {
         if (err instanceof StaleLaunchSequenceError) throw err;
         console.warn(`[STREAM_COMMIT_TIMEOUT] seq=${seqId} Streams failed to commit in time, falling back to degraded`);
-        secondaryLaunchFailed = true;
-        degradedReasonVal = "stream_timeout";
+        emitVerboseLaunchDiag("stream_timeout", {
+          seqId,
+          hasSecondary: Boolean(request.secondaryPkg) && !secondaryLaunchFailed,
+          primaryStartGen,
+          secondaryStartGen,
+          snapshot: buildLaunchSnapshot(seqId),
+        });
+        try {
+          await retryAfterStreamTimeout(seqId, request);
+        } catch (retryErr) {
+          if (retryErr instanceof StaleLaunchSequenceError) throw retryErr;
+          console.warn(`[STREAM_COMMIT_RECOVERY_FAIL] seq=${seqId} Automatic relaunch after stream timeout failed`, retryErr);
+          emitVerboseLaunchDiag("stream_recovery_failed", {
+            seqId,
+            error: retryErr instanceof Error ? retryErr.message : String(retryErr),
+            snapshot: buildLaunchSnapshot(seqId),
+          });
+          secondaryLaunchFailed = true;
+          degradedReasonVal = "stream_timeout";
+        }
       }
       streamCommitMs = Date.now() - startedAt;
       
@@ -692,15 +951,30 @@
         };
       });
       console.info(`[LAUNCH_SM_SUCCESS] seq=${seqId} state=${nextState} (E2E ACK sequence completed) degradedReason=${degradedReasonVal} totalTime=${totalLaunchMs}ms`);
+      emitVerboseLaunchDiag("sequence_complete", {
+        seqId,
+        state: nextState,
+        degradedReason: degradedReasonVal,
+        totalLaunchMs,
+        metrics,
+        snapshot: buildLaunchSnapshot(seqId),
+      });
       
     } catch (err) {
       if (err instanceof StaleLaunchSequenceError) {
         console.warn(`[LAUNCH_SM_ABORT] seq=${seqId} Sequence was aborted by a newer launch`);
+        emitVerboseLaunchDiag("sequence_abort", { seqId });
         return;
       }
       
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error(`[LAUNCH_SM_FAIL] seq=${seqId} state=FAILED degradedReason=${degradedReasonVal} error=${errorMsg}`);
+      emitVerboseLaunchDiag("sequence_fail", {
+        seqId,
+        degradedReason: degradedReasonVal,
+        error: errorMsg,
+        snapshot: buildLaunchSnapshot(seqId),
+      });
       setLaunchState(seqId, "FAILED", errorMsg, degradedReasonVal);
     }
   }

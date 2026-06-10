@@ -754,3 +754,64 @@ stateDiagram-v2
   - `blackout_activity_ready`가 늦거나 빠지면 `BLACKOUT_PENDING`에서 `WAKE_REVIVE -> self_induced SCREEN_ON -> POWER_BURST reassert` 절충 경로를 탑니다.
   - 현재 목표는 “완전 무점등”이 아니라, **패널 ON 시간을 짧게 잘라 발열을 줄이면서 미러링 first frame을 살리는 것**입니다.
 
+---
+
+## 20. 🏆 [NEW] 2026-06-10 차량 재현 Launch/Barrier/Stream 진단 강화 및 same-app 재실행 복구
+
+2026년 6월 10일, 차량에서 재현되던 `barrierText` 장기 정체, 스트림 자동 복구 지연, 그리고 앱 종료 후 같은 앱을 다시 실행할 때 미러링이 실패하는 문제를 로그 기반으로 추적해 프론트엔드/백엔드 양쪽을 함께 손봤습니다.
+
+### 20.1. 로그 공유 경로에 프론트엔드 진단 덤프 편입
+- **문제 현상**: 미러링 앱의 로그 공유 시 네이티브 로그만으로는 `barrierText` 체류, 프론트 launch state, stream commit 관찰 실패 여부를 구분하기 어려웠습니다.
+- **해결 메커니즘**:
+  - `MirrorServer`가 프론트엔드에 `requestFrontendDebugDump` 제어 메시지를 보낼 수 있게 추가했습니다.
+  - `SettingsScreen.shareLogs()` 호출 시 프론트엔드 dump를 먼저 요청한 뒤 로그를 수집하도록 바꿨습니다.
+  - `App.svelte`는 해당 제어 메시지를 받으면 `debugDump`를 즉시 업로드하도록 연결했습니다.
+- **효과**: 이후 실차/PC 재현 로그에는 네이티브 로그뿐 아니라 프론트 launch FSM, barrier, recovery 경로가 함께 남아 원인 분리가 훨씬 쉬워졌습니다.
+
+### 20.2. verbose 전용 Launch/Barrier 상세 진단 로그 정비
+- **문제 현상**: `barrierText`가 오래 유지되는 동안 실제로는 layout 단계인지, launch/session 단계인지, stream commit 단계인지 구분이 어려웠습니다.
+- **해결 메커니즘**:
+  - `AppLauncher.svelte`에 `LAUNCH_SM` verbose 로그를 추가해 `sequence_start`, 상태 전이, `layout_timeout`, `primary_session_timeout`, `stream_timeout`, `stream_recovery_begin/success/failed`, `sequence_complete/fail`를 기록하도록 했습니다.
+  - `ViewportHost.svelte`에 `COMPOSITOR_BARRIER` verbose 로그를 추가해 `freeze`, `release`, `safety_unfreeze_timeout`을 기록하도록 했습니다.
+  - `stream_wait_begin`, `stream_timeout`, `sequence_complete/fail` 시점에는 현재 `launchState`, `sessionEpoch`, `appLaunchSequence`, `controlBuffered`, viewport별 `committed/generation/firstFrameReady` 스냅샷까지 함께 남기도록 보강했습니다.
+- **효과**: 다음 로그 한 번만으로도 “프레임이 실제로 안 온 것인지”, “프론트가 관찰을 놓친 것인지”, “자동 복구가 어느 분기에서 실패했는지”를 판단할 수 있는 수준까지 진단 해상도가 올라갔습니다.
+
+### 20.3. 첫 번째 케이스: `layout_ack` 레이스 제거
+- **문제 현상**: 차량에서 미러링 시작 직후 특정 사이트/앱 진입 시 `barrierText`가 길게 유지되다가 약 5초 후에야 성공하는 패턴이 있었습니다.
+- **로그 결론**: `mirror (2).log` 첫 번째 케이스는 `stream_timeout`이 아니라 `layout_ack_timeout`이었고, layout update 전송 후 ACK 대기자를 나중에 붙이면서 ACK를 놓치는 프론트 race로 해석됐습니다.
+- **해결 메커니즘**:
+  - `AppLauncher.startLaunchSequence()`에서 `waitForLayoutAck()`를 layout 전송보다 먼저 생성하도록 순서를 바꿨습니다.
+  - 같은 방식으로 primary/secondary `waitForLaunchAck()`도 실제 launch command 전송 전에 등록하도록 정리했습니다.
+- **효과**: `LAYOUT_SENT -> 5초 정체` 타입의 첫 실행 지연을 제거했고, 이후 로그에서는 해당 패턴이 재발하지 않았습니다.
+
+### 20.4. 두 번째 케이스: stream commit 타이밍 미스 완화 및 자동 복구
+- **문제 현상**: `barrierText` 이후 미러링이 붙지 않다가 사용자가 앱을 한 번 더 눌렀을 때는 바로 살아나는 패턴이 있었습니다.
+- **로그 결론**: `mirror (2).log` 두 번째 케이스는 layout은 정상 통과했고 `STREAM_COMMITTING` 단계에서 `stream_timeout`이 발생했습니다. 수동 두 번째 탭은 `fresh_launch_prepare`를 다시 태우면서 빠르게 성공했습니다.
+- **해결 메커니즘**:
+  - `waitForStreamsToCommit()` 타임아웃을 `8초 -> 5초`로 줄여 체감 지연을 완화했습니다.
+  - 첫 `stream_timeout` 발생 시 수동 두 번째 탭과 같은 효과를 내는 자동 relaunch 1회를 추가했습니다.
+  - `committed/generation`뿐 아니라 새 `streamMetadata.firstFrameReady`도 성공 신호로 인정하도록 보강해, store 반영 한 박자 지연 때문에 timeout 나는 race를 줄였습니다.
+- **효과**: 완전 실패 대신 더 빠르게 자동 복구를 시도하며, 프레임 준비 신호를 직접 관찰해 stream commit 판정이 한층 견고해졌습니다.
+
+### 20.5. 세 번째 케이스: 앱 종료 후 same-app 재실행 stale 상태 복구
+- **문제 현상**: 미러링 중이던 앱을 사용자가 완전히 종료한 뒤 같은 앱을 다시 실행하면 미러링이 실패하지만, 다른 앱을 한 번 거친 뒤 다시 실행하면 곧바로 성공하는 패턴이 반복 재현됐습니다.
+- **로그 결론**:
+  - 실패 구간은 공통적으로 `freshPrep=false`, `realignBypass=true`, `firstFrameReady=false`, 최종 `stream_timeout`으로 끝났습니다.
+  - 즉 파이프라인은 “같은 앱이 아직 살아 있다”고 오판해 fresh launch preparation 없이 재정렬만 반복했고, 실제로는 task가 이미 종료되어 있어 새 first frame이 다시 올라오지 못한 상태였습니다.
+- **해결 메커니즘**:
+  - `LaunchRecoveryPolicy` 유틸을 추가해 “same-app 재실행인데 실제 task 수는 0개이고, recovery/realign launch를 시도하는 경우”를 별도 stale 상태로 판정하도록 만들었습니다.
+  - 해당 조건이면 `requiresFreshLaunchPreparation`을 강제로 다시 켜고 `realignBypass` 대신 `fresh_launch_prepare` 경로를 태우도록 `MirrorForegroundService.launchComponent()` 분기를 조정했습니다.
+  - 이 판정은 JUnit 테스트(`LaunchRecoveryPolicyTest`)로 고정했습니다.
+- **효과**: 앱이 사용자가 직접 종료된 뒤에도 stale active-app 상태에 갇히지 않고, cold-ish recovery path로 빠르게 복귀할 수 있는 기반을 마련했습니다.
+
+### 20.6. 검증 결과와 해석
+- **프론트엔드 검증**:
+  - `pnpm run build` 통과
+  - `launchFsm.test.ts`에 layout race, same-generation recommit, automatic relaunch, `firstFrameReady` 선반영 시나리오를 추가
+- **안드로이드 검증**:
+  - `./gradlew :app:compileDebugKotlin` 통과
+  - `./gradlew :app:testDebugUnitTest --tests com.castla.mirror.service.LaunchRecoveryPolicyTest` 통과
+- **로그 해석 결론**:
+  - 이전 1번(`layout_ack`) 문제는 `mirror (3).log`에서 재발 흔적이 없었습니다.
+  - 이전 2번(`stream_timeout` after layout success) 문제도 이번 로그의 주범이라기보다, 새로 드러난 stale same-app relaunch 문제가 압도적으로 핵심이었습니다.
+  - 즉 2026-06-10 시점의 패치는 “기존 1/2번 문제 보강 + 3번 문제 신규 해결”을 한 묶음으로 마무리한 작업입니다.
