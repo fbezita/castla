@@ -84,6 +84,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
 
 @OptIn(
     kotlinx.coroutines.ExperimentalCoroutinesApi::class,
@@ -153,7 +154,8 @@ class MirrorForegroundService : Service() {
         var instance: MirrorForegroundService? = null
             private set
 
-        private const val VD_KEEP_ALIVE_INTERVAL_MS = 1_000L
+        private const val RECOVERY_ACTION_MIN_INTERVAL_MS = 900L
+        private const val DIAGNOSTICS_BROADCAST_MIN_INTERVAL_MS = 1_000L
     }
 
     inner class LocalBinder : Binder() {
@@ -163,6 +165,8 @@ class MirrorForegroundService : Service() {
     private val binder = LocalBinder()
     @Volatile private var backFallbackLastTriggeredTime = 0L
     private var mirrorServer: MirrorServer? = null
+    private val recentRecoveryActionAtMs = ConcurrentHashMap<Int, Long>()
+    @Volatile private var lastDiagnosticsBroadcastAtMs = 0L
     fun getMirrorServer(): MirrorServer? = mirrorServer
 
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -841,7 +845,7 @@ class MirrorForegroundService : Service() {
                         mainHandler.postDelayed({ if (keyguardManager.isKeyguardLocked) MirrorDiagnostics.log(DiagnosticEvent.KEYGUARD_LOCKED) }, 500)
                     }
                     Intent.ACTION_SCREEN_ON -> onPhoneScreenOn()
-                    Intent.ACTION_USER_PRESENT -> MirrorDiagnostics.log(DiagnosticEvent.KEYGUARD_UNLOCKED)
+                    Intent.ACTION_USER_PRESENT -> onUserPresent()
                 }
             }
         }
@@ -1438,13 +1442,32 @@ class MirrorForegroundService : Service() {
         val source = screenOffLoopGuard.classifyScreenOn(android.os.SystemClock.elapsedRealtime())
         logScreenOffLoop("SCREEN_ON", source)
         if (source == ScreenOffLoopGuard.EventSource.SELF_INDUCED) {
-            if (!isBlackoutActivityRunning) {
+            if (screenOffReviveStrategy == ScreenOffReviveStrategy.BLACKOUT_KEEP_ALIVE) {
+                if (!isBlackoutActivityRunning) {
+                    startScreenOffBlackout("self_induced_screen_on")
+                }
+                reassertPhysicalPanelOff("self_induced_screen_on")
+            } else if (!isBlackoutActivityRunning) {
                 reassertPhysicalPanelOff("self_induced_screen_on")
             }
             return
         }
 
         handleFsmTransition(ScreenOffEvent.SCREEN_ON)
+    }
+
+    private fun onUserPresent() {
+        MirrorDiagnostics.log(DiagnosticEvent.KEYGUARD_UNLOCKED)
+        logScreenState("onUserPresent() called")
+
+        if (!screenOffPolicy.isScreenOff) return
+        if (!isPhysicalScreenReallyOn()) {
+            logScreenOffInfo("[SCREEN_OFF] [USER_RESTORE] event=USER_PRESENT ignored=physical_display_not_on")
+            return
+        }
+
+        logScreenOffInfo("[SCREEN_OFF] [USER_RESTORE] event=USER_PRESENT phase=request reason=keyguard_unlocked")
+        handleFsmTransition(ScreenOffEvent.USER_PRESENT)
     }
 
     private fun startVdKeepAlive() {
@@ -1458,7 +1481,12 @@ class MirrorForegroundService : Service() {
                         pipeline.controller.keepDisplayAwake()
                     }
                 }
-                kotlinx.coroutines.delay(VD_KEEP_ALIVE_INTERVAL_MS)
+                kotlinx.coroutines.delay(
+                    ScreenOffRecoveryPlanner.vdKeepAliveIntervalMs(
+                        isScreenOff = screenOffPolicy.isScreenOff,
+                        blackoutActivityReady = blackoutActivityReady
+                    )
+                )
             }
         }
         startAppExitMonitor()
@@ -1520,21 +1548,24 @@ class MirrorForegroundService : Service() {
         stopAppExitMonitor()
         appExitMonitorJob = serviceScope.launch {
             while (true) {
-                kotlinx.coroutines.delay(2000L)
+                kotlinx.coroutines.delay(
+                    ScreenOffRecoveryPlanner.appExitMonitorIntervalMs(screenOffPolicy.isScreenOff)
+                )
                 pipelines.values.forEach { pipeline ->
                     val displayId = pipeline.displayId
                     if (displayId < 0) return@forEach
+                    if (pipeline.currentApp.isBlank() ||
+                        pipeline.currentApp == "HOME" ||
+                        pipeline.currentApp == "com.android.settings") return@forEach
                     val service = pipeline.controller.getPrivilegedService() ?: return@forEach
-                    if (pipeline.currentApp.isNotBlank() && pipeline.currentApp != "HOME" && pipeline.currentApp != "com.android.settings") {
-                        try {
-                            val activeTasks = service.getRunningTasksOnDisplay(displayId) ?: emptyList()
-                            if (activeTasks.firstOrNull()?.contains("VirtualDisplayHomeActivity") == true) {
-                                Log.i(TAG, "[ExitMonitor] Home activity detected at the top of pane (${pipeline.name}). BroadCasting APP_STREAM_STOPPED.")
-                                pipeline.currentApp = "HOME"
-                                mirrorServer?.broadcastControlMessage("{\"type\":\"APP_STREAM_STOPPED\", \"pane\":\"${pipeline.name}\"}")
-                            }
-                        } catch (_: Exception) {}
-                    }
+                    try {
+                        val activeTasks = service.getRunningTasksOnDisplay(displayId) ?: emptyList()
+                        if (activeTasks.firstOrNull()?.contains("VirtualDisplayHomeActivity") == true) {
+                            Log.i(TAG, "[ExitMonitor] Home activity detected at the top of pane (${pipeline.name}). BroadCasting APP_STREAM_STOPPED.")
+                            pipeline.currentApp = "HOME"
+                            mirrorServer?.broadcastControlMessage("{\"type\":\"APP_STREAM_STOPPED\", \"pane\":\"${pipeline.name}\"}")
+                        }
+                    } catch (_: Exception) {}
                 }
             }
         }
@@ -1552,8 +1583,10 @@ class MirrorForegroundService : Service() {
 
     fun onBlackoutActivityReady() {
         mainHandler.post {
+            blackoutActivityReady = true
             logScreenOffInfo("[SCREEN_OFF] [BLACKOUT] blackout_activity_ready")
             handleFsmTransition(ScreenOffEvent.ON_BLACKOUT_READY)
+            requestScreenOffReviveBurst("blackout_ready")
         }
     }
 
@@ -1601,7 +1634,8 @@ class MirrorForegroundService : Service() {
     }
 
     private fun reassertPhysicalPanelOff(reason: String) {
-        if (screenOffPolicy.state != ScreenOffState.BLACKOUT_ACTIVE || screenOffReviveStrategy != ScreenOffReviveStrategy.PANEL_OFF) return
+        if (screenOffPolicy.state != ScreenOffState.BLACKOUT_ACTIVE &&
+            screenOffPolicy.state != ScreenOffState.BLACKOUT_PENDING) return
         val controller = pipelines.values.firstOrNull()?.controller ?: return
         serviceScope.launch {
             val suppressReentryUntil = screenOffLoopGuard.markPowerBurst(android.os.SystemClock.elapsedRealtime())
@@ -1617,6 +1651,10 @@ class MirrorForegroundService : Service() {
 
     private fun requestScreenOffReviveBurst(reason: String) {
         if (screenOffReviveStrategy != ScreenOffReviveStrategy.BLACKOUT_KEEP_ALIVE) return
+        if (!ScreenOffRecoveryPlanner.shouldPulseVirtualDisplayWake(screenOffReviveStrategy)) {
+            logScreenOffInfo("[SCREEN_OFF] [REVIVE] reason=$reason skipped=strategy")
+            return
+        }
         if (screenOffReviveBurstInFlight) {
             logScreenOffInfo("[SCREEN_OFF] [REVIVE] reason=$reason skipped=in_flight")
             return
@@ -1626,11 +1664,10 @@ class MirrorForegroundService : Service() {
         screenOffReviveBurstJob = serviceScope.launch {
             try {
                 val startMs = android.os.SystemClock.elapsedRealtime()
-                var elapsed = 0L
-                while (!blackoutActivityReady && elapsed < 1500L) {
-                    kotlinx.coroutines.delay(50L)
-                    elapsed = android.os.SystemClock.elapsedRealtime() - startMs
+                if (reason == "fsm_blackout_pending") {
+                    kotlinx.coroutines.delay(250L)
                 }
+                val elapsed = android.os.SystemClock.elapsedRealtime() - startMs
                 logScreenOffInfo("[SCREEN_OFF] [REVIVE] reason=$reason waitCompleteReady=$blackoutActivityReady elapsed=${elapsed}ms")
 
                 repeat(1) { attempt ->
@@ -1709,10 +1746,17 @@ class MirrorForegroundService : Service() {
         reason: String,
     ) {
         if (service == null || displayId < 0) return
+        if (shouldThrottleRecoveryAction(displayId, reason)) return
         try {
-            screenOffLoopGuard.markKeepAlive(android.os.SystemClock.elapsedRealtime())
-            service.wakeUpDisplay(displayId)
-            logScreenOffInfo("[SCREEN_OFF] [WAKE_REVIVE] reason=$reason displayId=$displayId direct=true")
+            if (ScreenOffRecoveryPlanner.shouldUseDirectWakeForRevive(screenOffPolicy.isScreenOff)) {
+                screenOffLoopGuard.markKeepAlive(android.os.SystemClock.elapsedRealtime())
+                service.wakeUpDisplay(displayId)
+                logScreenOffInfo("[SCREEN_OFF] [WAKE_REVIVE] reason=$reason displayId=$displayId direct=true")
+            } else {
+                screenOffLoopGuard.markKeepAlive(android.os.SystemClock.elapsedRealtime())
+                service.keepVirtualDisplayAlive(displayId)
+                logScreenOffInfo("[SCREEN_OFF] [VD_KEEPALIVE] reason=$reason displayId=$displayId source=revive")
+            }
         } catch (e: Exception) {
             Log.w(TAG, "pulseWakeDisplayForScreenOffRevive failed reason=$reason displayId=$displayId", e)
         }
@@ -1724,8 +1768,10 @@ class MirrorForegroundService : Service() {
         reason: String,
     ) {
         if (service == null || displayId < 0) return
+        if (shouldThrottleRecoveryAction(displayId, reason)) return
         try {
             if (screenOffPolicy.isScreenOff) {
+                screenOffLoopGuard.markKeepAlive(android.os.SystemClock.elapsedRealtime())
                 service.keepVirtualDisplayAlive(displayId)
                 logScreenOffInfo("[SCREEN_OFF] [VD_KEEPALIVE] reason=$reason displayId=$displayId source=recovery")
             } else {
@@ -1734,6 +1780,24 @@ class MirrorForegroundService : Service() {
         } catch (e: Exception) {
             Log.w(TAG, "wakeDisplayForRecovery failed reason=$reason displayId=$displayId", e)
         }
+    }
+
+    private fun shouldThrottleRecoveryAction(displayId: Int, reason: String): Boolean {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val last = recentRecoveryActionAtMs[displayId] ?: 0L
+        if (last > 0L && now - last < RECOVERY_ACTION_MIN_INTERVAL_MS) {
+            logScreenOffInfo("[SCREEN_OFF] [RECOVERY_THROTTLE] reason=$reason displayId=$displayId elapsed=${now - last}ms")
+            return true
+        }
+        recentRecoveryActionAtMs[displayId] = now
+        return false
+    }
+
+    private fun broadcastDiagnosticsDebounced() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastDiagnosticsBroadcastAtMs < DIAGNOSTICS_BROADCAST_MIN_INTERVAL_MS) return
+        lastDiagnosticsBroadcastAtMs = now
+        broadcastDiagnosticsDebounced()
     }
 
     private fun dismissKeyguardForRecovery(
@@ -2087,7 +2151,7 @@ class MirrorForegroundService : Service() {
             }
         } catch (t: Throwable) { Log.e(TAG, "Failed onBrowserConnected", t); markTerminal(TerminalReason.BROWSER_ACTIVATION_FAILED) }
 
-        mirrorServer?.broadcastDiagnostics()
+        broadcastDiagnosticsDebounced()
         broadcastWebDiagnostics("browser_connected")
     }
 
@@ -2175,7 +2239,7 @@ class MirrorForegroundService : Service() {
             broadcastWebDiagnostics("browser_disconnected_async_done")
         }
 
-        mirrorServer?.broadcastDiagnostics()        
+        broadcastDiagnosticsDebounced()        
         broadcastWebDiagnostics("browser_disconnected")
     }
 
@@ -2727,8 +2791,11 @@ class MirrorForegroundService : Service() {
         pipeline.debugFallbackStarts += 1
         pipeline.activeFallbackJob = serviceScope.launch(Dispatchers.IO) {
             // Wait for activity manager to settle down task placement and allow the first graphic frame to render.
-            // Increase stabilization grace period to 5.5s to comfortably accommodate heavy apps like Google Maps on cold start.
-            kotlinx.coroutines.delay(5500L)
+            // Screen-off mirroring gets a longer grace period to avoid expensive rebuild churn while the
+            // panel-off recovery path is still stabilizing.
+            kotlinx.coroutines.delay(
+                ScreenOffRecoveryPlanner.fallbackWatchdogDelayMs(screenOffPolicy.isScreenOff)
+            )
             try {
                 if (pipeline.isTouchInteractionActive()) {
                     return@launch
@@ -3108,7 +3175,7 @@ class MirrorForegroundService : Service() {
                         runBinderSafe { controller.releaseVirtualDisplay() }
                         displayId = -1
                     }
-                    mirrorServer?.broadcastDiagnostics()
+                    broadcastDiagnosticsDebounced()
                 }
             }
         }
@@ -3427,7 +3494,7 @@ class MirrorForegroundService : Service() {
                 }
             }
 
-            mirrorServer?.broadcastDiagnostics()
+            broadcastDiagnosticsDebounced()
         }
 
         fun invalidateVd(reason: String): Long {

@@ -14,6 +14,7 @@ import android.widget.FrameLayout
 class ScreenOffBlackoutActivity : Activity() {
 
     private lateinit var gestureDetector: GestureDetector
+    private var readyNotified = false
 
     companion object {
         const val ACTION_START = "com.castla.mirror.action.SCREEN_OFF_BLACKOUT_START"
@@ -32,6 +33,7 @@ class ScreenOffBlackoutActivity : Activity() {
         })
         applyBlackoutWindow()
         handleIntent(intent)
+        notifyBlackoutReadyOnce()
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -43,6 +45,7 @@ class ScreenOffBlackoutActivity : Activity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleIntent(intent)
+        notifyBlackoutReadyOnce()
     }
 
     private fun handleIntent(intent: Intent?) {
@@ -72,18 +75,23 @@ class ScreenOffBlackoutActivity : Activity() {
             window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED)
         }
         window.addFlags(
-            WindowManager.LayoutParams.FLAG_FULLSCREEN or
-            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            WindowManager.LayoutParams.FLAG_FULLSCREEN
         )
         window.attributes = window.attributes.apply {
             screenBrightness = 0f
         }
     }
 
-    override fun onResume() {
-        super.onResume()
+    private fun notifyBlackoutReadyOnce() {
+        if (readyNotified) return
+        readyNotified = true
         try {
             com.castla.mirror.service.MirrorForegroundService.instance?.onBlackoutActivityReady()
         } catch (_: Exception) {}
+    }
+
+    override fun onResume() {
+        super.onResume()
+        notifyBlackoutReadyOnce()
     }
 }

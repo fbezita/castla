@@ -2,11 +2,13 @@ package com.castla.mirror.policy
 
 class ScreenOffLoopGuard(
     private val suppressWindowMs: Long = DEFAULT_SUPPRESS_WINDOW_MS,
+    private val suppressScreenOnAfterKeepAliveMs: Long = DEFAULT_SUPPRESS_SCREEN_ON_AFTER_KEEP_ALIVE_MS,
     private val suppressBlackoutWindowMs: Long = DEFAULT_SUPPRESS_BLACKOUT_WINDOW_MS,
 ) {
 
     companion object {
         const val DEFAULT_SUPPRESS_WINDOW_MS = 2_500L
+        const val DEFAULT_SUPPRESS_SCREEN_ON_AFTER_KEEP_ALIVE_MS = 900L
         const val DEFAULT_SUPPRESS_BLACKOUT_WINDOW_MS = 800L
     }
 
@@ -37,7 +39,7 @@ class ScreenOffLoopGuard(
     }
 
     fun classifyScreenOn(nowMs: Long): EventSource {
-        val keepAliveValid = lastKeepAliveAtMs > 0L && nowMs - lastKeepAliveAtMs <= suppressWindowMs
+        val keepAliveValid = lastKeepAliveAtMs > 0L && nowMs - lastKeepAliveAtMs <= suppressScreenOnAfterKeepAliveMs
         val blackoutStartValid = lastBlackoutStartedAtMs > 0L && nowMs - lastBlackoutStartedAtMs <= suppressBlackoutWindowMs
         return if (keepAliveValid || blackoutStartValid) {
             EventSource.SELF_INDUCED

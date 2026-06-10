@@ -91,7 +91,6 @@
             android:exported="false"
             android:launchMode="singleTask"
             android:showWhenLocked="true"
-            android:turnScreenOn="true"
             android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
 
         <service

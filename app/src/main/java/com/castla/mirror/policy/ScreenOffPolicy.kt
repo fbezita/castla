@@ -20,6 +20,7 @@ enum class ScreenOffEvent {
     ON_BLACKOUT_READY,
     RESTORE_REQUEST,
     SCREEN_ON,
+    USER_PRESENT,
     RESET
 }
 
@@ -50,12 +51,14 @@ class ScreenOffPolicy {
                 ScreenOffEvent.ON_BLACKOUT_READY -> ScreenOffState.BLACKOUT_ACTIVE
                 ScreenOffEvent.RESTORE_REQUEST -> ScreenOffState.ACTIVE
                 ScreenOffEvent.SCREEN_ON -> ScreenOffState.ACTIVE
+                ScreenOffEvent.USER_PRESENT -> ScreenOffState.ACTIVE
                 ScreenOffEvent.RESET -> ScreenOffState.ACTIVE
                 else -> state
             }
             ScreenOffState.BLACKOUT_ACTIVE -> when (event) {
                 ScreenOffEvent.RESTORE_REQUEST -> ScreenOffState.ACTIVE
                 ScreenOffEvent.SCREEN_ON -> ScreenOffState.ACTIVE
+                ScreenOffEvent.USER_PRESENT -> ScreenOffState.ACTIVE
                 ScreenOffEvent.RESET -> ScreenOffState.ACTIVE
                 else -> state
             }
@@ -73,4 +76,3 @@ class ScreenOffPolicy {
         isPanelOffSupported = true
     }
 }
-

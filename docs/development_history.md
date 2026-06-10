@@ -693,6 +693,64 @@ sequenceDiagram
 - **로그 정책**: 모든 화면 꺼짐 추적 로그에 `[SCREEN_OFF]` 접두사(예: `[SCREEN_OFF] [FSM]`, `[SCREEN_OFF] [USER_RESTORE]`)를 부여하여 일관된 궤적을 확인하도록 규격화했습니다.
 - **옵션화**: 이 정밀 로그들은 CPU 및 디버깅 자원 절약을 위해 설정 앱 내 verbose diagnostics 설정(`verboseDiagnosticsEnabled`)이 활성화되어 있을 때만 선별적으로 출력되도록 게이팅하였습니다.
 
+### 19.6. [SCREEN_OFF] 삼성 홈/런처 경유 시나리오 재검증 및 절충형 저발열 복구안 정립
+- **재현 시나리오 재정의**: 단순히 “미러링 중 화면 끄기”가 아니라, `미러링 시작 -> 홈 버튼으로 런처 복귀 -> 전원 버튼으로 화면 끄기` 경로에서 삼성 기기 재현율이 100%에 가깝다는 사실을 분리 확인했습니다. 이 경로는 기존 앱 화면 체류 시나리오보다 첫 프레임 복구 실패와 자기유발 `SCREEN_ON` 루프가 훨씬 잘 드러났습니다.
+- **블랙아웃 액티비티 오작동 원인 추가 제거**: `ScreenOffBlackoutActivity`의 매니페스트 `android:turnScreenOn="true"`와 런타임 `FLAG_KEEP_SCREEN_ON`이 남아 있어 화면 OFF 직후 자기유발 점등을 만든다는 사실을 확인하고 둘 다 제거했습니다. 또한 `onResume()`만 기다리지 않도록 ready 신호를 `onCreate()`/`onNewIntent()`에서도 1회 전달하게 보강했습니다.
+- **직접 wake 기반 revive 재도입**: 완전히 wake를 막는 접근은 삼성에서 첫 프레임이 끝내 살아나지 않아 실사용에 실패했습니다. 따라서 `WAKE_REVIVE`를 다시 허용하되, 목적을 “완전 패널 OFF”가 아니라 “짧게 깨워 프레임을 복구한 뒤 다시 빠르게 패널을 내려 발열을 줄이는 전략”으로 재정의했습니다.
+- **자기유발 `SCREEN_ON` 오분류 수정**: `keepVirtualDisplayAlive()` 및 revive/recovery 경로에서도 `ScreenOffLoopGuard.markKeepAlive()`를 기록하도록 수정하여, revive 직후 들어오는 `SCREEN_ON`이 `user`가 아니라 `self_induced`로 올바르게 분류되도록 고쳤습니다. 이 수정으로 사용자의 실제 복귀와 시스템이 만든 일시 점등을 구분할 수 있게 되었습니다.
+- **입력 복귀성 보존을 위한 가드 윈도우 세분화**: 자기유발 점등 억제는 유지하되 사용자의 뒤늦은 전원 버튼/터치 복귀를 막지 않도록, `SCREEN_ON`의 keepalive 억제 창을 별도로 `900ms`로 축소했습니다. 그 결과 revive 직후 자동 점등은 계속 억제하면서도, 일정 시간이 지난 후의 사용자 복귀는 다시 허용하는 균형점을 마련했습니다.
+- **현재 실용적 결론**: 삼성 기기에서는 블랙아웃 오버레이가 항상 전면을 안정적으로 장악하지 못해 “완전히 꺼진 것 같은 상태”를 100% 보장하기 어려웠습니다. 대신 현재 빌드는 `짧은 wake -> first frame revive -> self-induced SCREEN_ON 즉시 재패널OFF` 절충안을 채택해, 미러링 유지력을 확보하면서 패널 ON 시간을 최소화하는 쪽으로 방향을 정리했습니다. 최종 목표는 충전 중 장시간 미러링 시 발열을 줄이는 것이며, 현 단계에서는 이 경로가 가장 실용적인 균형점으로 판단되었습니다.
+- **후속 실기기 관찰**: 추가 로그 검증에서 `blackout_activity_ready`는 항상 오는 것이 아니라, 포그라운드가 미러링 앱일 때는 비교적 빠르게 `BLACKOUT_ACTIVE`까지 진입하는 반면 홈/런처가 포그라운드일 때는 `BLACKOUT_PENDING` 상태에서 fallback revive와 panel reassert 경로를 더 자주 타는 경향을 확인했습니다. 현재 구현은 두 경로를 모두 수용하되, ready가 늦는 경우에도 패널 ON 시간을 짧게 유지하는 데 초점을 맞추고 있습니다.
 
+### 19.7. [SCREEN_OFF] 상태 다이어그램 및 타이밍 파라미터 정리
 
+```mermaid
+stateDiagram-v2
+    [*] --> ACTIVE
+
+    ACTIVE --> BLACKOUT_PENDING: SCREEN_OFF\nsource=user
+    BLACKOUT_PENDING --> BLACKOUT_ACTIVE: ON_BLACKOUT_READY\nblackout_activity_ready
+    BLACKOUT_PENDING --> ACTIVE: SCREEN_ON\nsource=user
+    BLACKOUT_PENDING --> ACTIVE: USER_PRESENT
+    BLACKOUT_PENDING --> ACTIVE: RESTORE_REQUEST
+
+    BLACKOUT_ACTIVE --> ACTIVE: SCREEN_ON\nsource=user
+    BLACKOUT_ACTIVE --> ACTIVE: USER_PRESENT
+    BLACKOUT_ACTIVE --> ACTIVE: RESTORE_REQUEST
+
+    BLACKOUT_PENDING --> BLACKOUT_PENDING: WAKE_REVIVE / VD_KEEPALIVE\nfirst-frame revive
+    BLACKOUT_PENDING --> BLACKOUT_PENDING: SCREEN_ON\nsource=self_induced\nPOWER_BURST reassert
+    BLACKOUT_ACTIVE --> BLACKOUT_ACTIVE: SCREEN_ON ignored\nphysical STATE_OFF
+```
+
+- **상태 의미**:
+  - `ACTIVE`: 일반 미러링 상태. 물리 패널이 켜져 있고 사용자 복귀 입력을 정상 처리합니다.
+  - `BLACKOUT_PENDING`: 화면 꺼짐 직후 과도 구간. revive, blackout overlay 기동, self-induced `SCREEN_ON` 필터링이 집중되는 상태입니다.
+  - `BLACKOUT_ACTIVE`: blackout overlay가 준비 완료된 안정 구간. 가능하면 이 상태를 오래 유지하는 것이 이상적입니다.
+
+| 변수 / 상수 | 현재 값 | 용도 |
+| --- | ---: | --- |
+| `suppressWindowMs` | `2500ms` | `setPhysicalDisplayPower(false)` 이후 유입되는 자기유발 `SCREEN_OFF`를 사용자 입력과 구분하는 suppression window |
+| `suppressScreenOnAfterKeepAliveMs` | `900ms` | revive/keepalive 직후 유입되는 자기유발 `SCREEN_ON`을 `self_induced`로 분류하는 keepalive 전용 suppression window |
+| `suppressBlackoutWindowMs` | `800ms` | blackout activity 시작 직후 발생하는 초기 노이즈 `SCREEN_ON`을 자기유발로 간주하는 window |
+| `BLACKOUT_KEEP_ALIVE_STOP_DELAY_MS` | `1500ms` | 사용자 복귀 후 `vdKeepAlive`를 즉시 끄지 않고 유예하는 시간 |
+| `APP_EXIT_MONITOR_INTERVAL_MS` | `2000ms` | 일반 상태에서 app exit monitor가 task stack을 폴링하는 주기 |
+| `APP_EXIT_MONITOR_SCREEN_OFF_INTERVAL_MS` | `6000ms` | screen-off 상태에서 app exit monitor 폴링을 늦춘 주기 |
+| `VD_KEEP_ALIVE_INTERVAL_MS` | `1000ms` | blackout 안정화 전 `keepDisplayAwake()` 기본 주기 |
+| `VD_KEEP_ALIVE_SCREEN_OFF_STABLE_INTERVAL_MS` | `2500ms` | `blackout_activity_ready` 이후 screen-off 안정 구간의 완화된 keepalive 주기 |
+| `FALLBACK_WATCHDOG_DELAY_MS` | `5500ms` | 일반 상태에서 첫 프레임 미도착을 검사하는 fallback watchdog 지연 |
+| `FALLBACK_WATCHDOG_SCREEN_OFF_DELAY_MS` | `8000ms` | screen-off 상태에서 rebuild churn을 줄이기 위해 늘린 fallback watchdog 지연 |
+| `RECOVERY_ACTION_MIN_INTERVAL_MS` | `900ms` | 같은 display에 대한 revive/recovery binder 호출을 coalescing하는 최소 간격 |
+| `DIAGNOSTICS_BROADCAST_MIN_INTERVAL_MS` | `1000ms` | `broadcastDiagnostics()` 연속 호출을 debounce하는 최소 간격 |
+| `requestScreenOffReviveBurst()` 초기 대기 | `250ms` | `BLACKOUT` 시작 직후 첫 revive 전에 blackout overlay가 먼저 올라올 시간을 주기 위한 지연 |
+| `requestScreenOnResumeBurst()` 반복 | `2회 / 180ms 간격` | 사용자 복귀 직후 keyframe 복구를 보조하는 resume burst |
+| `executePhysicalDisplayWakeupAction()` 반복 | `2회 / 150ms 간격` | 사용자 복귀 시 display 0 wake pulse 체인 |
+| `reassertPhysicalPanelOff()` 반복 | `3회 / 75ms 간격` | self-induced `SCREEN_ON` 직후 패널 ON 시간을 줄이기 위한 재-패널OFF pulse |
+| `executePhysicalPanelOffAction()` 반복 | `10회 / 100ms 간격` | PANEL_OFF 전략에서 패널 OFF 성공률을 높이기 위한 초기 pulse chain |
+| `startScreenOffReviveMonitor()` 지연 | `4000ms` | screen-off 진입 후 first frame missing 여부를 처음 점검하는 시점 |
+
+- **읽는 법**:
+  - `blackout_activity_ready`가 빨리 오면 `BLACKOUT_PENDING -> BLACKOUT_ACTIVE`로 넘어가고, 이후 revive는 상대적으로 안정적으로 처리됩니다.
+  - `blackout_activity_ready`가 늦거나 빠지면 `BLACKOUT_PENDING`에서 `WAKE_REVIVE -> self_induced SCREEN_ON -> POWER_BURST reassert` 절충 경로를 탑니다.
+  - 현재 목표는 “완전 무점등”이 아니라, **패널 ON 시간을 짧게 잘라 발열을 줄이면서 미러링 first frame을 살리는 것**입니다.
 

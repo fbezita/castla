@@ -5,7 +5,10 @@ import org.junit.Test
 
 class ScreenOffLoopGuardTest {
 
-    private val guard = ScreenOffLoopGuard(suppressWindowMs = 2_500L)
+    private val guard = ScreenOffLoopGuard(
+        suppressWindowMs = 2_500L,
+        suppressScreenOnAfterKeepAliveMs = 900L,
+    )
 
     @Test
     fun `screen off inside suppression window is self induced`() {
@@ -25,14 +28,14 @@ class ScreenOffLoopGuardTest {
     fun `screen on shortly after keepalive is self induced`() {
         guard.markKeepAlive(nowMs = 5_000L)
 
-        assertEquals(ScreenOffLoopGuard.EventSource.SELF_INDUCED, guard.classifyScreenOn(nowMs = 7_000L))
+        assertEquals(ScreenOffLoopGuard.EventSource.SELF_INDUCED, guard.classifyScreenOn(nowMs = 5_800L))
     }
 
     @Test
     fun `screen on long after keepalive is user induced`() {
         guard.markKeepAlive(nowMs = 5_000L)
 
-        assertEquals(ScreenOffLoopGuard.EventSource.USER, guard.classifyScreenOn(nowMs = 7_600L))
+        assertEquals(ScreenOffLoopGuard.EventSource.USER, guard.classifyScreenOn(nowMs = 6_100L))
     }
 
     @Test

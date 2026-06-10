@@ -61,6 +61,23 @@ class ScreenOffPolicyTest {
     }
 
     @Test
+    fun `user present transitions BLACKOUT_PENDING to ACTIVE`() {
+        policy.transition(ScreenOffEvent.SCREEN_OFF)
+        val next = policy.transition(ScreenOffEvent.USER_PRESENT)
+        assertEquals(ScreenOffState.ACTIVE, next)
+        assertFalse(policy.isScreenOff)
+    }
+
+    @Test
+    fun `user present transitions BLACKOUT_ACTIVE to ACTIVE`() {
+        policy.transition(ScreenOffEvent.SCREEN_OFF)
+        policy.transition(ScreenOffEvent.ON_BLACKOUT_READY)
+        val next = policy.transition(ScreenOffEvent.USER_PRESENT)
+        assertEquals(ScreenOffState.ACTIVE, next)
+        assertFalse(policy.isScreenOff)
+    }
+
+    @Test
     fun `invalid events are ignored in states`() {
         // SCREEN_ON in ACTIVE should be ignored
         val next1 = policy.transition(ScreenOffEvent.SCREEN_ON)
@@ -80,4 +97,3 @@ class ScreenOffPolicyTest {
         assertTrue(policy.isPanelOffSupported)
     }
 }
-

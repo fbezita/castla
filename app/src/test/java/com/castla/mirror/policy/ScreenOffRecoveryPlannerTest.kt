@@ -1,6 +1,7 @@
 package com.castla.mirror.policy
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -29,9 +30,81 @@ class ScreenOffRecoveryPlannerTest {
         assertTrue(
             ScreenOffRecoveryPlanner.shouldKeepVdKeepAliveRunningAfterScreenOn(ScreenOffReviveStrategy.BLACKOUT_KEEP_ALIVE)
         )
-        org.junit.Assert.assertFalse(
+        assertFalse(
             ScreenOffRecoveryPlanner.shouldKeepVdKeepAliveRunningAfterScreenOn(ScreenOffReviveStrategy.PANEL_OFF)
         )
     }
-}
 
+    @Test
+    fun `shouldPulseVirtualDisplayWake only depends on blackout strategy`() {
+        assertFalse(
+            ScreenOffRecoveryPlanner.shouldPulseVirtualDisplayWake(
+                ScreenOffReviveStrategy.PANEL_OFF
+            )
+        )
+        assertTrue(
+            ScreenOffRecoveryPlanner.shouldPulseVirtualDisplayWake(
+                ScreenOffReviveStrategy.BLACKOUT_KEEP_ALIVE
+            )
+        )
+    }
+
+    @Test
+    fun `shouldUseDirectWakeForRevive is enabled while screen is off`() {
+        assertTrue(
+            ScreenOffRecoveryPlanner.shouldUseDirectWakeForRevive(isScreenOff = true)
+        )
+        assertTrue(
+            ScreenOffRecoveryPlanner.shouldUseDirectWakeForRevive(isScreenOff = false)
+        )
+    }
+
+    @Test
+    fun `appExitMonitorIntervalMs slows down while screen is off`() {
+        assertEquals(
+            2_000L,
+            ScreenOffRecoveryPlanner.appExitMonitorIntervalMs(isScreenOff = false)
+        )
+        assertEquals(
+            6_000L,
+            ScreenOffRecoveryPlanner.appExitMonitorIntervalMs(isScreenOff = true)
+        )
+    }
+
+    @Test
+    fun `vdKeepAliveIntervalMs slows down when screen off is stable`() {
+        assertEquals(
+            1_000L,
+            ScreenOffRecoveryPlanner.vdKeepAliveIntervalMs(
+                isScreenOff = false,
+                blackoutActivityReady = false
+            )
+        )
+        assertEquals(
+            1_000L,
+            ScreenOffRecoveryPlanner.vdKeepAliveIntervalMs(
+                isScreenOff = true,
+                blackoutActivityReady = false
+            )
+        )
+        assertEquals(
+            2_500L,
+            ScreenOffRecoveryPlanner.vdKeepAliveIntervalMs(
+                isScreenOff = true,
+                blackoutActivityReady = true
+            )
+        )
+    }
+
+    @Test
+    fun `fallbackWatchdogDelayMs is longer while screen is off`() {
+        assertEquals(
+            5_500L,
+            ScreenOffRecoveryPlanner.fallbackWatchdogDelayMs(isScreenOff = false)
+        )
+        assertEquals(
+            8_000L,
+            ScreenOffRecoveryPlanner.fallbackWatchdogDelayMs(isScreenOff = true)
+        )
+    }
+}
