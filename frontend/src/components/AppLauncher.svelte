@@ -4,6 +4,9 @@
   import type { StreamRuntime } from "../runtime/StreamRuntime";
   import { compositorStore, setLanguage } from "../stores/compositorStore";
   import { t } from "../lib/i18n";
+  import { canReuseHotStream } from "../lib/launchReuse";
+  import { canKeepCurrentLaunch } from "../lib/launchRequestReuse";
+  import { buildLayoutModeLaunchRequest } from "../lib/layoutModeTransition";
   import type { PaneId } from "../protocol";
   import { debugLog } from "../utils/debugLogger";
   import {
@@ -13,11 +16,15 @@
     type OverlayUiScalePreference,
   } from "../utils/overlayUiScalePreference";
   import {
+    dedupeAppPairs,
+    getDefaultAppPairLayoutMode,
     getAppPairKey,
     normalizeAppPair,
+    toStoredAppPair,
     type LayoutMode,
     type AppPair,
   } from "../lib/appPair";
+  import type { SplitTargets } from "../lib/splitTargets";
 
   // Modular components imported for robust Svelte 5 structure
   import LauncherTabs from "./LauncherTabs.svelte";
@@ -121,6 +128,8 @@
   let drawerRevision = $state(0);
   let pairTargetTimer = $state<number | undefined>(undefined);
   let pairTargetCandidate = $state("");
+  let categoryExpandTimer = $state<number | undefined>(undefined);
+  let categoryExpandCandidate = $state("");
   let autoScrollVelocity = $state(0);
   let autoScrollFrame = $state<number | undefined>(undefined);
   let drawerAutoCollapsedForDrag = $state(false);
@@ -259,6 +268,12 @@
     const primary = store.viewports.get("primary");
     const secondary = store.viewports.get("secondary");
     if (!primary || !secondary) return;
+
+    const transitionRequest = buildLayoutModeLaunchRequest(mode, store);
+    if (transitionRequest) {
+      startLaunchSequence(transitionRequest);
+      return;
+    }
 
     if (mode === store.layoutMode) return;
     
@@ -427,20 +442,30 @@
   // Await layout_ack packet from backend
   function waitForLayoutAck(seqId: number, expectedMode: string, timeoutMs = 5000): Promise<void> {
     return new Promise((resolve, reject) => {
+      let settled = false;
+      let timeoutId = 0;
+      const finish = (cb: () => void) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeoutId);
+        unsub();
+        cb();
+      };
       const unsub = runtime.onAckMessage((msg) => {
-        if (isStale(seqId)) { unsub(); reject(new StaleLaunchSequenceError()); return; }
+        if (isStale(seqId)) { finish(() => reject(new StaleLaunchSequenceError())); return; }
         if (msg.type === "layout_ack" && msg.seqId === seqId) {
-          unsub();
-          if (msg.success) resolve();
-          else reject(new Error("layout_ack_failed"));
+          finish(() => {
+            if (msg.success) resolve();
+            else reject(new Error("layout_ack_failed"));
+          });
         }
       });
-      setTimeout(() => {
-        unsub();
+      timeoutId = window.setTimeout(() => {
+        if (settled) return;
         if (isStale(seqId)) {
-          reject(new StaleLaunchSequenceError());
+          finish(() => reject(new StaleLaunchSequenceError()));
         } else {
-          reject(new Error("layout_ack_timeout"));
+          finish(() => reject(new Error("layout_ack_timeout")));
         }
       }, timeoutMs);
     });
@@ -449,44 +474,112 @@
   // Await launch_ack packet from backend (Catches launch_failed explicitly)
   function waitForLaunchAck(seqId: number, pane: "primary" | "secondary", timeoutMs = 5000): Promise<void> {
     return new Promise((resolve, reject) => {
+      let settled = false;
+      let timeoutId = 0;
+      const finish = (cb: () => void) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeoutId);
+        unsub();
+        cb();
+      };
       const unsub = runtime.onAckMessage((msg) => {
-        if (isStale(seqId)) { unsub(); reject(new StaleLaunchSequenceError()); return; }
+        if (isStale(seqId)) { finish(() => reject(new StaleLaunchSequenceError())); return; }
         if (msg.type === "launch_ack" && msg.seqId === seqId && msg.pane === pane) {
-          unsub();
-          if (msg.success) resolve();
-          else reject(new Error("launch_failure"));
+          finish(() => {
+            if (msg.success) resolve();
+            else reject(new Error("launch_failure"));
+          });
         } else if (msg.type === "launch_failed" && msg.seqId === seqId && msg.pane === pane) {
-          unsub();
-          reject(new Error("launch_failure"));
+          finish(() => reject(new Error("launch_failure")));
         }
       });
-      setTimeout(() => {
-        unsub();
+      timeoutId = window.setTimeout(() => {
+        if (settled) return;
         if (isStale(seqId)) {
-          reject(new StaleLaunchSequenceError());
+          finish(() => reject(new StaleLaunchSequenceError()));
         } else {
-          reject(new Error("launch_failure"));
+          finish(() => reject(new Error("launch_failure")));
         }
       }, timeoutMs);
     });
   }
 
+  function canReuseExistingHotStream(
+    pane: "primary" | "secondary",
+    startGen: number,
+  ): boolean {
+    const viewport = get(compositorStore).viewports.get(pane);
+    const metadata = runtime.generations.getMetadata(pane);
+    return canReuseHotStream(viewport, metadata, startGen);
+  }
+
   // Await session_ready packet from backend
-  function waitForSessionReady(seqId: number, pane: "primary" | "secondary", timeoutMs = 6000): Promise<void> {
+  function waitForSessionReady(
+    seqId: number,
+    pane: "primary" | "secondary",
+    startGen: number,
+    timeoutMs = 6000,
+  ): Promise<void> {
     return new Promise((resolve, reject) => {
-      const unsub = runtime.onAckMessage((msg) => {
-        if (isStale(seqId)) { unsub(); reject(new StaleLaunchSequenceError()); return; }
+      const startedAt = Date.now();
+      let settled = false;
+      let timeoutId = 0;
+      let unsub = () => {};
+      const finish = (cb: () => void) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeoutId);
+        unsub();
+        cb();
+      };
+      emitVerboseLaunchDiag("session_wait_begin", {
+        seqId,
+        pane,
+        startGen,
+        timeoutMs,
+        snapshot: buildLaunchSnapshot(seqId),
+      });
+      if (canReuseExistingHotStream(pane, startGen)) {
+        emitVerboseLaunchDiag("session_wait_reuse_existing_stream", {
+          seqId,
+          pane,
+          startGen,
+          snapshot: buildLaunchSnapshot(seqId),
+        });
+        finish(() => resolve());
+        return;
+      }
+      unsub = runtime.onAckMessage((msg) => {
+        if (isStale(seqId)) { finish(() => reject(new StaleLaunchSequenceError())); return; }
         if (msg.type === "session_ready" && msg.seqId === seqId && msg.pane === pane) {
-          unsub();
-          resolve();
+          emitVerboseLaunchDiag("session_wait_ack", {
+            seqId,
+            pane,
+            waitedMs: Date.now() - startedAt,
+            message: {
+              type: msg.type,
+              seqId: msg.seqId,
+              pane: msg.pane,
+            },
+            snapshot: buildLaunchSnapshot(seqId),
+          });
+          finish(() => resolve());
         }
       });
-      setTimeout(() => {
-        unsub();
+      timeoutId = window.setTimeout(() => {
+        if (settled) return;
         if (isStale(seqId)) {
-          reject(new StaleLaunchSequenceError());
+          finish(() => reject(new StaleLaunchSequenceError()));
         } else {
-          reject(new Error("session_timeout"));
+          emitVerboseLaunchDiag("session_wait_timeout", {
+            seqId,
+            pane,
+            waitedMs: Date.now() - startedAt,
+            timeoutMs,
+            snapshot: buildLaunchSnapshot(seqId),
+          });
+          finish(() => reject(new Error("session_timeout")));
         }
       }, timeoutMs);
     });
@@ -503,8 +596,20 @@
     return new Promise((resolve, reject) => {
       let primarySawRecommit = false;
       let secondarySawRecommit = false;
-      let primaryMetadataReady = false;
-      let secondaryMetadataReady = !hasSecondary;
+      const initialState = get(compositorStore);
+      const initialPrimaryViewport = initialState.viewports.get("primary");
+      const initialSecondaryViewport = initialState.viewports.get("secondary");
+      let previousPrimaryCommitted = initialPrimaryViewport?.committed === true;
+      let previousSecondaryCommitted = initialSecondaryViewport?.committed === true;
+      const initialPrimaryMetadata = runtime.generations.getMetadata("primary");
+      const initialSecondaryMetadata = runtime.generations.getMetadata("secondary");
+      let primaryMetadataReady =
+        initialPrimaryMetadata?.firstFrameReady === true &&
+        initialPrimaryMetadata.generation > primaryStartGen;
+      let secondaryMetadataReady = !hasSecondary || (
+        initialSecondaryMetadata?.firstFrameReady === true &&
+        initialSecondaryMetadata.generation > secondaryStartGen
+      );
       let cleanup = () => {};
 
       const tryResolve = () => {
@@ -514,10 +619,23 @@
         const primary = state.viewports.get("primary");
         const secondary = state.viewports.get("secondary");
 
-        if (primary?.committed) {
+        if (
+          primary?.committed &&
+          (
+            primary.generation > primaryStartGen ||
+            (!previousPrimaryCommitted && primary.generation === primaryStartGen)
+          )
+        ) {
           primarySawRecommit = true;
         }
-        if (hasSecondary && secondary?.committed) {
+        if (
+          hasSecondary &&
+          secondary?.committed &&
+          (
+            secondary.generation > secondaryStartGen ||
+            (!previousSecondaryCommitted && secondary.generation === secondaryStartGen)
+          )
+        ) {
           secondarySawRecommit = true;
         }
 
@@ -533,6 +651,9 @@
               secondaryMetadataReady
             )
           : true;
+
+        previousPrimaryCommitted = primary?.committed === true;
+        previousSecondaryCommitted = secondary?.committed === true;
 
         if (primaryReady && secondaryReady) {
           cleanup();
@@ -550,14 +671,14 @@
           return;
         }
         if (message.type !== "streamMetadata") return;
-        if (message.sessionId === "primary" && message.firstFrameReady && message.generation >= primaryStartGen) {
+        if (message.sessionId === "primary" && message.firstFrameReady && message.generation > primaryStartGen) {
           primaryMetadataReady = true;
         }
         if (
           hasSecondary &&
           message.sessionId === "secondary" &&
           message.firstFrameReady &&
-          message.generation >= secondaryStartGen
+          message.generation > secondaryStartGen
         ) {
           secondaryMetadataReady = true;
         }
@@ -613,6 +734,12 @@
     const primaryLaunchAckPromise = runtime.isAckSupported()
       ? waitForLaunchAck(seqId, "primary")
       : null;
+    emitVerboseLaunchDiag("stream_recovery_dispatch_primary", {
+      seqId,
+      primaryPkg: request.primaryPkg,
+      retryPrimaryStartGen,
+      snapshot: buildLaunchSnapshot(seqId),
+    });
     runtime.launchApp(request.primaryPkg, "primary", undefined, false, seqId);
 
     assertCurrent(seqId);
@@ -623,7 +750,7 @@
       assertCurrent(seqId);
       setLaunchState(seqId, "PRIMARY_LAUNCH_ACKED");
 
-      await waitForSessionReady(seqId, "primary");
+      await waitForSessionReady(seqId, "primary", retryPrimaryStartGen);
       assertCurrent(seqId);
       setLaunchState(seqId, "PRIMARY_SESSION_READY");
     }
@@ -634,6 +761,12 @@
       const secondaryLaunchAckPromise = runtime.isAckSupported()
         ? waitForLaunchAck(seqId, "secondary")
         : null;
+      emitVerboseLaunchDiag("stream_recovery_dispatch_secondary", {
+        seqId,
+        secondaryPkg: request.secondaryPkg,
+        retrySecondaryStartGen,
+        snapshot: buildLaunchSnapshot(seqId),
+      });
       runtime.launchApp(
         request.secondaryPkg,
         "secondary",
@@ -650,7 +783,7 @@
         assertCurrent(seqId);
         setLaunchState(seqId, "SECONDARY_LAUNCH_ACKED");
 
-        await waitForSessionReady(seqId, "secondary");
+        await waitForSessionReady(seqId, "secondary", retrySecondaryStartGen);
         assertCurrent(seqId);
         setLaunchState(seqId, "SECONDARY_SESSION_READY");
       }
@@ -682,6 +815,52 @@
     secondaryPkg?: string;
     layoutMode: "single" | "split" | "popup";
   }) {
+    const currentState = get(compositorStore);
+    const currentPopup =
+      request.layoutMode === "popup"
+        ? {
+            ...currentState.popup,
+            visible: true,
+            minimized: false,
+          }
+        : undefined;
+    const currentSplitTargets =
+      request.layoutMode === "split" && viewportHost
+        ? viewportHost.primeLayoutTargets(
+            request.layoutMode,
+            currentState.splitRatio,
+            currentState.popup,
+          )
+        : null;
+    if (
+      canKeepCurrentLaunch(
+        request,
+        currentState,
+        runtime.generations.getMetadata("primary"),
+        runtime.generations.getMetadata("secondary"),
+        {
+          splitTargets: currentSplitTargets,
+          popup: currentPopup,
+        },
+      )
+    ) {
+      compositorStore.update((state) => ({
+        ...state,
+        launchSequence: {
+          ...state.launchSequence,
+          state: "RUNNING",
+          degradedReason: "",
+        },
+      }));
+      emitVerboseLaunchDiag("sequence_skip_same_target", {
+        primaryPkg: request.primaryPkg,
+        secondaryPkg: request.secondaryPkg ?? "",
+        layoutMode: request.layoutMode,
+        snapshot: buildLaunchSnapshot(currentState.launchSequence.id),
+      });
+      return;
+    }
+
     const seqId = nextLaunchSeqId();
     
     // Capture initial viewport generations for strict stream validation
@@ -708,6 +887,16 @@
     let primaryLaunchAckMs = 0;
     let primarySessionReadyMs = 0;
     let streamCommitMs = 0;
+
+    const preLaunchStore = get(compositorStore);
+    let primedSplitTargets: SplitTargets | null = null;
+    if (viewportHost) {
+      primedSplitTargets = viewportHost.primeLayoutTargets(
+        request.layoutMode,
+        preLaunchStore.splitRatio,
+        preLaunchStore.popup,
+      );
+    }
 
     // 1. Force Reset committed=false to clean frame remnants of previous session
     compositorStore.update((state) => {
@@ -744,6 +933,9 @@
           degradedReason: '',
           primaryStartGen,
           secondaryStartGen,
+          expectedPrimaryPaneWidth: primedSplitTargets?.primaryWidth,
+          expectedSecondaryPaneWidth: primedSplitTargets?.secondaryWidth,
+          expectedPaneHeight: primedSplitTargets?.paneHeight,
         }
       };
     });
@@ -791,6 +983,11 @@
       const primaryLaunchAckPromise = runtime.isAckSupported()
         ? waitForLaunchAck(seqId, "primary")
         : null;
+      emitVerboseLaunchDiag("primary_launch_dispatch", {
+        seqId,
+        primaryPkg: request.primaryPkg,
+        snapshot: buildLaunchSnapshot(seqId),
+      });
       runtime.launchApp(request.primaryPkg, "primary", undefined, false, seqId);
       
       assertCurrent(seqId);
@@ -818,7 +1015,7 @@
       // 5. Await Primary Session Ready
       if (runtime.isAckSupported()) {
         try {
-          await waitForSessionReady(seqId, "primary");
+          await waitForSessionReady(seqId, "primary", primaryStartGen);
         } catch (err) {
           if (err instanceof StaleLaunchSequenceError) throw err;
           console.warn(`[LAUNCH_SM_SESSION_TIMEOUT] seq=${seqId} Primary Session Ready failed, continuing degraded`, err);
@@ -847,6 +1044,11 @@
           const secondaryLaunchAckPromise = runtime.isAckSupported()
             ? waitForLaunchAck(seqId, "secondary")
             : null;
+          emitVerboseLaunchDiag("secondary_launch_dispatch", {
+            seqId,
+            secondaryPkg: request.secondaryPkg,
+            snapshot: buildLaunchSnapshot(seqId),
+          });
           runtime.launchApp(
             request.secondaryPkg,
             "secondary",
@@ -863,7 +1065,7 @@
             assertCurrent(seqId);
             setLaunchState(seqId, "SECONDARY_LAUNCH_ACKED");
             
-            await waitForSessionReady(seqId, "secondary");
+            await waitForSessionReady(seqId, "secondary", secondaryStartGen);
             assertCurrent(seqId);
             setLaunchState(seqId, "SECONDARY_SESSION_READY");
           }
@@ -985,14 +1187,6 @@
     recordRecentLaunch(app.packageName);
     
     if (pane === "primary") {
-      compositorStore.update((state) => ({
-        ...state,
-        activePrimaryApp: app.packageName,
-        activeSecondaryApp: "",
-        layoutMode: "single",
-      }));
-      setSingle("primary");
-      
       startLaunchSequence({
         primaryPkg: app.packageName,
         secondaryPkg: undefined,
@@ -1007,13 +1201,6 @@
           layoutMode: "split",
         });
       } else {
-        compositorStore.update((state) => ({
-          ...state,
-          activePrimaryApp: app.packageName,
-          activeSecondaryApp: "",
-          layoutMode: "single",
-        }));
-        setSingle("primary");
         startLaunchSequence({
           primaryPkg: app.packageName,
           secondaryPkg: undefined,
@@ -1061,7 +1248,7 @@
     if (!primary || !secondary) return;
 
     const currentMode = $compositorStore.layoutMode;
-    const layout = record.layoutMode ?? (currentMode === "popup" ? "popup" : "split");
+    const layout = getDefaultAppPairLayoutMode(currentMode);
     
     if (layout === "popup") {
       compositorStore.update((state) => {
@@ -1168,7 +1355,6 @@
         label: `${appA.label} + ${appB.label}`,
         category: "PAIR",
         isPair: true,
-        layoutMode: pair.layoutMode,
         apps: pair.apps,
       });
     }
@@ -1187,7 +1373,6 @@
       label: `${source.label} + ${target.label}`,
       category: "PAIR",
       isPair: true,
-      layoutMode: "split",
       apps: [source.packageName, target.packageName],
     };
     pairMenuOpen = "";
@@ -1200,7 +1385,6 @@
         label: "New App Pair",
         category: "PAIR",
         isPair: true,
-        layoutMode: "split",
       };
       pairMenuOpen = "";
       return;
@@ -1211,14 +1395,16 @@
   }
 
   function persistAppPair(nextPair: AppPair, previousKey?: string) {
+    const storedPair = toStoredAppPair(nextPair);
     const index = previousKey
       ? appPairs.findIndex((pair) => getAppPairKey(pair) === previousKey)
       : -1;
     if (index >= 0) {
-      appPairs = appPairs.map((pair, idx) => (idx === index ? nextPair : pair));
+      appPairs = appPairs.map((pair, idx) => (idx === index ? storedPair : pair));
     } else {
-      appPairs = [...appPairs, nextPair];
+      appPairs = [...appPairs, storedPair];
     }
+    appPairs = dedupeAppPairs(appPairs);
     localStorage.setItem("castla_app_pairs", JSON.stringify(appPairs));
     touchDrawer();
   }
@@ -1379,7 +1565,6 @@
     if (!app.apps || app.apps.length !== 2) return null;
     return {
       apps: app.apps,
-      layoutMode: app.layoutMode,
     };
   }
 
@@ -1420,9 +1605,11 @@
     try {
       const value = JSON.parse(localStorage.getItem("castla_app_pairs") ?? "[]");
       if (!Array.isArray(value)) return [];
-      return value
-        .map((pair) => normalizeAppPair(pair))
-        .filter((pair): pair is AppPair => pair !== null);
+      return dedupeAppPairs(
+        value
+          .map((pair) => normalizeAppPair(pair))
+          .filter((pair): pair is AppPair => pair !== null),
+      );
     } catch {
       return [];
     }
@@ -1539,7 +1726,7 @@
     window.clearTimeout(pressTimer);
     if (gestureState === "dragging" && draggingApp) {
       if (pairTarget) {
-        createWorkspace(draggingApp, pairTarget);
+        createAppPair(draggingApp, pairTarget);
       } else if (dropZone) {
         applyDrop(draggingApp, dropZone);
       }
@@ -1559,8 +1746,28 @@
       const hoveredTab = getHoveredLauncherTab(x, y);
       if (hoveredTab) {
         clearPairHoverState();
+        clearCategoryHoverState();
         dropZone = hoveredTab === "autorun" ? "autorun" : hoveredTab === "starred" ? "favorite" : "";
         return;
+      }
+
+      if (activeTab === "browse") {
+        const hoveredCategory = getHoveredBrowseCategory(x, y);
+        if (hoveredCategory && hoveredCategory !== expandedCategory) {
+          clearPairHoverState();
+          dropZone = "";
+          if (categoryExpandCandidate !== hoveredCategory) {
+            clearCategoryHoverState();
+            categoryExpandCandidate = hoveredCategory;
+            categoryExpandTimer = window.setTimeout(() => {
+              expandedCategory = hoveredCategory;
+              categoryExpandCandidate = "";
+              categoryExpandTimer = undefined;
+            }, 220);
+          }
+          return;
+        }
+        clearCategoryHoverState();
       }
 
       const candidate = findPairTarget(x, y);
@@ -1588,6 +1795,7 @@
       reopenDrawerForDrag();
       drawerDimmed = false;
       clearPairHoverState();
+      clearCategoryHoverState();
       dropZone = "";
       return;
     }
@@ -1599,6 +1807,7 @@
 
     // Outer screen regions for launching panes or removal
     clearPairHoverState();
+    clearCategoryHoverState();
     dropZone = getExternalDropZone(x, y);
     drawerDimmed = dropZone !== "";
   }
@@ -1749,6 +1958,17 @@
     pairTarget = null;
   }
 
+  function clearCategoryHoverState() {
+    window.clearTimeout(categoryExpandTimer);
+    categoryExpandTimer = undefined;
+    categoryExpandCandidate = "";
+  }
+
+  function getHoveredBrowseCategory(x: number, y: number): string | null {
+    const header = document.elementFromPoint(x, y)?.closest("[data-category-key]") as HTMLElement | null;
+    return header?.dataset.categoryKey ?? null;
+  }
+
   function preventTouchScroll(event: TouchEvent) {
     if (gestureState === "dragging" && event.cancelable) {
       event.preventDefault();
@@ -1785,10 +2005,13 @@
 
   function resetGestureState() {
     window.clearTimeout(pairTargetTimer);
+    window.clearTimeout(categoryExpandTimer);
     detachDragListeners();
     stopAutoScrollDrawer();
     pairTargetTimer = undefined;
     pairTargetCandidate = "";
+    categoryExpandTimer = undefined;
+    categoryExpandCandidate = "";
     if (dragSourceElement && activePointerId !== null) {
       try {
         dragSourceElement.releasePointerCapture(activePointerId);

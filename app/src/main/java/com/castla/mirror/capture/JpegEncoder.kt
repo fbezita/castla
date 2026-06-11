@@ -42,6 +42,7 @@ class JpegEncoder(
     private val cropDstRect = Rect()
 
     private val baos = ByteArrayOutputStream(width * height / 8)
+    var onCaptureEvent: ((String) -> Unit)? = null
 
     fun createInputSurface(): Surface {
         // RGBA_8888 방식이 하드웨어 디코더에 따라 호환되지 않는 경우가 있어
@@ -82,9 +83,23 @@ class JpegEncoder(
         }
         handler = Handler(thread!!.looper)
         isRunning = true
+        onCaptureEvent?.invoke("start_requested width=$width height=$height fps=$fps quality=$quality")
+        var firstImageLogged = false
+        var firstFrameLogged = false
+        var callbackSeen = false
+
+        fun scheduleCaptureWatchdog(delayMs: Long) {
+            handler?.postDelayed({
+                if (released.get() || !isRunning || firstFrameLogged) return@postDelayed
+                onCaptureEvent?.invoke(
+                    "capture_watchdog delayMs=$delayMs callbackSeen=$callbackSeen imageAvailable=$firstImageLogged encodedFrame=$firstFrameLogged"
+                )
+            }, delayMs)
+        }
 
         reader.setOnImageAvailableListener({ ir ->
             if (released.get() || !isRunning) return@setOnImageAvailableListener
+            callbackSeen = true
 
             val now = System.currentTimeMillis()
             
@@ -105,6 +120,10 @@ class JpegEncoder(
             lastFrameTime = now
 
             try {
+                if (!firstImageLogged) {
+                    firstImageLogged = true
+                    onCaptureEvent?.invoke("image_available")
+                }
                 val plane = image.planes[0]
                 val buffer = plane.buffer
                 val pixelStride = plane.pixelStride
@@ -148,12 +167,17 @@ class JpegEncoder(
                 target.compress(Bitmap.CompressFormat.JPEG, quality, baos)
 
                 val jpegData = baos.toByteArray()
+                if (!firstFrameLogged) {
+                    firstFrameLogged = true
+                    onCaptureEvent?.invoke("encoded_frame size=${jpegData.size}")
+                }
                 // Log.d(TAG, "Encoded JPEG frame: ${jpegData.size} bytes")
                 
                 // 전송
                 onFrame(jpegData, true)
                 
             } catch (e: Exception) {
+                onCaptureEvent?.invoke("encode_error message=${e.message ?: e::class.java.simpleName}")
                 Log.e(TAG, "JPEG encode error", e)
             } finally {
                 image.close()
@@ -161,6 +185,10 @@ class JpegEncoder(
         }, handler)
 
         Log.i(TAG, "JPEG encoder started")
+        onCaptureEvent?.invoke("listener_registered handlerThread=${thread?.name ?: "unknown"}")
+        scheduleCaptureWatchdog(250L)
+        scheduleCaptureWatchdog(1000L)
+        scheduleCaptureWatchdog(2500L)
     }
 
     fun stop() {

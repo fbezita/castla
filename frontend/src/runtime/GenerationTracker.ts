@@ -43,4 +43,8 @@ export class GenerationTracker {
   isFirstFrameReady(pane: PaneId): boolean {
     return this.metadata.get(pane)?.firstFrameReady === true;
   }
+
+  getMetadata(pane: PaneId): StreamMetadata | undefined {
+    return this.metadata.get(pane);
+  }
 }

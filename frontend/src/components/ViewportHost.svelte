@@ -7,6 +7,13 @@
     type ViewportModel,
   } from "../stores/compositorStore";
   import { t } from "../lib/i18n";
+  import { isPaneBarrierReadyForRelease } from "../lib/barrierRelease";
+  import {
+    buildSplitPaneStyles,
+    hasCompleteSplitTargets,
+    resolveExpectedSplitTargets,
+    type SplitTargets,
+  } from "../lib/splitTargets";
   import { debugLog } from "../utils/debugLogger";
   import ViewportPane from "./ViewportPane.svelte";
   import type { TouchRouter } from "../touch/TouchRouter";
@@ -37,6 +44,18 @@
     splitRatio: number;
   }
 
+  const EMPTY_SPLIT_LAYOUT_METRICS = {
+    primaryWidth: 0,
+    secondaryWidth: 0,
+    leftPercent: 50,
+    rightPercent: 50,
+    boundaryPercent: 50,
+  };
+
+  function isPositiveDimension(value: number | undefined): value is number {
+    return value !== undefined && Number.isFinite(value) && value > 0;
+  }
+
   let frozenLayoutState: FrozenLayoutState | null = null;
   let safetyReleaseTimer = 0;
 
@@ -56,6 +75,7 @@
 
   let popupBody: HTMLDivElement;
   let resizeObserver: ResizeObserver;
+  let detachMetadata: (() => void) | undefined;
   let resizingSplit = false;
   let popupInteracting = false;
   let hostRect = new DOMRect();
@@ -84,8 +104,18 @@
   let tempPopupY = 0;
   let tempPopupWidth = 0;
   let tempPopupHeight = 0;
+  let layoutMetrics = EMPTY_SPLIT_LAYOUT_METRICS;
+  let boundary = layoutMetrics.boundaryPercent;
+  let metadataRevision = 0;
+  let pendingBarrierPanes: PaneId[] = [];
+  let lastDispatchedSplitTargets: SplitTargets | null = null;
 
   onMount(() => {
+    detachMetadata = runtime.control.onMessage((message) => {
+      if (message.type === "streamMetadata") {
+        metadataRevision += 1;
+      }
+    });
     resizeObserver = new ResizeObserver(() => {
       hostRect = host.getBoundingClientRect();
       touchRouter.updateHost(hostRect);
@@ -103,6 +133,7 @@
   });
 
   onDestroy(() => {
+    detachMetadata?.();
     resizeObserver?.disconnect();
     activeTouchPanes.clear();
     window.clearTimeout(provisionalLayoutTimer);
@@ -170,26 +201,218 @@
     $compositorStore.launchSequence.state,
   );
 
+  function isPaneTrackedByBarrier(
+    pane: PaneId,
+    frozen: FrozenLayoutState,
+  ): boolean {
+    if (frozen.layoutMode === "single") {
+      return pane === "primary";
+    }
+    if (frozen.layoutMode === "split") {
+      return frozen.visibleViewports.some((viewport) => viewport.pane === pane && viewport.visible);
+    }
+    if (frozen.layoutMode === "popup") {
+      if (pane === "primary") return true;
+      return frozen.popup.visible && !frozen.popup.minimized;
+    }
+    return pane === "primary";
+  }
+
+  function isPaneReadyForBarrierRelease(
+    pane: PaneId,
+    launchSequence: typeof $compositorStore.launchSequence,
+    primaryViewportSnapshot: ViewportModel | undefined,
+    secondaryViewportSnapshot: ViewportModel | undefined,
+    primaryMetadataGeneration: number,
+    secondaryMetadataGeneration: number,
+    primaryMetadataReady: boolean,
+    secondaryMetadataReady: boolean,
+    expectedPrimaryWidth: number | undefined,
+    expectedSecondaryWidth: number | undefined,
+    expectedPrimaryHeight: number | undefined,
+    expectedSecondaryHeight: number | undefined,
+  ): boolean {
+    const viewport = pane === "primary"
+      ? primaryViewportSnapshot
+      : secondaryViewportSnapshot;
+    const startGen = pane === "primary"
+      ? launchSequence.primaryStartGen
+      : launchSequence.secondaryStartGen;
+    const metadataGeneration = pane === "primary"
+      ? primaryMetadataGeneration
+      : secondaryMetadataGeneration;
+    const metadataReady = pane === "primary"
+      ? primaryMetadataReady
+      : secondaryMetadataReady;
+    const expectedWidth = pane === "primary"
+      ? expectedPrimaryWidth
+      : expectedSecondaryWidth;
+    const expectedHeight = pane === "primary"
+      ? expectedPrimaryHeight
+      : expectedSecondaryHeight;
+    return isPaneBarrierReadyForRelease({
+      pane,
+      viewport,
+      startGeneration: startGen,
+      metadataGeneration,
+      metadataReady,
+      expectedWidth,
+      expectedHeight,
+    });
+  }
+
+  function getPendingBarrierPanes(
+    launchSequence: typeof $compositorStore.launchSequence,
+    primaryViewportSnapshot: ViewportModel | undefined,
+    secondaryViewportSnapshot: ViewportModel | undefined,
+    primaryMetadataGeneration: number,
+    secondaryMetadataGeneration: number,
+    primaryMetadataReady: boolean,
+    secondaryMetadataReady: boolean,
+    expectedPrimaryWidth: number | undefined,
+    expectedSecondaryWidth: number | undefined,
+    expectedPrimaryHeight: number | undefined,
+    expectedSecondaryHeight: number | undefined,
+  ): PaneId[] {
+    if (!frozenLayoutState) return [];
+    const panes: PaneId[] = [];
+    for (const pane of ["primary", "secondary"] as PaneId[]) {
+      if (!isPaneTrackedByBarrier(pane, frozenLayoutState)) continue;
+      if (!isPaneReadyForBarrierRelease(
+        pane,
+        launchSequence,
+        primaryViewportSnapshot,
+        secondaryViewportSnapshot,
+        primaryMetadataGeneration,
+        secondaryMetadataGeneration,
+        primaryMetadataReady,
+        secondaryMetadataReady,
+        expectedPrimaryWidth,
+        expectedSecondaryWidth,
+        expectedPrimaryHeight,
+        expectedSecondaryHeight,
+      )) {
+        panes.push(pane);
+      }
+    }
+    return panes;
+  }
+
+  function getCurrentHostRect(): DOMRect {
+    if (!host) {
+      return hostRect;
+    }
+    const liveRect = host.getBoundingClientRect();
+    if (liveRect.width > 0 && liveRect.height > 0) {
+      hostRect = liveRect;
+      return liveRect;
+    }
+    return hostRect;
+  }
+
+  function getActiveExpectedSplitTargets(
+    launchSequence: typeof $compositorStore.launchSequence,
+    frozenLayoutMode: LayoutMode | undefined,
+    splitRatio: number,
+    hostWidth: number,
+    hostHeight: number,
+    dispatchedTargets: SplitTargets | null,
+  ) {
+    if (frozenLayoutMode !== "split") {
+      return {
+        expectedPrimaryPaneWidth: undefined,
+        expectedSecondaryPaneWidth: undefined,
+        expectedPaneHeight: undefined,
+        source: "inactive",
+      };
+    }
+    const primedTargets = hasCompleteSplitTargets({
+      primaryWidth: launchSequence.expectedPrimaryPaneWidth,
+      secondaryWidth: launchSequence.expectedSecondaryPaneWidth,
+      paneHeight: launchSequence.expectedPaneHeight,
+    })
+      ? {
+          primaryWidth: launchSequence.expectedPrimaryPaneWidth,
+          secondaryWidth: launchSequence.expectedSecondaryPaneWidth,
+          paneHeight: launchSequence.expectedPaneHeight,
+        }
+      : null;
+    const targets = resolveExpectedSplitTargets({
+      hostWidth,
+      hostHeight,
+      splitRatio,
+      primedTargets,
+      dispatchedTargets,
+    });
+    const source =
+      hasCompleteSplitTargets(primedTargets)
+        ? "launch_sequence"
+        : hasCompleteSplitTargets(dispatchedTargets)
+        ? "dispatched"
+        : "host_rect";
+
+    return {
+      expectedPrimaryPaneWidth: targets.primaryWidth,
+      expectedSecondaryPaneWidth: targets.secondaryWidth,
+      expectedPaneHeight: targets.paneHeight,
+      source,
+    };
+  }
+
+  function getFrozenPaneStyles(layoutMode: LayoutMode, splitRatio: number) {
+    if (layoutMode === "split") {
+      const rect = getCurrentHostRect();
+      const primedTargets = hasCompleteSplitTargets({
+        primaryWidth: $compositorStore.launchSequence.expectedPrimaryPaneWidth,
+        secondaryWidth: $compositorStore.launchSequence.expectedSecondaryPaneWidth,
+        paneHeight: $compositorStore.launchSequence.expectedPaneHeight,
+      })
+        ? {
+            primaryWidth: $compositorStore.launchSequence.expectedPrimaryPaneWidth,
+            secondaryWidth: $compositorStore.launchSequence.expectedSecondaryPaneWidth,
+            paneHeight: $compositorStore.launchSequence.expectedPaneHeight,
+          }
+        : null;
+      const targets = resolveExpectedSplitTargets({
+        hostWidth: rect.width,
+        hostHeight: rect.height,
+        splitRatio,
+        primedTargets,
+        dispatchedTargets: lastDispatchedSplitTargets,
+      });
+      const splitPaneStyles = buildSplitPaneStyles(targets);
+      if (splitPaneStyles) {
+        return splitPaneStyles;
+      }
+    }
+
+    return {
+      primary: paneStyle("primary"),
+      secondary: paneStyle("secondary"),
+    };
+  }
+
   function handleTransitionChange(active: boolean) {
     window.clearTimeout(safetyReleaseTimer);
     if (active) {
       if (!frozenLayoutState) {
+        hostRect = getCurrentHostRect();
+        const layoutMode = $compositorStore.layoutMode;
+        const splitRatio = $compositorStore.splitRatio;
         frozenLayoutState = {
-          layoutMode: $compositorStore.layoutMode,
+          layoutMode,
           visibleViewports: Array.from($compositorStore.viewports.values()).map(v => ({ ...v })),
-          paneStyles: {
-            primary: paneStyle("primary"),
-            secondary: paneStyle("secondary"),
-          },
+          paneStyles: getFrozenPaneStyles(layoutMode, splitRatio),
           popup: { ...$compositorStore.popup },
           fullPane: fullPane,
           popupPane: popupPane,
-          splitRatio: $compositorStore.splitRatio,
+          splitRatio,
         };
-        console.info(`[COMPOSITOR_BARRIER] event=freeze state=${$compositorStore.launchSequence.state} layout=${$compositorStore.layoutMode}`);
+        console.info(`[COMPOSITOR_BARRIER] event=freeze state=${$compositorStore.launchSequence.state} layout=${layoutMode}`);
         emitVerboseBarrierDiag("freeze", {
           state: $compositorStore.launchSequence.state,
-          layoutMode: $compositorStore.layoutMode,
+          layoutMode,
+          splitRatio,
         });
 
         // 6초 세이프 가드 타이머 시작 (어떤 원인으로든 6초 이상 배리어가 가두지 않도록 보장)
@@ -203,18 +426,115 @@
           }
         }, 6000);
       }
-    } else {
-      if (frozenLayoutState) {
-        console.info(`[COMPOSITOR_BARRIER] event=release state=${$compositorStore.launchSequence.state}`);
-        emitVerboseBarrierDiag("release", {
-          state: $compositorStore.launchSequence.state,
-        });
-        frozenLayoutState = null;
-      }
     }
   }
 
   $: handleTransitionChange(layoutTransitionActive);
+
+  $: primaryMetadata = runtime.generations.getMetadata("primary");
+  $: secondaryMetadata = runtime.generations.getMetadata("secondary");
+  $: primaryMetadataGeneration = primaryMetadata?.generation ?? -1;
+  $: secondaryMetadataGeneration = secondaryMetadata?.generation ?? -1;
+  $: primaryMetadataReady = primaryMetadata?.firstFrameReady === true;
+  $: secondaryMetadataReady = secondaryMetadata?.firstFrameReady === true;
+  $: frozenExpectedTargets = getActiveExpectedSplitTargets(
+    $compositorStore.launchSequence,
+    frozenLayoutState?.layoutMode,
+    frozenLayoutState?.splitRatio ?? $compositorStore.splitRatio,
+    hostRect.width,
+    hostRect.height,
+    lastDispatchedSplitTargets,
+  );
+  $: expectedPaneHeight = frozenExpectedTargets.expectedPaneHeight;
+  $: expectedPrimaryPaneWidth = frozenExpectedTargets.expectedPrimaryPaneWidth;
+  $: expectedSecondaryPaneWidth = frozenExpectedTargets.expectedSecondaryPaneWidth;
+  $: expectedSplitTargetSource = frozenExpectedTargets.source;
+
+  $: pendingBarrierPanes = getPendingBarrierPanes(
+    $compositorStore.launchSequence,
+    primaryViewport,
+    secondaryViewport,
+    primaryMetadataGeneration,
+    secondaryMetadataGeneration,
+    primaryMetadataReady,
+    secondaryMetadataReady,
+    expectedPrimaryPaneWidth,
+    expectedSecondaryPaneWidth,
+    expectedPaneHeight,
+    expectedPaneHeight,
+  );
+
+  $: if (frozenLayoutState) {
+    void metadataRevision;
+    emitVerboseBarrierDiag("pending_update", {
+      state: $compositorStore.launchSequence.state,
+      layoutMode: frozenLayoutState.layoutMode,
+      pendingPanes: pendingBarrierPanes,
+      primaryViewportGeneration: primaryViewport?.generation ?? -1,
+      primaryViewportCommitted: primaryViewport?.committed ?? false,
+      secondaryViewportGeneration: secondaryViewport?.generation ?? -1,
+      secondaryViewportCommitted: secondaryViewport?.committed ?? false,
+      primaryMetadataGeneration,
+      primaryMetadataReady,
+      secondaryMetadataGeneration,
+      secondaryMetadataReady,
+      expectedPrimaryPaneWidth: expectedPrimaryPaneWidth ?? -1,
+      expectedSecondaryPaneWidth: expectedSecondaryPaneWidth ?? -1,
+      expectedPaneHeight: expectedPaneHeight ?? -1,
+      expectedSplitTargetSource,
+    });
+  }
+
+  $: if (
+    frozenLayoutState?.layoutMode === "split" &&
+    isPositiveDimension(lastDispatchedSplitTargets?.primaryWidth) &&
+    isPositiveDimension(lastDispatchedSplitTargets?.secondaryWidth)
+  ) {
+    const nextPaneStyles = buildSplitPaneStyles({
+      primaryWidth: lastDispatchedSplitTargets.primaryWidth,
+      secondaryWidth: lastDispatchedSplitTargets.secondaryWidth,
+    });
+    if (
+      nextPaneStyles &&
+      (
+        frozenLayoutState.paneStyles.primary !== nextPaneStyles.primary ||
+        frozenLayoutState.paneStyles.secondary !== nextPaneStyles.secondary
+      )
+    ) {
+      frozenLayoutState = {
+        ...frozenLayoutState,
+        paneStyles: nextPaneStyles,
+      };
+      emitVerboseBarrierDiag("freeze_split_targets_applied", {
+        state: $compositorStore.launchSequence.state,
+        primaryWidth: lastDispatchedSplitTargets.primaryWidth,
+        secondaryWidth: lastDispatchedSplitTargets.secondaryWidth,
+        paneHeight: lastDispatchedSplitTargets.paneHeight ?? -1,
+        source: "dispatched",
+      });
+    }
+  }
+
+  function releaseFrozenBarrier(reason: string) {
+    if (!frozenLayoutState) return;
+    console.info(`[COMPOSITOR_BARRIER] event=release state=${$compositorStore.launchSequence.state} reason=${reason}`);
+    emitVerboseBarrierDiag("release", {
+      state: $compositorStore.launchSequence.state,
+      reason,
+      pendingPanes: pendingBarrierPanes,
+    });
+    frozenLayoutState = null;
+  }
+
+  $: if (frozenLayoutState && !layoutTransitionActive) {
+    if (pendingBarrierPanes.length === 0) {
+      releaseFrozenBarrier("pane_barriers_complete");
+    }
+  }
+
+  function shouldShowPaneBarrier(pane: PaneId): boolean {
+    return frozenLayoutState !== null && pendingBarrierPanes.includes(pane);
+  }
 
 
 
@@ -253,7 +573,7 @@
 
   $: if (host && layoutTrigger) {
     updateChrome();
-    if (!resizingSplit && !popupInteracting && !layoutTransitionActive) {
+    if (!resizingSplit && !popupInteracting && !layoutTransitionActive && !frozenLayoutState) {
       dispatchLayout();
     }
   }
@@ -261,7 +581,8 @@
   $: if (
     splitActive &&
     secondaryViewport?.committed === true &&
-    !layoutTransitionActive
+    !layoutTransitionActive &&
+    !frozenLayoutState
   ) {
     dispatchLayout(true);
   }
@@ -720,6 +1041,29 @@
     return runtime.currentAppLaunchSequence() === 0;
   }
 
+  function shouldLockExplicitLayoutTargets(): boolean {
+    if (resizingSplit || popupInteracting) return false;
+    return layoutTransitionActive || frozenLayoutState !== null || runtime.currentAppLaunchSequence() > 0;
+  }
+
+  function getLockedSplitTargets(alignedHeight: number) {
+    if (!shouldLockExplicitLayoutTargets()) {
+      return null;
+    }
+    if (
+      lastDispatchedSplitTargets?.primaryWidth &&
+      lastDispatchedSplitTargets?.secondaryWidth &&
+      lastDispatchedSplitTargets?.paneHeight
+    ) {
+      return lastDispatchedSplitTargets;
+    }
+    return {
+      primaryWidth: layoutMetrics.primaryWidth,
+      secondaryWidth: layoutMetrics.secondaryWidth,
+      paneHeight: alignedHeight,
+    };
+  }
+
   // Explicit immediate layout dispatch to backend with control queue promise resolution
   export function dispatchLayoutNow(
     mode: LayoutMode,
@@ -743,6 +1087,7 @@
       console.info(`[LAYOUT_DISPATCH] seq=${seqId ?? $compositorStore.launchSequence.id} mode=${mode} splitRatio=${splitRatio.toFixed(4)} popupVisible=${popup.visible}`);
 
       if (mode === "popup" && primaryViewport && secondaryViewport) {
+        lastDispatchedSplitTargets = null;
         const popupWidth = align16(popup.width);
         const popupHeight = align16(popup.visible && !popup.minimized ? Math.max(POPUP_MIN_HEIGHT, popup.height - POPUP_HEADER_HEIGHT) : rect.height);
         runtime.sendLayout([
@@ -751,11 +1096,17 @@
         ], seqId);
       } else if (mode === "split") {
         const layoutMetrics = computeSplitLayoutMetrics(rect.width, rect.height, splitRatio);
+        lastDispatchedSplitTargets = {
+          primaryWidth: layoutMetrics.primaryWidth,
+          secondaryWidth: layoutMetrics.secondaryWidth,
+          paneHeight: alignedHeight,
+        };
         runtime.sendLayout([
           { id: "primary", width: layoutMetrics.primaryWidth, height: alignedHeight, visible: true },
           { id: "secondary", width: layoutMetrics.secondaryWidth, height: alignedHeight, visible: true }
         ], seqId);
       } else {
+        lastDispatchedSplitTargets = null;
         const activePane = visibleViewports[0]?.pane ?? "primary";
         const hiddenPane = activePane === "primary" ? "secondary" : "primary";
         const alignedWidth = align16(rect.width);
@@ -781,8 +1132,49 @@
     });
   }
 
+  export function primeLayoutTargets(
+    mode: LayoutMode,
+    splitRatio: number,
+    popup: PopupLayoutState,
+  ): SplitTargets | null {
+    if (!host) return null;
+    hostRect = getCurrentHostRect();
+    const rect = hostRect.width > 0 && hostRect.height > 0 ? hostRect : host.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+
+    if (mode === "split") {
+      const metrics = computeSplitLayoutMetrics(rect.width, rect.height, splitRatio);
+      lastDispatchedSplitTargets = {
+        primaryWidth: metrics.primaryWidth,
+        secondaryWidth: metrics.secondaryWidth,
+        paneHeight: align16(rect.height),
+      };
+      emitVerboseBarrierDiag("layout_targets_primed", {
+        mode,
+        splitRatio,
+        primaryWidth: metrics.primaryWidth,
+        secondaryWidth: metrics.secondaryWidth,
+        paneHeight: align16(rect.height),
+      });
+      return lastDispatchedSplitTargets;
+    }
+
+    lastDispatchedSplitTargets = null;
+    if (mode === "popup") {
+      emitVerboseBarrierDiag("layout_targets_primed", {
+        mode,
+        popupVisible: popup.visible,
+        popupMinimized: popup.minimized,
+      });
+    }
+    return null;
+  }
+
   function dispatchLayout(forceImmediate = false) {
     window.clearTimeout(provisionalLayoutTimer);
+    if (shouldLockExplicitLayoutTargets() && !lastDispatchedSplitTargets) {
+      return;
+    }
     if (!forceImmediate && shouldDelayProvisionalLayout()) {
       provisionalLayoutTimer = window.setTimeout(() => {
         provisionalLayoutTimer = 0;
@@ -801,14 +1193,17 @@
         : host.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
     const alignedHeight = align16(rect.height);
+    const effectiveLayoutMode = frozenLayoutState?.layoutMode ?? $compositorStore.layoutMode;
 
-    if (fullPopupActive && fullViewport && popupViewport) {
+    if (effectiveLayoutMode === "popup" && fullViewport && popupViewport) {
+      lastDispatchedSplitTargets = null;
       const fullPaneId = fullViewport.pane as PaneId;
       const popupPaneId = popupViewport.pane as PaneId;
-      const popupWidth = align16($compositorStore.popup.width);
+      const popupState = frozenLayoutState?.popup ?? $compositorStore.popup;
+      const popupWidth = align16(popupState.width);
       const popupHeight = align16(
-        popupVisible && !popupMinimized
-          ? Math.max(POPUP_MIN_HEIGHT, popupBodyHeight)
+        popupState.visible && !popupState.minimized
+          ? Math.max(POPUP_MIN_HEIGHT, popupState.height - POPUP_HEADER_HEIGHT)
           : rect.height,
       );
       runtime.sendLayout([
@@ -822,31 +1217,49 @@
           id: popupPaneId,
           width: popupWidth,
           height: popupHeight,
-          visible: popupVisible && !popupMinimized,
+          visible: popupState.visible && !popupState.minimized,
         },
       ]);
       return;
     }
 
-    if (splitActive) {
-      const { primaryWidth, secondaryWidth } = layoutMetrics;
+    if (effectiveLayoutMode === "split") {
+      const lockedSplitTargets = getLockedSplitTargets(alignedHeight);
+      const primaryWidth =
+        lockedSplitTargets?.primaryWidth ??
+        expectedPrimaryPaneWidth ??
+        layoutMetrics.primaryWidth;
+      const secondaryWidth =
+        lockedSplitTargets?.secondaryWidth ??
+        expectedSecondaryPaneWidth ??
+        layoutMetrics.secondaryWidth;
+      const effectiveHeight =
+        lockedSplitTargets?.paneHeight ??
+        expectedPaneHeight ??
+        alignedHeight;
+      lastDispatchedSplitTargets = {
+        primaryWidth,
+        secondaryWidth,
+        paneHeight: effectiveHeight,
+      };
       runtime.sendLayout([
         {
           id: leftPane,
           width: primaryWidth,
-          height: alignedHeight,
+          height: effectiveHeight,
           visible: true,
         },
         {
           id: rightPane,
           width: secondaryWidth,
-          height: alignedHeight,
+          height: effectiveHeight,
           visible: true,
         },
       ]);
       return;
     }
 
+    lastDispatchedSplitTargets = null;
     const activePane = visibleViewports[0]?.pane ?? "primary";
     const hiddenPane: PaneId =
       activePane === "primary" ? "secondary" : "primary";
@@ -1059,6 +1472,9 @@
     if (!host) return;
     hostRect = host.getBoundingClientRect();
     touchRouter.updateHost(hostRect);
+    if (shouldLockExplicitLayoutTargets() && !lastDispatchedSplitTargets) {
+      return;
+    }
     dispatchLayout(true);
   }
 
@@ -1195,6 +1611,16 @@
     return paneStyle(pane);
   }
 
+  function getPaneBarrierStyle(pane: PaneId): string {
+    if (
+      frozenLayoutState?.layoutMode === "popup" &&
+      pane === "secondary"
+    ) {
+      return "left:0;top:0;width:100%;height:100%;";
+    }
+    return getCurrentPaneStyle(pane);
+  }
+
 
 
   function computeSplitLayoutMetrics(
@@ -1269,6 +1695,20 @@
         paneStyle={getCurrentPaneStyle(viewport.pane)}
         fitMode="fill"
       />
+      {#if shouldShowPaneBarrier(viewport.pane)}
+        <div
+          class="compositor-pane-barrier"
+          style={getPaneBarrierStyle(viewport.pane)}
+          role="presentation"
+          on:pointerdown|stopPropagation|preventDefault={handleBarrierInput}
+        >
+          <div class="premium-loader">
+            <div class="loader-circle"></div>
+            <div class="loader-pulse"></div>
+          </div>
+          <p class="barrier-text">{t($compositorStore.language, "barrierText")}</p>
+        </div>
+      {/if}
     {/each}
   {:else if currentFullPopupActive && currentFullViewport}
     <ViewportPane
@@ -1277,6 +1717,20 @@
       paneStyle={getCurrentPaneStyle(currentFullViewport.pane)}
       fitMode="contain"
     />
+    {#if shouldShowPaneBarrier(currentFullViewport.pane)}
+      <div
+        class="compositor-pane-barrier"
+        style={getPaneBarrierStyle(currentFullViewport.pane)}
+        role="presentation"
+        on:pointerdown|stopPropagation|preventDefault={handleBarrierInput}
+      >
+        <div class="premium-loader">
+          <div class="loader-circle"></div>
+          <div class="loader-pulse"></div>
+        </div>
+        <p class="barrier-text">{t($compositorStore.language, "barrierText")}</p>
+      </div>
+    {/if}
     {#if currentPopupVisible && currentPopupViewport}
       {#if currentPopupMinimized}
         <!-- Minimized premium circular floating app icon bubble -->
@@ -1341,6 +1795,20 @@
               paneStyle="left:0;top:0;width:100%;height:100%;"
               fitMode="fill"
             />
+            {#if shouldShowPaneBarrier(currentPopupViewport.pane)}
+              <div
+                class="compositor-pane-barrier popup-pane-barrier"
+                style={getPaneBarrierStyle(currentPopupViewport.pane)}
+                role="presentation"
+                on:pointerdown|stopPropagation|preventDefault={handleBarrierInput}
+              >
+                <div class="premium-loader">
+                  <div class="loader-circle"></div>
+                  <div class="loader-pulse"></div>
+                </div>
+                <p class="barrier-text">{t($compositorStore.language, "barrierText")}</p>
+              </div>
+            {/if}
           </div>
           <button
             class="popup-resize-handle edge-n"
@@ -1401,6 +1869,20 @@
         paneStyle={getCurrentPaneStyle(viewport.pane)}
         fitMode="contain"
       />
+      {#if shouldShowPaneBarrier(viewport.pane)}
+        <div
+          class="compositor-pane-barrier"
+          style={getPaneBarrierStyle(viewport.pane)}
+          role="presentation"
+          on:pointerdown|stopPropagation|preventDefault={handleBarrierInput}
+        >
+          <div class="premium-loader">
+            <div class="loader-circle"></div>
+            <div class="loader-pulse"></div>
+          </div>
+          <p class="barrier-text">{t($compositorStore.language, "barrierText")}</p>
+        </div>
+      {/if}
     {/each}
   {/if}
 
@@ -1416,15 +1898,6 @@
     ></button>
   {/if}
 
-  {#if layoutTransitionActive || frozenLayoutState}
-    <div class="compositor-barrier-overlay" role="presentation" on:pointerdown|stopPropagation|preventDefault={handleBarrierInput}>
-      <div class="premium-loader">
-        <div class="loader-circle"></div>
-        <div class="loader-pulse"></div>
-      </div>
-      <p class="barrier-text">{t($compositorStore.language, "barrierText")}</p>
-    </div>
-  {/if}
 </div>
 
 <style>
@@ -1691,7 +2164,7 @@
 
 
 
-  .compositor-barrier-overlay {
+  .compositor-pane-barrier {
     position: absolute;
     inset: 0;
     z-index: 36;
@@ -1703,6 +2176,11 @@
     backdrop-filter: blur(16px) saturate(120%);
     gap: 20px;
     animation: fadeInBarrier 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    pointer-events: auto;
+  }
+
+  .popup-pane-barrier {
+    border-radius: 0 0 16px 16px;
   }
 
   .premium-loader {

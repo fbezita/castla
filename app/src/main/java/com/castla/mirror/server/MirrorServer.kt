@@ -76,9 +76,24 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         private const val CERT_API_URL = "https://car.fbezita.com/api/castla/cert"
         private const val CASTLA_CERT_TOKEN = "5f8c7d3a91e24f0bb4d7e6c2a8f91b6d"
         private const val CERT_PASSWORD = "castla4864"
+        @Volatile private var verboseServerAvailabilityLogging = false
+
+        fun isVerboseServerAvailabilityLoggingEnabled(): Boolean = verboseServerAvailabilityLogging
     }    
 
+    private fun logServerAvailability(message: String) {
+        if (verboseServerAvailabilityLogging) {
+            FileLogger.i("SERVER_AVAILABILITY", message)
+            Log.i(TAG, message)
+        }
+    }
+
+    fun setVerboseDiagnosticsEnabled(enabled: Boolean) {
+        verboseServerAvailabilityLogging = enabled
+    }
+
     init {
+        verboseServerAvailabilityLogging = com.castla.mirror.ui.StreamSettings.load(context).verboseDiagnosticsEnabled
         // [Legacy Code] Filtering NanoHTTPD socket closed exception logs
         try {
             val nanoLogger = java.util.logging.Logger.getLogger("fi.iki.elonen.NanoHTTPD")
@@ -97,6 +112,10 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             Log.w(TAG, "Failed to configure NanoHTTPD log filter", e)
         }
 
+        logServerAvailability(
+            "init instanceId=$instanceId port=$DEFAULT_PORT hostname=${hostname ?: "<default>"} " +
+                "webCodecs=${com.castla.mirror.ui.StreamSettings.load(context).webCodecsEnabled}"
+        )
         Log.i(TAG, "MirrorServer init: relay DNS publish will wait for WebCodecs mode and a valid serverIp")
 
         configureSecureContext()
@@ -114,19 +133,24 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         if (settings.webCodecsEnabled) {
             try {
                 val password = CERT_PASSWORD.toCharArray()
-                val keyStore = KeyStore.getInstance("PKCS12")
                 val dynamicKeyStoreFile = File(context.filesDir, "dynamic_castla.p12")
-                
-                val isDynamic = dynamicKeyStoreFile.exists() && dynamicKeyStoreFile.length() > 0
-                val keystoreStream: InputStream = if (isDynamic) {
-                    Log.i(TAG, "🔓 [Success] SSL Cert source: dynamic_castla.p12 loaded from local app storage")
-                    FileInputStream(dynamicKeyStoreFile)
-                } else {
-                    Log.i(TAG, "🔓 [Success] SSL Cert source: castla.p12 loaded from bundled assets fallback")
-                    context.assets.open("castla.p12")
+                val loadedKeystore = TlsKeystoreLoader.loadDynamicPkcs12WithRefresh(
+                    password = password,
+                    dynamicFile = dynamicKeyStoreFile,
+                ) {
+                    Log.w(TAG, "[TLS] dynamic_castla.p12 invalid or missing. Re-downloading certificate.")
+                    downloadCertIfAvailableBlocking(context)
                 }
-
-                keystoreStream.use { stream -> keyStore.load(stream, password) }
+                val keyStore = loadedKeystore.keyStore
+                val certSource = loadedKeystore.source
+                Log.i(
+                    TAG,
+                    if (certSource == "dynamic") {
+                        "🔓 [Success] SSL Cert source: dynamic_castla.p12 loaded from local app storage"
+                    } else {
+                        "🔓 [Success] SSL Cert source: dynamic_castla.p12 refreshed from remote API"
+                    }
+                )
                 val keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
                 keyManagerFactory.init(keyStore, password)
 
@@ -145,16 +169,22 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
                     }
                     serverSocketFactory = loggingFactory
                 }
+                logServerAvailability(
+                    "tls_configured mode=https certSource=$certSource " +
+                        "relayUrl=${relayDnsManager.getDeviceRelayUrl()}"
+                )
                 Log.i(TAG, "🚀 HTTPS server started")
                 Log.i(TAG, "🌐 Public URL = ${relayDnsManager.getPublicEntryUrl()}")
                 Log.i(TAG, "🔗 Device relay URL = ${relayDnsManager.getDeviceRelayUrl()}")
                 return
             } catch (e: Exception) {
+                logServerAvailability("tls_config_failed error=${e.message ?: e::class.java.simpleName}")
                 Log.e(TAG, "❌ SSL load failed, falling back to HTTP mode", e)
             }
         }
 
         // 🌐 When WebCodecs is disabled, makeSecure() is bypassed so the server automatically runs in HTTP mode.
+        logServerAvailability("tls_bypassed mode=http reason=webcodecs_disabled")
         Log.w(TAG, "⚠️ [HTTP Mode] WebCodecs is disabled; running as a standard HTTP server.")
     }
 
@@ -242,6 +272,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             Log.i(TAG, "setRelayPublishIp: relayPublishIp $relayPublishIp -> $nextIp")
             relayPublishIp = nextIp
         }
+        logServerAvailability("relay_publish_ip value=$relayPublishIp")
 
         publishRelayDnsIfReady("setRelayPublishIp")
     } 
@@ -250,11 +281,13 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         val settings = com.castla.mirror.ui.StreamSettings.load(context)
 
         if (!settings.webCodecsEnabled) {
+            logServerAvailability("relay_publish_skip reason=webcodecs_disabled trigger=$reason")
             Log.i(TAG, "Relay DNS publish skipped: WebCodecs is disabled (reason=$reason)")
             return
         }
 
         if (relayPublishIp.isBlank() || relayPublishIp == "0.0.0.0") {
+            logServerAvailability("relay_publish_skip reason=ip_not_ready trigger=$reason ip=$relayPublishIp")
             Log.i(TAG, "Relay DNS publish skipped: relayPublishIp is not ready ($relayPublishIp, reason=$reason)")
             return
         }
@@ -586,12 +619,25 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         // When VirtualDisplay is created and stream encoder engine starts, dispatch session_ready packet
         val socket = synchronized(controlSocketLock) { activeControlSocket }
         if (socket != null && socket.currentLaunchSeqId != -1) {
+            if (MirrorServer.isVerboseServerAvailabilityLoggingEnabled()) {
+                FileLogger.i(
+                    "SESSION_READY",
+                    "dispatch channel=$normalized vdId=$vdId generation=$generation width=$width height=$height " +
+                        "seqId=${socket.currentLaunchSeqId} controlSession=${socket.debugId}"
+                )
+            }
             val response = JSONObject().apply {
                 put("type", "session_ready")
                 put("seqId", socket.currentLaunchSeqId)
                 put("pane", normalized)
             }
             sendControlSocketAsync(socket, response.toString(), "session_ready")
+        } else if (MirrorServer.isVerboseServerAvailabilityLoggingEnabled()) {
+            FileLogger.i(
+                "SESSION_READY",
+                "dispatch_skipped channel=$normalized vdId=$vdId generation=$generation width=$width height=$height " +
+                    "hasSocket=${socket != null} seqId=${socket?.currentLaunchSeqId ?: -1}"
+            )
         }
 
         return generation
@@ -606,6 +652,11 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         FileLogger.i("FRAME_DEBUG", "firstFrameReady channel=$normalized vdId=$vdId generation=$generation ${width}x$height")
         FileLogger.i("VD_FRAME", "firstFrameReady channel=$normalized vdId=$vdId generation=$generation width=$width height=$height")
         broadcastStreamMetadata(normalized, vdId, generation, width, height, streamReady = true, firstFrame = true)
+    }
+
+    fun getCurrentStreamGeneration(channel: String = "primary"): Int {
+        val normalized = normalizeChannel(channel)
+        return streamGenerations[normalized]?.get() ?: 0
     }
 
     fun pauseStream(channel: String = "primary", vdId: Int, width: Int, height: Int) {
@@ -1076,6 +1127,10 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
 
 
     override fun openWebSocket(handshake: IHTTPSession): WebSocket {
+        logServerAvailability(
+            "websocket_upgrade uri=${handshake.uri} remoteIp=${handshake.remoteIpAddress} " +
+                "query=${handshake.queryParameterString ?: ""}"
+        )
         Log.i(TAG, "openWebSocket uri=${handshake.uri} params=${handshake.parameters}")
 
         val uri = handshake.uri
@@ -1105,6 +1160,10 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     override fun serveHttp(session: IHTTPSession): Response {
         var uri = session.uri
         if (uri == "/") uri = "/index.html"
+        logServerAvailability(
+            "http_request method=${session.method} uri=$uri remoteIp=${session.remoteIpAddress} " +
+                "host=${session.headers["host"] ?: ""} ua=${session.headers["user-agent"] ?: ""}"
+        )
         
         // Handle API routes for Native Web Launcher
         if (uri == "/api/apps") {
@@ -1279,6 +1338,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     }
 
     override fun stop() {
+        logServerAvailability("server_stop_begin instanceId=$instanceId")
         closeAllSockets("Server stop")
         try {
             controlSendExecutor.shutdown()
@@ -1295,7 +1355,9 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             val stopThread = Thread({
                 try {
                     super.stop()
+                    logServerAvailability("server_stop_complete instanceId=$instanceId thread=background")
                 } catch (e: Exception) {
+                    logServerAvailability("server_stop_error instanceId=$instanceId error=${e.message ?: e::class.java.simpleName}")
                     Log.w(TAG, "Error stopping server in background thread", e)
                 }
             }, "MirrorServerStopThread")
@@ -1305,7 +1367,13 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
                 stopThread.join(500)
             } catch (_: Exception) {}
         } else {
-            super.stop()
+            try {
+                super.stop()
+                logServerAvailability("server_stop_complete instanceId=$instanceId thread=direct")
+            } catch (e: Exception) {
+                logServerAvailability("server_stop_error instanceId=$instanceId error=${e.message ?: e::class.java.simpleName}")
+                throw e
+            }
         }
     }
 
@@ -1314,20 +1382,79 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
 private class LoggingServerSocket(private val delegate: java.net.ServerSocket) : java.net.ServerSocket() {
     override fun accept(): java.net.Socket {
         android.util.Log.i("MirrorServer", "Waiting for connection...")
-        val socket = delegate.accept()
-        android.util.Log.i("MirrorServer", "Client connected: ${socket.inetAddress}:${socket.port}")
-        if (socket is javax.net.ssl.SSLSocket) {
-            android.util.Log.i("MirrorServer", "Starting TLS handshake...")
+        if (MirrorServer.isVerboseServerAvailabilityLoggingEnabled()) {
+            com.castla.mirror.diagnostics.FileLogger.i(
+                "SERVER_AVAILABILITY",
+                "accept_wait local=${delegate.localSocketAddress}"
+            )
         }
-        return socket
+        return try {
+            val socket = delegate.accept()
+            val remote = "${socket.inetAddress?.hostAddress ?: "unknown"}:${socket.port}"
+            if (MirrorServer.isVerboseServerAvailabilityLoggingEnabled()) {
+                com.castla.mirror.diagnostics.FileLogger.i(
+                    "SERVER_AVAILABILITY",
+                    "accept_success local=${delegate.localSocketAddress} remote=$remote ssl=${socket is javax.net.ssl.SSLSocket}"
+                )
+            }
+            android.util.Log.i("MirrorServer", "Client connected: ${socket.inetAddress}:${socket.port}")
+            if (socket is javax.net.ssl.SSLSocket) {
+                android.util.Log.i("MirrorServer", "Starting TLS handshake...")
+            }
+            socket
+        } catch (e: Exception) {
+            if (MirrorServer.isVerboseServerAvailabilityLoggingEnabled()) {
+                com.castla.mirror.diagnostics.FileLogger.i(
+                    "SERVER_AVAILABILITY",
+                    "accept_error local=${delegate.localSocketAddress} error=${e.message ?: e::class.java.simpleName}"
+                )
+            }
+            throw e
+        }
     }
 
-    override fun bind(endpoint: java.net.SocketAddress?) = delegate.bind(endpoint)
-    override fun bind(endpoint: java.net.SocketAddress?, backlog: Int) = delegate.bind(endpoint, backlog)
+    override fun bind(endpoint: java.net.SocketAddress?) {
+        if (MirrorServer.isVerboseServerAvailabilityLoggingEnabled()) {
+            com.castla.mirror.diagnostics.FileLogger.i(
+                "SERVER_AVAILABILITY",
+                "bind_request endpoint=${endpoint ?: "<null>"}"
+            )
+        }
+        delegate.bind(endpoint)
+        if (MirrorServer.isVerboseServerAvailabilityLoggingEnabled()) {
+            com.castla.mirror.diagnostics.FileLogger.i(
+                "SERVER_AVAILABILITY",
+                "bind_success endpoint=${delegate.localSocketAddress}"
+            )
+        }
+    }
+    override fun bind(endpoint: java.net.SocketAddress?, backlog: Int) {
+        if (MirrorServer.isVerboseServerAvailabilityLoggingEnabled()) {
+            com.castla.mirror.diagnostics.FileLogger.i(
+                "SERVER_AVAILABILITY",
+                "bind_request endpoint=${endpoint ?: "<null>"} backlog=$backlog"
+            )
+        }
+        delegate.bind(endpoint, backlog)
+        if (MirrorServer.isVerboseServerAvailabilityLoggingEnabled()) {
+            com.castla.mirror.diagnostics.FileLogger.i(
+                "SERVER_AVAILABILITY",
+                "bind_success endpoint=${delegate.localSocketAddress} backlog=$backlog"
+            )
+        }
+    }
     override fun getInetAddress(): java.net.InetAddress = delegate.inetAddress
     override fun getLocalPort(): Int = delegate.localPort
     override fun getLocalSocketAddress(): java.net.SocketAddress = delegate.localSocketAddress
-    override fun close() = delegate.close()
+    override fun close() {
+        if (MirrorServer.isVerboseServerAvailabilityLoggingEnabled()) {
+            com.castla.mirror.diagnostics.FileLogger.i(
+                "SERVER_AVAILABILITY",
+                "server_socket_close endpoint=${delegate.localSocketAddress}"
+            )
+        }
+        delegate.close()
+    }
     override fun isClosed(): Boolean = delegate.isClosed
     override fun getReuseAddress(): Boolean = delegate.reuseAddress
     override fun setReuseAddress(on: Boolean) { delegate.reuseAddress = on }

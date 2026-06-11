@@ -15,6 +15,7 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
   
   // Simulated message subscription listeners
   let ackListeners: Array<(msg: any) => void> = [];
+  let latestStreamMetadata = new Map<string, any>();
 
   function nextLaunchSeqId(): number {
     return ++currentSeqId;
@@ -28,6 +29,9 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
   }
 
   function emitAckMessage(msg: any) {
+    if (msg.type === 'streamMetadata' && typeof msg.sessionId === 'string') {
+      latestStreamMetadata.set(msg.sessionId, msg);
+    }
     ackListeners.forEach(l => l(msg));
   }
 
@@ -95,8 +99,16 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
     return new Promise((resolve, reject) => {
       let primarySawRecommit = false;
       let secondarySawRecommit = false;
-      let primaryMetadataReady = false;
-      let secondaryMetadataReady = !hasSecondary;
+      const initialPrimaryMetadata = latestStreamMetadata.get('primary');
+      const initialSecondaryMetadata = latestStreamMetadata.get('secondary');
+      let primaryMetadataReady = Boolean(
+        initialPrimaryMetadata?.firstFrameReady === true &&
+        initialPrimaryMetadata.generation > primaryStartGen
+      );
+      let secondaryMetadataReady = !hasSecondary || Boolean(
+        initialSecondaryMetadata?.firstFrameReady === true &&
+        initialSecondaryMetadata.generation > secondaryStartGen
+      );
       let cleanup = () => {};
       const tryResolve = () => {
         const state = get(compositorStore);
@@ -130,10 +142,10 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
       });
       const ackUnsub = registerAckListener((msg) => {
         if (isStale(seqId)) { cleanup(); reject(new StaleLaunchSequenceError()); return; }
-        if (msg.type === 'streamMetadata' && msg.sessionId === 'primary' && msg.firstFrameReady && msg.generation >= primaryStartGen) {
+        if (msg.type === 'streamMetadata' && msg.sessionId === 'primary' && msg.firstFrameReady && msg.generation > primaryStartGen) {
           primaryMetadataReady = true;
         }
-        if (hasSecondary && msg.type === 'streamMetadata' && msg.sessionId === 'secondary' && msg.firstFrameReady && msg.generation >= secondaryStartGen) {
+        if (hasSecondary && msg.type === 'streamMetadata' && msg.sessionId === 'secondary' && msg.firstFrameReady && msg.generation > secondaryStartGen) {
           secondaryMetadataReady = true;
         }
         tryResolve();
@@ -154,6 +166,7 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
   beforeEach(() => {
     ackListeners = [];
     currentSeqId = 0;
+    latestStreamMetadata = new Map();
     
     // Reset compositorStore initial state
     compositorStore.set({
@@ -497,7 +510,7 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
       emitAckMessage({
         type: 'streamMetadata',
         sessionId: 'primary',
-        generation: 7,
+        generation: 8,
         firstFrameReady: true,
         streamReady: true,
         vdId: 3,
@@ -505,6 +518,118 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
         height: 720,
       });
     }, 20);
+
+    await expect(waitPromise).resolves.toBeUndefined();
+  });
+
+  it('Scenario 2e: Should resolve when fresh firstFrameReady metadata already arrived before waiting starts', async () => {
+    const seqId = nextLaunchSeqId();
+
+    compositorStore.set({
+      viewports: new Map([
+        ['primary', { pane: 'primary', width: 720, height: 720, committed: false, generation: 2, visible: true }],
+        ['secondary', { pane: 'secondary', width: 1280, height: 720, committed: false, generation: 0, visible: false }]
+      ]),
+      diagnostics: [],
+      serverDiagnostics: null,
+      layoutMode: 'single',
+      splitRatio: 0.5,
+      activePrimaryApp: 'com.example.app',
+      activeSecondaryApp: '',
+      popup: { visible: false, minimized: false, x: 0, y: 0, width: 0, height: 0 },
+      launchSequence: {
+        id: seqId,
+        primaryPkg: 'com.example.app',
+        layoutMode: 'single',
+        state: 'STREAM_COMMITTING',
+        startedAt: Date.now(),
+        primaryStartGen: 2,
+        secondaryStartGen: 0,
+      }
+    });
+
+    emitAckMessage({
+      type: 'streamMetadata',
+      sessionId: 'primary',
+      generation: 3,
+      firstFrameReady: true,
+      streamReady: true,
+      vdId: 7,
+      width: 720,
+      height: 720,
+    });
+
+    await expect(waitForStreamsToCommit(seqId, false, 2, 0, 40)).resolves.toBeUndefined();
+  });
+
+  it('Scenario 2f: Should keep split launch pending until reused secondary stream recommits', async () => {
+    const seqId = nextLaunchSeqId();
+    const resolved = vi.fn();
+
+    compositorStore.set({
+      viewports: new Map([
+        ['primary', { pane: 'primary', width: 368, height: 704, committed: false, generation: 5, visible: true }],
+        ['secondary', { pane: 'secondary', width: 544, height: 704, committed: false, generation: 2, visible: true }]
+      ]),
+      diagnostics: [],
+      serverDiagnostics: null,
+      layoutMode: 'split',
+      splitRatio: 0.403954802259887,
+      activePrimaryApp: 'com.google.android.youtube',
+      activeSecondaryApp: 'com.disney.disneyplus',
+      popup: { visible: false, minimized: false, x: 0, y: 0, width: 0, height: 0 },
+      launchSequence: {
+        id: seqId,
+        primaryPkg: 'com.google.android.youtube',
+        secondaryPkg: 'com.disney.disneyplus',
+        layoutMode: 'split',
+        state: 'STREAM_COMMITTING',
+        startedAt: Date.now(),
+        primaryStartGen: 5,
+        secondaryStartGen: 2,
+      }
+    });
+
+    emitAckMessage({
+      type: 'streamMetadata',
+      sessionId: 'secondary',
+      generation: 2,
+      firstFrameReady: true,
+      streamReady: true,
+      vdId: 9,
+      width: 544,
+      height: 704,
+    });
+
+    const waitPromise = waitForStreamsToCommit(seqId, true, 5, 2, 120);
+    waitPromise.then(resolved);
+
+    compositorStore.update((curr) => ({
+      ...curr,
+      viewports: new Map(curr.viewports).set('primary', {
+        pane: 'primary',
+        width: 368,
+        height: 704,
+        committed: true,
+        generation: 6,
+        visible: true,
+      }),
+    }));
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(resolved).not.toHaveBeenCalled();
+
+    compositorStore.update((curr) => ({
+      ...curr,
+      viewports: new Map(curr.viewports).set('secondary', {
+        pane: 'secondary',
+        width: 544,
+        height: 704,
+        committed: true,
+        generation: 2,
+        visible: true,
+      }),
+    }));
 
     await expect(waitPromise).resolves.toBeUndefined();
   });

@@ -815,3 +815,149 @@ stateDiagram-v2
   - 이전 1번(`layout_ack`) 문제는 `mirror (3).log`에서 재발 흔적이 없었습니다.
   - 이전 2번(`stream_timeout` after layout success) 문제도 이번 로그의 주범이라기보다, 새로 드러난 stale same-app relaunch 문제가 압도적으로 핵심이었습니다.
   - 즉 2026-06-10 시점의 패치는 “기존 1/2번 문제 보강 + 3번 문제 신규 해결”을 한 묶음으로 마무리한 작업입니다.
+
+---
+
+## 21. 🏁 [NEW] 2026-06-11 same-target no-op 정교화와 split/popup/single 전환 안정화
+
+2026년 6월 11일에는 실차 로그(`mirror (41).log`, `mirror.log`, `mirror (2).log`)를 바탕으로, "같은 앱/같은 앱 페어면 재실행을 건너뛴다"는 최적화가 실제 recommit이 필요한 경우까지 잘못 삼켜버리던 문제를 집중 보강했습니다. 이번 묶음의 핵심은 **stale metadata 기반의 가짜 ready/no-op 판정을 제거하고, layout 전환 자체를 launch FSM의 정식 경로로 편입**한 것입니다.
+
+### 21.1. hot stream 재사용 조건을 committed/generation 기준으로 강화
+- **문제 현상**: launch 시작 시 pane을 의도적으로 `committed=false`로 리셋해도, 이전 세션의 `streamMetadata.firstFrameReady=true`만 보고 `session_wait_reuse_existing_stream`이 너무 빨리 통과하는 경로가 있었습니다.
+- **해결 메커니즘**:
+  - `canReuseHotStream()` helper를 분리해 재사용 조건을 한곳에 모았습니다.
+  - 이제는 `viewport.visible === true`, `viewport.committed === true`, 유효한 viewport 크기, `metadata.firstFrameReady === true`, `metadata.generation >= startGen`을 모두 만족할 때만 hot stream reuse를 허용합니다.
+- **효과**: launch 도중 우리가 일부러 `committed=false`로 내려놓은 pane은 stale metadata만으로 `SESSION_READY`를 통과하지 못하게 되었고, 가짜 ready 뒤 `stream_timeout`으로 떨어지던 경로를 차단했습니다.
+
+### 21.2. same app/pair no-op 최적화를 layout equivalence까지 확장
+- **문제 현상**: "같은 앱" 또는 "같은 앱 페어"를 다시 눌렀을 때는 현재 상태를 유지하는 것이 맞지만, 기존 최적화는 앱 패키지 일치 여부만으로는 부족했습니다. split/popup/single 전환이나 popup geometry 차이까지 모두 구분하지 못하면 필요한 recommit까지 건너뛰게 됩니다.
+- **해결 메커니즘**:
+  - `launchRequestReuse.ts`의 `canKeepCurrentLaunch()`를 추가해 재사용 조건을 순수 helper로 정리했습니다.
+  - 공통 조건:
+    - `primary/secondary pkg` 일치
+    - `layoutMode` 일치
+    - 현재 `launchSequence.state`가 안정 상태
+    - 현재 viewport가 `committed + firstFrameReady` 상태의 healthy stream
+  - 추가 조건:
+    - `split`: expected pane sizes(`primaryWidth`, `secondaryWidth`, `paneHeight`)까지 동일해야 skip
+    - `popup`: popup `x/y/width/height`, `visible`, `minimized`, 그리고 popup에서 유도되는 secondary viewport 크기까지 동일해야 skip
+    - `single`: secondary pane이 실제로 `visible=false`여야 skip
+- **효과**: truly same target일 때만 no-op로 유지하고, layout이나 geometry가 조금이라도 다르면 기존 launch/recommit 경로를 그대로 타도록 정밀도가 올라갔습니다.
+
+### 21.3. barrier release helper를 waitForStreamsToCommit()와 동일한 same-generation recommit semantics로 정렬
+- **문제 현상**: barrier 해제 판단과 `waitForStreamsToCommit()`의 recommit 판단 기준이 조금 달라, 한쪽은 release 가능으로 보고 다른 한쪽은 아직 미완료로 보는 엇갈림이 생길 여지가 있었습니다.
+- **해결 메커니즘**:
+  - `barrierRelease.ts`의 helper가 `viewportGeneration >= startGeneration` 기반으로 same-generation recommit을 인정하도록 맞췄습니다.
+  - 동시에 `waitForStreamsToCommit()`도 initial committed 상태를 기억했다가, `committed false -> true` 전이가 같은 generation에서 일어나면 성공으로 간주하도록 정리했습니다.
+  - 반면 metadata 기반 ready는 여전히 `generation > startGeneration`일 때만 인정해 stale frame을 배제했습니다.
+- **효과**: barrier release와 stream commit 완료 판정이 동일한 세대 규칙을 공유하게 되어, recommit 직후 barrier가 남아 있거나 반대로 너무 빨리 풀리는 불일치를 줄였습니다.
+
+### 21.4. split -> popup, popup -> split, popup -> single 전환을 단순 UI 토글이 아닌 launch FSM 재진입으로 수정
+- **문제 현상**:
+  - `split -> popup`에서는 layout 버튼이 단순히 store의 `layoutMode`만 바꾸고 끝나서, popup용 layout dispatch / recommit 없이 split 시절 viewport 상태를 끌고 가는 문제가 있었습니다.
+  - 그 상태에서 `popup -> single`까지 내려간 뒤 새 single 앱을 실행하면, launch 전에 store가 먼저 새 값으로 덮여서 no-op 최적화가 "이미 같은 single target"이라고 오판하는 회귀도 드러났습니다.
+- **해결 메커니즘**:
+  - `layoutModeTransition.ts`의 `buildLayoutModeLaunchRequest()`를 추가해, 현재 active 앱 상태를 바탕으로 layout 전환이 실제 launch/recommit이 필요한지 순수 함수로 판정하도록 했습니다.
+  - `AppLauncher.setLayoutMode()`는 이제:
+    - active primary/secondary가 모두 살아 있고 `split <-> popup` 전환이 필요하면 현재 pair로 `startLaunchSequence()`를 다시 태웁니다.
+    - `-> single` 전환이면 primary만 남기는 single launch request를 태웁니다.
+    - active 앱이 없는 경우에만 예전처럼 단순 UI 토글로 남깁니다.
+  - 추가로 `launch(app, "primary")` 경로에서 `startLaunchSequence()` 전에 `activePrimaryApp/layoutMode`를 선행 갱신하던 코드를 제거해, 새 single 앱 실행이 잘못된 no-op skip으로 빠지지 않게 했습니다.
+- **효과**:
+  - `split -> popup`
+  - `popup -> split`
+  - `popup -> single -> 다른 single 앱 실행`
+  시나리오가 모두 launch FSM을 통해 정식 recommit 경로를 타게 되었고, layout 버튼이 더 이상 "보이는 모드만 바뀌고 실제 스트림은 안 바뀌는" 상태를 만들지 않게 되었습니다.
+
+### 21.5. 테스트 및 검증
+- **프론트엔드 테스트 추가**:
+  - `launchRequestReuse.test.ts`
+    - same split pair healthy + layout-equivalent면 skip
+    - same popup pair + geometry identical이면 skip
+    - same single + secondary hidden이면 skip
+    - requested single app이 현재 single app과 다르면 skip 금지
+  - `barrierRelease.test.ts`
+    - same-generation recommit release 허용
+  - `layoutModeTransition.test.ts`
+    - `split -> popup`
+    - `popup -> split`
+    - `-> single`
+    - secondary 없는 상태에서 dual-pane relaunch 금지
+- **실행 검증 결과**:
+  - `pnpm test` 통과 (`10 files, 47 tests passed`)
+  - `./gradlew :app:testDebugUnitTest` 통과
+
+### 21.6. split launch target을 launchSequence의 단일 소스로 승격
+- **문제 현상**: split 실행 시 `LAYOUT_ALIGNING` 단계에서는 이미 최종 목표 폭(`368/544/704`)이 계산되어 있었지만, `PRIMARY_LAUNCH_SENT` 혹은 `SECONDARY_LAUNCH_SENT` 직후 freeze가 그 값을 보기 전에 한 틱 먼저 돌면서 `expectedPrimaryPaneWidth=-1`이 찍히고, 실제 UI에서도 임시 `5:5` split이 잠깐 보였다가 다시 줄어드는 현상이 남아 있었습니다.
+- **로그 결론**: `mirror (40).log` 계열에서 공통적으로 첫 `pending_update`만 `-1/-1/-1`, 바로 다음 틱에 `368/544/704`로 바뀌는 패턴이 반복됐습니다. 즉 split 폭 계산 자체가 틀린 것이 아니라, 계산 결과를 freeze/barrier가 참조하는 데이터 원천이 `launchSequence.state`와 분리되어 있어 순서 race가 발생한 것이 핵심이었습니다.
+- **해결 메커니즘**:
+  - `ViewportHost.primeLayoutTargets()`가 split 목표 폭을 계산해 반환하도록 바꾸고,
+  - `AppLauncher.startLaunchSequence()`가 launch 시작 시점에 이 값을 `launchSequence.expectedPrimaryPaneWidth`, `expectedSecondaryPaneWidth`, `expectedPaneHeight`에 함께 싣도록 수정했습니다.
+  - `ViewportHost`의 expected split target 판정과 frozen pane style 생성은 이제 `launchSequence`에 실린 목표 폭을 최우선으로 보고, 없을 때만 dispatched target / host rect fallback을 타도록 정리했습니다.
+  - 관련 순수 helper(`splitTargets.ts`)도 `primedTargets -> dispatchedTargets -> host rect` 우선순위를 명시적으로 지원하도록 보강했습니다.
+- **효과**:
+  - `PRIMARY_LAUNCH_SENT`, `SECONDARY_LAUNCH_SENT` 직후 첫 `pending_update`부터 바로 최종 split 폭이 유지됩니다.
+  - freeze가 launch state보다 늦게 target을 보는 현상이 사라져, 임시 `5:5` 분할이나 “먼저 크게 뜬 뒤 다시 줄어드는” 시각적 튐을 구조적으로 줄였습니다.
+  - `mirror (41).log`에서는 실제로 split 케이스 첫 freeze부터 `368/544/704`가 유지되고 `expectedSplitTargetSource:"launch_sequence"`가 확인되었습니다.
+
+### 21.7. secondary stale hot-stream reuse 오판 제거
+- **문제 현상**: 이번 split 안정화 작업 이후 `youtube + disney` 같은 일부 조합에서, secondary pane이 launch 시작 시 `committed=false`로 리셋되었음에도 이전 세션의 `streamMetadata.firstFrameReady=true`만 보고 `session_wait_reuse_existing_stream`으로 너무 빨리 통과하는 문제가 드러났습니다. 그 결과 `SECONDARY_SESSION_READY`까지는 갔지만 실제 `secondaryViewportCommitted=true`가 생기지 않아 결국 `stream_timeout`으로 떨어졌습니다.
+- **로그 결론**: `mirror (41).log`의 `seqId=3`은 목표 split 폭은 처음부터 끝까지 정상(`368/544/704`)이었고, primary도 `generation 6 -> committed=true`로 잘 붙었습니다. 반면 secondary는 `secondaryMetadataReady=true`, `secondaryStartGen=2` 상태인데도 끝까지 `secondaryViewportCommitted=false`로 남았고, recovery 이후에도 같은 이유로 `DEGRADED`로 종료됐습니다. 즉 이 문제는 split target 타이밍이 아니라 **stale metadata 기반의 잘못된 hot-stream reuse 판정**으로 좁혀졌습니다.
+- **해결 메커니즘**:
+  - `launchReuse.ts`의 `canReuseHotStream()` helper를 추가해 재사용 조건을 순수 함수로 분리했습니다.
+  - 이제는 아래 조건을 모두 만족할 때만 `session_wait_reuse_existing_stream`을 허용합니다.
+    - `viewport.visible === true`
+    - `viewport.committed === true`
+    - 유효한 viewport 크기
+    - `metadata.firstFrameReady === true`
+    - `metadata.generation >= startGen`
+  - 특히 launch 시작 시 우리가 의도적으로 `committed=false`로 리셋한 pane은, stale metadata만으로 더 이상 재사용 통과하지 못하게 바꿨습니다.
+- **효과**:
+  - secondary가 실제 recommit 없이 가짜로 `SESSION_READY`를 지나가던 경로를 차단했습니다.
+  - 앞으로 같은 유형의 실패가 다시 발생하더라도, 원인이 프론트 재사용 오판인지 백엔드의 실제 recommit/stream 생성 실패인지 훨씬 명확하게 분리해 볼 수 있게 되었습니다.
+
+### 21.8. 첫 프레임 미도착 경로 추적 강화와 bootstrap 순서 보강
+- **문제 현상**: 차량/PC 공통으로 “launch는 된 것 같은데 첫 프레임이 한동안 안 나오다가 timeout 후 재시도에서만 붙는” 케이스가 남아 있었습니다. 특히 `720x720 prewarm`을 제거한 뒤에는 최초 launch에서 timeout이 더 잘 드러났고, 사용자가 보기엔 “처음 build에서는 프레임을 못 보내고, 다시 rebuild될 때부터 붙는” 듯한 패턴이 관찰됐습니다.
+- **로그 결론**:
+  - 기존 프론트 로그만으로는 `frame이 아예 안 왔는지`, `codec output은 있었는데 publish가 안 되었는지`, `VD 생성/재사용 타이밍이 launch보다 뒤틀렸는지`를 한 번에 분리하기 어려웠습니다.
+  - 그래서 이번 묶음에서는 단순 timeout 단축보다, **VD / pre-stream launch / stream generation / encoder output / first frame publish**의 상대 순서를 직접 남기고, 첫 실행에서 왜 비는지를 추적 가능한 상태로 만드는 데 초점을 맞췄습니다.
+- **해결 메커니즘**:
+  - `VideoEncoder`와 `JpegEncoder`에 verbose 전용 bootstrap 이벤트를 추가해 `start_requested`, `callback_registered`, `output_config`, `output_frame`, `image_available`, `encoded_frame`, `codec_error`, `capture_watchdog` 같은 첫 프레임 관찰 지점을 남기도록 했습니다.
+  - `MirrorForegroundService`에는 `STREAM_BOOTSTRAP` / `LAUNCH_RECOVERY` 로그 채널을 추가해 아래 순서를 직접 기록하도록 보강했습니다.
+    - `surface_ready`
+    - `vd_reuse_begin` / `vd_create_begin`
+    - `vd_reuse_ready` / `vd_create_ready`
+    - `prestream_launch_begin` / `prestream_launch_done`
+    - `stream_generation_begin_request` / `stream_generation_begin_done`
+  - 동시에 rebuild 경로에서 **launch target이 있으면 pre-stream launch를 먼저 정렬한 뒤 `beginStreamGeneration()`과 encoder start를 연결**하도록 순서를 조정했고, bootstrap nudge / recovery keyframe 요청도 이 흐름에 맞춰 묶었습니다.
+  - 프론트 `GenerationTracker`와 `launchFsm.test.ts`는 `fresh firstFrameReady metadata가 wait 시작 전에 먼저 도착한 경우`와 `split secondary reused stream은 recommit 전까지 pending으로 남아야 하는 경우`를 별도 시나리오로 고정했습니다.
+- **효과**:
+  - “왜 첫 프레임이 안 오는지”를 다음 로그 한 번으로 판별할 수 있는 수준까지 관찰성이 올라갔습니다.
+  - pre-stream launch / stream generation / encoder bootstrap 순서가 분리되지 않도록 정리해, 첫 launch에서만 화면이 비고 retry에서만 붙는 구조적 타이밍 문제를 줄이는 기반을 마련했습니다.
+  - 사용자 체감상으로는 단순 자동복구가 아니라, **첫 실행 자체가 왜 느리거나 비는지를 직접 추적하고 고칠 수 있는 상태**로 진전됐습니다.
+
+### 21.9. 손상된 dynamic PKCS12 인증서 자동 복구 경로 추가
+- **문제 현상**: `SERVER_AVAILABILITY: tls_config_failed error=PKCS12 key store mac invalid - wrong password or corrupted file` 같은 로그와 함께, 미러링 UI는 스트리밍 중처럼 보여도 실제 `https://c-...castla...:9090` 접속이 실패하는 케이스가 있었습니다. 사용자는 미러링을 stop 후 다시 start하면 그제서야 붙는 패턴을 확인했습니다.
+- **로그 결론**: 원인은 앱 내부에 저장된 `dynamic_castla.p12`가 비어 있거나 손상되었는데, 기존 경로가 그 파일을 그대로 재사용하려 하면서 HTTPS secure context 구성이 초기에 실패하는 데 있었습니다.
+- **해결 메커니즘**:
+  - `TlsKeystoreLoader.loadDynamicPkcs12WithRefresh()`를 추가해:
+    - 기존 `dynamic_castla.p12`를 먼저 로드 시도
+    - 실패하면 손상 파일을 삭제
+    - 원격 cert API에서 다시 다운로드
+    - 새 PKCS12를 재검증 후 `dynamic_refreshed` source로 로드
+    하는 복구 경로를 표준화했습니다.
+  - `MirrorServer.configureSecureContext()`는 더 이상 손상된 local PKCS12에 고정되지 않고, invalid/missing 감지 시 즉시 재다운로드 후 secure context 구성을 다시 시도합니다.
+  - 다운로드 경로는 `.tmp` 파일에 먼저 저장 후 PKCS12 유효성을 검증하고, 성공한 경우에만 원본 파일로 교체하도록 정리했습니다.
+  - `TlsKeystoreLoaderTest`로
+    - 손상 파일이면 refresh가 호출되는지
+    - 이미 정상 파일이면 그대로 사용하는지
+    를 JUnit으로 고정했습니다.
+- **효과**:
+  - 깨진 인증서가 남아 있으면 stop/start를 반복해야만 붙던 경로를, 앱 기동 시점의 자동 복구로 흡수할 수 있게 됐습니다.
+  - secure context 실패와 stream 자체 실패를 로그상으로도 분리해 볼 수 있어, `웹페이지가 9090에 연결 실패`하는 문제와 `미러링 앱 프레임 미도착` 문제를 더 명확히 구분할 수 있게 됐습니다.
+
+### 21.10. 최종 해석
+- 이번 2026-06-11 패치의 핵심은 "같은 target이면 무조건 skip"이 아니라, **정말로 현재 화면/레이아웃/geometry/stream health가 모두 같은 경우에만 skip**하도록 기준을 높인 것입니다.
+- 그 결과, 사용자가 보기엔 같은 앱/같은 페어처럼 보여도 실제로 recommit이 필요한 `split <-> popup`, `popup -> single`, barrier same-generation recommit 같은 경계 케이스를 정상 launch flow로 되돌릴 수 있게 되었습니다.
+- 여기에 더해, split target 자체를 `launchSequence`의 일부로 승격하면서 freeze/barrier와 launch FSM이 동일한 목표 geometry를 공유하게 되었고, stale metadata 기반 secondary reuse 오판까지 제거함으로써 2026-06-11 작업은 단순 no-op 최적화 보정 수준을 넘어 **split launch 상태머신의 데이터 소유권과 ready 판정 규칙을 함께 정리한 묶음**으로 확장되었습니다.
+- 또한 첫 프레임 bootstrap 관찰 지점과 pre-stream launch 순서를 백엔드/프론트 양쪽에 명시적으로 드러내고, 손상된 PKCS12 인증서에 대한 자동 복구 경로까지 추가하면서, 이번 묶음은 단순 UI/layout 안정화가 아니라 **launch, first frame, secure context 초기화까지 포함한 실차 재현 안정화 패치**로 정리할 수 있습니다.

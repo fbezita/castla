@@ -227,6 +227,12 @@ class ControlSocket(
                     val componentName = json.optString("componentName", "")
                         .takeIf { it.isNotEmpty() }
                     val isVideoApp = json.optBoolean("isVideoApp", false)
+                    if (MirrorServer.isVerboseServerAvailabilityLoggingEnabled()) {
+                        FileLogger.i(
+                            "LAUNCH_ACK",
+                            "launch_request_received socket=$debugId seqId=$seqId pane=$pane pkg=$pkg component=${componentName ?: ""} video=$isVideoApp"
+                        )
+                    }
                     
                     // Extract sequence ID and dispatch launch_ack/failed feedback deterministically
                     if (seqId != -1) {
@@ -242,6 +248,12 @@ class ControlSocket(
                                     put("pane", pane)
                                     put("success", true)
                                 }.toString())
+                                if (MirrorServer.isVerboseServerAvailabilityLoggingEnabled()) {
+                                    FileLogger.i(
+                                        "LAUNCH_ACK",
+                                        "launch_ack_sent socket=$debugId seqId=$seqId pane=$pane pkg=$pkg"
+                                    )
+                                }
                             } catch (e: Exception) {
                                 Log.w(TAG, "Failed to send launch_ack", e)
                             }
@@ -258,6 +270,12 @@ class ControlSocket(
                                     put("pane", pane)
                                     put("reason", "empty_package")
                                 }.toString())
+                                if (MirrorServer.isVerboseServerAvailabilityLoggingEnabled()) {
+                                    FileLogger.i(
+                                        "LAUNCH_ACK",
+                                        "launch_failed_sent socket=$debugId seqId=$seqId pane=$pane reason=empty_package"
+                                    )
+                                }
                             } catch (e: Exception) {
                                 Log.w(TAG, "Failed to send launch_failed", e)
                             }

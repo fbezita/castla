@@ -85,7 +85,7 @@
   }
 
   function previewPackages(app: AppInfo): string[] {
-    if (!app.isPair || !app.layoutMode) return [];
+    if (!app.isPair) return [];
     return getAppPairPreviewPackages(app as any);
   }
 </script>
@@ -105,7 +105,7 @@
 </div>
 
 <div class="drag-ghost" style={`left: ${dragX}px; top: ${dragY}px`}>
-  {#if draggingApp.isPair && draggingApp.layoutMode && previewPackages(draggingApp).length > 1}
+  {#if draggingApp.isPair && previewPackages(draggingApp).length > 1}
     <div class="ghost-pair-icons">
       <img
         class="ghost-pair-left"
@@ -120,7 +120,7 @@
         draggable="false"
       />
     </div>
-  {:else if draggingApp.isPair && draggingApp.layoutMode && previewPackages(draggingApp).length === 1}
+  {:else if draggingApp.isPair && previewPackages(draggingApp).length === 1}
     <img
       src={`/api/icon?pkg=${encodeURIComponent(previewPackages(draggingApp)[0])}`}
       alt=""

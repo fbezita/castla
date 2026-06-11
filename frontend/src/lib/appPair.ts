@@ -5,6 +5,22 @@ export interface AppPair {
   layoutMode?: LayoutMode;
 }
 
+export function getDefaultAppPairLayoutMode(currentMode?: string | null): LayoutMode {
+  return currentMode === "popup" ? "popup" : "split";
+}
+
+export function resolveAppPairLayoutMode(layoutMode: unknown, fallbackMode?: string | null): LayoutMode {
+  if (layoutMode === "popup") return "popup";
+  if (layoutMode === "split") return "split";
+  return getDefaultAppPairLayoutMode(fallbackMode);
+}
+
+export function toStoredAppPair(pair: AppPair): AppPair {
+  return {
+    apps: [pair.apps[0], pair.apps[1]],
+  };
+}
+
 export function normalizeAppPair(value: unknown): AppPair | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as any;
@@ -36,10 +52,9 @@ export function normalizeAppPair(value: unknown): AppPair | null {
         : undefined;
 
     if (secondary && primary !== secondary) {
-      const mode = candidate.layoutMode === "popup" ? "popup" : "split";
       return {
         apps: [primary, secondary],
-        layoutMode: mode,
+        layoutMode: resolveAppPairLayoutMode(candidate.layoutMode),
       };
     }
   }
@@ -54,7 +69,22 @@ export function normalizeAppPair(value: unknown): AppPair | null {
     if (candidate.left !== candidate.right) {
       return {
         apps: [candidate.left, candidate.right],
-        layoutMode: "split",
+        layoutMode: resolveAppPairLayoutMode(candidate.layoutMode),
+      };
+    }
+  }
+
+  // Legacy App Pair: { appA?: string, appB?: string, mode?: 'split' | 'popup' }
+  if (
+    typeof candidate.appA === "string" &&
+    candidate.appA.length > 0 &&
+    typeof candidate.appB === "string" &&
+    candidate.appB.length > 0
+  ) {
+    if (candidate.appA !== candidate.appB) {
+      return {
+        apps: [candidate.appA, candidate.appB],
+        layoutMode: resolveAppPairLayoutMode(candidate.layoutMode ?? candidate.mode),
       };
     }
   }
@@ -82,7 +112,16 @@ export function swapAppPairApps(pair: AppPair): AppPair {
 }
 
 export function getAppPairKey(pair: AppPair): string {
-  return `${pair.layoutMode ?? "default"}:${pair.apps[0]}:${pair.apps[1]}`;
+  return `${pair.apps[0]}:${pair.apps[1]}`;
+}
+
+export function dedupeAppPairs(pairs: AppPair[]): AppPair[] {
+  const deduped = new Map<string, AppPair>();
+  for (const pair of pairs) {
+    if (!isValidAppPair(pair)) continue;
+    deduped.set(getAppPairKey(pair), toStoredAppPair(pair));
+  }
+  return Array.from(deduped.values());
 }
 
 export function getAppPairPreviewPackages(pair: AppPair): string[] {

@@ -70,7 +70,7 @@
   }
 
   function previewPackages(app: AppInfo): string[] {
-    if (!app.isPair || !app.layoutMode) return [];
+    if (!app.isPair) return [];
     return getAppPairPreviewPackages(app as any);
   }
 </script>
@@ -79,6 +79,7 @@
   <button
     class="browse-group-header"
     class:expanded={isExpanded}
+    data-category-key={group.key}
     onclick={() => onToggle(group.key)}
   >
     <div class="browse-group-label">
@@ -108,7 +109,7 @@
           role="button"
           tabindex="0"
         >
-          {#if app.isPair && app.layoutMode && previewPackages(app).length > 1}
+          {#if app.isPair && previewPackages(app).length > 1}
             <div class="pair-icons split-pair-icon">
               <img
                 class="app-pair-icon-left"
@@ -125,7 +126,7 @@
                 draggable="false"
               />
             </div>
-          {:else if app.isPair && app.layoutMode && previewPackages(app).length === 1}
+          {:else if app.isPair && previewPackages(app).length === 1}
             <img
               class="split-app-icon"
               src={`/api/icon?pkg=${encodeURIComponent(previewPackages(app)[0])}`}

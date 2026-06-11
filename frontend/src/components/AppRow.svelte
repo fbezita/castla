@@ -62,7 +62,7 @@
   }
 
   function previewPackages(target: AppInfo): string[] {
-    if (!target.isPair || !target.layoutMode) return [];
+    if (!target.isPair) return [];
     return getAppPairPreviewPackages(target as any);
   }
 </script>
@@ -81,7 +81,7 @@
   role="button"
   tabindex="0"
 >
-  {#if app.isPair && app.layoutMode && previewPackages(app).length > 1}
+  {#if app.isPair && previewPackages(app).length > 1}
     <div class="pair-icons row-pair-icon">
       <img
         class="app-pair-icon-left"
@@ -98,7 +98,7 @@
         draggable="false"
       />
     </div>
-  {:else if app.isPair && app.layoutMode && previewPackages(app).length === 1}
+  {:else if app.isPair && previewPackages(app).length === 1}
     <img
       class="launcher-row-icon"
       src={`/api/icon?pkg=${encodeURIComponent(previewPackages(app)[0])}`}

@@ -1,9 +1,7 @@
 <script lang="ts">
   import {
-    getAppPairModeLabel,
     isValidAppPair,
     swapAppPairApps,
-    type LayoutMode,
     type AppPair,
   } from "../lib/appPair";
 
@@ -14,7 +12,6 @@
     category?: string;
     isWeb?: boolean;
     isPair?: boolean;
-    layoutMode?: LayoutMode;
     apps?: [string, string];
     primaryApp?: string;
     secondaryApp?: string;
@@ -40,7 +37,6 @@
     if (source.apps && source.apps.length === 2) {
       return {
         apps: [source.apps[0], source.apps[1]],
-        layoutMode: source.layoutMode ?? "split",
       };
     }
     // Handle migration from legacy primary/secondary states
@@ -48,16 +44,12 @@
     const appB = source.secondaryApp ?? candidates[1]?.packageName ?? "";
     return {
       apps: [appA, appB],
-      layoutMode: source.layoutMode === "popup" ? "popup" : "split",
     };
   }
 
   let draft = $state<AppPair>({
     apps: ["", ""],
-    layoutMode: "split",
   });
-
-  const layoutModes: LayoutMode[] = ["split", "popup"];
 
   $effect(() => {
     draft = createDraft(editingPair, availableApps);
@@ -86,13 +78,6 @@
       event.preventDefault();
       onCancel();
     }
-  }
-
-  function setLayoutMode(mode: LayoutMode) {
-    draft = {
-      ...draft,
-      layoutMode: mode,
-    };
   }
 
   function updateAppA(packageName: string) {
@@ -146,18 +131,6 @@
       <strong>App Pair Editor</strong>
       <small>Group two apps together to launch them simultaneously.</small>
     </header>
-
-    <section class="mode-picker">
-      {#each layoutModes as mode}
-        <button
-          class:active={draft.layoutMode === mode}
-          class="mode-chip"
-          onclick={() => setLayoutMode(mode)}
-        >
-          {getAppPairModeLabel(mode)}
-        </button>
-      {/each}
-    </section>
 
     <div class="pair-dialog-body">
       <div class="workspace-slot">
@@ -226,13 +199,10 @@
 
     <div class="layout-explainer">
       <div>
-        <span class="explainer-title">Display Layout</span>
+        <span class="explainer-title">Launch Behavior</span>
         <p>
-          {#if draft.layoutMode === "split"}
-            App 1 renders on the left side and App 2 renders on the right side.
-          {:else}
-            App 1 fills the full background screen and App 2 floats as a popup window.
-          {/if}
+          App Pair follows the current screen mode when launched. In Single or Split it opens as
+          Split, and in Popup it opens as Popup.
         </p>
       </div>
     </div>
@@ -287,30 +257,6 @@
   .pair-dialog-header small {
     color: #94a3b8;
     font-size: 12px;
-  }
-
-  .mode-picker {
-    display: flex;
-    gap: 10px;
-    padding: 18px 24px 0;
-  }
-
-  .mode-chip {
-    height: 34px;
-    padding: 0 14px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.04);
-    color: #dbeafe;
-    font-size: 12px;
-    font-weight: 800;
-    cursor: pointer;
-  }
-
-  .mode-chip.active {
-    border-color: rgba(0, 229, 255, 0.32);
-    background: rgba(0, 229, 255, 0.12);
-    color: #9cefff;
   }
 
   .pair-dialog-body {

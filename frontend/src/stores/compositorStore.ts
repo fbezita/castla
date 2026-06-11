@@ -37,6 +37,9 @@ export interface LaunchSequence {
   metrics?: LaunchMetrics;
   primaryStartGen: number;
   secondaryStartGen: number;
+  expectedPrimaryPaneWidth?: number;
+  expectedSecondaryPaneWidth?: number;
+  expectedPaneHeight?: number;
 }
 
 export interface PopupLayoutState {

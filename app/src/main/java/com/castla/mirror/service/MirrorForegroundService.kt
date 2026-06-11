@@ -114,6 +114,20 @@ class MirrorForegroundService : Service() {
         }
     }
 
+    private fun logLaunchRecoveryInfo(message: String) {
+        if (verboseDiagnosticsEnabled) {
+            FileLogger.i("LAUNCH_RECOVERY", message)
+            Log.i(TAG, message)
+        }
+    }
+
+    private fun logStreamBootstrapInfo(message: String) {
+        if (verboseDiagnosticsEnabled) {
+            FileLogger.i("STREAM_BOOTSTRAP", message)
+            Log.i(TAG, message)
+        }
+    }
+
     private suspend fun <T> runBinderSafe(timeoutMs: Long = 3000L, block: suspend () -> T): T? {
         return withTimeoutOrNull(timeoutMs) { block() }
     }
@@ -377,6 +391,8 @@ class MirrorForegroundService : Service() {
     // Hardware request envelope to sequentialize all VirtualDisplay operations
     sealed class VdHardwareRequest {
         data class Rebuild(
+            val requestId: Long,
+            val reason: String,
             val pipelineName: String,
             val targetWidth: Int,
             val targetHeight: Int,
@@ -393,6 +409,7 @@ class MirrorForegroundService : Service() {
     enum class PipelineState { IDLE, REBUILDING }
     enum class RebuildPriority { LOW, NORMAL, HIGH, IMMEDIATE }
     data class RebuildRequest(
+        val requestId: Long,
         val pipelineName: String,
         val reason: String,
         val priority: RebuildPriority,
@@ -413,6 +430,7 @@ class MirrorForegroundService : Service() {
 
     private val rebuildRequestMutex = Mutex()
     private val lastRebuildRequestByPane = java.util.concurrent.ConcurrentHashMap<String, RebuildRequestSnapshot>()
+    private val rebuildRequestIdGenerator = java.util.concurrent.atomic.AtomicLong(0)
 
     private var dpiScale: Float = 0.7f
     private val shizukuSetupMutex = Mutex()
@@ -626,6 +644,11 @@ class MirrorForegroundService : Service() {
             request.onComplete?.complete(Unit)
             return
         }
+        logLaunchRecoveryInfo(
+            "rebuild_request_received id=${request.requestId} pane=${request.pipelineName} reason=${request.reason} " +
+                "priority=${request.priority} target=${request.width}x${request.height} force=${request.force} " +
+                "forceSingle=${request.forceSingle} launchingContext=$isAppLaunchingContext"
+        )
 
         val now = android.os.SystemClock.elapsedRealtime()
         var coalesced = false
@@ -652,6 +675,10 @@ class MirrorForegroundService : Service() {
             }
         }
         if (coalesced) {
+            logLaunchRecoveryInfo(
+                "rebuild_request_coalesced id=${request.requestId} pane=${request.pipelineName} reason=${request.reason} " +
+                    "target=${request.width}x${request.height}"
+            )
             Log.d(
                 TAG,
                 "[RebuildCoordinator] coalesced pane=${request.pipelineName} reason=${request.reason} " +
@@ -680,6 +707,10 @@ class MirrorForegroundService : Service() {
         if (deferredForTouch) {
         }
         if (skippedForTouchQuietWindow) {
+            logLaunchRecoveryInfo(
+                "rebuild_request_skipped id=${request.requestId} pane=${request.pipelineName} reason=${request.reason} " +
+                    "priority=${request.priority} source=touch_quiet_window target=${request.width}x${request.height}"
+            )
             Log.i(
                 TAG,
                 "[RebuildCoordinator] skipped pane=${request.pipelineName} reason=${request.reason} priority=${request.priority} " +
@@ -690,8 +721,15 @@ class MirrorForegroundService : Service() {
         }
 
         pipeline.debugRebuildRequests += 1
+        logLaunchRecoveryInfo(
+            "rebuild_request_enqueue id=${request.requestId} pane=${request.pipelineName} reason=${request.reason} " +
+                "priority=${request.priority} target=${request.width}x${request.height} force=${request.force} " +
+                "forceSingle=${request.forceSingle}"
+        )
         val enqueueResult = vdRequestChannel.trySend(
             VdHardwareRequest.Rebuild(
+                request.requestId,
+                request.reason,
                 request.pipelineName,
                 request.width,
                 request.height,
@@ -721,9 +759,16 @@ class MirrorForegroundService : Service() {
                     when (request) {
                         is VdHardwareRequest.Rebuild -> {
                             try {
+                                logLaunchRecoveryInfo(
+                                    "rebuild_worker_begin id=${request.requestId} pane=${request.pipelineName} " +
+                                        "reason=${request.reason} target=${request.targetWidth}x${request.targetHeight} force=${request.force} " +
+                                        "forceSingle=${request.forceSingle}"
+                                )
                                 val pipeline = pipelines[request.pipelineName]
                                 if (pipeline != null) {
                                     pipeline.executeActualRebuild(
+                                        request.requestId,
+                                        request.reason,
                                         request.targetWidth,
                                         request.targetHeight,
                                         request.force,
@@ -731,6 +776,9 @@ class MirrorForegroundService : Service() {
                                     )
                                 }
                             } finally {
+                                logLaunchRecoveryInfo(
+                                    "rebuild_worker_end id=${request.requestId} pane=${request.pipelineName}"
+                                )
                                 request.onComplete?.complete(Unit)
                             }
                         }
@@ -983,7 +1031,27 @@ class MirrorForegroundService : Service() {
 
                 // 2-1. Call the integrated helper function that handles complex external browser redirection, package validation, etc.
                 // Pass forceDisplayId constraint dynamically from the launch request.
-                targetPipeline.launchAppFromWebLauncher(request.packageName, request.className, forceDisplayId = request.forceDisplayId)
+                val routingDecision = LaunchRouting.resolve(
+                    request.packageName,
+                    request.className,
+                    request.launchMode,
+                )
+                when (routingDecision.kind) {
+                    LaunchRoutingKind.STANDARD_APP -> {
+                        targetPipeline.launchAppFromWebLauncher(
+                            request.packageName,
+                            request.className,
+                            forceDisplayId = request.forceDisplayId
+                        )
+                    }
+                    LaunchRoutingKind.WEB_URL -> {
+                        targetPipeline.launchBrowser(
+                            routingDecision.launchTarget,
+                            sourceAppPackage = routingDecision.sourceAppPackage,
+                            allowFallback = routingDecision.allowEmbeddedFallback
+                        )
+                    }
+                }
 
                 // 2-2. Link subsequent autoscale (resolution and FPS tiering) evaluations
                 if (targetPipeline.autoResolution || targetPipeline.autoFps) {
@@ -1767,18 +1835,64 @@ class MirrorForegroundService : Service() {
         displayId: Int,
         reason: String,
     ) {
-        if (service == null || displayId < 0) return
-        if (shouldThrottleRecoveryAction(displayId, reason)) return
+        if (service == null || displayId < 0) {
+            logLaunchRecoveryInfo(
+                "recovery_wake_skipped displayId=$displayId reason=$reason serviceAvailable=${service != null}"
+            )
+            return
+        }
+        logLaunchRecoveryInfo(
+            "recovery_wake_begin displayId=$displayId reason=$reason screenOff=${screenOffPolicy.isScreenOff}"
+        )
+        if (shouldThrottleRecoveryAction(displayId, reason)) {
+            logLaunchRecoveryInfo(
+                "recovery_wake_throttled displayId=$displayId reason=$reason"
+            )
+            return
+        }
         try {
             if (screenOffPolicy.isScreenOff) {
                 screenOffLoopGuard.markKeepAlive(android.os.SystemClock.elapsedRealtime())
                 service.keepVirtualDisplayAlive(displayId)
                 logScreenOffInfo("[SCREEN_OFF] [VD_KEEPALIVE] reason=$reason displayId=$displayId source=recovery")
+                logLaunchRecoveryInfo(
+                    "recovery_wake_done displayId=$displayId reason=$reason action=keepVirtualDisplayAlive"
+                )
             } else {
                 service.wakeUpDisplay(displayId)
+                logLaunchRecoveryInfo(
+                    "recovery_wake_done displayId=$displayId reason=$reason action=wakeUpDisplay"
+                )
             }
         } catch (e: Exception) {
+            logLaunchRecoveryInfo(
+                "recovery_wake_error displayId=$displayId reason=$reason error=${e.message ?: e::class.java.simpleName}"
+            )
             Log.w(TAG, "wakeDisplayForRecovery failed reason=$reason displayId=$displayId", e)
+        }
+    }
+
+    private fun requestKeyFrameForRecovery(
+        pipeline: MirroringPipeline,
+        reason: String,
+    ) {
+        if (currentCodecMode == "mjpeg") return
+        val encoderAvailable = pipeline.videoEncoder != null
+        logLaunchRecoveryInfo(
+            "recovery_keyframe_request pane=${pipeline.name} displayId=${pipeline.displayId} reason=$reason " +
+                "encoderAvailable=$encoderAvailable firstFramePublished=${pipeline.firstFrameMetadataSent} " +
+                "lastFrameRenderedTime=${pipeline.lastFrameRenderedTime}"
+        )
+        try {
+            pipeline.videoEncoder?.requestKeyFrame()
+            logLaunchRecoveryInfo(
+                "recovery_keyframe_done pane=${pipeline.name} displayId=${pipeline.displayId} reason=$reason"
+            )
+        } catch (e: Exception) {
+            logLaunchRecoveryInfo(
+                "recovery_keyframe_error pane=${pipeline.name} displayId=${pipeline.displayId} reason=$reason " +
+                    "error=${e.message ?: e::class.java.simpleName}"
+            )
         }
     }
 
@@ -1963,6 +2077,7 @@ class MirrorForegroundService : Service() {
             pipelines.values.forEach { it.touchInjector = TouchInjector(width, height) }
 
             mirrorServer = MirrorServer(this).also { server ->
+                server.setVerboseDiagnosticsEnabled(verboseDiagnosticsEnabled)
                 server.setRelayPublishIp(relayPublishIp)
                 server.setNetworkCongestionListener { adaptiveBitrateManager.onNetworkCongestion() }
                 server.setTouchListener { event ->
@@ -2051,12 +2166,11 @@ class MirrorForegroundService : Service() {
                             // pipelines[pane]?.isVideoApp = isVideoApp
                             // pipelines[pane]?.launchAppFromWebLauncher(pkg, cmp)
                             // 💡 Proactively categorize the nature of the launch request here
-                           val mode = if (pkg.startsWith("http")) {
+                           val mode = if (pkg.startsWith("http") || OttCatalog.isOtt(pkg)) {
                                LaunchMode.EXTERNAL_BROWSER_URL
                            } else {
                                LaunchMode.STANDARD_APP
                            }
-                           val rawLaunchTarget = cmp ?: pkg
                            // Assemble the bus event envelope based on refined target details
                            val requestEvent = AppLaunchRequest(
                                packageName = pkg,
@@ -2132,15 +2246,22 @@ class MirrorForegroundService : Service() {
                 isInitialRebuildTriggered = true
                 val primary = pipelines["primary"] ?: return@launch
                 primary.markFreshLaunchPreparation("browser_connected")
-                val finalW = if (primary.width > 1) primary.width 
-                             else if (primary.requestedWidth > 1) primary.requestedWidth
-                             else primary.lastValidWidth.coerceAtLeast(720)
-                val finalH = if (primary.height > 1) primary.height 
-                             else if (primary.requestedHeight > 1) primary.requestedHeight
-                             else primary.lastValidHeight.coerceAtLeast(720)
                 paneVisibility["primary"] = true
                 primary.setTier(DisplayTier.ACTIVE, "browser_connected")
-                triggerPipelineRebuildWithPolicy(primary.name, finalW, finalH, force = true)
+                if (!LaunchRecoveryPolicy.shouldDeferInitialBrowserConnectedRebuild(hasReceivedBrowserLayout, primary.displayId)) {
+                    val finalW = if (primary.width > 1) primary.width
+                                 else if (primary.requestedWidth > 1) primary.requestedWidth
+                                 else primary.lastValidWidth.coerceAtLeast(720)
+                    val finalH = if (primary.height > 1) primary.height
+                                 else if (primary.requestedHeight > 1) primary.requestedHeight
+                                 else primary.lastValidHeight.coerceAtLeast(720)
+                    triggerPipelineRebuildWithPolicy(primary.name, finalW, finalH, force = true)
+                } else {
+                    logLaunchRecoveryInfo(
+                        "initial_rebuild_deferred pane=${primary.name} reason=await_first_browser_layout " +
+                            "displayId=${primary.displayId} requested=${primary.requestedWidth}x${primary.requestedHeight}"
+                    )
+                }
 
                 pipelines["secondary"]?.let { secondary ->
                     secondary.markFreshLaunchPreparation("browser_connected_secondary")
@@ -2156,8 +2277,10 @@ class MirrorForegroundService : Service() {
     }
 
     private var lastVisiblePaneCount = 1
+    @Volatile private var hasReceivedBrowserLayout = false
 
     private fun applyBrowserLayoutUpdate(panes: JSONArray) {
+        hasReceivedBrowserLayout = panes.length() > 0
         val paneStates = mutableListOf<Triple<String, android.util.Size, Boolean>>()
         val seen = mutableSetOf<String>()
         for (i in 0 until panes.length()) {
@@ -2202,7 +2325,7 @@ class MirrorForegroundService : Service() {
 
     private fun onBrowserDisconnected() {
         Log.w(TAG, "onBrowserDisconnected() - Target web panel dropped connection link.")
-        pendingBrowserDisconnectJob = null; browserConnected = false; isInitialRebuildTriggered = false
+        pendingBrowserDisconnectJob = null; browserConnected = false; isInitialRebuildTriggered = false; hasReceivedBrowserLayout = false
         browserTeardownPhase = "begin"
         stopVdKeepAlive()
         
@@ -2462,6 +2585,7 @@ class MirrorForegroundService : Service() {
 
     private suspend fun trySetupVirtualDisplay(width: Int, height: Int, surface: Surface): Boolean = withContext(vdDispatcher) {
         shizukuSetupMutex.withLock {
+            val trySetupStartedAt = android.os.SystemClock.elapsedRealtime()
             val setup = ensureShizukuSetup() ?: return@withContext false
             if ((setup.privilegedService == null && !setup.isBindingInProgress) || !setup.isAvailable()) setup.forceResetBindingState()
             if (!setup.isAvailable() || !setup.hasPermission()) return@withContext false
@@ -2480,6 +2604,10 @@ class MirrorForegroundService : Service() {
             }
 
             if (!isStable) {
+                logLaunchRecoveryInfo(
+                    "fallback_vd_bind_unstable elapsedMs=${android.os.SystemClock.elapsedRealtime() - trySetupStartedAt} " +
+                        "browserConnected=$browserConnected retryCount=$shizukuBindRetryCount"
+                )
                 Log.e(TAG, "[Shizuku Connect] Binding target failed to stabilize. Evicting active graphics buffers.")
                 shizukuBindRetryCount++; setup.forceResetBindingState()
                 
@@ -2503,6 +2631,10 @@ class MirrorForegroundService : Service() {
 
             shizukuBindRetryCount = 0
             val svc = setup.privilegedService ?: return@withLock false
+            logLaunchRecoveryInfo(
+                "fallback_vd_bind_ready elapsedMs=${android.os.SystemClock.elapsedRealtime() - trySetupStartedAt} " +
+                    "serviceConnected=${setup.serviceConnected.value}"
+            )
             try { runBinderSafe { svc.enableStayAwakeMode() } } catch (_: Exception) {}
 
             try {
@@ -2523,21 +2655,48 @@ class MirrorForegroundService : Service() {
                     Log.i(TAG, "[VDIME] skip initial VD materialization pane=${pipeline.name} tier=${pipeline.displayTier}")
                     return@forEach
                 }
+                val paneVisible = paneVisibility[pipeline.name] == true
+                if (LaunchRecoveryPolicy.shouldDeferFallbackMaterialization(
+                        paneName = pipeline.name,
+                        paneVisible = paneVisible,
+                        browserConnected = browserConnected,
+                    )
+                ) {
+                    logLaunchRecoveryInfo(
+                        "fallback_vd_deferred pane=${pipeline.name} visible=$paneVisible tier=${pipeline.displayTier} " +
+                            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - trySetupStartedAt}"
+                    )
+                    return@forEach
+                }
                 val w = if (pipeline.width > 0) pipeline.width else width
                 val h = if (pipeline.height > 0) pipeline.height else height
                 val dpi = computeVirtualDisplayDpi(w, h)
+                val pipelineSetupStartedAt = android.os.SystemClock.elapsedRealtime()
                 // Minimize lock scope to prevent blocking binder calls like restoreContentLocked within the mutex.
                 var activeId = -1
                 var generation = -1L
                 var success = false
                 virtualDisplayHardwareMutex.withLock {
+                    logLaunchRecoveryInfo(
+                        "fallback_vd_create_begin pane=${pipeline.name} target=${w}x${h} dpi=$dpi " +
+                            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - trySetupStartedAt}"
+                    )
                     success = runBinderSafe {
                         pipeline.controller.createVirtualDisplay(w, h, dpi, pipeline.currentEncoderSurface ?: surface)
                         pipeline.controller.hasVirtualDisplay()
                     } ?: false
+                    logLaunchRecoveryInfo(
+                        "fallback_vd_create_result pane=${pipeline.name} success=$success hasVd=${pipeline.controller.hasVirtualDisplay()} " +
+                            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - trySetupStartedAt}"
+                    )
                     if (success) {
                         activeId = pipeline.controller.getDisplayId()
                         generation = pipeline.markVdCreated(activeId, "try_setup")
+                        logLaunchRecoveryInfo(
+                            "fallback_vd_create_ready pane=${pipeline.name} displayId=$activeId generation=$generation " +
+                                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - trySetupStartedAt} " +
+                                "pipelineElapsedMs=${android.os.SystemClock.elapsedRealtime() - pipelineSetupStartedAt}"
+                        )
                         pipeline.touchInjector?.updateController { touchEvent, event ->
                             val accepted = pipeline.controller.injectMotionEventWithResult(event)
                             pipeline.recordInjectionResult(event, accepted)
@@ -2558,8 +2717,16 @@ class MirrorForegroundService : Service() {
                     } catch (e: Exception) {
                         Log.w(TAG, "[VDRebuild] Soft recovery failed for pane=${pipeline.name}", e)
                     }
+                    logLaunchRecoveryInfo(
+                        "fallback_vd_post_ready pane=${pipeline.name} displayId=$activeId generation=$generation " +
+                            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - trySetupStartedAt} " +
+                            "pipelineElapsedMs=${android.os.SystemClock.elapsedRealtime() - pipelineSetupStartedAt}"
+                    )
                     Log.i(TAG, "[VDRebuild] Sub-session core mounted safely. Pane: (${pipeline.name}), Id: $activeId")
                 } else if (!success) {
+                    logLaunchRecoveryInfo(
+                        "fallback_vd_create_failed pane=${pipeline.name} elapsedMs=${android.os.SystemClock.elapsedRealtime() - trySetupStartedAt}"
+                    )
                     Log.e(TAG, "[VDRebuild] Failed to create virtual display for pane (${pipeline.name})")
                     globalSuccess = false
                 }
@@ -2789,15 +2956,23 @@ class MirrorForegroundService : Service() {
         pipeline.activeFallbackJob?.cancel()
         
         pipeline.debugFallbackStarts += 1
+        val scheduledAtMs = android.os.SystemClock.elapsedRealtime()
+        val watchdogDelayMs = LaunchRecoveryPolicy.fallbackWatchdogDelayMs(screenOffPolicy.isScreenOff)
+        logLaunchRecoveryInfo(
+            "watchdog_scheduled pane=${pipeline.name} pkg=$pkg displayId=$displayId delayMs=$watchdogDelayMs " +
+                "screenOff=${screenOffPolicy.isScreenOff} taskIds=${taskIds.joinToString(prefix = "[", postfix = "]")}"
+        )
         pipeline.activeFallbackJob = serviceScope.launch(Dispatchers.IO) {
             // Wait for activity manager to settle down task placement and allow the first graphic frame to render.
             // Screen-off mirroring gets a longer grace period to avoid expensive rebuild churn while the
             // panel-off recovery path is still stabilizing.
-            kotlinx.coroutines.delay(
-                ScreenOffRecoveryPlanner.fallbackWatchdogDelayMs(screenOffPolicy.isScreenOff)
-            )
+            kotlinx.coroutines.delay(watchdogDelayMs)
             try {
                 if (pipeline.isTouchInteractionActive()) {
+                    logLaunchRecoveryInfo(
+                        "watchdog_skipped_touch pane=${pipeline.name} pkg=$pkg displayId=$displayId " +
+                            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - scheduledAtMs}"
+                    )
                     return@launch
                 }
                 val runningTasks = try { service.getRunningTasksOnDisplay(displayId) } catch (e: Exception) {
@@ -2813,22 +2988,35 @@ class MirrorForegroundService : Service() {
                 // within the 5.5-second launch grace period due to graphics lockup or initialization freeze.
                 // Already rendered static scenes (lastFrameRenderedTime > 0L) are excluded from recovery triggers.
                 val isStagnated = !isAbsent && (pipeline.lastFrameRenderedTime == 0L)
+                logLaunchRecoveryInfo(
+                    "watchdog_evaluated pane=${pipeline.name} pkg=$pkg displayId=$displayId " +
+                        "elapsedMs=${android.os.SystemClock.elapsedRealtime() - scheduledAtMs} " +
+                        "isAbsent=$isAbsent isStagnated=$isStagnated lastFrameRenderedTime=${pipeline.lastFrameRenderedTime} " +
+                        "runningTasks=${runningTasks?.joinToString(prefix = "[", postfix = "]") ?: "<null>"}"
+                )
                 
                 if (isStagnated && !isAbsent) {
                     if (screenOffPolicy.isScreenOff) {
+                        logLaunchRecoveryInfo(
+                            "watchdog_action pane=${pipeline.name} pkg=$pkg displayId=$displayId action=screenoff_rebuild_and_keyframe reason=first_frame_delayed"
+                        )
                         logScreenOffWarn("[SCREEN_OFF] [REVIVE_REBUILD] watchdog pane=${pipeline.name} pkg=$pkg displayId=$displayId firstFrameDelayed=true")
                         requestScreenOffRebuild(pipeline, "fallback_watchdog")
                         wakeDisplayForRecovery(service, displayId, "fallback_watchdog_rebuild")
-                        if (currentCodecMode != "mjpeg") {
-                            pipeline.videoEncoder?.requestKeyFrame()
-                        }
+                        requestKeyFrameForRecovery(pipeline, "fallback_watchdog_rebuild")
                     } else {
+                        logLaunchRecoveryInfo(
+                            "watchdog_action pane=${pipeline.name} pkg=$pkg displayId=$displayId action=await_frontend_recovery_only reason=first_frame_delayed"
+                        )
                         Log.i(TAG, "[Fallback] Watchdog skipped: app ($pkg) exists, first frame delayed. displayId=$displayId")
                     }
                     return@launch
                 }
                 
                 if (isAbsent) {
+                    logLaunchRecoveryInfo(
+                        "watchdog_action pane=${pipeline.name} pkg=$pkg displayId=$displayId action=soft_recovery_keyframe reason=task_absent"
+                    )
                     Log.w(TAG, "[Fallback] Watchdog detected missing task ($pkg) on Display $displayId; soft recovery only. Skipping force-stop / am start.")
                     try {
                         if (screenOffPolicy.isScreenOff) {
@@ -2836,22 +3024,31 @@ class MirrorForegroundService : Service() {
                             requestScreenOffRebuild(pipeline, "fallback_absent")
                         }
                         wakeDisplayForRecovery(service, displayId, "fallback_watchdog")
-                        if (currentCodecMode != "mjpeg") {
-                            pipeline.videoEncoder?.requestKeyFrame()
-                        }
+                        requestKeyFrameForRecovery(pipeline, "fallback_watchdog")
                         val router = CastlaTextInputRouter.getInstance()
                         router.triggerRecoveryFocusNudge()
                     } catch (e: Exception) {
                         Log.e(TAG, "[Fallback] Soft recovery failed: ${e.message}")
                     }
+                    return@launch
                 }
+                logLaunchRecoveryInfo(
+                    "watchdog_noop pane=${pipeline.name} pkg=$pkg displayId=$displayId reason=frame_or_task_healthy"
+                )
             } catch (e: Exception) {
+                logLaunchRecoveryInfo(
+                    "watchdog_error pane=${pipeline.name} pkg=$pkg displayId=$displayId error=${e.message ?: e::class.java.simpleName}"
+                )
                 Log.e(TAG, "[Fallback] Critical error occurred inside surface verification coroutine: ${e.message}", e)
             } finally {
                 // Safely clear the active fallback job reference if this job finished executing normally
                 if (pipeline.activeFallbackJob == coroutineContext[kotlinx.coroutines.Job]) {
                     pipeline.activeFallbackJob = null
                 }
+                logLaunchRecoveryInfo(
+                    "watchdog_finished pane=${pipeline.name} pkg=$pkg displayId=$displayId " +
+                        "elapsedMs=${android.os.SystemClock.elapsedRealtime() - scheduledAtMs}"
+                )
             }
         }
     }
@@ -2877,6 +3074,8 @@ class MirrorForegroundService : Service() {
         // State guards to prevent concurrent self-healing re-entry which triggers duplicate am start shell command floods
         @Volatile var isSelfHealingInProgress = false
         @Volatile var activeFallbackJob: kotlinx.coroutines.Job? = null
+        @Volatile var bootstrapNudgeJob: kotlinx.coroutines.Job? = null
+        @Volatile var bootstrapNudgeAttempts = 0
         @Volatile var lastFrameRenderedTime = 0L
         @Volatile var lastMoveRejectLoggedAt = 0L
         
@@ -2974,15 +3173,89 @@ class MirrorForegroundService : Service() {
             requiresFreshLaunchPreparation = true
             lastPreparedTargetPackage = ""
             lastFrameRenderedTime = 0L
+            bootstrapNudgeAttempts = 0
             lastKeyframeRequestTime = 0L
             activeFallbackJob?.cancel()
             activeFallbackJob = null
+            bootstrapNudgeJob?.cancel()
+            bootstrapNudgeJob = null
             mirrorServer?.clearCachedSpsPps(name)
             mirrorServer?.pauseStream(name, displayId, width, height)
             Log.i(
                 TAG,
                 "[$name Pipeline] Marked fresh launch preparation required. reason=$reason displayId=$displayId currentApp=$currentApp"
             )
+        }
+
+        private fun cancelBootstrapNudge(reason: String) {
+            bootstrapNudgeJob?.cancel()
+            bootstrapNudgeJob = null
+            logLaunchRecoveryInfo("bootstrap_nudge_cancel pane=$name reason=$reason displayId=$displayId")
+        }
+
+        private fun scheduleBootstrapNudge(
+            sessionId: Long,
+            targetDisplayId: Int,
+        ) {
+            bootstrapNudgeJob?.cancel()
+            bootstrapNudgeJob = serviceScope.launch {
+                val scheduledAtMs = android.os.SystemClock.elapsedRealtime()
+                logLaunchRecoveryInfo(
+                    "bootstrap_nudge_scheduled pane=$name session=$sessionId displayId=$targetDisplayId delayMs=${LaunchRecoveryPolicy.INITIAL_BOOTSTRAP_NUDGE_DELAY_MS}"
+                )
+                kotlinx.coroutines.delay(LaunchRecoveryPolicy.INITIAL_BOOTSTRAP_NUDGE_DELAY_MS)
+                val elapsedMs = android.os.SystemClock.elapsedRealtime() - scheduledAtMs
+                val shouldTrigger = LaunchRecoveryPolicy.shouldTriggerInitialBootstrapNudge(
+                    elapsedMs = elapsedMs,
+                    firstFramePublished = firstFrameMetadataSent,
+                    nudgeAttempts = bootstrapNudgeAttempts,
+                )
+                if (!shouldTrigger) {
+                    logLaunchRecoveryInfo(
+                        "bootstrap_nudge_noop pane=$name session=$sessionId displayId=$targetDisplayId elapsedMs=$elapsedMs " +
+                            "firstFramePublished=$firstFrameMetadataSent attempts=$bootstrapNudgeAttempts"
+                    )
+                    return@launch
+                }
+                if (!browserConnected ||
+                    (displayTier != DisplayTier.ACTIVE && displayTier != DisplayTier.VISIBLE) ||
+                    displayId < 0 ||
+                    displayId != targetDisplayId
+                ) {
+                    logLaunchRecoveryInfo(
+                        "bootstrap_nudge_skipped pane=$name session=$sessionId targetDisplayId=$targetDisplayId " +
+                            "currentDisplayId=$displayId browserConnected=$browserConnected tier=$displayTier elapsedMs=$elapsedMs"
+                    )
+                    return@launch
+                }
+                bootstrapNudgeAttempts += 1
+                logLaunchRecoveryInfo(
+                    "bootstrap_nudge_fire pane=$name session=$sessionId displayId=$displayId elapsedMs=$elapsedMs"
+                )
+                val target = recoveryLaunchTarget()
+                if (LaunchRecoveryPolicy.shouldAttemptBootstrapRealign(
+                        currentApp = target,
+                        displayId = displayId,
+                        browserConnected = browserConnected,
+                    )
+                ) {
+                    logLaunchRecoveryInfo(
+                        "bootstrap_realign_begin pane=$name session=$sessionId displayId=$displayId target=$target"
+                    )
+                    val launched = launchComponent(
+                        target,
+                        forceColdStart = false,
+                        forceTaskRealign = true,
+                    )
+                    logLaunchRecoveryInfo(
+                        "bootstrap_realign_done pane=$name session=$sessionId displayId=$displayId target=$target launched=$launched"
+                    )
+                } else {
+                    logLaunchRecoveryInfo(
+                        "bootstrap_realign_skipped pane=$name session=$sessionId displayId=$displayId target=$target"
+                    )
+                }
+            }
         }
 
         fun recordInjectionResult(motionEvent: android.view.MotionEvent, accepted: Boolean) {
@@ -3182,6 +3455,7 @@ class MirrorForegroundService : Service() {
 
         suspend fun suspendEncoder(reason: String) {
             Log.i(TAG, "[$name Pipeline] Suspending encoder and stream while preserving VD/app session. Reason=$reason")
+            cancelBootstrapNudge("suspend_encoder:$reason")
             if (resizeJob?.isActive == true) debugResizeCancels += 1
             resizeJob?.cancel()
             if (videoEncoder != null || jpegEncoder != null) debugEncoderReleases += 1
@@ -3215,8 +3489,8 @@ class MirrorForegroundService : Service() {
             // Cache the latest valid viewport sizes for runtime self-healing recovery
             lastValidWidth = w
             lastValidHeight = h
-            
-            requestedWidth = w; requestedHeight = h
+            requestedWidth = w
+            requestedHeight = h
             if (resizeJob?.isActive == true) debugResizeCancels += 1
             resizeJob?.cancel()
             debugResizeSchedules += 1
@@ -3251,7 +3525,17 @@ class MirrorForegroundService : Service() {
             onComplete: kotlinx.coroutines.CompletableDeferred<Unit>? = null
         ) {
             this@MirrorForegroundService.requestRebuild(
-                RebuildRequest(name, reason, priority, newWidth, newHeight, force, forceSingle, onComplete)
+                RebuildRequest(
+                    requestId = rebuildRequestIdGenerator.incrementAndGet(),
+                    pipelineName = name,
+                    reason = reason,
+                    priority = priority,
+                    width = newWidth,
+                    height = newHeight,
+                    force = force,
+                    forceSingle = forceSingle,
+                    onComplete = onComplete,
+                )
             )
         }
 
@@ -3265,10 +3549,11 @@ class MirrorForegroundService : Service() {
             requestRebuild("legacy_direct", RebuildPriority.NORMAL, newWidth, newHeight, force, forceSingle, onComplete)
         }
 
-        suspend fun executeActualRebuild(targetWidth: Int, targetHeight: Int, force: Boolean = false, forceSingle: Boolean = false) {
+        suspend fun executeActualRebuild(requestId: Long, rebuildReason: String, targetWidth: Int, targetHeight: Int, force: Boolean = false, forceSingle: Boolean = false) {
             debugRebuildExecutions += 1
             markServiceMutation("rebuild_begin(force=$force,forceSingle=$forceSingle,target=${targetWidth}x${targetHeight})")
             val sessionId = encoderSession.incrementAndGet()
+            val rebuildStartedAtMs = android.os.SystemClock.elapsedRealtime()
             val effectiveMaxHeight = targetHeight.coerceAtMost(currentMaxHeight)
             var targetW = targetWidth; var targetH = targetHeight
             if (targetH > effectiveMaxHeight) { val scale = effectiveMaxHeight.toFloat() / targetH; targetH = effectiveMaxHeight; targetW = (targetW * scale).toInt() }
@@ -3283,14 +3568,23 @@ class MirrorForegroundService : Service() {
                 TAG,
                 "[PIPELINE_DEBUG] [$name] rebuild session=$sessionId target=${targetWidth}x${targetHeight} aligned=${w}x${h} force=$force forceSingle=$forceSingle currentDisplayId=$displayId currentApp=$currentApp"
             )
+            logLaunchRecoveryInfo(
+                "rebuild_execute_begin id=$requestId pane=$name session=$sessionId reason=$rebuildReason target=${targetWidth}x${targetHeight} " +
+                    "aligned=${w}x${h} force=$force forceSingle=$forceSingle displayId=$displayId currentApp=$currentApp"
+            )
             FileLogger.i("PIPELINE_DEBUG", "[$name] rebuild session=$sessionId target=${targetWidth}x${targetHeight} aligned=${w}x${h} force=$force forceSingle=$forceSingle currentDisplayId=$displayId currentApp=$currentApp")
             FileLogger.i("DISPLAY_STATE", "[$name] rebuild session=$sessionId displayId=$displayId currentApp=$currentApp target=${w}x${h}")
 
             // Reset frame indicator on viewport/encoder layout reconstruction to guarantee correct watchdog operation
             lastFrameRenderedTime = 0L
+            bootstrapNudgeAttempts = 0
             mirrorServer?.clearCachedSpsPps(name)
-            mirrorServer?.beginStreamGeneration(name, displayId, w, h)
             firstFrameMetadataSent = false
+            cancelBootstrapNudge("rebuild_prepare")
+            logStreamBootstrapInfo(
+                "pane=$name session=$sessionId phase=rebuild_prepare codec=$currentCodecMode displayId=$displayId " +
+                    "target=${w}x${h} elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+            )
 
             if (videoEncoder != null || jpegEncoder != null) debugEncoderReleases += 1
             videoEncoder?.release(); videoEncoder = null
@@ -3306,14 +3600,34 @@ class MirrorForegroundService : Service() {
             val surface = if (currentCodecMode == "mjpeg") {
                 val jpeg = JpegEncoder(w, h, fps = 15, quality = 65); val inputSurface = jpeg.createInputSurface(); jpegEncoder = jpeg
                 debugEncoderCreates += 1
+                jpeg.onCaptureEvent = { detail ->
+                    logStreamBootstrapInfo(
+                        "pane=$name session=$sessionId phase=jpeg_encoder $detail displayId=$displayId " +
+                            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+                    )
+                }
                 startEncoderTask = {
                     if (encoderSession.get() != sessionId || jpegEncoder !== jpeg || currentEncoderSurface !== inputSurface) {
+                        logStreamBootstrapInfo(
+                            "pane=$name session=$sessionId phase=encoder_start_skipped reason=stale codec=mjpeg displayId=$displayId " +
+                                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+                        )
                         Log.i(TAG, "[$name Pipeline] Skipping stale JPEG encoder start for session=$sessionId")
                     } else {
+                        logStreamBootstrapInfo(
+                            "pane=$name session=$sessionId phase=encoder_start codec=mjpeg displayId=$displayId " +
+                                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+                        )
                         jpeg.start { data, key ->
                             lastFrameRenderedTime = System.currentTimeMillis()
                             if (!firstFrameMetadataSent) {
                                 firstFrameMetadataSent = true
+                                cancelBootstrapNudge("first_frame_publish")
+                                logStreamBootstrapInfo(
+                                    "pane=$name session=$sessionId phase=first_frame_publish codec=mjpeg displayId=$displayId " +
+                                        "generation=${mirrorServer?.getCurrentStreamGeneration(name) ?: 0} bytes=${data.size} key=$key " +
+                                        "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+                                )
                                 mirrorServer?.markFirstFrameReady(name, displayId, w, h)
                             }
                             mirrorServer?.broadcastFrame(data, key, name)
@@ -3344,15 +3658,41 @@ class MirrorForegroundService : Service() {
                 val inputSurface = encoder.createInputSurface()
                 videoEncoder = encoder
                 debugEncoderCreates += 1
-                encoder.onSpsPps = { mirrorServer?.broadcastSpsPps(it, name) }
+                encoder.onCodecEvent = { detail ->
+                    logStreamBootstrapInfo(
+                        "pane=$name session=$sessionId phase=video_encoder $detail displayId=$displayId " +
+                            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+                    )
+                }
+                encoder.onSpsPps = {
+                    logStreamBootstrapInfo(
+                        "pane=$name session=$sessionId phase=sps_pps_ready size=${it.size} displayId=$displayId " +
+                            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+                    )
+                    mirrorServer?.broadcastSpsPps(it, name)
+                }
                 startEncoderTask = {
                     if (encoderSession.get() != sessionId || videoEncoder !== encoder || currentEncoderSurface !== inputSurface) {
+                        logStreamBootstrapInfo(
+                            "pane=$name session=$sessionId phase=encoder_start_skipped reason=stale codec=h264 displayId=$displayId " +
+                                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+                        )
                         Log.i(TAG, "[$name Pipeline] Skipping stale video encoder start for session=$sessionId")
                     } else {
+                        logStreamBootstrapInfo(
+                            "pane=$name session=$sessionId phase=encoder_start codec=h264 displayId=$displayId " +
+                                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+                        )
                         encoder.start { data, key ->
                             lastFrameRenderedTime = System.currentTimeMillis()
                             if (!firstFrameMetadataSent) {
                                 firstFrameMetadataSent = true
+                                cancelBootstrapNudge("first_frame_publish")
+                                logStreamBootstrapInfo(
+                                    "pane=$name session=$sessionId phase=first_frame_publish codec=h264 displayId=$displayId " +
+                                        "generation=${mirrorServer?.getCurrentStreamGeneration(name) ?: 0} bytes=${data.size} key=$key " +
+                                        "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+                                )
                                 mirrorServer?.markFirstFrameReady(name, displayId, w, h)
                             }
                             mirrorServer?.broadcastFrame(data, key, name)
@@ -3369,7 +3709,7 @@ class MirrorForegroundService : Service() {
                             if (displayId >= 0) {
                                 wakeDisplayForRecovery(controller.getPrivilegedService(), displayId, "frame_watchdog_secondary")
                             }
-                            encoder.requestKeyFrame()
+                            requestKeyFrameForRecovery(this@MirroringPipeline, "frame_watchdog_secondary")
                         } catch (e: Exception) {
                             Log.w(TAG, "[$name Pipeline] Failed to force graphics wakeup on keyframe request", e)
                         }
@@ -3380,6 +3720,10 @@ class MirrorForegroundService : Service() {
             }
 
             currentEncoderSurface = surface; width = w; height = h; currentBitrate = calculatedBitrate
+            logStreamBootstrapInfo(
+                "pane=$name session=$sessionId phase=surface_ready codec=$currentCodecMode surfaceHash=${surface.hashCode()} " +
+                    "displayId=$displayId width=$w height=$h elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+            )
             delay(100)
             
             if (controller.isBound()) {
@@ -3393,6 +3737,10 @@ class MirrorForegroundService : Service() {
                     virtualDisplayHardwareMutex.withLock {
                         val currentId = controller.getDisplayId()
                         if (currentId >= 0) {
+                            logStreamBootstrapInfo(
+                                "pane=$name session=$sessionId phase=vd_reuse_begin displayId=$currentId width=$w height=$h dpi=$dpi " +
+                                    "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+                            )
                             Log.i(TAG, "[DISPLAY_DEBUG] [$name] reusing VirtualDisplay id=$currentId resize=${w}x${h} dpi=$dpi")
                             FileLogger.i("DISPLAY_DEBUG", "[$name] reuseVirtualDisplay id=$currentId resize=${w}x${h} dpi=$dpi")
                             FileLogger.i("DISPLAY_STATE", "[$name] reuseVirtualDisplay id=$currentId width=$w height=$h dpi=$dpi")
@@ -3406,7 +3754,15 @@ class MirrorForegroundService : Service() {
                             gen = markVdCreated(currentId, "${name}_reuse")
                             isNewVd = false
                             success = true
+                            logStreamBootstrapInfo(
+                                "pane=$name session=$sessionId phase=vd_reuse_ready displayId=$currentId generation=$gen " +
+                                    "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+                            )
                         } else {
+                            logStreamBootstrapInfo(
+                                "pane=$name session=$sessionId phase=vd_create_begin width=$w height=$h dpi=$dpi " +
+                                    "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+                            )
                             Log.i(TAG, "[DISPLAY_DEBUG] [$name] creating new VirtualDisplay target=${w}x${h} dpi=$dpi")
                             FileLogger.i("DISPLAY_DEBUG", "[$name] createVirtualDisplay target=${w}x${h} dpi=$dpi")
                             FileLogger.i("DISPLAY_STATE", "[$name] createVirtualDisplay width=$w height=$h dpi=$dpi")
@@ -3419,6 +3775,10 @@ class MirrorForegroundService : Service() {
                                 gen = markVdCreated(newActiveId, "${name}_rebuild")
                                 isNewVd = true
                                 success = true
+                                logStreamBootstrapInfo(
+                                    "pane=$name session=$sessionId phase=vd_create_ready displayId=$newActiveId generation=$gen " +
+                                        "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+                                )
                             }
                         }
                     }
@@ -3436,7 +3796,43 @@ class MirrorForegroundService : Service() {
                             accepted
                         }
                     }
+                    val preStreamTarget = preStreamLaunchTarget()
+                    val shouldLaunchBeforeStream = LaunchRecoveryPolicy.shouldLaunchTargetBeforeStreamBootstrap(
+                        hasLaunchTarget = preStreamTarget != null,
+                        requiresFreshLaunchPreparation = requiresFreshLaunchPreparation,
+                        isNewVirtualDisplay = isNewVd,
+                    )
+                    if (shouldLaunchBeforeStream && preStreamTarget != null) {
+                        logLaunchRecoveryInfo(
+                            "prestream_launch_begin pane=$name session=$sessionId displayId=$activeId target=$preStreamTarget " +
+                                "reason=$rebuildReason currentApp=$currentApp"
+                        )
+                        val launched = launchComponent(
+                            preStreamTarget,
+                            forceColdStart = false,
+                            forceTaskRealign = true,
+                            skipLaunchSelfHeal = true,
+                            suppressStreamGenerationRestart = true,
+                        )
+                        logLaunchRecoveryInfo(
+                            "prestream_launch_done pane=$name session=$sessionId displayId=$activeId target=$preStreamTarget " +
+                                "reason=$rebuildReason launched=$launched"
+                        )
+                    }
+                    logStreamBootstrapInfo(
+                        "pane=$name session=$sessionId phase=stream_generation_begin_request displayId=$activeId isNewVd=$isNewVd " +
+                            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+                    )
+                    val streamGeneration = mirrorServer?.beginStreamGeneration(name, activeId, w, h) ?: 0
+                    logStreamBootstrapInfo(
+                        "pane=$name session=$sessionId phase=stream_generation_begin_done displayId=$activeId generation=$streamGeneration " +
+                            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+                    )
                     startEncoderTask?.invoke()
+                    scheduleBootstrapNudge(
+                        sessionId = sessionId,
+                        targetDisplayId = activeId,
+                    )
                     
                     delay(100) // Small stabilization delay outside lock
                     runBinderSafe { controller.keepDisplayAwake() }
@@ -3456,6 +3852,8 @@ class MirrorForegroundService : Service() {
                         currentApp = "HOME"
                         markServiceMutation("launch_home_after_rebuild")
                         runBinderSafe { controller.launchHomeOnDisplay() }
+                    } else if (shouldLaunchBeforeStream) {
+                        markServiceMutation("prestream_launch_after_rebuild")
                     } else if (isNewVd || forceSingle) {
                         markServiceMutation("soft_recovery_after_rebuild")
                         Log.i(TAG, "[$name Pipeline] Rebuild completed without automatic app relaunch. Waiting for explicit launch path.")
@@ -3469,7 +3867,52 @@ class MirrorForegroundService : Service() {
                     throw IllegalStateException("VirtualDisplay allocation completely failed via binder server.")
                 }
             } else {
-                if (trySetupVirtualDisplay(w, h, surface)) startEncoderTask?.invoke()
+                if (trySetupVirtualDisplay(w, h, surface)) {
+                    val preStreamTarget = preStreamLaunchTarget()
+                    val shouldLaunchBeforeStream = LaunchRecoveryPolicy.shouldLaunchTargetBeforeStreamBootstrap(
+                        hasLaunchTarget = preStreamTarget != null,
+                        requiresFreshLaunchPreparation = requiresFreshLaunchPreparation,
+                        isNewVirtualDisplay = displayId >= 0,
+                    )
+                    if (displayId >= 0 && shouldLaunchBeforeStream && preStreamTarget != null) {
+                        logLaunchRecoveryInfo(
+                            "prestream_launch_begin pane=$name session=$sessionId displayId=$displayId target=$preStreamTarget " +
+                                "reason=$rebuildReason fallbackPath=true currentApp=$currentApp"
+                        )
+                        val launched = launchComponent(
+                            preStreamTarget,
+                            forceColdStart = false,
+                            forceTaskRealign = true,
+                            skipLaunchSelfHeal = true,
+                            suppressStreamGenerationRestart = true,
+                        )
+                        logLaunchRecoveryInfo(
+                            "prestream_launch_done pane=$name session=$sessionId displayId=$displayId target=$preStreamTarget " +
+                                "reason=$rebuildReason fallbackPath=true launched=$launched"
+                        )
+                    }
+                    if (displayId >= 0) {
+                        logStreamBootstrapInfo(
+                            "pane=$name session=$sessionId phase=stream_generation_begin_request displayId=$displayId isNewVd=true " +
+                                "fallbackPath=true elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+                        )
+                        val streamGeneration = mirrorServer?.beginStreamGeneration(name, displayId, w, h) ?: 0
+                        logStreamBootstrapInfo(
+                            "pane=$name session=$sessionId phase=stream_generation_begin_done displayId=$displayId generation=$streamGeneration " +
+                                "fallbackPath=true elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+                        )
+                    }
+                    startEncoderTask?.invoke()
+                    if (displayId >= 0) {
+                        scheduleBootstrapNudge(
+                            sessionId = sessionId,
+                            targetDisplayId = displayId,
+                        )
+                    }
+                    if (displayId >= 0 && shouldLaunchBeforeStream) {
+                        markServiceMutation("prestream_launch_after_rebuild_fallback")
+                    }
+                }
             }
             if (displayId >= 0) {
                 try { mirrorServer?.broadcastControlMessage(org.json.JSONObject().apply { put("type", "resolutionChanged"); put("pane", name); put("width", w); put("height", h) }.toString()) } catch (_: Exception) {}
@@ -3482,8 +3925,8 @@ class MirrorForegroundService : Service() {
                         wakeDisplayForRecovery(controller.getPrivilegedService(), displayId, "restore_content")
                         if (currentCodecMode != "mjpeg") {
                             markServiceMutation("post_rebuild_keyframe")
-                            videoEncoder?.requestKeyFrame()
                         }
+                        requestKeyFrameForRecovery(this@MirroringPipeline, "restore_content")
                         // Log.i(TAG, "[FRAME_DEBUG] [$name] post-rebuild wakeup/keyframe displayId=$displayId codec=$currentCodecMode")
                         FileLogger.i("FRAME_DEBUG", "[$name] post-rebuild wakeup/keyframe displayId=$displayId codec=$currentCodecMode")
                         FileLogger.i("KEYFRAME_REQUEST", "[$name] postRebuild displayId=$displayId codec=$currentCodecMode")
@@ -3546,9 +3989,7 @@ class MirrorForegroundService : Service() {
                         wakeDisplayForRecovery(service, targetDisplayId, "launch_component")
                     }
                     delay(40)
-                    if (currentCodecMode != "mjpeg") {
-                        videoEncoder?.requestKeyFrame()
-                    }
+                    requestKeyFrameForRecovery(this@MirroringPipeline, "launch_component")
                     Log.i(TAG, "[$name Pipeline] Symmetrical adaptive wakeup successfully completed on display $targetDisplayId")
                 } catch (e: Exception) {
                     Log.w(TAG, "[$name Pipeline] Failed to trigger adaptive wakeup sequence", e)
@@ -3812,6 +4253,21 @@ class MirrorForegroundService : Service() {
             return active.substringBefore('/').ifBlank { active }
         }
 
+        private fun preStreamLaunchTarget(): String? {
+            val active = currentApp.trim()
+            if (active.isBlank() || active == "HOME" || active == "com.android.settings") return null
+            if (active.startsWith("$packageName/") || active.contains("WebBrowserActivity")) return null
+            return recoveryLaunchTarget().ifBlank { null }
+        }
+
+        private fun restartActiveStreamGeneration() {
+            val token = currentVdToken() ?: return
+            val encoderActive = if (currentCodecMode == "mjpeg") jpegEncoder != null else videoEncoder != null
+            if (!encoderActive || width <= 0 || height <= 0) return
+            firstFrameMetadataSent = false
+            mirrorServer?.beginStreamGeneration(name, token.second, width, height)
+        }
+
         fun launchOwnActivity(activityClassName: String, url: String) {
             val targetDisplayId = this.displayId
             if (targetDisplayId < 0) return
@@ -3837,7 +4293,9 @@ class MirrorForegroundService : Service() {
             extraValue: String? = null,
             forceColdStart: Boolean = false,
             forceDisplayId: Boolean = false,
-            forceTaskRealign: Boolean = false
+            forceTaskRealign: Boolean = false,
+            skipLaunchSelfHeal: Boolean = false,
+            suppressStreamGenerationRestart: Boolean = false,
         ): Boolean = withContext(vdDispatcher) {
             markServiceMutation("launch_component_begin(target=$packageOrComponent,cold=$forceColdStart,realign=$forceTaskRealign)")
             // Ensure lastFrameRenderedTime is reset only when actually switching to a different application package
@@ -3891,7 +4349,7 @@ class MirrorForegroundService : Service() {
             val alignedH = ((targetH + 15) and 15.inv()).coerceAtLeast(320)
             val needsViewportRealignment = width != alignedW || height != alignedH
 
-            if ((isEncoderReleased || width <= 1 || needsViewportRealignment) && !isSelfHealingInProgress) {
+            if (!skipLaunchSelfHeal && (isEncoderReleased || width <= 1 || needsViewportRealignment) && !isSelfHealingInProgress) {
                 isSelfHealingInProgress = true
                 try {
                     Log.i(TAG, "[$name Pipeline] Self-healing or Viewport Alignment activated on launchComponent. Restoring layout state to ${targetW}x${targetH}")
@@ -3915,7 +4373,7 @@ class MirrorForegroundService : Service() {
                 } finally {
                     isSelfHealingInProgress = false
                 }
-            } else if (isSelfHealingInProgress) {
+            } else if (!skipLaunchSelfHeal && isSelfHealingInProgress) {
                 Log.d(TAG, "[$name Pipeline] Self-healing is already in progress. Skipping redundant trigger.")
             }
 
@@ -3993,7 +4451,7 @@ class MirrorForegroundService : Service() {
                     requiresFreshLaunchPreparation = false
                     lastPreparedTargetPackage = cleanPkg
                     currentApp = packageOrComponent
-                    if (isEncoderActive) {
+                    if (isEncoderActive && !suppressStreamGenerationRestart) {
                         val token = currentVdToken()
                         if (token != null) {
                             firstFrameMetadataSent = false
@@ -4018,7 +4476,7 @@ class MirrorForegroundService : Service() {
                     executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
                     currentApp = packageOrComponent
                     val token = currentVdToken()
-                    if (token != null) {
+                    if (token != null && !suppressStreamGenerationRestart) {
                         firstFrameMetadataSent = false
                         mirrorServer?.beginStreamGeneration(name, token.second, width, height)
                     }
@@ -4093,7 +4551,7 @@ class MirrorForegroundService : Service() {
                 requiresFreshLaunchPreparation = false
                 lastPreparedTargetPackage = cleanPkg
                 currentApp = packageOrComponent
-                if (isEncoderActive) {
+                if (isEncoderActive && !suppressStreamGenerationRestart) {
                     val token = currentVdToken()
                     if (token != null) {
                         firstFrameMetadataSent = false
@@ -4115,6 +4573,11 @@ class MirrorForegroundService : Service() {
         suspend fun launchBrowser(url: String, sourceAppPackage: String? = null, allowFallback: Boolean = true) {
             val browser = BrowserResolver.resolve(this@MirrorForegroundService, url)
             val targetComponent = browser?.componentFlat ?: internalComponentName("com.castla.mirror.ui.WebBrowserActivity")
+            if (displayId >= 0 && currentWebUrl == url && currentApp == targetComponent) {
+                restartActiveStreamGeneration()
+                adaptiveBitrateManager.rebalanceBitrates()
+                return
+            }
             if (displayId < 0) {
                 currentApp = targetComponent; currentWebUrl = url; isVideoApp = (browser != null)
                 serviceScope.launch(Dispatchers.IO) {
@@ -4141,12 +4604,14 @@ class MirrorForegroundService : Service() {
                     controller.getPrivilegedService()?.execCommand(buildExternalBrowserCommand(displayId, url, browser.componentFlat))
                     // Bypassed: Do not force stop the previous app to support warm start
                     currentApp = browser.componentFlat; currentWebUrl = url; isVideoApp = true
+                    restartActiveStreamGeneration()
                     adaptiveBitrateManager.rebalanceBitrates(); return
                 } catch (_: Exception) {}
             }
             if (allowFallback) {
                 launchOwnActivity("com.castla.mirror.ui.WebBrowserActivity", url)
                 currentApp = internalComponentName("com.castla.mirror.ui.WebBrowserActivity"); currentWebUrl = url; isVideoApp = false
+                restartActiveStreamGeneration()
                 adaptiveBitrateManager.rebalanceBitrates()
             }
         }
@@ -4156,6 +4621,10 @@ class MirrorForegroundService : Service() {
             // Force task realignment on standard launching requests from web to bypass the Command Equivalence Guard
             val launched = if (displayId >= 0) launchComponent(resolvedTarget, forceDisplayId = forceDisplayId, forceTaskRealign = true) else false
             if (!launched) {
+                logLaunchRecoveryInfo(
+                    "launch_standard_defer pkg=$resolvedTarget displayId=$displayId requested=${requestedWidth}x${requestedHeight} " +
+                        "lastValid=${lastValidWidth}x${lastValidHeight}"
+                )
                 currentApp = resolvedTarget; currentWebUrl = null; isVideoApp = false
                 serviceScope.launch(Dispatchers.IO) {
                     try {
@@ -4167,6 +4636,9 @@ class MirrorForegroundService : Service() {
                             priority = RebuildPriority.HIGH,
                             newWidth = if (requestedWidth > 0) requestedWidth else fallbackW,
                             newHeight = if (requestedHeight > 0) requestedHeight else fallbackH
+                        )
+                        logLaunchRecoveryInfo(
+                            "launch_standard_rebuild_requested pkg=$resolvedTarget displayId=$displayId target=${if (requestedWidth > 0) requestedWidth else fallbackW}x${if (requestedHeight > 0) requestedHeight else fallbackH}"
                         )
                         if (displayId >= 0) launchComponent(resolvedTarget, forceDisplayId = forceDisplayId, forceTaskRealign = true)
                     } catch (_: Exception) {}
