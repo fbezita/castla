@@ -4,6 +4,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileNotFoundException
 import java.security.KeyStore
+import java.security.cert.X509Certificate
 
 data class LoadedTlsKeystore(
     val keyStore: KeyStore,
@@ -11,6 +12,22 @@ data class LoadedTlsKeystore(
 )
 
 object TlsKeystoreLoader {
+    fun readCertificateNotAfterMs(
+        password: CharArray,
+        dynamicFile: File,
+    ): Long? {
+        val keyStore = loadPkcs12FromFile(password, dynamicFile)
+        val aliases = keyStore.aliases()
+
+        while (aliases.hasMoreElements()) {
+            val alias = aliases.nextElement()
+            val certificate = keyStore.getCertificate(alias) as? X509Certificate ?: continue
+            return certificate.notAfter.time
+        }
+
+        return null
+    }
+
     fun loadDynamicPkcs12WithRefresh(
         password: CharArray,
         dynamicFile: File,

@@ -19,6 +19,9 @@
     <string name="status_streaming_active">Streaming Active</string>
     <string name="status_preparing">Preparing…</string>
     <string name="status_ready_to_stream">Ready to Stream</string>
+    <string name="status_waiting_for_secure_relay">Waiting for secure relay…</string>
+    <string name="status_server_setup_failed">Server setup failed</string>
+    <string name="status_server_starting">Starting server…</string>
     <string name="title_open_tesla_browser">Open Tesla Browser</string>
     <string name="title_tesla_setup_required">Tesla Setup Required</string>
     <string name="desc_shizuku_install_required">Tesla browser needs Shizuku to connect.\nTap below to download and install Shizuku.</string>

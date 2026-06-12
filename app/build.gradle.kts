@@ -15,6 +15,26 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(keystorePropertiesFile.inputStream())
 }
 
+val localPropertiesFile = rootProject.file("local.properties")
+val localProperties = Properties()
+if (localPropertiesFile.exists()) {
+    localProperties.load(localPropertiesFile.inputStream())
+}
+
+fun readSecret(name: String): String {
+    val envValue = System.getenv(name)?.trim()
+    if (!envValue.isNullOrEmpty()) {
+        return envValue
+    }
+
+    val localValue = localProperties.getProperty(name)?.trim()
+    if (!localValue.isNullOrEmpty()) {
+        return localValue
+    }
+
+    return ""
+}
+
 // Reads the highest semver tag from `git tag`. Used by debug builds so the
 // installed APK reflects the actual latest release (CI strips/injects versionName
 // for release builds — debug runs locally without that injection, so we derive
@@ -71,8 +91,11 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 12
-        versionName = "2.4.6"
+        versionName = "2.4.7"
         buildConfigField("String", "BUILD_TIMESTAMP", "\"$buildTimestamp\"")
+        buildConfigField("String", "CASTLA_CERT_PASSWORD", "\"${readSecret("CASTLA_CERT_PASSWORD")}\"")
+        buildConfigField("String", "CASTLA_CERT_TOKEN", "\"${readSecret("CASTLA_CERT_TOKEN")}\"")
+        buildConfigField("String", "CASTLA_RELAY_TOKEN", "\"${readSecret("CASTLA_RELAY_TOKEN")}\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

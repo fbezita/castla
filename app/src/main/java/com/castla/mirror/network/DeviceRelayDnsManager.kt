@@ -69,6 +69,12 @@ class DeviceRelayDnsManager(
             return
         }
 
+        if (relayUpdateToken.isBlank()) {
+            Log.e(TAG, "❌ Cannot publish relay DNS: CASTLA_RELAY_TOKEN is missing")
+            onResult?.invoke(false, publicUrl, relayUrl, ip)
+            return
+        }
+
         scope.launch {
             val ok = RelayRegistrationApi(
                 endpointUrl = backendEndpointUrl,

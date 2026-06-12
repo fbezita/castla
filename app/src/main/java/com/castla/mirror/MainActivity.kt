@@ -22,6 +22,8 @@ import android.widget.Toast
 import androidx.core.content.FileProvider
 import java.io.File
 import com.castla.mirror.server.MirrorServer
+import com.castla.mirror.server.MirrorServerAvailability
+import com.castla.mirror.server.MirrorServerAvailabilityState
 import androidx.appcompat.app.AppCompatActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -89,6 +91,7 @@ class MainActivity : AppCompatActivity() {
     private var isStreaming by mutableStateOf(false)
     private var isPreparing by mutableStateOf(false)
     private var serverUrl by mutableStateOf("")
+    private var serverAvailability by mutableStateOf(MirrorServerAvailability.IDLE)
     private var currentIp by mutableStateOf("0.0.0.0")
     private var showSettings by mutableStateOf(false)
     private var streamSettings by mutableStateOf(StreamSettings())
@@ -132,6 +135,8 @@ class MainActivity : AppCompatActivity() {
             if (!isStreaming) {
                 isStreaming = localBinder.service.isRunning
             }
+            serverAvailability = localBinder.service.getMirrorServer()?.getAvailability()
+                ?: MirrorServerAvailability.IDLE
             val serviceWasAlreadyRunning = localBinder.service.isRunning
             if (streamSettings.mirroringMode == MirroringMode.FULL_SCREEN && !serviceWasAlreadyRunning) {
                 localBinder.service.setBrowserConnectionListener { connected ->
@@ -149,6 +154,7 @@ class MainActivity : AppCompatActivity() {
         override fun onServiceDisconnected(name: ComponentName?) {
             mirrorService = null
             serviceBound = false
+            serverAvailability = MirrorServerAvailability.IDLE
         }
     }
 
@@ -222,6 +228,7 @@ class MainActivity : AppCompatActivity() {
                 MirrorForegroundService.serviceRunningFlow.collect { running ->
                     if (!running && isStreaming) {
                         isStreaming = false
+                        serverAvailability = MirrorServerAvailability.IDLE
                         if (!pendingStartAfterCleanup) {
                             isPreparing = false
                         }
@@ -241,6 +248,14 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                MirrorForegroundService.serverAvailabilityFlow.collect { availability ->
+                    serverAvailability = availability
                 }
             }
         }
@@ -327,6 +342,7 @@ class MainActivity : AppCompatActivity() {
                         isStreaming = isStreaming,
                         isPreparing = isPreparing,
                         serverUrl = serverUrl,
+                        serverAvailability = serverAvailability,
                         reachableMirrorIp = resolveReachableMirrorIp(),
                         shizukuInstalled = shizukuInstalled,
                         shizukuRunning = shizukuRunning,
@@ -679,7 +695,7 @@ class MainActivity : AppCompatActivity() {
         return null
     }
 
-    private fun resolveReachableMirrorIp(): String {
+private fun resolveReachableMirrorIp(): String {
         val cellularIp = getCellularIpv4Address()
         val hotspotIp = currentIp
 
@@ -1263,11 +1279,21 @@ class MainActivity : AppCompatActivity() {
     }
 }
 
+private fun MirrorServerAvailability.toStatusTextRes(): Int = when (state) {
+    MirrorServerAvailabilityState.STARTING -> R.string.status_server_starting
+    MirrorServerAvailabilityState.WAITING_RELAY -> R.string.status_waiting_for_secure_relay
+    MirrorServerAvailabilityState.ERROR -> R.string.status_server_setup_failed
+    MirrorServerAvailabilityState.READY_HTTP,
+    MirrorServerAvailabilityState.READY_HTTPS -> R.string.status_streaming_active
+    MirrorServerAvailabilityState.IDLE -> R.string.status_ready_to_stream
+}
+
 @Composable
 fun CastlaScreen(
     isStreaming: Boolean,
     isPreparing: Boolean = false,
     serverUrl: String,
+    serverAvailability: MirrorServerAvailability = MirrorServerAvailability.IDLE,
     reachableMirrorIp: String = "0.0.0.0",
     shizukuInstalled: Boolean,
     shizukuRunning: Boolean,
@@ -1299,6 +1325,13 @@ fun CastlaScreen(
     onOpenShizukuBatterySettings: () -> Unit = {}
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val serverReady = serverAvailability.isReady
+    val serverStatusColor = when {
+        isPreparing || serverAvailability.state == MirrorServerAvailabilityState.STARTING -> Color(0xFFFFB300)
+        serverReady -> Color(0xFF69F0AE)
+        isStreaming && serverAvailability.state == MirrorServerAvailabilityState.ERROR -> Color(0xFFFF5252)
+        else -> Color.White.copy(alpha = 0.7f)
+    }
     MeshGradientBackground {
         Column(
             modifier = Modifier.fillMaxSize()
@@ -1446,29 +1479,31 @@ fun CastlaScreen(
                         modifier = Modifier
                             .size(12.dp)
                             .clip(CircleShape)
-                            .background(if (isStreaming) Color(0xFF69F0AE) else Color.White.copy(alpha = 0.5f))
+                            .background(
+                                when {
+                                    serverReady -> Color(0xFF69F0AE)
+                                    isStreaming && serverAvailability.state == MirrorServerAvailabilityState.ERROR -> Color(0xFFFF5252)
+                                    else -> Color.White.copy(alpha = 0.5f)
+                                }
+                            )
                     )
                 }
                 Spacer(modifier = Modifier.width(12.dp))
                 Text(
                     text = when {
                         isPreparing -> stringResource(id = R.string.status_preparing)
-                        isStreaming -> stringResource(id = R.string.status_streaming_active)
+                        isStreaming -> stringResource(id = serverAvailability.toStatusTextRes())
                         else -> stringResource(id = R.string.status_ready_to_stream)
                     },
                     style = MaterialTheme.typography.titleMedium,
-                    color = when {
-                        isPreparing -> Color(0xFFFFB300)
-                        isStreaming -> Color(0xFF69F0AE)
-                        else -> Color.White.copy(alpha = 0.7f)
-                    },
+                    color = serverStatusColor,
                     fontWeight = FontWeight.Bold
                 )
             }
 
             Spacer(modifier = Modifier.height(32.dp))
 
-            AnimatedVisibility(visible = isStreaming) {
+            AnimatedVisibility(visible = isStreaming && serverReady) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1509,7 +1544,7 @@ fun CastlaScreen(
             }
 
             // Hotspot toggle button + auto-hotspot switch — only visible when streaming
-            AnimatedVisibility(visible = isStreaming) {
+            AnimatedVisibility(visible = isStreaming && serverReady) {
                 Column {
                     Spacer(modifier = Modifier.height(16.dp))
                     Row(
@@ -1574,7 +1609,7 @@ fun CastlaScreen(
             }
 
             // Screen off (panel-off) button — only visible when streaming
-            AnimatedVisibility(visible = isStreaming) {
+            AnimatedVisibility(visible = isStreaming && serverReady) {
                 Column {
                     Spacer(modifier = Modifier.height(12.dp))
                     Button(

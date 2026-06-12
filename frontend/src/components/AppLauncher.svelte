@@ -70,6 +70,7 @@
   const AUTORUN_SESSION_KEY = "castla_autorun_done";
   const RECENT_APPS_KEY = "castla_recent_apps_v1";
   const ACTIVE_TAB_KEY = "castla_launch_hub_active_tab";
+  const FRONTEND_GUIDE_URL = "https://github.com/fbezita/castla/blob/master/docs/frontend-user-guide.md";
   const MAX_RECENT_APPS = 8;
   const DRAWER_HANDLE_HOTZONE = 56;
 
@@ -2243,6 +2244,21 @@
             <span>200%</span>
           </div>
         </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title-row">
+          <strong>Frontend Guide</strong>
+          <span>Launcher help</span>
+        </div>
+        <a
+          class="settings-link-btn"
+          href={FRONTEND_GUIDE_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Open Usage Guide
+        </a>
       </div>
     </section>
   {/if}

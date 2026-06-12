@@ -42,6 +42,7 @@ import com.castla.mirror.input.RemoteImeBridge
 import com.castla.mirror.input.ImeCommand
 import com.castla.mirror.input.CastlaTextInputRouter
 import com.castla.mirror.server.MirrorServer
+import com.castla.mirror.server.MirrorServerAvailability
 import com.castla.mirror.server.TouchEvent
 import com.castla.mirror.shizuku.BinderConnectionTracker
 import com.castla.mirror.shizuku.IPrivilegedService
@@ -147,6 +148,8 @@ class MirrorForegroundService : Service() {
 
         private val _serviceRunningFlow = MutableStateFlow(false)
         val serviceRunningFlow: StateFlow<Boolean> = _serviceRunningFlow
+        private val _serverAvailabilityFlow = MutableStateFlow(MirrorServerAvailability.IDLE)
+        val serverAvailabilityFlow: StateFlow<MirrorServerAvailability> = _serverAvailabilityFlow
 
         private val _cleanupInProgressFlow = MutableStateFlow(false)
         val cleanupInProgressFlow: StateFlow<Boolean> = _cleanupInProgressFlow
@@ -1981,7 +1984,7 @@ class MirrorForegroundService : Service() {
         reconnectJob?.cancel()
         reconnectJob = null
 
-        try { mirrorServer?.stop() } catch (_: Exception) {}
+        try { mirrorServer?.stopBlocking() } catch (_: Exception) {}
         mirrorServer = null
 
 
@@ -2023,6 +2026,7 @@ class MirrorForegroundService : Service() {
             Log.i("MirrorServiceCleanup", "threadsStopped=true")
 
             instance = null; isCleanupInProgress = false; isServiceRunning = false
+            _serverAvailabilityFlow.value = MirrorServerAvailability.IDLE
             Log.i(TAG, "[Cleanup] Central resource recycling sequencer terminated successfully.")
             Log.i("MirrorServiceCleanup", "done")
         }
@@ -2032,6 +2036,7 @@ class MirrorForegroundService : Service() {
         try {
             terminalReason.set(null)
             MirrorDiagnostics.onSessionStart()
+            _serverAvailabilityFlow.value = MirrorServerAvailability.STARTING
 
             val metrics = resources.displayMetrics
             val rawWidth = metrics.widthPixels.coerceAtMost(1920)
@@ -2077,6 +2082,9 @@ class MirrorForegroundService : Service() {
             pipelines.values.forEach { it.touchInjector = TouchInjector(width, height) }
 
             mirrorServer = MirrorServer(this).also { server ->
+                server.setAvailabilityListener { availability ->
+                    _serverAvailabilityFlow.value = availability
+                }
                 server.setVerboseDiagnosticsEnabled(verboseDiagnosticsEnabled)
                 server.setRelayPublishIp(relayPublishIp)
                 server.setNetworkCongestionListener { adaptiveBitrateManager.onNetworkCongestion() }

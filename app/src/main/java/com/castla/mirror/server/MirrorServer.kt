@@ -5,7 +5,7 @@ import android.util.Log
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.io.InputStream
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.KeyStore
@@ -19,6 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import com.castla.mirror.diagnostics.DiagnosticEvent
 import com.castla.mirror.diagnostics.FileLogger
 import com.castla.mirror.diagnostics.MirrorDiagnostics
+import com.castla.mirror.BuildConfig
 import com.castla.mirror.utils.AppCategoryClassifier
 import com.castla.mirror.ott.OttCatalog
 
@@ -60,12 +61,14 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     private val layoutUpdateRelayedCount = AtomicInteger(0)
     private val layoutUpdateDedupedCount = AtomicInteger(0)
     @Volatile private var lastLayoutUpdateSignature: String = ""
+    @Volatile private var availabilityListener: ((MirrorServerAvailability) -> Unit)? = null
+    @Volatile private var availability: MirrorServerAvailability = MirrorServerAvailability.STARTING
 
     private val dnsScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val relayDnsManager = DeviceRelayDnsManager(
         context = context,
         scope = dnsScope,
-        relayUpdateToken = CASTLA_CERT_TOKEN
+        relayUpdateToken = getRelayTokenOrEmpty()
     )
 
 
@@ -74,9 +77,9 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         const val DEFAULT_PORT = 9090
 
         private const val CERT_API_URL = "https://car.fbezita.com/api/castla/cert"
-        private const val CASTLA_CERT_TOKEN = "5f8c7d3a91e24f0bb4d7e6c2a8f91b6d"
-        private const val CERT_PASSWORD = "castla4864"
         @Volatile private var verboseServerAvailabilityLogging = false
+        private const val DYNAMIC_CERT_FILE_NAME = "dynamic_castla.p12"
+        private const val DYNAMIC_CERT_LAST_CHECK_FILE_NAME = "dynamic_castla.p12.last_check"
 
         fun isVerboseServerAvailabilityLoggingEnabled(): Boolean = verboseServerAvailabilityLogging
     }    
@@ -88,8 +91,46 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         }
     }
 
+    private fun updateAvailability(next: MirrorServerAvailability) {
+        availability = next
+        availabilityListener?.invoke(next)
+    }
+
+    fun setAvailabilityListener(listener: (MirrorServerAvailability) -> Unit) {
+        availabilityListener = listener
+        listener(availability)
+    }
+
+    fun getAvailability(): MirrorServerAvailability = availability
+
     fun setVerboseDiagnosticsEnabled(enabled: Boolean) {
         verboseServerAvailabilityLogging = enabled
+    }
+
+    private fun getCertDownloadTokenOrEmpty(): String {
+        return BuildConfig.CASTLA_CERT_TOKEN.trim()
+    }
+
+    private fun getRelayTokenOrEmpty(): String {
+        return BuildConfig.CASTLA_RELAY_TOKEN.trim()
+    }
+
+    private fun getCertificatePasswordOrNull(): CharArray? {
+        val password = BuildConfig.CASTLA_CERT_PASSWORD.trim()
+        if (password.isEmpty()) {
+            updateAvailability(
+                MirrorServerAvailability(
+                    state = MirrorServerAvailabilityState.ERROR,
+                    detail = "cert_password_missing",
+                )
+            )
+            Log.e(
+                TAG,
+                "[Certificate Sync] CASTLA_CERT_PASSWORD is missing. Set it via local.properties or environment variables."
+            )
+            return null
+        }
+        return password.toCharArray()
     }
 
     init {
@@ -123,8 +164,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     }
 
     private fun configureSecureContext() {
-        // Trigger certificate download in background
-        downloadCertIfAvailableBlocking(context)
+        refreshCertificateIfNeededBlocking(context)
 
         // Load settings to check if WebCodecs hardware accelerated decoding is enabled
         val settings = com.castla.mirror.ui.StreamSettings.load(context)
@@ -132,8 +172,8 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         // ✅ Only enable SSL/HTTPS socket binding if WebCodecs option is enabled
         if (settings.webCodecsEnabled) {
             try {
-                val password = CERT_PASSWORD.toCharArray()
-                val dynamicKeyStoreFile = File(context.filesDir, "dynamic_castla.p12")
+                val password = getCertificatePasswordOrNull() ?: return
+                val dynamicKeyStoreFile = File(context.filesDir, DYNAMIC_CERT_FILE_NAME)
                 val loadedKeystore = TlsKeystoreLoader.loadDynamicPkcs12WithRefresh(
                     password = password,
                     dynamicFile = dynamicKeyStoreFile,
@@ -173,34 +213,134 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
                     "tls_configured mode=https certSource=$certSource " +
                         "relayUrl=${relayDnsManager.getDeviceRelayUrl()}"
                 )
+                updateAvailability(
+                    MirrorServerAvailability(
+                        state = MirrorServerAvailabilityState.WAITING_RELAY,
+                        detail = "tls_ready",
+                    )
+                )
                 Log.i(TAG, "🚀 HTTPS server started")
                 Log.i(TAG, "🌐 Public URL = ${relayDnsManager.getPublicEntryUrl()}")
                 Log.i(TAG, "🔗 Device relay URL = ${relayDnsManager.getDeviceRelayUrl()}")
                 return
             } catch (e: Exception) {
                 logServerAvailability("tls_config_failed error=${e.message ?: e::class.java.simpleName}")
+                updateAvailability(
+                    MirrorServerAvailability(
+                        state = MirrorServerAvailabilityState.ERROR,
+                        detail = "tls_config_failed",
+                    )
+                )
                 Log.e(TAG, "❌ SSL load failed, falling back to HTTP mode", e)
             }
         }
 
         // 🌐 When WebCodecs is disabled, makeSecure() is bypassed so the server automatically runs in HTTP mode.
         logServerAvailability("tls_bypassed mode=http reason=webcodecs_disabled")
+        updateAvailability(
+            MirrorServerAvailability(
+                state = MirrorServerAvailabilityState.READY_HTTP,
+                detail = "http_mode",
+            )
+        )
         Log.w(TAG, "⚠️ [HTTP Mode] WebCodecs is disabled; running as a standard HTTP server.")
+    }
+
+    private fun refreshCertificateIfNeededBlocking(context: Context): Boolean {
+        val password = getCertificatePasswordOrNull() ?: return false
+        val targetFile = File(context.filesDir, DYNAMIC_CERT_FILE_NAME)
+        val nowMs = System.currentTimeMillis()
+        val certificateNotAfterMs = try {
+            TlsKeystoreLoader.readCertificateNotAfterMs(password, targetFile)
+        } catch (_: Exception) {
+            null
+        }
+        val lastRefreshCheckMs = readLastCertificateRefreshCheckMs(context)
+        val shouldRefresh = TlsCertificateRefreshPolicy.shouldRefresh(
+            nowMs = nowMs,
+            certificateNotAfterMs = certificateNotAfterMs,
+            lastRefreshCheckMs = lastRefreshCheckMs,
+        )
+
+        if (!shouldRefresh) {
+            Log.i(
+                TAG,
+                "[Certificate Sync] Reusing cached certificate. expiresAt=$certificateNotAfterMs lastCheckAt=$lastRefreshCheckMs"
+            )
+            return false
+        }
+
+        if (getCertDownloadTokenOrEmpty().isEmpty()) {
+            updateAvailability(
+                MirrorServerAvailability(
+                    state = MirrorServerAvailabilityState.ERROR,
+                    detail = "cert_token_missing",
+                )
+            )
+            Log.e(
+                TAG,
+                "[Certificate Sync] CASTLA_CERT_TOKEN is missing. Set it via local.properties or environment variables."
+            )
+            return false
+        }
+
+        val downloadSucceeded = downloadCertIfAvailableBlocking(context)
+        if (downloadSucceeded || certificateNotAfterMs?.let { it > nowMs } == true) {
+            writeLastCertificateRefreshCheckMs(context, nowMs)
+        }
+        return downloadSucceeded
+    }
+
+    private fun readLastCertificateRefreshCheckMs(context: Context): Long? {
+        val checkFile = File(context.filesDir, DYNAMIC_CERT_LAST_CHECK_FILE_NAME)
+        if (!checkFile.exists()) {
+            return null
+        }
+
+        return try {
+            checkFile.readText().trim().toLongOrNull()
+        } catch (_: IOException) {
+            null
+        }
+    }
+
+    private fun writeLastCertificateRefreshCheckMs(context: Context, timestampMs: Long) {
+        val checkFile = File(context.filesDir, DYNAMIC_CERT_LAST_CHECK_FILE_NAME)
+        try {
+            checkFile.writeText(timestampMs.toString())
+        } catch (e: IOException) {
+            Log.w(TAG, "[Certificate Sync] Failed to persist last refresh check timestamp.", e)
+        }
     }
 
     /**
      * Function to download the latest .p12 certificate from a remote cloud or NAS server
      */
     fun downloadCertIfAvailableBlocking(context: Context): Boolean {
-        val targetFile = File(context.filesDir, "dynamic_castla.p12")
-        val tempFile = File(context.filesDir, "dynamic_castla.p12.tmp")
+        val password = getCertificatePasswordOrNull() ?: return false
+        val certToken = getCertDownloadTokenOrEmpty()
+        if (certToken.isEmpty()) {
+            updateAvailability(
+                MirrorServerAvailability(
+                    state = MirrorServerAvailabilityState.ERROR,
+                    detail = "cert_token_missing",
+                )
+            )
+            Log.e(
+                TAG,
+                "[Certificate Sync] CASTLA_CERT_TOKEN is missing. Set it via local.properties or environment variables."
+            )
+            return false
+        }
+        val targetFile = File(context.filesDir, DYNAMIC_CERT_FILE_NAME)
+        val tempFile = File(context.filesDir, "$DYNAMIC_CERT_FILE_NAME.tmp")
 
         return try {
             val connection = (URL(CERT_API_URL).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 5000
                 readTimeout = 5000
                 requestMethod = "GET"
-                setRequestProperty("Authorization", "Bearer $CASTLA_CERT_TOKEN")
+                setRequestProperty("Authorization", "Bearer $certToken")
             }
 
             try {
@@ -218,7 +358,6 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
                             return false
                         }
 
-                        val password = CERT_PASSWORD.toCharArray()
                         val keyStore = KeyStore.getInstance("PKCS12")
                         FileInputStream(tempFile).use { stream ->
                             keyStore.load(stream, password)
@@ -288,6 +427,12 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
 
         if (relayPublishIp.isBlank() || relayPublishIp == "0.0.0.0") {
             logServerAvailability("relay_publish_skip reason=ip_not_ready trigger=$reason ip=$relayPublishIp")
+            updateAvailability(
+                MirrorServerAvailability(
+                    state = MirrorServerAvailabilityState.WAITING_RELAY,
+                    detail = "ip_not_ready",
+                )
+            )
             Log.i(TAG, "Relay DNS publish skipped: relayPublishIp is not ready ($relayPublishIp, reason=$reason)")
             return
         }
@@ -307,8 +452,21 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             )
 
             if (success) {
+                updateAvailability(
+                    MirrorServerAvailability(
+                        state = MirrorServerAvailabilityState.READY_HTTPS,
+                        detail = "relay_ready",
+                    )
+                )
                 Log.i(TAG, "🚀 Public URL = $publicUrl")
                 Log.i(TAG, "🔗 Device relay URL = $relayUrl")
+            } else {
+                updateAvailability(
+                    MirrorServerAvailability(
+                        state = MirrorServerAvailabilityState.ERROR,
+                        detail = "relay_publish_failed",
+                    )
+                )
             }
         }
     }
@@ -1350,6 +1508,26 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         } catch (e: Exception) {
             Log.w(TAG, "Failed to cancel dnsScope", e)
         }
+        stopServerSocketBlocking(waitTimeoutMs = 500L)
+    }
+
+    fun stopBlocking(waitTimeoutMs: Long = 2_000L) {
+        logServerAvailability("server_stop_blocking_begin instanceId=$instanceId timeoutMs=$waitTimeoutMs")
+        closeAllSockets("Server stop")
+        try {
+            controlSendExecutor.shutdown()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to shutdown controlSendExecutor", e)
+        }
+        try {
+            dnsScope.cancel()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to cancel dnsScope", e)
+        }
+        stopServerSocketBlocking(waitTimeoutMs)
+    }
+
+    private fun stopServerSocketBlocking(waitTimeoutMs: Long) {
         if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
             // Offload super.stop() to a background thread to prevent NetworkOnMainThreadException
             val stopThread = Thread({
@@ -1363,8 +1541,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             }, "MirrorServerStopThread")
             stopThread.start()
             try {
-                // Wait up to 500ms to allow smooth socket teardown without blocking the UI thread indefinitely
-                stopThread.join(500)
+                stopThread.join(waitTimeoutMs)
             } catch (_: Exception) {}
         } else {
             try {

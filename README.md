@@ -85,6 +85,10 @@ The APK will be at `app/build/outputs/apk/debug/app-debug.apk`.
 5. **Start mirroring** — Tap "Start Mirroring" in Castla
 6. **Open in Tesla** — Enter the displayed URL in Tesla's browser
 
+## Frontend Guide
+
+- See the [Frontend User Guide](docs/frontend-user-guide.md) for launcher usage, layout modes, App Pair creation, drag-and-drop launching, and Auto-run / Starred workflows.
+
 ## Architecture
 
 ```
