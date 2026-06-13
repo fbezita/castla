@@ -35,9 +35,15 @@ data class TouchEvent(
     val y: Float,
     val pointerId: Int,
     val pane: String = "primary",
+    val mappedWidth: Int = 0,
+    val mappedHeight: Int = 0,
     val clientTsMs: Long = 0L,
     val receivedAtElapsedMs: Long = 0L
 )
+
+internal fun shouldLogHttpRequest(uri: String): Boolean = !uri.startsWith("/api/icon")
+
+internal fun shouldLogBroadcastFrame(seq: Int): Boolean = seq <= 3 || seq % 300 == 0
 
 class MirrorServer(private val context: Context, hostname: String? = null) : NanoWSD(hostname, DEFAULT_PORT) {
 
@@ -924,7 +930,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             header + data
         }
 
-        if (seq <= 3 || isKeyFrame || seq % 120 == 0) {
+        if (shouldLogBroadcastFrame(seq)) {
             val generation = streamGenerations[normalized]?.get() ?: 0
             // Log.i(
             //     TAG,
@@ -1318,10 +1324,12 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     override fun serveHttp(session: IHTTPSession): Response {
         var uri = session.uri
         if (uri == "/") uri = "/index.html"
-        logServerAvailability(
-            "http_request method=${session.method} uri=$uri remoteIp=${session.remoteIpAddress} " +
-                "host=${session.headers["host"] ?: ""} ua=${session.headers["user-agent"] ?: ""}"
-        )
+        if (shouldLogHttpRequest(uri)) {
+            logServerAvailability(
+                "http_request method=${session.method} uri=$uri remoteIp=${session.remoteIpAddress} " +
+                    "host=${session.headers["host"] ?: ""} ua=${session.headers["user-agent"] ?: ""}"
+            )
+        }
         
         // Handle API routes for Native Web Launcher
         if (uri == "/api/apps") {

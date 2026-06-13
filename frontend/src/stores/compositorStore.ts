@@ -55,6 +55,8 @@ export interface ViewportModel {
   pane: PaneId;
   width: number;
   height: number;
+  streamWidth?: number;
+  streamHeight?: number;
   committed: boolean;
   generation: number;
   visible: boolean;

@@ -53,8 +53,10 @@ export class BrowserCompositor {
       const previous = viewports.get(metadata.sessionId);
       viewports.set(metadata.sessionId, {
         pane: metadata.sessionId,
-        width: metadata.width,
-        height: metadata.height,
+        width: previous?.width ?? metadata.width,
+        height: previous?.height ?? metadata.height,
+        streamWidth: metadata.width,
+        streamHeight: metadata.height,
         committed: metadata.firstFrameReady,
         generation: metadata.generation,
         visible: previous?.visible ?? metadata.sessionId === 'primary'

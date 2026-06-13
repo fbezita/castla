@@ -166,9 +166,29 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
             }
         }
 
-        val absX = event.x * displayWidth
-        val absY = event.y * displayHeight
+        val effectiveDimensions = TouchInjectionMath.resolveDimensions(
+            fallbackWidth = displayWidth,
+            fallbackHeight = displayHeight,
+            mappedWidth = event.mappedWidth,
+            mappedHeight = event.mappedHeight,
+        )
+        val effectiveWidth = effectiveDimensions.width
+        val effectiveHeight = effectiveDimensions.height
+        val absX = event.x * effectiveWidth
+        val absY = event.y * effectiveHeight
         val browserPointerId = event.pointerId
+
+        if (event.action != "move") {
+            Log.i(
+                "TOUCH_TRACE",
+                "[backend] action=${event.action} pane=${event.pane} id=$browserPointerId " +
+                    "norm=${"%.4f".format(event.x)},${"%.4f".format(event.y)} " +
+                    "display=${displayWidth}x${displayHeight} " +
+                    "mapped=${event.mappedWidth}x${event.mappedHeight} " +
+                    "effective=${effectiveWidth}x${effectiveHeight} " +
+                    "abs=${"%.1f".format(absX)},${"%.1f".format(absY)}"
+            )
+        }
 
         val beforeCount = activePointers.size
         var androidPointerId = browserToAndroidPointerId[browserPointerId] ?: -1

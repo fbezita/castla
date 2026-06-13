@@ -20,6 +20,7 @@
   import { mapViewportPoint } from "../touch/TouchRouter";
   import type { StreamRuntime } from "../runtime/StreamRuntime";
   import type { PaneId } from "../protocol";
+  import { normalizePopupForStreaming } from "../lib/popupLayout";
 
   export let touchRouter: TouchRouter;
   export let runtime: StreamRuntime;
@@ -899,19 +900,18 @@
     window.removeEventListener("pointercancel", endPopupResize);
 
     // Commit the final resized bounds and trigger render / layout dispatch at the very end
-    const finalPopup = {
+    const finalPopup = normalizePopupForStreaming({
       ...$compositorStore.popup,
       x: tempPopupX,
       y: tempPopupY,
       width: tempPopupWidth,
       height: tempPopupHeight,
-    };
+    });
     applyPopupState(finalPopup, true);
 
     scheduleLayoutFlush();
-    if (popupPane) {
-      runtime.requestKeyframe(popupPane);
-    }
+    requestPaneKeyframes("primary", "secondary");
+    touchRouter.reset();
   }
 
   function minimizePopup() {
@@ -1046,6 +1046,15 @@
     return layoutTransitionActive || frozenLayoutState !== null || runtime.currentAppLaunchSequence() > 0;
   }
 
+  function shouldBlockLayoutDispatchForMissingSplitTargets(): boolean {
+    const effectiveLayoutMode =
+      frozenLayoutState?.layoutMode ?? $compositorStore.layoutMode;
+    if (effectiveLayoutMode !== "split") {
+      return false;
+    }
+    return shouldLockExplicitLayoutTargets() && !lastDispatchedSplitTargets;
+  }
+
   function getLockedSplitTargets(alignedHeight: number) {
     if (!shouldLockExplicitLayoutTargets()) {
       return null;
@@ -1172,7 +1181,7 @@
 
   function dispatchLayout(forceImmediate = false) {
     window.clearTimeout(provisionalLayoutTimer);
-    if (shouldLockExplicitLayoutTargets() && !lastDispatchedSplitTargets) {
+    if (shouldBlockLayoutDispatchForMissingSplitTargets()) {
       return;
     }
     if (!forceImmediate && shouldDelayProvisionalLayout()) {
@@ -1206,7 +1215,7 @@
           ? Math.max(POPUP_MIN_HEIGHT, popupState.height - POPUP_HEADER_HEIGHT)
           : rect.height,
       );
-      runtime.sendLayout([
+      const layoutPipelines = [
         {
           id: fullPaneId,
           width: align16(rect.width),
@@ -1219,7 +1228,9 @@
           height: popupHeight,
           visible: popupState.visible && !popupState.minimized,
         },
-      ]);
+      ];
+      syncViewportLayout(layoutPipelines);
+      runtime.sendLayout(layoutPipelines);
       return;
     }
 
@@ -1242,7 +1253,7 @@
         secondaryWidth,
         paneHeight: effectiveHeight,
       };
-      runtime.sendLayout([
+      const layoutPipelines = [
         {
           id: leftPane,
           width: primaryWidth,
@@ -1255,7 +1266,9 @@
           height: effectiveHeight,
           visible: true,
         },
-      ]);
+      ];
+      syncViewportLayout(layoutPipelines);
+      runtime.sendLayout(layoutPipelines);
       return;
     }
 
@@ -1264,7 +1277,7 @@
     const hiddenPane: PaneId =
       activePane === "primary" ? "secondary" : "primary";
     const alignedWidth = align16(rect.width);
-    runtime.sendLayout([
+    const layoutPipelines = [
       {
         id: activePane,
         width: alignedWidth,
@@ -1277,7 +1290,36 @@
         height: alignedHeight,
         visible: false,
       },
-    ]);
+    ];
+    syncViewportLayout(layoutPipelines);
+    runtime.sendLayout(layoutPipelines);
+  }
+
+  function syncViewportLayout(
+    layout: Array<{
+      id: PaneId;
+      width: number;
+      height: number;
+      visible?: boolean;
+    }>,
+  ) {
+    compositorStore.update((state) => {
+      const viewports = new Map(state.viewports);
+      for (const pipeline of layout) {
+        const previous = viewports.get(pipeline.id);
+        viewports.set(pipeline.id, {
+          pane: pipeline.id,
+          width: pipeline.width,
+          height: pipeline.height,
+          streamWidth: previous?.streamWidth,
+          streamHeight: previous?.streamHeight,
+          committed: previous?.committed ?? false,
+          generation: previous?.generation ?? 0,
+          visible: pipeline.visible ?? previous?.visible ?? pipeline.id === "primary",
+        });
+      }
+      return { ...state, viewports };
+    });
   }
 
   // Exact DOMRect based viewport hit testing
@@ -1295,26 +1337,30 @@
     if (fullPopupActive && popupVisible && !popupMinimized) {
       const popupEl = host.querySelector(".popup-window") as HTMLElement;
       if (popupEl) {
-        const rect = popupEl.getBoundingClientRect();
+        const target = document.elementFromPoint(
+          clientX,
+          clientY,
+        ) as HTMLElement | null;
         if (
-          clientX >= rect.left &&
-          clientX <= rect.right &&
-          clientY >= rect.top &&
-          clientY <= rect.bottom
+          target?.closest(".popup-header") ||
+          target?.closest(".popup-resize-handle")
         ) {
-          const target = document.elementFromPoint(
-            clientX,
-            clientY,
-          ) as HTMLElement | null;
+          return null;
+        }
+        const popupBodyEl = popupEl.querySelector(".popup-body") as HTMLElement;
+        if (popupBodyEl) {
+          const rect = popupBodyEl.getBoundingClientRect();
           if (
-            target?.closest(".popup-header") ||
-            target?.closest(".popup-resize-handle")
+            clientX >= rect.left &&
+            clientX <= rect.right &&
+            clientY >= rect.top &&
+            clientY <= rect.bottom
           ) {
-            return null;
+            const paneEl = popupBodyEl.querySelector(".viewport-pane") as HTMLElement;
+            if (paneEl) {
+              return { pane: "secondary", element: paneEl, fitMode: "fill" };
+            }
           }
-          const paneEl = popupEl.querySelector(".viewport-pane") as HTMLElement;
-          if (paneEl)
-            return { pane: "secondary", element: paneEl, fitMode: "fill" };
         }
       }
 
@@ -1367,7 +1413,7 @@
     }
 
     // Default to active single pane if visible
-    const activeViewport = visibleViewports[0];
+    const activeViewport = currentVisibleViewports[0];
     if (activeViewport) {
       const paneEl = host.querySelector(
         `.viewport-pane[data-pane="${activeViewport.pane}"]`,
@@ -1390,6 +1436,17 @@
     }
 
     return null;
+  }
+
+  function getRenderedViewportByPane(pane: PaneId): ViewportModel | undefined {
+    if (currentSplitActive) {
+      return currentVisibleViewports.find((entry) => entry.pane === pane);
+    }
+    if (currentFullPopupActive) {
+      if (pane === "primary") return currentFullViewport ?? undefined;
+      if (pane === "secondary") return currentPopupViewport ?? undefined;
+    }
+    return currentVisibleViewports.find((entry) => entry.pane === pane);
   }
 
   function handleBarrierInput(event: PointerEvent) {
@@ -1439,16 +1496,20 @@
             `.viewport-pane[data-pane="${pane}"]`,
           ) as HTMLElement)
         : null);
-    const fitMode = routing?.fitMode ?? (splitActive ? "fill" : "contain");
+    const mediaElement =
+      (paneElement?.querySelector(
+        "canvas:not(.hidden), video:not(.hidden)",
+      ) as HTMLElement | null) ?? paneElement;
+    const fitMode = routing?.fitMode ?? (currentSplitActive ? "fill" : "contain");
 
-    if (!pane || !paneElement) {
+    if (!pane || !paneElement || !mediaElement) {
       if (action === "down") {
         logTouchRoute(event, "-", undefined, "outside");
       }
       return;
     }
 
-    const viewport = allViewports.find((entry) => entry.pane === pane);
+    const viewport = getRenderedViewportByPane(pane);
     if (!viewport) return;
 
     if (action === "down") {
@@ -1456,7 +1517,7 @@
       // logTouchRoute(event, pane, viewport, "video", paneElement, fitMode);
     }
 
-    touchRouter.pointer(event, viewport, fitMode, paneElement);
+    touchRouter.pointer(event, viewport, fitMode, mediaElement);
 
     if (action === "up") {
       activeTouchPanes.delete(pointerKey);
@@ -1472,7 +1533,7 @@
     if (!host) return;
     hostRect = host.getBoundingClientRect();
     touchRouter.updateHost(hostRect);
-    if (shouldLockExplicitLayoutTargets() && !lastDispatchedSplitTargets) {
+    if (shouldBlockLayoutDispatchForMissingSplitTargets()) {
       return;
     }
     dispatchLayout(true);

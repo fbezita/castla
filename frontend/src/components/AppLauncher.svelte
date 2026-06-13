@@ -7,6 +7,8 @@
   import { canReuseHotStream } from "../lib/launchReuse";
   import { canKeepCurrentLaunch } from "../lib/launchRequestReuse";
   import { buildLayoutModeLaunchRequest } from "../lib/layoutModeTransition";
+  import { isJmuxerFrontendPath } from "../lib/decoderPath";
+  import { isFreshCommittedViewport } from "../lib/streamCommitPolicy";
   import type { PaneId } from "../protocol";
   import { debugLog } from "../utils/debugLogger";
   import {
@@ -592,11 +594,22 @@
     hasSecondary: boolean,
     primaryStartGen: number,
     secondaryStartGen: number,
-    timeoutMs = 5000
+    timeoutMs = 5000,
+    allowSameGenerationRecommit = true,
+    expectedPrimaryWidth?: number,
+    expectedSecondaryWidth?: number,
   ): Promise<void> {
     return new Promise((resolve, reject) => {
-      let primarySawRecommit = false;
-      let secondarySawRecommit = false;
+      const metadataMatchesExpectedWidth = (
+        metadata: { width: number } | undefined,
+        expectedWidth: number | undefined,
+      ): boolean => {
+        if (expectedWidth === undefined || !Number.isFinite(expectedWidth) || expectedWidth <= 0) {
+          return true;
+        }
+        if (!metadata) return false;
+        return Math.abs(metadata.width - expectedWidth) <= 16;
+      };
       const initialState = get(compositorStore);
       const initialPrimaryViewport = initialState.viewports.get("primary");
       const initialSecondaryViewport = initialState.viewports.get("secondary");
@@ -606,10 +619,12 @@
       const initialSecondaryMetadata = runtime.generations.getMetadata("secondary");
       let primaryMetadataReady =
         initialPrimaryMetadata?.firstFrameReady === true &&
-        initialPrimaryMetadata.generation > primaryStartGen;
+        initialPrimaryMetadata.generation > primaryStartGen &&
+        metadataMatchesExpectedWidth(initialPrimaryMetadata, expectedPrimaryWidth);
       let secondaryMetadataReady = !hasSecondary || (
         initialSecondaryMetadata?.firstFrameReady === true &&
-        initialSecondaryMetadata.generation > secondaryStartGen
+        initialSecondaryMetadata.generation > secondaryStartGen &&
+        metadataMatchesExpectedWidth(initialSecondaryMetadata, expectedSecondaryWidth)
       );
       let cleanup = () => {};
 
@@ -620,35 +635,35 @@
         const primary = state.viewports.get("primary");
         const secondary = state.viewports.get("secondary");
 
-        if (
-          primary?.committed &&
-          (
-            primary.generation > primaryStartGen ||
-            (!previousPrimaryCommitted && primary.generation === primaryStartGen)
-          )
-        ) {
-          primarySawRecommit = true;
-        }
-        if (
-          hasSecondary &&
-          secondary?.committed &&
-          (
-            secondary.generation > secondaryStartGen ||
-            (!previousSecondaryCommitted && secondary.generation === secondaryStartGen)
-          )
-        ) {
-          secondarySawRecommit = true;
-        }
-
         const primaryReady = primary
           ? (
-              (primary.committed && (primary.generation > primaryStartGen || primarySawRecommit)) ||
+              isFreshCommittedViewport(
+                {
+                  committed: primary.committed,
+                  generation: primary.generation,
+                  width: primary.streamWidth ?? primary.width,
+                },
+                primaryStartGen,
+                previousPrimaryCommitted,
+                allowSameGenerationRecommit,
+                expectedPrimaryWidth,
+              ) ||
               primaryMetadataReady
             )
           : true;
         const secondaryReady = hasSecondary && secondary
           ? (
-              (secondary.committed && (secondary.generation > secondaryStartGen || secondarySawRecommit)) ||
+              isFreshCommittedViewport(
+                {
+                  committed: secondary.committed,
+                  generation: secondary.generation,
+                  width: secondary.streamWidth ?? secondary.width,
+                },
+                secondaryStartGen,
+                previousSecondaryCommitted,
+                allowSameGenerationRecommit,
+                expectedSecondaryWidth,
+              ) ||
               secondaryMetadataReady
             )
           : true;
@@ -672,14 +687,20 @@
           return;
         }
         if (message.type !== "streamMetadata") return;
-        if (message.sessionId === "primary" && message.firstFrameReady && message.generation > primaryStartGen) {
+        if (
+          message.sessionId === "primary" &&
+          message.firstFrameReady &&
+          message.generation > primaryStartGen &&
+          metadataMatchesExpectedWidth(message, expectedPrimaryWidth)
+        ) {
           primaryMetadataReady = true;
         }
         if (
           hasSecondary &&
           message.sessionId === "secondary" &&
           message.firstFrameReady &&
-          message.generation > secondaryStartGen
+          message.generation > secondaryStartGen &&
+          metadataMatchesExpectedWidth(message, expectedSecondaryWidth)
         ) {
           secondaryMetadataReady = true;
         }
@@ -705,6 +726,7 @@
       secondaryPkg?: string;
       layoutMode: "single" | "split" | "popup";
     },
+    allowSameGenerationRecommit = true,
   ): Promise<boolean> {
     emitVerboseLaunchDiag("stream_recovery_begin", {
       seqId,
@@ -791,11 +813,24 @@
     }
 
     setLaunchState(seqId, "STREAM_COMMITTING");
+    const expectedPrimaryWidth =
+      isJmuxerFrontendPath()
+        ? get(compositorStore).viewports.get("primary")?.width
+        : undefined;
+    const expectedSecondaryWidth =
+      isJmuxerFrontendPath() && request.secondaryPkg
+        ? get(compositorStore).viewports.get("secondary")?.width
+        : undefined;
+
     await waitForStreamsToCommit(
       seqId,
       Boolean(request.secondaryPkg),
       retryPrimaryStartGen,
-      retrySecondaryStartGen
+      retrySecondaryStartGen,
+      5000,
+      allowSameGenerationRecommit,
+      expectedPrimaryWidth,
+      expectedSecondaryWidth,
     );
 
     emitVerboseLaunchDiag("stream_recovery_success", {
@@ -833,6 +868,8 @@
             currentState.popup,
           )
         : null;
+    const requiresFreshCommittedGeneration =
+      isJmuxerFrontendPath() && request.layoutMode !== currentState.layoutMode;
     if (
       canKeepCurrentLaunch(
         request,
@@ -1092,12 +1129,24 @@
         secondaryStartGen,
         snapshot: buildLaunchSnapshot(seqId),
       });
+      const expectedPrimaryWidth =
+        isJmuxerFrontendPath()
+          ? get(compositorStore).viewports.get("primary")?.width
+          : undefined;
+      const expectedSecondaryWidth =
+        isJmuxerFrontendPath() && request.secondaryPkg
+          ? get(compositorStore).viewports.get("secondary")?.width
+          : undefined;
       try {
         await waitForStreamsToCommit(
           seqId,
           Boolean(request.secondaryPkg) && !secondaryLaunchFailed,
           primaryStartGen,
-          secondaryStartGen
+          secondaryStartGen,
+          5000,
+          !requiresFreshCommittedGeneration,
+          expectedPrimaryWidth,
+          expectedSecondaryWidth,
         );
       } catch (err) {
         if (err instanceof StaleLaunchSequenceError) throw err;
@@ -1110,7 +1159,11 @@
           snapshot: buildLaunchSnapshot(seqId),
         });
         try {
-          await retryAfterStreamTimeout(seqId, request);
+          await retryAfterStreamTimeout(
+            seqId,
+            request,
+            !requiresFreshCommittedGeneration,
+          );
         } catch (retryErr) {
           if (retryErr instanceof StaleLaunchSequenceError) throw retryErr;
           console.warn(`[STREAM_COMMIT_RECOVERY_FAIL] seq=${seqId} Automatic relaunch after stream timeout failed`, retryErr);
@@ -2161,6 +2214,17 @@
   <div class="server-pill"><span></span>{t($compositorStore.language, "serverActive")}</div>
 </div>
 
+{#if drawerOpen}
+  <button
+    class="drawer-scrim"
+    aria-label={t($compositorStore.language, "closeLauncher")}
+    onclick={() => {
+      if (draggingApp || gestureState === "dragging") return;
+      drawerOpen = false;
+    }}
+  ></button>
+{/if}
+
 <aside
   bind:this={drawerElement}
   class:open={drawerOpen}
@@ -2486,6 +2550,16 @@
     border-radius: 50%;
     background: #12d8ff;
     box-shadow: 0 0 10px #12d8ff;
+  }
+
+  .drawer-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 39;
+    border: 0;
+    padding: 0;
+    margin: 0;
+    background: rgb(2 6 12 / 0.12);
   }
 
   /* Premium Sidebar Drawer styling */

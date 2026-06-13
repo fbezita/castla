@@ -8,6 +8,8 @@ type PendingMove = {
   x: number;
   y: number;
   epoch: number;
+  mappedWidth: number;
+  mappedHeight: number;
 };
 
 type SentMove = {
@@ -91,8 +93,14 @@ export class TouchRouter {
   ): void {
     const captureTarget = event.currentTarget as HTMLElement;
     const rect = (surface ?? captureTarget).getBoundingClientRect();
+    const mappingViewport = resolveTouchViewportSize(
+      surface,
+      viewport,
+      fitMode,
+    );
     const pointerId = event.pointerId & 0xff;
     const action = pointerAction(event.type);
+    const hasActivePointer = this.activePointers.has(pointerId);
     this.recordEvent("pointer_input", {
       action,
       browserPointerId: event.pointerId,
@@ -107,11 +115,34 @@ export class TouchRouter {
       event.clientX,
       event.clientY,
       rect,
-      viewport.width,
-      viewport.height,
+      mappingViewport.width,
+      mappingViewport.height,
       fitMode,
       action !== "down",
     );
+    // if (shouldEmitPointerRouteTrace(action, hasActivePointer)) {
+    //   this.runtime.control.sendFrontendDiag("TOUCH_TRACE", "pointer_route", {
+    //     action,
+    //     pane: viewport.pane,
+    //     browserPointerId: event.pointerId,
+    //     remotePointerId: pointerId,
+    //     clientX: Math.round(event.clientX),
+    //     clientY: Math.round(event.clientY),
+    //     rectLeft: Math.round(rect.left),
+    //     rectTop: Math.round(rect.top),
+    //     rectWidth: Math.round(rect.width),
+    //     rectHeight: Math.round(rect.height),
+    //     viewportWidth: viewport.width,
+    //     viewportHeight: viewport.height,
+    //     mappingWidth: mappingViewport.width,
+    //     mappingHeight: mappingViewport.height,
+    //     mappingSource: mappingViewport.source,
+    //     surfaceTag: surface?.tagName?.toLowerCase() ?? null,
+    //     fitMode,
+    //     mappedX: mapped ? Number(mapped.x.toFixed(4)) : null,
+    //     mappedY: mapped ? Number(mapped.y.toFixed(4)) : null,
+    //   });
+    // }
     if (!mapped) {
       if (action === "down") {
         this.logAnomaly("down_outside_viewport", {
@@ -126,7 +157,7 @@ export class TouchRouter {
       }
       return;
     }
-    if (action === "down" && this.activePointers.has(pointerId)) {
+    if (action === "down" && hasActivePointer) {
       this.logAnomaly("duplicate_down_active_pointer", {
         browserPointerId: event.pointerId,
         remotePointerId: pointerId,
@@ -134,7 +165,7 @@ export class TouchRouter {
         activePointers: this.activePointers.size,
       });
     }
-    if (action !== "down" && !this.activePointers.has(pointerId)) {
+    if (action !== "down" && !hasActivePointer) {
       // this.logAnomaly("non_down_without_active_pointer", {
       //   action,
       //   browserPointerId: event.pointerId,
@@ -171,6 +202,8 @@ export class TouchRouter {
         x: mapped.x,
         y: mapped.y,
         epoch: this.sessionEpoch,
+        mappedWidth: mappingViewport.width,
+        mappedHeight: mappingViewport.height,
       });
       this.scheduleMoveFlush();
       return;
@@ -197,6 +230,8 @@ export class TouchRouter {
       id: pointerId,
       x: mapped.x,
       y: mapped.y,
+      mappedWidth: mappingViewport.width,
+      mappedHeight: mappingViewport.height,
       epoch: this.sessionEpoch,
       clientTs: Date.now(),
     });
@@ -287,6 +322,8 @@ export class TouchRouter {
           id: move.id,
           x: move.x,
           y: move.y,
+          mappedWidth: move.mappedWidth,
+          mappedHeight: move.mappedHeight,
           epoch: move.epoch,
           clientTs: Date.now(),
         });
@@ -301,9 +338,22 @@ export class TouchRouter {
     id: number;
     x: number;
     y: number;
+    mappedWidth: number;
+    mappedHeight: number;
     epoch: number;
     clientTs?: number;
   }): void {
+    // this.runtime.control.sendFrontendDiag("TOUCH_TRACE", "touch_send", {
+    //   action: message.action,
+    //   pane: message.pane,
+    //   id: message.id,
+    //   x: Number(message.x.toFixed(4)),
+    //   y: Number(message.y.toFixed(4)),
+    //   mappedWidth: message.mappedWidth,
+    //   mappedHeight: message.mappedHeight,
+    //   epoch: message.epoch,
+    //   launchSequence: this.runtime.currentAppLaunchSequence(),
+    // });
     this.recordEvent("touch_send", {
       action: message.action,
       pane: message.pane,
@@ -426,6 +476,65 @@ function pointerAction(type: string): "down" | "move" | "up" {
   if (type === "pointerdown") return "down";
   if (type === "pointermove") return "move";
   return "up";
+}
+
+export function shouldEmitPointerRouteTrace(
+  action: "down" | "move" | "up",
+  hasActivePointer: boolean,
+): boolean {
+  if (action === "move" && !hasActivePointer) return false;
+  return true;
+}
+
+export function resolveTouchViewportSize(
+  surface: HTMLElement | undefined,
+  viewport: Pick<ViewportModel, "width" | "height">,
+  fitMode: "contain" | "fill" = "contain",
+): { width: number; height: number; source: "canvas" | "video" | "viewport" } {
+  if (fitMode === "fill") {
+    return {
+      width: viewport.width,
+      height: viewport.height,
+      source: "viewport",
+    };
+  }
+  const tagName = surface?.tagName?.toLowerCase();
+  const maybeCanvas = surface as
+    | (HTMLElement & { width?: number; height?: number })
+    | undefined;
+  const maybeVideo = surface as
+    | (HTMLElement & { videoWidth?: number; videoHeight?: number })
+    | undefined;
+
+  if (
+    tagName === "canvas" &&
+    (maybeCanvas?.width ?? 0) > 0 &&
+    (maybeCanvas?.height ?? 0) > 0
+  ) {
+    return {
+      width: maybeCanvas?.width ?? viewport.width,
+      height: maybeCanvas?.height ?? viewport.height,
+      source: "canvas",
+    };
+  }
+
+  if (
+    tagName === "video" &&
+    (maybeVideo?.videoWidth ?? 0) > 0 &&
+    (maybeVideo?.videoHeight ?? 0) > 0
+  ) {
+    return {
+      width: maybeVideo?.videoWidth ?? viewport.width,
+      height: maybeVideo?.videoHeight ?? viewport.height,
+      source: "video",
+    };
+  }
+
+  return {
+    width: viewport.width,
+    height: viewport.height,
+    source: "viewport",
+  };
 }
 
 export function mapViewportPoint(

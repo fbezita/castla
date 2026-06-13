@@ -105,6 +105,8 @@ class ControlSocket(
                         y = json.getDouble("y").toFloat(),
                         pointerId = json.optInt("id", 0),
                         pane = json.optString("pane", "primary"),
+                        mappedWidth = json.optInt("mappedWidth", 0),
+                        mappedHeight = json.optInt("mappedHeight", 0),
                         clientTsMs = json.optLong("clientTs", 0L),
                         receivedAtElapsedMs = SystemClock.elapsedRealtime()
                     )

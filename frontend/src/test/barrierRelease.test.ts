@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { isPaneBarrierReadyForRelease } from "../lib/barrierRelease";
 
 describe("barrier release helper", () => {
-  it("holds the barrier until the viewport reaches the expected split size", () => {
+  it("releases once the pane recommits on a fresh generation", () => {
     expect(
       isPaneBarrierReadyForRelease({
         pane: "primary",
@@ -11,35 +11,12 @@ describe("barrier release helper", () => {
           width: 320,
           height: 704,
           committed: true,
-          generation: 19,
-          visible: true,
-        },
-        startGeneration: 17,
-        metadataGeneration: 18,
-        metadataReady: true,
-        expectedWidth: 368,
-        expectedHeight: 704,
-      }),
-    ).toBe(false);
-  });
-
-  it("releases once the committed viewport matches the expected split size", () => {
-    expect(
-      isPaneBarrierReadyForRelease({
-        pane: "primary",
-        viewport: {
-          pane: "primary",
-          width: 368,
-          height: 704,
-          committed: true,
           generation: 20,
           visible: true,
         },
         startGeneration: 17,
         metadataGeneration: 18,
         metadataReady: false,
-        expectedWidth: 368,
-        expectedHeight: 704,
       }),
     ).toBe(true);
   });
@@ -59,8 +36,6 @@ describe("barrier release helper", () => {
         startGeneration: 7,
         metadataGeneration: 7,
         metadataReady: false,
-        expectedWidth: 368,
-        expectedHeight: 704,
       }),
     ).toBe(true);
   });
@@ -99,9 +74,26 @@ describe("barrier release helper", () => {
         startGeneration: 0,
         metadataGeneration: 1,
         metadataReady: true,
-        expectedWidth: 544,
-        expectedHeight: 704,
       }),
     ).toBe(false);
+  });
+
+  it("releases from fresh metadata even when stream dimensions differ from layout size", () => {
+    expect(
+      isPaneBarrierReadyForRelease({
+        pane: "secondary",
+        viewport: {
+          pane: "secondary",
+          width: 608,
+          height: 720,
+          committed: false,
+          generation: 8,
+          visible: true,
+        },
+        startGeneration: 7,
+        metadataGeneration: 9,
+        metadataReady: true,
+      }),
+    ).toBe(true);
   });
 });

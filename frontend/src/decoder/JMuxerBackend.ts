@@ -7,6 +7,46 @@ import { get } from 'svelte/store';
 type JMuxerCtor = new (options: Record<string, unknown>) => { feed(data: Record<string, Uint8Array>): void; destroy(): void };
 const isVerboseJmuxerDiagnostics = (): boolean =>
   (window as Window & { __CASTLA_VERBOSE_DIAGNOSTICS__?: boolean }).__CASTLA_VERBOSE_DIAGNOSTICS__ === true;
+const VIDEO_STATE_DUPLICATE_WINDOW_MS = 250;
+
+type VideoStateSnapshot = {
+  readyState: number;
+  width: number;
+  height: number;
+  currentTime: number;
+  buffered: number;
+  paused: boolean;
+};
+
+export const buildVideoStateSnapshot = (video: HTMLVideoElement): VideoStateSnapshot => ({
+  readyState: video.readyState,
+  width: video.videoWidth,
+  height: video.videoHeight,
+  currentTime: video.currentTime,
+  buffered: video.buffered.length,
+  paused: video.paused,
+});
+
+export const shouldEmitVideoStateSnapshot = ({
+  now,
+  lastEmitAt,
+  next,
+  previous,
+}: {
+  now: number;
+  lastEmitAt: number;
+  next: VideoStateSnapshot;
+  previous?: VideoStateSnapshot;
+}): boolean => {
+  if (!previous) return true;
+  const stableStateChanged =
+    previous.readyState !== next.readyState ||
+    previous.width !== next.width ||
+    previous.height !== next.height ||
+    previous.buffered !== next.buffered ||
+    previous.paused !== next.paused;
+  return stableStateChanged || now - lastEmitAt >= VIDEO_STATE_DUPLICATE_WINDOW_MS;
+};
 
 declare global {
   interface Window {
@@ -35,6 +75,8 @@ export class JMuxerBackend implements DecoderBackend {
   private lastSyncTime = 0;
   private lastFeedTime = 0;
   private firstKeyframeSeen = false;
+  private lastVideoStateAt = 0;
+  private lastVideoStateSnapshot?: VideoStateSnapshot;
 
   private emitMirrorDiag(message: string, data: Record<string, unknown>): void {
     window.castlaRuntime?.control?.sendFrontendDiag?.("VIDEO_DEBUG", message, data);
@@ -48,14 +90,19 @@ export class JMuxerBackend implements DecoderBackend {
   private emitVideoState(tag: string): void {
     if (!this.video) return;
     if (!isVerboseJmuxerDiagnostics()) return;
-    this.emitMirrorDiag(tag, {
-      readyState: this.video.readyState,
-      width: this.video.videoWidth,
-      height: this.video.videoHeight,
-      currentTime: this.video.currentTime,
-      buffered: this.video.buffered.length,
-      paused: this.video.paused,
-    });
+    const snapshot = buildVideoStateSnapshot(this.video);
+    const now = Date.now();
+    if (!shouldEmitVideoStateSnapshot({
+      now,
+      lastEmitAt: this.lastVideoStateAt,
+      next: snapshot,
+      previous: this.lastVideoStateSnapshot,
+    })) {
+      return;
+    }
+    this.lastVideoStateAt = now;
+    this.lastVideoStateSnapshot = snapshot;
+    this.emitMirrorDiag(tag, snapshot);
   }
 
   constructor(onFrame?: () => void, onStatus?: (event: string, detail?: string) => void) {
@@ -237,6 +284,8 @@ export class JMuxerBackend implements DecoderBackend {
     this.configPayload = undefined;
     this.fedFrames = 0;
     this.rendered = false;
+    this.lastVideoStateAt = 0;
+    this.lastVideoStateSnapshot = undefined;
     this.detachVideoListeners.splice(0).forEach((detach) => detach());
     if (this.video) {
       try { this.video.pause(); } catch {}
@@ -277,7 +326,7 @@ export class JMuxerBackend implements DecoderBackend {
       feedIntervalMs: interval,
       feedFrequencyFps: interval > 0 ? (1000 / interval).toFixed(1) : "0.0"
     });
-    if (this.fedFrames < 3 || this.fedFrames % 120 === 0) {
+    if (this.fedFrames < 3 || this.fedFrames % 300 === 0) {
       const hasVisibleStream = Array.from(get(compositorStore).viewports.values()).some((viewport) => viewport.committed);
       if (isVerboseJmuxerDiagnostics()) console.warn("[FRAME_DEBUG] JMuxer feed", {
         fedFrames: this.fedFrames + 1,
@@ -317,7 +366,7 @@ export class JMuxerBackend implements DecoderBackend {
 
     this.muxer.feed({ video: payload });
     this.fedFrames += 1;
-    if (this.fedFrames === 1 || this.fedFrames % 120 === 0) {
+    if (this.fedFrames === 1 || this.fedFrames % 300 === 0) {
       this.reportVideoState('jmuxerFeedSummary', `fed=${this.fedFrames} bytes=${payload.byteLength}`);
     }
     this.video.play().catch((error) => {

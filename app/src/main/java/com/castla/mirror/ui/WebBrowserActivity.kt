@@ -146,11 +146,10 @@ class WebBrowserActivity : Activity() {
             builtInZoomControls = !followDisplayShape
             displayZoomControls = false
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            userAgentString = if (followDisplayShape) {
-                "Mozilla/5.0 (Linux; Android 15; SM-F741N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Mobile Safari/537.36"
-            } else {
-                "Mozilla/5.0 (iPad; CPU OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1"
-            }
+            userAgentString = BrowserUserAgentPolicy.resolve(
+                url = intent.getStringExtra("url") ?: "https://m.youtube.com",
+                followDisplayShape = followDisplayShape,
+            )
         }
         if (followDisplayShape) {
             webView.setInitialScale(100)

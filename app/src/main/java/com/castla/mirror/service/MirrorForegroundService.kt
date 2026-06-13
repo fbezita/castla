@@ -769,6 +769,23 @@ class MirrorForegroundService : Service() {
                                 )
                                 val pipeline = pipelines[request.pipelineName]
                                 if (pipeline != null) {
+                                    val skipStaleRequest = RebuildRequestPolicy.shouldSkipStaleRequest(
+                                        requestWidth = request.targetWidth,
+                                        requestHeight = request.targetHeight,
+                                        viewport = RebuildRequestPolicy.PendingViewport(
+                                            requestedWidth = pipeline.requestedWidth,
+                                            requestedHeight = pipeline.requestedHeight,
+                                            hasReceivedBrowserLayout = hasReceivedBrowserLayout,
+                                        ),
+                                    )
+                                    if (skipStaleRequest) {
+                                        logLaunchRecoveryInfo(
+                                            "rebuild_worker_skip_stale id=${request.requestId} pane=${request.pipelineName} " +
+                                                "reason=${request.reason} target=${request.targetWidth}x${request.targetHeight} " +
+                                                "latest=${pipeline.requestedWidth}x${pipeline.requestedHeight}"
+                                        )
+                                        continue
+                                    }
                                     pipeline.executeActualRebuild(
                                         request.requestId,
                                         request.reason,
@@ -2304,13 +2321,20 @@ class MirrorForegroundService : Service() {
         }
 
         val visiblePanes = paneStates.filter { (_, size, visible) -> visible && size.width > 0 && size.height > 0 }
-        val singleVisiblePane = if (visiblePanes.size == 1) visiblePanes.first().first else null
-        val forceLayoutRealign = visiblePanes.size != lastVisiblePaneCount
-        lastVisiblePaneCount = visiblePanes.size
+        val visiblePaneCount = visiblePanes.size
+        val singleVisiblePane = if (visiblePaneCount == 1) visiblePanes.first().first else null
 
         for ((paneId, size, visible) in paneStates) {
             val pipeline = pipelines[paneId] ?: continue
             if (visible && size.width > 0 && size.height > 0) {
+                val forceLayoutRealign = BrowserLayoutPolicy.shouldForceViewportRealign(
+                    previousVisiblePaneCount = lastVisiblePaneCount,
+                    currentVisiblePaneCount = visiblePaneCount,
+                    previousWidth = pipeline.requestedWidth,
+                    previousHeight = pipeline.requestedHeight,
+                    nextWidth = size.width,
+                    nextHeight = size.height,
+                )
                 val targetTier = if (singleVisiblePane == paneId || (singleVisiblePane == null && paneId == "primary")) {
                     DisplayTier.ACTIVE
                 } else {
@@ -2322,6 +2346,7 @@ class MirrorForegroundService : Service() {
                 serviceScope.launch { pipeline.setTier(DisplayTier.SUSPENDED, "browser_layout_hidden") }
             }
         }
+        lastVisiblePaneCount = visiblePaneCount
 
         pipelines.forEach { (paneId, pipeline) ->
             if (!seen.contains(paneId) && paneVisibility[paneId] == true) {
@@ -4434,7 +4459,7 @@ class MirrorForegroundService : Service() {
                 // Prevent redundant 'am start' shell command execution immediately following async task migration command.
                 // Re-launching via 'am start' in parallel with active task displacement commands causes Android OS task stack conflict,
                 // frequently forcing the primary Display 0 (MainActivity) to recede to the background Recents view.
-                if (isWarmStart && !forceColdStart) {
+                if (isWarmStart && !forceColdStart && !BrowserLaunchPolicy.shouldBypassWarmTaskMove(cleanPkg)) {
                     markServiceMutation("launch_component_warm_start")
                     FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision warmStart=true pkg=$cleanPkg taskCount=${matchingTaskIds.size} targetDisplayId=$targetDisplayId freshPrep=$effectiveNeedsFreshLaunchPreparation")
                     scheduleDisplayRoutingDiagnostics(name, service, cleanPkg, targetDisplayId, "postlaunch", "warm_task_move", displayId)
@@ -4494,7 +4519,7 @@ class MirrorForegroundService : Service() {
                 // 1. Try native binder launchAppOnDisplayV2 first (only for Standard package without complex query strings)
                 var nativeStarted = false
                 val isStandardAppLaunch = extraKey.isNullOrEmpty() && extraValue == null && !packageOrComponent.contains("/")
-                if (isStandardAppLaunch) {
+                if (isStandardAppLaunch && !BrowserLaunchPolicy.shouldBypassNativeLaunchShortcut(cleanPkg)) {
                     try {
                         nativeStarted = runBinderSafe { controller.launchAppOnDisplayV2(cleanPkg, forceStop = false) } ?: false
                     } catch (e: Exception) {
