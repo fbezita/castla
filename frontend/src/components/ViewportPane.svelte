@@ -10,6 +10,8 @@
   export let runtime: StreamRuntime;
   export let paneStyle = "";
   export let fitMode: "contain" | "fill" = "contain";
+  export let resizingSplit = false;
+  export let activeTouchPanesSize = 0;
 
   let canvas: HTMLCanvasElement;
   let video: HTMLVideoElement;
@@ -41,6 +43,7 @@
     });
     detachSession = runtime.onSessionChange(async () => {
       currentGeneration = -1;
+      hasCommittedOnce = false;
       runtime.requestKeyframe(viewport.pane);
     });
     stallTimer = window.setInterval(() => {
@@ -66,6 +69,7 @@
   }
 
   $: if (!viewport.committed) {
+    hasCommittedOnce = false;
     hideSurface();
   }
 
@@ -152,6 +156,7 @@
   }
 
   async function maybeRecoverStalledPane() {
+    if (resizingSplit || activeTouchPanesSize > 0) return;
     if (!viewport.visible || !decoder) return;
     if (currentGeneration <= 0) return;
     const sample = runtime.health.sample(viewport.pane);
@@ -220,6 +225,9 @@
     overflow: hidden;
     background: #05070a;
     touch-action: none;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 0;
+    box-sizing: border-box;
   }
 
   .viewport-pane.pending {

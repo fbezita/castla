@@ -1068,7 +1068,8 @@ class MirrorForegroundService : Service() {
                         targetPipeline.launchBrowser(
                             routingDecision.launchTarget,
                             sourceAppPackage = routingDecision.sourceAppPackage,
-                            allowFallback = routingDecision.allowEmbeddedFallback
+                            allowFallback = routingDecision.allowEmbeddedFallback,
+                            forceEmbeddedBrowser = routingDecision.forceEmbeddedBrowser,
                         )
                     }
                 }
@@ -3515,15 +3516,19 @@ class MirrorForegroundService : Service() {
                 resizeJob?.cancel(); serviceScope.launch { setTier(DisplayTier.SUSPENDED, "viewport_invalid") }; return
             }
             
+            // Align dimensions to a 16-pixel grid and enforce a minimum threshold of 320px to match hardware virtual display constraints.
+            val alignedW = ((w + 15) and 15.inv()).coerceAtLeast(320)
+            val alignedH = ((h + 15) and 15.inv()).coerceAtLeast(320)
+            
             // Check if this is the initial setup phase. If so, bypass the 500ms debounce delay 
             // to instantly rebuild virtual display surface layout, preventing unaligned viewports during app startup.
             val isFirstSetup = requestedWidth <= 0 || displayId < 0
             
             // Cache the latest valid viewport sizes for runtime self-healing recovery
-            lastValidWidth = w
-            lastValidHeight = h
-            requestedWidth = w
-            requestedHeight = h
+            lastValidWidth = alignedW
+            lastValidHeight = alignedH
+            requestedWidth = alignedW
+            requestedHeight = alignedH
             if (resizeJob?.isActive == true) debugResizeCancels += 1
             resizeJob?.cancel()
             debugResizeSchedules += 1
@@ -3532,11 +3537,16 @@ class MirrorForegroundService : Service() {
                     kotlinx.coroutines.delay(120L) 
                 }
                 val forceResume = !isEncoderRunning()
+                val nextPriority = when {
+                    forceLayoutRealign -> RebuildPriority.IMMEDIATE
+                    isFirstSetup || forceResume -> RebuildPriority.HIGH
+                    else -> RebuildPriority.NORMAL
+                }
                 requestRebuild(
                     reason = "viewport_change",
-                    priority = if (isFirstSetup || forceResume) RebuildPriority.HIGH else RebuildPriority.NORMAL,
-                    newWidth = w,
-                    newHeight = h,
+                    priority = nextPriority,
+                    newWidth = alignedW,
+                    newHeight = alignedH,
                     force = forceResume,
                     forceSingle = forceLayoutRealign
                 )
@@ -4603,8 +4613,19 @@ class MirrorForegroundService : Service() {
                 append("-n ${escapeShellArg(browserComponent)} ")
             }.trim()
         }
-        suspend fun launchBrowser(url: String, sourceAppPackage: String? = null, allowFallback: Boolean = true) {
-            val browser = BrowserResolver.resolve(this@MirrorForegroundService, url)
+        suspend fun launchBrowser(
+            url: String,
+            sourceAppPackage: String? = null,
+            allowFallback: Boolean = true,
+            forceEmbeddedBrowser: Boolean = false,
+        ) {
+            val shouldForceEmbeddedBrowser =
+                forceEmbeddedBrowser || OttCatalog.forceEmbeddedBrowserFor(sourceAppPackage)
+            val browser = if (shouldForceEmbeddedBrowser) {
+                null
+            } else {
+                BrowserResolver.resolve(this@MirrorForegroundService, url)
+            }
             val targetComponent = browser?.componentFlat ?: internalComponentName("com.castla.mirror.ui.WebBrowserActivity")
             if (displayId >= 0 && currentWebUrl == url && currentApp == targetComponent) {
                 restartActiveStreamGeneration()

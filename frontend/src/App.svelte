@@ -783,6 +783,7 @@
   .overlay-ui-layer {
     position: fixed;
     inset: 0;
+    z-index: 80;
     width: calc(100% * var(--overlay-ui-inverse-scale, 1));
     height: calc(100% * var(--overlay-ui-inverse-scale, 1));
     transform: scale(var(--overlay-ui-scale, 1));

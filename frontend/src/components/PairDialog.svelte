@@ -1,8 +1,11 @@
 <script lang="ts">
   import {
+    getAppPairPlacementLabel,
     isValidAppPair,
+    resolveAppPairPlacement,
     swapAppPairApps,
     type AppPair,
+    type AppPairPlacement,
   } from "../lib/appPair";
 
   interface AppInfo {
@@ -15,6 +18,8 @@
     apps?: [string, string];
     primaryApp?: string;
     secondaryApp?: string;
+    layoutMode?: AppPair["layoutMode"];
+    secondaryPlacement?: AppPair["secondaryPlacement"];
   }
 
   let {
@@ -37,6 +42,10 @@
     if (source.apps && source.apps.length === 2) {
       return {
         apps: [source.apps[0], source.apps[1]],
+        secondaryPlacement: resolveAppPairPlacement(
+          source.secondaryPlacement,
+          source.layoutMode,
+        ),
       };
     }
     // Handle migration from legacy primary/secondary states
@@ -44,12 +53,18 @@
     const appB = source.secondaryApp ?? candidates[1]?.packageName ?? "";
     return {
       apps: [appA, appB],
+      secondaryPlacement: resolveAppPairPlacement(
+        source.secondaryPlacement,
+        source.layoutMode,
+      ),
     };
   }
 
   let draft = $state<AppPair>({
     apps: ["", ""],
+    secondaryPlacement: "right",
   });
+  const placements: AppPairPlacement[] = ["left", "right", "top", "bottom", "popup"];
 
   $effect(() => {
     draft = createDraft(editingPair, availableApps);
@@ -104,6 +119,13 @@
     draft = swapAppPairApps(draft);
   }
 
+  function updatePlacement(secondaryPlacement: AppPairPlacement) {
+    draft = {
+      ...draft,
+      secondaryPlacement,
+    };
+  }
+
   function save() {
     if (!isValidAppPair(draft)) return;
     onSave(draft);
@@ -149,7 +171,15 @@
           </div>
           <div class="slot-meta">
             <strong>{getAppLabel(draft.apps[0])}</strong>
-            <small>Left in Split. Background in Popup.</small>
+            <small>
+              {draft.secondaryPlacement === "popup"
+                ? "Background app when popup preset runs."
+                : draft.secondaryPlacement === "left"
+                  ? "Primary app stays on the right side."
+                  : draft.secondaryPlacement === "top"
+                    ? "Primary app stays on the bottom side."
+                    : "Primary app stays in the main pane."}
+            </small>
           </div>
         </div>
         <select value={draft.apps[0]} onchange={(event) => updateAppA((event.currentTarget as HTMLSelectElement).value)}>
@@ -183,7 +213,11 @@
           </div>
           <div class="slot-meta">
             <strong>{getAppLabel(draft.apps[1])}</strong>
-            <small>Right in Split. Floating in Popup.</small>
+            <small>
+              {draft.secondaryPlacement === "popup"
+                ? "Launches as the floating popup window."
+                : `${getAppPairPlacementLabel(draft.secondaryPlacement ?? "right")} preset target.`}
+            </small>
           </div>
         </div>
         <select
@@ -199,10 +233,20 @@
 
     <div class="layout-explainer">
       <div>
-        <span class="explainer-title">Launch Behavior</span>
+        <span class="explainer-title">Window Placement</span>
+        <div class="placement-grid">
+          {#each placements as placement}
+            <button
+              class="placement-option"
+              class:active={draft.secondaryPlacement === placement}
+              onclick={() => updatePlacement(placement)}
+            >
+              {getAppPairPlacementLabel(placement)}
+            </button>
+          {/each}
+        </div>
         <p>
-          App Pair follows the current screen mode when launched. In Single or Split it opens as
-          Split, and in Popup it opens as Popup.
+          Save this pair as a reusable multiwindow preset, including where the secondary app should open.
         </p>
       </div>
     </div>
@@ -385,6 +429,30 @@
     color: #cbd5e1;
     font-size: 13px;
     line-height: 1.45;
+  }
+
+  .placement-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
+  .placement-option {
+    height: 34px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.04);
+    color: #dbe8f4;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .placement-option.active {
+    border-color: rgba(0, 229, 255, 0.28);
+    background: rgba(0, 229, 255, 0.14);
+    color: #93f5ff;
   }
 
   .pair-dialog-actions {

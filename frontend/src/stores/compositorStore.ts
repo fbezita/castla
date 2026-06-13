@@ -3,6 +3,7 @@ import type { Language } from '../lib/i18n';
 import type { DiagnosticsDisplay, PaneId, ServerDiagnostics } from '../protocol';
 
 export type LayoutMode = 'single' | 'split' | 'popup';
+export type SecondaryPlacement = 'left' | 'right' | 'top' | 'bottom' | 'popup';
 
 export type LaunchState =
   | 'IDLE'
@@ -70,6 +71,7 @@ export interface CompositorState {
   splitRatio: number;
   activePrimaryApp: string;
   activeSecondaryApp: string;
+  secondaryPlacement?: SecondaryPlacement | null;
   popup: PopupLayoutState;
   launchSequence: LaunchSequence; // Holds the active sequence and current state machine stage
   language: Language;
@@ -127,6 +129,7 @@ export function createInitialCompositorState(): CompositorState {
     splitRatio: readStoredSplitRatio(),
     activePrimaryApp: '',
     activeSecondaryApp: '',
+    secondaryPlacement: null,
     popup: readStoredPopupState(),
     launchSequence: {
       id: 0,

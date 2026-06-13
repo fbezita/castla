@@ -13,6 +13,7 @@ data class LaunchRoutingDecision(
     val launchTarget: String,
     val sourceAppPackage: String? = null,
     val allowEmbeddedFallback: Boolean = true,
+    val forceEmbeddedBrowser: Boolean = false,
 )
 
 object LaunchRouting {
@@ -36,6 +37,7 @@ object LaunchRouting {
                 launchTarget = ottTarget?.webUrl ?: trimmedPackage,
                 sourceAppPackage = trimmedPackage,
                 allowEmbeddedFallback = ottTarget?.allowEmbeddedFallback ?: true,
+                forceEmbeddedBrowser = ottTarget?.forceEmbeddedBrowser ?: false,
             )
         }
 

@@ -5,6 +5,7 @@
     type LayoutMode,
     type PopupLayoutState,
     type ViewportModel,
+    type SecondaryPlacement,
   } from "../stores/compositorStore";
   import { t } from "../lib/i18n";
   import { isPaneBarrierReadyForRelease } from "../lib/barrierRelease";
@@ -14,6 +15,15 @@
     resolveExpectedSplitTargets,
     type SplitTargets,
   } from "../lib/splitTargets";
+  import {
+    buildDockedPaneStyles,
+    computeDockedPaneLayout,
+    isDockedPlacement,
+    resolveSecondaryPlacement,
+  } from "../lib/secondaryPlacement";
+  import { getResizerAxis } from "../lib/resizerAxis";
+  import { persistSplitRatioForPlacement } from "../lib/splitRatioByPlacement";
+  import { shouldLockExplicitLayoutTargets as shouldLockLayoutTargets } from "../lib/layoutTargetLock";
   import { debugLog } from "../utils/debugLogger";
   import ViewportPane from "./ViewportPane.svelte";
   import type { TouchRouter } from "../touch/TouchRouter";
@@ -43,6 +53,7 @@
     fullPane?: PaneId;
     popupPane?: PaneId;
     splitRatio: number;
+    effectiveSecondaryPlacement: SecondaryPlacement;
   }
 
   const EMPTY_SPLIT_LAYOUT_METRICS = {
@@ -91,6 +102,7 @@
     originX: number;
     originY: number;
   } | null = null;
+  let lastExpandedPopup: PopupLayoutState | null = null;
   let popupResize: {
     pointerId: number;
     edge: PopupResizeEdge;
@@ -107,6 +119,10 @@
   let tempPopupHeight = 0;
   let layoutMetrics = EMPTY_SPLIT_LAYOUT_METRICS;
   let boundary = layoutMetrics.boundaryPercent;
+  let resizePreviewRatio: number | null = null;
+  let verticalResizerThumbPercent = 50;
+  let horizontalResizerThumbPercent = 50;
+  let previousResizerAxis = "none";
   let metadataRevision = 0;
   let pendingBarrierPanes: PaneId[] = [];
   let lastDispatchedSplitTargets: SplitTargets | null = null;
@@ -169,16 +185,27 @@
     (viewport) => viewport.pane === "secondary",
   );
   $: dualPaneReady = Boolean(primaryViewport && secondaryViewport);
+  $: effectiveSecondaryPlacement =
+    resolveSecondaryPlacement(
+      $compositorStore.layoutMode,
+      $compositorStore.secondaryPlacement,
+    ) ?? "right";
   $: splitActive =
     dualPaneReady &&
     $compositorStore.layoutMode === "split" &&
     primaryViewport?.visible === true &&
     secondaryViewport?.visible === true;
+  $: horizontalSplitActive =
+    splitActive &&
+    (effectiveSecondaryPlacement === "left" || effectiveSecondaryPlacement === "right");
+  $: verticalSplitActive =
+    splitActive &&
+    (effectiveSecondaryPlacement === "top" || effectiveSecondaryPlacement === "bottom");
   $: fullPopupActive =
     dualPaneReady &&
     $compositorStore.layoutMode === "popup" &&
     primaryViewport?.visible === true &&
-    secondaryViewport?.visible === true;
+    Boolean($compositorStore.activeSecondaryApp);
 
   // Viewport mapping is physically fixed
   $: leftPane = "primary";
@@ -408,6 +435,7 @@
           fullPane: fullPane,
           popupPane: popupPane,
           splitRatio,
+          effectiveSecondaryPlacement,
         };
         console.info(`[COMPOSITOR_BARRIER] event=freeze state=${$compositorStore.launchSequence.state} layout=${layoutMode}`);
         emitVerboseBarrierDiag("freeze", {
@@ -525,6 +553,8 @@
       pendingPanes: pendingBarrierPanes,
     });
     frozenLayoutState = null;
+    activeTouchPanes.clear();
+    touchRouter.reset();
   }
 
   $: if (frozenLayoutState && !layoutTransitionActive) {
@@ -557,7 +587,23 @@
     hostRect.height,
     $compositorStore.splitRatio,
   );
-  $: boundary = layoutMetrics.boundaryPercent;
+  $: activeSplitRatio = frozenLayoutState ? frozenLayoutState.splitRatio : $compositorStore.splitRatio;
+  $: activeSecondaryPlacement = frozenLayoutState ? frozenLayoutState.effectiveSecondaryPlacement : effectiveSecondaryPlacement;
+  $: currentResizerAxis = getResizerAxis(activeSecondaryPlacement);
+  $: if (currentResizerAxis !== previousResizerAxis) {
+    verticalResizerThumbPercent = 50;
+    horizontalResizerThumbPercent = 50;
+    previousResizerAxis = currentResizerAxis;
+  }
+  $: boundary =
+    splitActive && isDockedPlacement(activeSecondaryPlacement)
+      ? computeDockedPaneLayout(
+          hostRect.width,
+          hostRect.height,
+          activeSplitRatio,
+          activeSecondaryPlacement,
+        ).boundaryPercent
+      : layoutMetrics.boundaryPercent;
   $: layoutTrigger = [
     Math.round(hostRect.width),
     Math.round(hostRect.height),
@@ -583,18 +629,22 @@
     splitActive &&
     secondaryViewport?.committed === true &&
     !layoutTransitionActive &&
-    !frozenLayoutState
+    !frozenLayoutState &&
+    !resizingSplit
   ) {
     dispatchLayout(true);
   }
 
   function paneStyle(pane: PaneId): string {
-    if (splitActive) {
-      const { leftPercent, rightPercent } = layoutMetrics;
-      if (pane === "secondary") {
-        return `left:${leftPercent}%;right:0;width:${rightPercent}%;`;
-      }
-      return `left:0;width:${leftPercent}%;right:auto;`;
+    if (splitActive && isDockedPlacement(effectiveSecondaryPlacement)) {
+      const layout = computeDockedPaneLayout(
+        hostRect.width,
+        hostRect.height,
+        $compositorStore.splitRatio,
+        effectiveSecondaryPlacement,
+      );
+      const styles = buildDockedPaneStyles(layout);
+      return pane === "secondary" ? styles.secondary : styles.primary;
     }
     return "left:0;top:0;width:100%;height:100%;";
   }
@@ -707,7 +757,15 @@
           primaryPkg: secondaryPkg,
           secondaryPkg: primaryPkg,
           layoutMode: layoutMode,
+          secondaryPlacement:
+            layoutMode === "popup"
+              ? "popup"
+              : resolveSecondaryPlacement(
+                  $compositorStore.layoutMode,
+                  $compositorStore.secondaryPlacement,
+                ) ?? "right",
         });
+        appLauncher.closeDrawer?.();
       } else {
         // Fallback for edge cases without appLauncher ref
         console.warn("[SWAP] appLauncher ref missing, falling back to manual swap");
@@ -733,6 +791,7 @@
     activeTouchPanes.clear();
     touchRouter.reset();
     resizingSplit = true;
+    resizePreviewRatio = $compositorStore.splitRatio;
     updateChrome();
     window.addEventListener("pointermove", resizeMove);
     window.addEventListener("pointerup", endResize, { once: true });
@@ -742,19 +801,49 @@
   function resizeMove(event: PointerEvent) {
     if (!resizingSplit || !host) return;
     const rect = host.getBoundingClientRect();
-    const pos = clamp((event.clientX - rect.left) / rect.width, 0.22, 0.78);
-    const nextRatio = pos;
-    localStorage.setItem("castla_split_ratio", String(nextRatio));
-    compositorStore.update((state) => ({ ...state, splitRatio: nextRatio }));
+    if (effectiveSecondaryPlacement === "left" || effectiveSecondaryPlacement === "right") {
+      verticalResizerThumbPercent = clamp(
+        ((event.clientY - rect.top) / rect.height) * 100,
+        10,
+        90,
+      );
+    } else if (effectiveSecondaryPlacement === "top" || effectiveSecondaryPlacement === "bottom") {
+      horizontalResizerThumbPercent = clamp(
+        ((event.clientX - rect.left) / rect.width) * 100,
+        10,
+        90,
+      );
+    }
+    const nextRatio =
+      effectiveSecondaryPlacement === "top"
+        ? clamp(1 - ((event.clientY - rect.top) / rect.height), 0.1, 0.9)
+        : effectiveSecondaryPlacement === "bottom"
+          ? clamp((event.clientY - rect.top) / rect.height, 0.1, 0.9)
+          : effectiveSecondaryPlacement === "left"
+            ? clamp(1 - ((event.clientX - rect.left) / rect.width), 0.22, 0.78)
+            : clamp((event.clientX - rect.left) / rect.width, 0.22, 0.78);
+    resizePreviewRatio = nextRatio;
     updateChrome(nextRatio);
   }
 
   function endResize() {
+    const committedRatio = resizePreviewRatio ?? $compositorStore.splitRatio;
+    const persistedRatio = persistSplitRatioForPlacement(
+      committedRatio,
+      effectiveSecondaryPlacement,
+    );
+    localStorage.setItem("castla_split_ratio", String(persistedRatio));
+    compositorStore.update((state) => ({ ...state, splitRatio: persistedRatio }));
+    resizePreviewRatio = null;
     resizingSplit = false;
     window.removeEventListener("pointermove", resizeMove);
     window.removeEventListener("pointerup", endResize);
     window.removeEventListener("pointercancel", endResize);
-    scheduleLayoutFlush();
+    lastDispatchedSplitTargets = null;
+    hostRect = getCurrentHostRect();
+    touchRouter.updateHost(hostRect);
+    updateChrome(committedRatio);
+    dispatchLayout(true);
     requestPaneKeyframes("primary", "secondary");
     touchRouter.reset();
   }
@@ -916,27 +1005,36 @@
 
   function minimizePopup() {
     const current = $compositorStore.popup;
-    const targetX = current.x + current.width - 60;
-    const targetY = current.y + current.height - 60;
+    if (!current.minimized) {
+      lastExpandedPopup = {
+        ...current,
+        minimized: false,
+      };
+    }
+    const targetX = Math.max(POPUP_MARGIN, hostRect.width - 60 - POPUP_MARGIN);
+    const targetY = Math.max(POPUP_MARGIN, hostRect.height - 60 - POPUP_MARGIN);
 
-    // Constrain the minimized 60px bubble within host bounds
-    const maxX = Math.max(POPUP_MARGIN, hostRect.width - 60 - POPUP_MARGIN);
-    const maxY = Math.max(POPUP_MARGIN, hostRect.height - 60 - POPUP_MARGIN);
-
-    const nextPopup = {
+    const nextPopup = constrainPopup({
       ...current,
-      x: clamp(targetX, POPUP_MARGIN, maxX),
-      y: clamp(targetY, POPUP_MARGIN, maxY),
+      x: targetX,
+      y: targetY,
       minimized: true,
-    };
+    });
     applyPopupState(nextPopup, true);
     scheduleLayoutFlush();
   }
 
+  function getPopupStreamLayout(popup: PopupLayoutState) {
+    const source = lastExpandedPopup ?? popup;
+    return {
+      width: align16(source.width),
+      height: align16(Math.max(POPUP_MIN_HEIGHT, source.height - POPUP_HEADER_HEIGHT)),
+    };
+  }
+
   function restorePopup() {
     const current = $compositorStore.popup;
-    const targetX = current.x + 60 - current.width;
-    const targetY = current.y + 60 - current.height;
+    const restoreSource = lastExpandedPopup ?? current;
 
     const maxWidth = Math.max(
       POPUP_MIN_WIDTH,
@@ -949,19 +1047,15 @@
     const width = clamp(current.width, POPUP_MIN_WIDTH, maxWidth);
     const height = clamp(current.height, POPUP_MIN_HEIGHT, maxHeight);
 
-    const maxX = Math.max(POPUP_MARGIN, hostRect.width - width - POPUP_MARGIN);
-    const maxY = Math.max(
-      POPUP_MARGIN,
-      hostRect.height - height - POPUP_MARGIN,
-    );
-
-    const nextPopup = {
+    const nextPopup = constrainPopup({
       ...current,
       visible: true,
       minimized: false,
-      x: clamp(targetX, POPUP_MARGIN, maxX),
-      y: clamp(targetY, POPUP_MARGIN, maxY),
-    };
+      width,
+      height,
+      x: restoreSource.x,
+      y: restoreSource.y,
+    });
     applyPopupState(nextPopup, true);
     scheduleLayoutFlush();
     if (popupPane) {
@@ -979,12 +1073,10 @@
   }
 
   function hidePopup() {
-    const nextPopup = { ...$compositorStore.popup, visible: false };
-    applyPopupState(nextPopup, true);
-    scheduleLayoutFlush();
+    hideSecondary();
   }
 
-  function hideSecondary() {
+  export function hideSecondary() {
     activeTouchPanes.clear();
     touchRouter.reset();
     compositorStore.update((state) => {
@@ -996,7 +1088,7 @@
         ...state,
         viewports,
         layoutMode: "single",
-        popup: { ...state.popup, visible: false },
+        popup: { ...state.popup, visible: false, minimized: false },
       };
     });
     scheduleLayoutFlush();
@@ -1042,14 +1134,24 @@
   }
 
   function shouldLockExplicitLayoutTargets(): boolean {
-    if (resizingSplit || popupInteracting) return false;
-    return layoutTransitionActive || frozenLayoutState !== null || runtime.currentAppLaunchSequence() > 0;
+    return shouldLockLayoutTargets({
+      resizingSplit,
+      popupInteracting,
+      layoutTransitionActive,
+      frozenLayoutActive: frozenLayoutState !== null,
+    });
   }
 
   function shouldBlockLayoutDispatchForMissingSplitTargets(): boolean {
     const effectiveLayoutMode =
       frozenLayoutState?.layoutMode ?? $compositorStore.layoutMode;
     if (effectiveLayoutMode !== "split") {
+      return false;
+    }
+    if (
+      effectiveSecondaryPlacement === "top" ||
+      effectiveSecondaryPlacement === "bottom"
+    ) {
       return false;
     }
     return shouldLockExplicitLayoutTargets() && !lastDispatchedSplitTargets;
@@ -1099,30 +1201,56 @@
         lastDispatchedSplitTargets = null;
         const popupWidth = align16(popup.width);
         const popupHeight = align16(popup.visible && !popup.minimized ? Math.max(POPUP_MIN_HEIGHT, popup.height - POPUP_HEADER_HEIGHT) : rect.height);
-        runtime.sendLayout([
+        const layoutPipelines = [
           { id: "primary", width: align16(rect.width), height: alignedHeight, visible: true },
           { id: "secondary", width: popupWidth, height: popupHeight, visible: popup.visible && !popup.minimized }
-        ], seqId);
+        ];
+        syncViewportLayout(layoutPipelines);
+        runtime.sendLayout(layoutPipelines, seqId);
       } else if (mode === "split") {
-        const layoutMetrics = computeSplitLayoutMetrics(rect.width, rect.height, splitRatio);
-        lastDispatchedSplitTargets = {
-          primaryWidth: layoutMetrics.primaryWidth,
-          secondaryWidth: layoutMetrics.secondaryWidth,
-          paneHeight: alignedHeight,
-        };
-        runtime.sendLayout([
-          { id: "primary", width: layoutMetrics.primaryWidth, height: alignedHeight, visible: true },
-          { id: "secondary", width: layoutMetrics.secondaryWidth, height: alignedHeight, visible: true }
-        ], seqId);
+        const placement =
+          resolveSecondaryPlacement(
+            $compositorStore.layoutMode,
+            $compositorStore.secondaryPlacement,
+          ) ?? "right";
+        const dockedLayout = isDockedPlacement(placement)
+          ? computeDockedPaneLayout(rect.width, rect.height, splitRatio, placement)
+          : null;
+        lastDispatchedSplitTargets =
+          placement === "left" || placement === "right"
+            ? {
+                primaryWidth: dockedLayout?.primary.width ?? align16(rect.width * splitRatio),
+                secondaryWidth: dockedLayout?.secondary.width ?? align16(rect.width * (1 - splitRatio)),
+                paneHeight: alignedHeight,
+              }
+            : null;
+        const layoutPipelines = [
+          {
+            id: "primary",
+            width: dockedLayout?.primary.width ?? align16(rect.width),
+            height: dockedLayout?.primary.height ?? alignedHeight,
+            visible: true,
+          },
+          {
+            id: "secondary",
+            width: dockedLayout?.secondary.width ?? align16(rect.width),
+            height: dockedLayout?.secondary.height ?? alignedHeight,
+            visible: true,
+          }
+        ];
+        syncViewportLayout(layoutPipelines);
+        runtime.sendLayout(layoutPipelines, seqId);
       } else {
         lastDispatchedSplitTargets = null;
         const activePane = visibleViewports[0]?.pane ?? "primary";
         const hiddenPane = activePane === "primary" ? "secondary" : "primary";
         const alignedWidth = align16(rect.width);
-        runtime.sendLayout([
+        const layoutPipelines = [
           { id: activePane, width: alignedWidth, height: alignedHeight, visible: true },
           { id: hiddenPane, width: alignedWidth, height: alignedHeight, visible: false }
-        ], seqId);
+        ];
+        syncViewportLayout(layoutPipelines);
+        runtime.sendLayout(layoutPipelines, seqId);
       }
 
       // Explicitly wait until the socket bufferedAmount drops to 0, ensuring complete network flush
@@ -1145,24 +1273,33 @@
     mode: LayoutMode,
     splitRatio: number,
     popup: PopupLayoutState,
+    secondaryPlacement?: "left" | "right" | "top" | "bottom" | "popup" | null,
   ): SplitTargets | null {
     if (!host) return null;
     hostRect = getCurrentHostRect();
     const rect = hostRect.width > 0 && hostRect.height > 0 ? hostRect : host.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
 
-    if (mode === "split") {
-      const metrics = computeSplitLayoutMetrics(rect.width, rect.height, splitRatio);
+    const placement =
+      mode === "split"
+        ? resolveSecondaryPlacement("split", secondaryPlacement) ?? "right"
+        : resolveSecondaryPlacement(
+            $compositorStore.layoutMode,
+            $compositorStore.secondaryPlacement,
+          ) ?? "right";
+
+    if (mode === "split" && (placement === "left" || placement === "right")) {
+      const layout = computeDockedPaneLayout(rect.width, rect.height, splitRatio, placement);
       lastDispatchedSplitTargets = {
-        primaryWidth: metrics.primaryWidth,
-        secondaryWidth: metrics.secondaryWidth,
+        primaryWidth: layout.primary.width,
+        secondaryWidth: layout.secondary.width,
         paneHeight: align16(rect.height),
       };
       emitVerboseBarrierDiag("layout_targets_primed", {
         mode,
         splitRatio,
-        primaryWidth: metrics.primaryWidth,
-        secondaryWidth: metrics.secondaryWidth,
+        primaryWidth: layout.primary.width,
+        secondaryWidth: layout.secondary.width,
         paneHeight: align16(rect.height),
       });
       return lastDispatchedSplitTargets;
@@ -1234,36 +1371,47 @@
       return;
     }
 
-    if (effectiveLayoutMode === "split") {
-      const lockedSplitTargets = getLockedSplitTargets(alignedHeight);
+    if (effectiveLayoutMode === "split" && isDockedPlacement(effectiveSecondaryPlacement)) {
+      const verticalDock =
+        effectiveSecondaryPlacement === "top" ||
+        effectiveSecondaryPlacement === "bottom";
+      const dockedLayout = computeDockedPaneLayout(
+        rect.width,
+        rect.height,
+        $compositorStore.splitRatio,
+        effectiveSecondaryPlacement,
+      );
+      const lockedSplitTargets = verticalDock ? null : getLockedSplitTargets(alignedHeight);
       const primaryWidth =
         lockedSplitTargets?.primaryWidth ??
         expectedPrimaryPaneWidth ??
-        layoutMetrics.primaryWidth;
+        dockedLayout.primary.width;
       const secondaryWidth =
         lockedSplitTargets?.secondaryWidth ??
         expectedSecondaryPaneWidth ??
-        layoutMetrics.secondaryWidth;
+        dockedLayout.secondary.width;
       const effectiveHeight =
         lockedSplitTargets?.paneHeight ??
         expectedPaneHeight ??
         alignedHeight;
-      lastDispatchedSplitTargets = {
-        primaryWidth,
-        secondaryWidth,
-        paneHeight: effectiveHeight,
-      };
+      lastDispatchedSplitTargets = verticalDock
+        ? null
+        : {
+            primaryWidth,
+            secondaryWidth,
+            paneHeight: effectiveHeight,
+          };
       const layoutPipelines = [
         {
           id: leftPane,
-          width: primaryWidth,
-          height: effectiveHeight,
+          width: verticalDock ? dockedLayout.primary.width : primaryWidth,
+          height: verticalDock ? dockedLayout.primary.height : effectiveHeight,
           visible: true,
         },
         {
           id: rightPane,
-          width: secondaryWidth,
-          height: effectiveHeight,
+          width: verticalDock ? dockedLayout.secondary.width : secondaryWidth,
+          height: verticalDock ? dockedLayout.secondary.height : effectiveHeight,
           visible: true,
         },
       ];
@@ -1539,14 +1687,28 @@
     dispatchLayout(true);
   }
 
-  function updateChrome(ratio = $compositorStore.splitRatio) {
-    if (splitActive && resizer) {
-      const boundaryValue = computeSplitLayoutMetrics(
-        hostRect.width,
-        hostRect.height,
-        ratio,
-      ).boundaryPercent;
-      resizer.style.left = `${boundaryValue}%`;
+  function updateChrome(ratio = (frozenLayoutState ? frozenLayoutState.splitRatio : $compositorStore.splitRatio)) {
+    const activePlacement = frozenLayoutState ? frozenLayoutState.effectiveSecondaryPlacement : effectiveSecondaryPlacement;
+    if ((horizontalSplitActive || verticalSplitActive) && resizer) {
+      const boundaryValue = isDockedPlacement(activePlacement)
+        ? computeDockedPaneLayout(
+            hostRect.width,
+            hostRect.height,
+            ratio,
+            activePlacement,
+          ).boundaryPercent
+        : computeSplitLayoutMetrics(
+            hostRect.width,
+            hostRect.height,
+            ratio,
+          ).boundaryPercent;
+      if (horizontalSplitActive) {
+        resizer.style.left = `${boundaryValue}%`;
+        resizer.style.top = `${verticalResizerThumbPercent}%`;
+      } else {
+        resizer.style.top = `${boundaryValue}%`;
+        resizer.style.left = `${horizontalResizerThumbPercent}%`;
+      }
     }
   }
 
@@ -1565,21 +1727,15 @@
     const width = clamp(popup.width, POPUP_MIN_WIDTH, maxWidth);
     const height = clamp(popup.height, POPUP_MIN_HEIGHT, maxHeight);
 
-    const maxX = Math.max(
-      POPUP_MARGIN,
-      hostRect.width - currentWidth - POPUP_MARGIN,
-    );
-    const maxY = Math.max(
-      POPUP_MARGIN,
-      hostRect.height - currentHeight - POPUP_MARGIN,
-    );
+    const nextWidth = popup.minimized ? 60 : width;
+    const nextHeight = popup.minimized ? 60 : height;
 
     return {
       ...popup,
       width,
       height,
-      x: clamp(popup.x, POPUP_MARGIN, maxX),
-      y: clamp(popup.y, POPUP_MARGIN, maxY),
+      x: clamp(popup.x, POPUP_MARGIN, Math.max(POPUP_MARGIN, hostRect.width - nextWidth - POPUP_MARGIN)),
+      y: clamp(popup.y, POPUP_MARGIN, Math.max(POPUP_MARGIN, hostRect.height - nextHeight - POPUP_MARGIN)),
     };
   }
 
@@ -1722,6 +1878,19 @@
     return Math.max(320, (Math.round(value) + 15) & ~15);
   }
 
+  function splitResizerStyle(
+    boundaryPercent: number,
+    placement: SecondaryPlacement,
+  ): string {
+    if (placement === "left" || placement === "right") {
+      return `left:${boundaryPercent}%; top:${verticalResizerThumbPercent}%;`;
+    }
+    if (placement === "top" || placement === "bottom") {
+      return `top:${boundaryPercent}%; left:${horizontalResizerThumbPercent}%;`;
+    }
+    return `left:${boundaryPercent}%; top:${verticalResizerThumbPercent}%;`;
+  }
+
   function clamp(value: number, min: number, max: number): number {
     return Math.min(max, Math.max(min, value));
   }
@@ -1755,6 +1924,8 @@
         {runtime}
         paneStyle={getCurrentPaneStyle(viewport.pane)}
         fitMode="fill"
+        {resizingSplit}
+        activeTouchPanesSize={activeTouchPanes.size}
       />
       {#if shouldShowPaneBarrier(viewport.pane)}
         <div
@@ -1777,6 +1948,8 @@
       {runtime}
       paneStyle={getCurrentPaneStyle(currentFullViewport.pane)}
       fitMode="contain"
+      {resizingSplit}
+      activeTouchPanesSize={activeTouchPanes.size}
     />
     {#if shouldShowPaneBarrier(currentFullViewport.pane)}
       <div
@@ -1836,9 +2009,10 @@
               <button
                 class="popup-action"
                 title={t($compositorStore.language, "minimize")}
+                on:pointerdown|stopPropagation
                 on:click={minimizePopup}>−</button
               >
-              <button class="popup-action" title={t($compositorStore.language, "close")} on:click={hidePopup}
+              <button class="popup-action" title={t($compositorStore.language, "close")} on:pointerdown|stopPropagation on:click={hidePopup}
                 >×</button
               >
             </div>
@@ -1855,6 +2029,8 @@
               {runtime}
               paneStyle="left:0;top:0;width:100%;height:100%;"
               fitMode="fill"
+              {resizingSplit}
+              activeTouchPanesSize={activeTouchPanes.size}
             />
             {#if shouldShowPaneBarrier(currentPopupViewport.pane)}
               <div
@@ -1929,6 +2105,8 @@
         {runtime}
         paneStyle={getCurrentPaneStyle(viewport.pane)}
         fitMode="contain"
+        {resizingSplit}
+        activeTouchPanesSize={activeTouchPanes.size}
       />
       {#if shouldShowPaneBarrier(viewport.pane)}
         <div
@@ -1949,11 +2127,13 @@
 
 
 
-  {#if currentSplitActive}
+  {#if currentSplitActive && (horizontalSplitActive || verticalSplitActive)}
     <button
       bind:this={resizer}
       class="split-resizer"
-      style={`left:${boundary}%`}
+      class:split-resizer-vertical={horizontalSplitActive}
+      class:split-resizer-horizontal={verticalSplitActive}
+      style={splitResizerStyle(boundary, activeSecondaryPlacement)}
       aria-label="Resize split"
       on:pointerdown={beginResize}
     ></button>
@@ -1979,38 +2159,105 @@
 
   .split-resizer {
     position: absolute;
-    top: 0;
-    bottom: 0;
     z-index: 35;
-    width: 22px;
-    transform: translateX(-50%);
     border: 0;
     background: transparent;
-    cursor: ew-resize;
     touch-action: none;
   }
 
-  .split-resizer::before {
-    content: "";
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: 10px;
-    width: 2px;
-    background: rgb(0 229 255 / 0.65);
-    box-shadow: 0 0 12px rgb(0 229 255 / 0.65);
+  .split-resizer-vertical {
+    width: 18px;
+    height: 56px;
+    transform: translate(-50%, -50%);
+    cursor: ew-resize;
+    overflow: visible;
   }
 
-  .split-resizer::after {
+  .split-resizer-horizontal {
+    width: 56px;
+    height: 18px;
+    cursor: ns-resize;
+    transform: translate(-50%, -50%);
+    overflow: visible;
+  }
+
+  .split-resizer-vertical::before {
+    content: "";
+    position: absolute;
+    top: -200vh;
+    bottom: -200vh;
+    left: 8px;
+    width: 2px;
+    background: rgb(255 255 255 / 0.64);
+    box-shadow: 0 0 0 1px rgb(5 7 10 / 0.16), 0 0 10px rgb(0 229 255 / 0.22);
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    pointer-events: none;
+  }
+
+  .split-resizer-vertical:hover::before,
+  .split-resizer-vertical:active::before {
+    background: rgb(0 229 255 / 0.98);
+    box-shadow: 0 0 0 1px rgb(0 229 255 / 0.32), 0 0 16px rgb(0 229 255 / 0.56);
+  }
+
+  .split-resizer-vertical::after {
     content: "";
     position: absolute;
     left: 6px;
     top: 50%;
-    width: 10px;
-    height: 72px;
+    width: 6px;
+    height: 34px;
     transform: translateY(-50%);
-    border-radius: 6px;
-    background: #13dff5;
+    border-radius: 999px;
+    background: rgb(248 250 252 / 0.96);
+    border: 1px solid rgb(8 12 18 / 0.12);
+    box-shadow: 0 2px 10px rgb(0 0 0 / 0.22);
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .split-resizer-vertical:hover::after,
+  .split-resizer-vertical:active::after {
+    background: rgb(0 229 255 / 0.95);
+    border-color: rgba(8, 12, 18, 0.1);
+  }
+
+  .split-resizer-horizontal::before {
+    content: "";
+    position: absolute;
+    left: -200vw;
+    right: -200vw;
+    top: 8px;
+    height: 2px;
+    background: rgb(255 255 255 / 0.64);
+    box-shadow: 0 0 0 1px rgb(5 7 10 / 0.16), 0 0 10px rgb(0 229 255 / 0.22);
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    pointer-events: none;
+  }
+
+  .split-resizer-horizontal:hover::before,
+  .split-resizer-horizontal:active::before {
+    background: rgb(0 229 255 / 0.98);
+    box-shadow: 0 0 0 1px rgb(0 229 255 / 0.32), 0 0 16px rgb(0 229 255 / 0.56);
+  }
+
+  .split-resizer-horizontal::after {
+    content: "";
+    position: absolute;
+    top: 6px;
+    right: 0;
+    width: 26px;
+    height: 6px;
+    border-radius: 999px;
+    background: rgb(248 250 252 / 0.96);
+    border: 1px solid rgb(8 12 18 / 0.12);
+    box-shadow: 0 2px 10px rgb(0 0 0 / 0.22);
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .split-resizer-horizontal:hover::after,
+  .split-resizer-horizontal:active::after {
+    background: rgb(0 229 255 / 0.95);
+    border-color: rgba(8, 12, 18, 0.1);
   }
 
   .popup-window {

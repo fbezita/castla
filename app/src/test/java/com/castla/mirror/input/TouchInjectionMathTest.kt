@@ -29,4 +29,17 @@ class TouchInjectionMathTest {
         assertEquals(1088, dimensions.width)
         assertEquals(1088, dimensions.height)
     }
+
+    @Test
+    fun clampsDimensionsToAtLeast320Pixels() {
+        val dimensions = TouchInjectionMath.resolveDimensions(
+            fallbackWidth = 200,
+            fallbackHeight = 200,
+            mappedWidth = 150,
+            mappedHeight = 150,
+        )
+
+        assertEquals(320, dimensions.width)
+        assertEquals(320, dimensions.height)
+    }
 }

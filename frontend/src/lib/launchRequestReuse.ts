@@ -6,12 +6,15 @@ import type {
   ViewportModel,
 } from "../stores/compositorStore";
 import { canReuseHotStream } from "./launchReuse";
+import { isJmuxerFrontendPath } from "./decoderPath";
 import type { SplitTargets } from "./splitTargets";
+import { resolveSecondaryPlacement } from "./secondaryPlacement";
 
 export interface LaunchRequest {
   primaryPkg: string;
   secondaryPkg?: string;
   layoutMode: LayoutMode;
+  secondaryPlacement?: CompositorState["secondaryPlacement"];
 }
 
 export interface ExpectedLaunchLayout {
@@ -20,7 +23,7 @@ export interface ExpectedLaunchLayout {
 }
 
 function isStableLaunchState(state: string): boolean {
-  return state === "IDLE" || state === "RUNNING" || state === "FAILED" || state === "DEGRADED";
+  return state === "IDLE" || state === "RUNNING" || state === "DEGRADED";
 }
 
 function isPaneHealthy(
@@ -39,8 +42,10 @@ function matchesPaneSize(
   viewport: ViewportModel | undefined,
   expectedWidth?: number,
   expectedHeight?: number,
+  strict = true,
 ): boolean {
   if (!viewport) return false;
+  if (!strict) return true;
   if (expectedWidth !== undefined && viewport.width !== expectedWidth) return false;
   if (expectedHeight !== undefined && viewport.height !== expectedHeight) return false;
   return true;
@@ -61,6 +66,41 @@ function matchesPopupGeometry(
   );
 }
 
+function shouldUseStrictPaneSize(): boolean {
+  if (typeof window === "undefined") {
+    return true;
+  }
+  return isJmuxerFrontendPath();
+}
+
+export function canReusePrimaryLaunchForRequest(
+  request: LaunchRequest,
+  state: CompositorState,
+  primaryMetadata: StreamMetadata | undefined,
+): boolean {
+  const currentPrimaryViewport = state.viewports.get("primary");
+  const samePrimaryApp = request.primaryPkg === state.activePrimaryApp;
+  const hasHealthyPrimaryStream = canReuseHotStream(
+    currentPrimaryViewport,
+    primaryMetadata,
+    currentPrimaryViewport ? Math.max(1, currentPrimaryViewport.generation) : 1,
+  );
+
+  if (!samePrimaryApp || !hasHealthyPrimaryStream) {
+    return false;
+  }
+
+  if (
+    shouldUseStrictPaneSize() &&
+    request.layoutMode === "single" &&
+    state.layoutMode !== "single"
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
 export function canKeepCurrentLaunch(
   request: LaunchRequest,
   state: CompositorState,
@@ -68,12 +108,22 @@ export function canKeepCurrentLaunch(
   secondaryMetadata: StreamMetadata | undefined,
   expectedLayout: ExpectedLaunchLayout,
 ): boolean {
+  const strictPaneSize = shouldUseStrictPaneSize();
   if (!isStableLaunchState(state.launchSequence.state)) return false;
   if (state.layoutMode !== request.layoutMode) return false;
   if (state.activePrimaryApp !== request.primaryPkg) return false;
 
   const requestedSecondary = request.secondaryPkg ?? "";
   if (state.activeSecondaryApp !== requestedSecondary) return false;
+  if (request.secondaryPkg) {
+    const currentPlacement = resolveSecondaryPlacement(
+      state.layoutMode,
+      state.secondaryPlacement,
+    );
+    const requestedPlacement = request.secondaryPlacement
+      ?? resolveSecondaryPlacement(request.layoutMode, state.secondaryPlacement);
+    if (currentPlacement !== requestedPlacement) return false;
+  }
 
   const primaryViewport = state.viewports.get("primary");
   if (!isPaneHealthy(primaryViewport, primaryMetadata)) return false;
@@ -84,7 +134,7 @@ export function canKeepCurrentLaunch(
       return false;
     }
     if (
-      !matchesPaneSize(primaryViewport, splitTargets.primaryWidth, splitTargets.paneHeight)
+      !matchesPaneSize(primaryViewport, splitTargets.primaryWidth, splitTargets.paneHeight, strictPaneSize)
     ) {
       return false;
     }
@@ -103,6 +153,7 @@ export function canKeepCurrentLaunch(
       secondaryViewport,
       splitTargets?.secondaryWidth,
       splitTargets?.paneHeight,
+      strictPaneSize,
     );
   }
 
@@ -113,7 +164,7 @@ export function canKeepCurrentLaunch(
     }
     const expectedPopupWidth = align16(expectedPopup.width);
     const expectedPopupHeight = align16(Math.max(160, expectedPopup.height - 40));
-    if (!matchesPaneSize(secondaryViewport, expectedPopupWidth, expectedPopupHeight)) {
+    if (!matchesPaneSize(secondaryViewport, expectedPopupWidth, expectedPopupHeight, strictPaneSize)) {
       return false;
     }
   }

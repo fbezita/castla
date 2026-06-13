@@ -1,5 +1,10 @@
 <script lang="ts">
   import { getAppPairPreviewPackages, type LayoutMode, type AppPair } from "../lib/appPair";
+  import {
+    getDropTargetRect,
+    getPlacementPreviewRect,
+    type ExternalAppDropZone,
+  } from "../lib/secondaryPlacement";
 
   interface AppInfo extends Partial<AppPair> {
     packageName: string;
@@ -11,7 +16,12 @@
     layoutMode?: LayoutMode;
   }
 
-  type DropZone = "favorite" | "autorun" | "primary" | "secondary" | "remove" | "";
+  type DropZone =
+    | "favorite"
+    | "autorun"
+    | "primary"
+    | "secondary"
+    | ExternalAppDropZone;
 
   let {
     draggingApp,
@@ -37,6 +47,8 @@
   };
 
   let targetRect = $state<HighlightRect | null>(null);
+  let previewRect = $state<HighlightRect | null>(null);
+  const placementZones = ["left", "right", "top", "bottom", "popup"] as const;
 
   $effect(() => {
     void dragX;
@@ -44,23 +56,34 @@
     void dropZone;
     void drawerLeft;
     targetRect = resolveHighlightRect(dropZone);
+    previewRect = resolvePreviewRect(dropZone);
   });
 
   function resolveHighlightRect(zone: DropZone): HighlightRect | null {
-    if (zone !== "primary" && zone !== "secondary" && zone !== "remove") {
-      return null;
+    if (
+      zone === "left" ||
+      zone === "right" ||
+      zone === "top" ||
+      zone === "bottom" ||
+      zone === "popup"
+    ) {
+      return getDropTargetRect(zone, {
+        width: window.innerWidth,
+        height: window.innerHeight,
+        drawerLeft,
+      });
     }
 
     if (zone === "remove") {
-      const sideInset = 20;
-      const bottomInset = 20;
-      const bottomZoneHeight = 120;
-      return {
-        left: sideInset,
-        top: window.innerHeight - bottomZoneHeight - bottomInset,
-        width: Math.max(0, drawerLeft - sideInset * 2),
-        height: bottomZoneHeight,
-      };
+      return getPlacementPreviewRect(
+        zone,
+        {
+          width: window.innerWidth,
+          height: window.innerHeight,
+          drawerLeft,
+        },
+        0.5,
+      );
     }
 
     const paneElement = document.querySelector(`.viewport-pane[data-pane="${zone}"]`) as HTMLElement | null;
@@ -77,11 +100,46 @@
     return null;
   }
 
+  function resolvePreviewRect(zone: DropZone): HighlightRect | null {
+    if (
+      zone === "left" ||
+      zone === "right" ||
+      zone === "top" ||
+      zone === "bottom" ||
+      zone === "popup"
+    ) {
+      return getPlacementPreviewRect(
+        zone,
+        {
+          width: window.innerWidth,
+          height: window.innerHeight,
+          drawerLeft,
+        },
+        0.5,
+      );
+    }
+
+    return null;
+  }
+
   function zoneLabel(zone: DropZone): string {
     if (zone === "primary") return "Selected Window";
     if (zone === "secondary") return "Selected Window";
+    if (zone === "left") return "Dock Left";
+    if (zone === "right") return "Dock Right";
+    if (zone === "top") return "Dock Top";
+    if (zone === "bottom") return "Dock Bottom";
+    if (zone === "popup") return "Open Popup";
     if (zone === "remove") return "Release to remove";
     return "";
+  }
+
+  function markerRect(zone: typeof placementZones[number]) {
+    return getDropTargetRect(zone, {
+      width: window.innerWidth,
+      height: window.innerHeight,
+      drawerLeft,
+    });
   }
 
   function previewPackages(app: AppInfo): string[] {
@@ -91,6 +149,24 @@
 </script>
 
 <div class="drop-overlay" class:hide-zones={Boolean(pairTarget)}>
+  {#if previewRect}
+    <div
+      class="placement-preview"
+      style={`left:${previewRect.left}px;top:${previewRect.top}px;width:${previewRect.width}px;height:${previewRect.height}px;`}
+    ></div>
+  {/if}
+  <div class="placement-targets">
+    {#each placementZones as zone}
+      {@const rect = markerRect(zone)}
+      <div
+        class="placement-target"
+        class:active={dropZone === zone}
+        style={`left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;`}
+      >
+        <span>{zone === "popup" ? "Popup" : zone[0].toUpperCase()}</span>
+      </div>
+    {/each}
+  </div>
   {#if targetRect}
     <div
       class:remove-highlight={dropZone === "remove"}
@@ -167,6 +243,90 @@
     position: absolute;
     border-radius: 22px;
     overflow: hidden;
+  }
+
+  .placement-targets {
+    position: absolute;
+    inset: 0;
+  }
+
+  .placement-preview {
+    position: absolute;
+    border-radius: 24px;
+    border: 1px solid rgba(125, 242, 255, 0.22);
+    background:
+      linear-gradient(180deg, rgba(125, 242, 255, 0.1), rgba(125, 242, 255, 0.04)),
+      rgba(255, 255, 255, 0.02);
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+      0 0 26px rgba(79, 209, 255, 0.12);
+  }
+
+  .placement-target {
+    position: absolute;
+    border-radius: 28px;
+    display: grid;
+    place-items: center;
+    background:
+      radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.12), transparent 55%),
+      linear-gradient(180deg, rgba(10, 18, 32, 0.9), rgba(6, 12, 24, 0.82));
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    color: rgba(226, 232, 240, 0.86);
+    box-shadow:
+      0 12px 32px rgba(0, 0, 0, 0.22),
+      inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(16px) saturate(120%);
+    transition:
+      transform 0.16s ease,
+      border-color 0.16s ease,
+      background 0.16s ease,
+      box-shadow 0.16s ease,
+      color 0.16s ease;
+  }
+
+  .placement-target span {
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  .placement-target::before {
+    content: "";
+    width: 28px;
+    height: 28px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.04);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    margin-bottom: 8px;
+  }
+
+  .placement-target:nth-child(1)::before {
+    border-radius: 12px;
+    width: 24px;
+    height: 24px;
+  }
+
+  .placement-target.active {
+    transform: scale(1.04);
+    border-color: rgba(125, 242, 255, 0.72);
+    background:
+      radial-gradient(circle at 30% 30%, rgba(182, 244, 255, 0.28), transparent 55%),
+      linear-gradient(180deg, rgba(18, 72, 92, 0.9), rgba(8, 28, 40, 0.86));
+    box-shadow:
+      0 18px 36px rgba(0, 0, 0, 0.28),
+      0 0 0 1px rgba(125, 242, 255, 0.14),
+      0 0 24px rgba(79, 209, 255, 0.22);
+    color: #f4fdff;
+  }
+
+  .placement-target.active::before {
+    border-color: rgba(216, 248, 255, 0.52);
+    background: rgba(216, 248, 255, 0.14);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.12),
+      0 0 18px rgba(79, 209, 255, 0.18);
   }
 
   .highlight-frame,

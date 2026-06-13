@@ -1,6 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { CompositorState } from "../stores/compositorStore";
-import { canKeepCurrentLaunch } from "../lib/launchRequestReuse";
+import {
+  canKeepCurrentLaunch,
+  canReusePrimaryLaunchForRequest,
+} from "../lib/launchRequestReuse";
 
 function createState(): CompositorState {
   return {
@@ -55,6 +58,16 @@ function secondaryMetadata(width = 544, height = 704) {
     height,
   };
 }
+
+const originalWindow = globalThis.window;
+
+afterEach(() => {
+  if (originalWindow === undefined) {
+    delete (globalThis as { window?: Window }).window;
+  } else {
+    (globalThis as { window?: Window }).window = originalWindow;
+  }
+});
 
 describe("canKeepCurrentLaunch", () => {
   it("skips relaunch when the same split pair is already healthy and layout-equivalent", () => {
@@ -194,6 +207,44 @@ describe("canKeepCurrentLaunch", () => {
     ).toBe(false);
   });
 
+  it("ignores split pane size differences on the webcodec path", () => {
+    (globalThis as { window?: Window & { VideoDecoder?: unknown } }).window = {
+      isSecureContext: true,
+      location: new URL("https://example.com"),
+      VideoDecoder: function VideoDecoder() {},
+    } as Window & { VideoDecoder?: unknown };
+
+    const state = createState();
+    state.viewports.set("primary", {
+      pane: "primary",
+      width: 544,
+      height: 704,
+      committed: true,
+      generation: 7,
+      visible: true,
+    });
+
+    expect(
+      canKeepCurrentLaunch(
+        {
+          primaryPkg: "com.google.android.youtube",
+          secondaryPkg: "com.disney.disneyplus",
+          layoutMode: "split",
+        },
+        state,
+        primaryMetadata(544, 704),
+        secondaryMetadata(),
+        {
+          splitTargets: {
+            primaryWidth: 368,
+            secondaryWidth: 544,
+            paneHeight: 704,
+          },
+        },
+      ),
+    ).toBe(true);
+  });
+
   it("does not skip when popup geometry differs", () => {
     const state = createState();
     state.layoutMode = "popup";
@@ -252,5 +303,53 @@ describe("canKeepCurrentLaunch", () => {
         },
       ),
     ).toBe(false);
+  });
+});
+
+describe("canReusePrimaryLaunchForRequest", () => {
+  it("does not reuse a jmuxer primary stream when promoting split layout back to single", () => {
+    const state = createState();
+
+    expect(
+      canReusePrimaryLaunchForRequest(
+        {
+          primaryPkg: "com.google.android.youtube",
+          layoutMode: "single",
+        },
+        state,
+        primaryMetadata(),
+      ),
+    ).toBe(false);
+  });
+
+  it("still allows single-layout reuse on the webcodec path", () => {
+    (globalThis as { window?: Window & { VideoDecoder?: unknown } }).window = {
+      isSecureContext: true,
+      location: new URL("https://example.com"),
+      VideoDecoder: function VideoDecoder() {},
+    } as Window & { VideoDecoder?: unknown };
+
+    const state = createState();
+    state.layoutMode = "single";
+    state.activeSecondaryApp = "";
+    state.viewports.set("secondary", {
+      pane: "secondary",
+      width: 544,
+      height: 704,
+      committed: true,
+      generation: 5,
+      visible: false,
+    });
+
+    expect(
+      canReusePrimaryLaunchForRequest(
+        {
+          primaryPkg: "com.google.android.youtube",
+          layoutMode: "single",
+        },
+        state,
+        primaryMetadata(),
+      ),
+    ).toBe(true);
   });
 });

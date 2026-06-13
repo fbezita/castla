@@ -25,6 +25,7 @@ describe("appPair helpers", () => {
     ).toEqual({
       apps: ["com.alpha", "com.beta"],
       layoutMode: "popup",
+      secondaryPlacement: "popup",
     });
   });
 
@@ -38,6 +39,7 @@ describe("appPair helpers", () => {
     ).toEqual({
       apps: ["com.alpha", "com.beta"],
       layoutMode: "popup",
+      secondaryPlacement: "popup",
     });
   });
 
@@ -52,45 +54,51 @@ describe("appPair helpers", () => {
     ).toEqual({
       apps: ["com.alpha", "com.beta"],
       layoutMode: "split",
+      secondaryPlacement: "right",
     });
   });
 
-  it("uses only the app combination for app pair keys", () => {
+  it("includes placement in app pair keys", () => {
     expect(
       getAppPairKey({
         apps: ["com.alpha", "com.beta"],
         layoutMode: "split",
+        secondaryPlacement: "right",
       }),
-    ).toBe("com.alpha:com.beta");
+    ).toBe("com.alpha:com.beta:right");
     expect(
       getAppPairKey({
         apps: ["com.alpha", "com.beta"],
-        layoutMode: "popup",
+        layoutMode: "split",
+        secondaryPlacement: "top",
       }),
-    ).toBe("com.alpha:com.beta");
+    ).toBe("com.alpha:com.beta:top");
   });
 
-  it("drops layout mode when storing app pairs", () => {
+  it("stores placement and derived layout mode for app pairs", () => {
     expect(
       toStoredAppPair({
         apps: ["com.alpha", "com.beta"],
-        layoutMode: "popup",
+        secondaryPlacement: "popup",
       }),
     ).toEqual({
       apps: ["com.alpha", "com.beta"],
+      layoutMode: "popup",
+      secondaryPlacement: "popup",
     });
   });
 
-  it("dedupes legacy split and popup entries into one app pair", () => {
+  it("keeps app pairs with different placements as separate presets", () => {
     expect(
       dedupeAppPairs([
-        { apps: ["com.alpha", "com.beta"], layoutMode: "split" },
-        { apps: ["com.alpha", "com.beta"], layoutMode: "popup" },
-        { apps: ["com.beta", "com.alpha"], layoutMode: "popup" },
+        { apps: ["com.alpha", "com.beta"], secondaryPlacement: "right" },
+        { apps: ["com.alpha", "com.beta"], secondaryPlacement: "popup" },
+        { apps: ["com.beta", "com.alpha"], secondaryPlacement: "popup" },
       ]),
     ).toEqual([
-      { apps: ["com.alpha", "com.beta"] },
-      { apps: ["com.beta", "com.alpha"] },
+      { apps: ["com.alpha", "com.beta"], layoutMode: "split", secondaryPlacement: "right" },
+      { apps: ["com.alpha", "com.beta"], layoutMode: "popup", secondaryPlacement: "popup" },
+      { apps: ["com.beta", "com.alpha"], layoutMode: "popup", secondaryPlacement: "popup" },
     ]);
   });
 });

@@ -164,7 +164,13 @@ export class WebCodecsBackend implements DecoderBackend {
     this.decoder = new VideoDecoder({
       output: (frame) => this.renderFrame(frame),
       error: (error) => {
+        console.error(`[WebCodecs] VideoDecoder error: ${error.message}`);
         this.hasDecodedKeyframe = false;
+        this.configuredCodec = '';
+        try {
+          this.decoder?.close();
+        } catch {}
+        this.decoder = undefined;
         this.throttledStatus('webcodecsDecoderError', error.message, 3000);
         this.requestKeyframeThrottled('decoder_error');
       },

@@ -1,12 +1,20 @@
+import type { SecondaryPlacement } from "../stores/compositorStore";
+
 export type LayoutMode = "split" | "popup";
+export type AppPairPlacement = SecondaryPlacement;
 
 export interface AppPair {
   apps: [string, string];
   layoutMode?: LayoutMode;
+  secondaryPlacement?: AppPairPlacement;
 }
 
 export function getDefaultAppPairLayoutMode(currentMode?: string | null): LayoutMode {
   return currentMode === "popup" ? "popup" : "split";
+}
+
+export function getDefaultAppPairPlacement(currentMode?: string | null): AppPairPlacement {
+  return currentMode === "popup" ? "popup" : "right";
 }
 
 export function resolveAppPairLayoutMode(layoutMode: unknown, fallbackMode?: string | null): LayoutMode {
@@ -15,9 +23,40 @@ export function resolveAppPairLayoutMode(layoutMode: unknown, fallbackMode?: str
   return getDefaultAppPairLayoutMode(fallbackMode);
 }
 
+export function resolveAppPairPlacement(
+  placement: unknown,
+  layoutMode?: unknown,
+  fallbackMode?: string | null,
+): AppPairPlacement {
+  if (
+    placement === "left" ||
+    placement === "right" ||
+    placement === "top" ||
+    placement === "bottom" ||
+    placement === "popup"
+  ) {
+    return placement;
+  }
+  return resolveAppPairLayoutMode(layoutMode, fallbackMode) === "popup"
+    ? "popup"
+    : getDefaultAppPairPlacement(fallbackMode);
+}
+
+export function getAppPairLayoutMode(pair: AppPair): LayoutMode {
+  return pair.secondaryPlacement === "popup"
+    ? "popup"
+    : resolveAppPairLayoutMode(pair.layoutMode);
+}
+
 export function toStoredAppPair(pair: AppPair): AppPair {
+  const secondaryPlacement = resolveAppPairPlacement(
+    pair.secondaryPlacement,
+    pair.layoutMode,
+  );
   return {
     apps: [pair.apps[0], pair.apps[1]],
+    layoutMode: secondaryPlacement === "popup" ? "popup" : "split",
+    secondaryPlacement,
   };
 }
 
@@ -36,9 +75,14 @@ export function normalizeAppPair(value: unknown): AppPair | null {
       app0 !== app1
     ) {
       const mode = candidate.layoutMode;
+      const secondaryPlacement = resolveAppPairPlacement(
+        candidate.secondaryPlacement,
+        mode,
+      );
       return {
         apps: [app0, app1],
         layoutMode: mode === "split" || mode === "popup" ? mode : undefined,
+        secondaryPlacement,
       };
     }
   }
@@ -55,6 +99,10 @@ export function normalizeAppPair(value: unknown): AppPair | null {
       return {
         apps: [primary, secondary],
         layoutMode: resolveAppPairLayoutMode(candidate.layoutMode),
+        secondaryPlacement: resolveAppPairPlacement(
+          candidate.secondaryPlacement,
+          candidate.layoutMode,
+        ),
       };
     }
   }
@@ -70,6 +118,10 @@ export function normalizeAppPair(value: unknown): AppPair | null {
       return {
         apps: [candidate.left, candidate.right],
         layoutMode: resolveAppPairLayoutMode(candidate.layoutMode),
+        secondaryPlacement: resolveAppPairPlacement(
+          candidate.secondaryPlacement,
+          candidate.layoutMode,
+        ),
       };
     }
   }
@@ -85,6 +137,10 @@ export function normalizeAppPair(value: unknown): AppPair | null {
       return {
         apps: [candidate.appA, candidate.appB],
         layoutMode: resolveAppPairLayoutMode(candidate.layoutMode ?? candidate.mode),
+        secondaryPlacement: resolveAppPairPlacement(
+          candidate.secondaryPlacement,
+          candidate.layoutMode ?? candidate.mode,
+        ),
       };
     }
   }
@@ -112,7 +168,7 @@ export function swapAppPairApps(pair: AppPair): AppPair {
 }
 
 export function getAppPairKey(pair: AppPair): string {
-  return `${pair.apps[0]}:${pair.apps[1]}`;
+  return `${pair.apps[0]}:${pair.apps[1]}:${resolveAppPairPlacement(pair.secondaryPlacement, pair.layoutMode)}`;
 }
 
 export function dedupeAppPairs(pairs: AppPair[]): AppPair[] {
@@ -130,5 +186,13 @@ export function getAppPairPreviewPackages(pair: AppPair): string[] {
 
 export function getAppPairModeLabel(mode: LayoutMode): string {
   if (mode === "split") return "Split";
+  return "Popup";
+}
+
+export function getAppPairPlacementLabel(placement: AppPairPlacement): string {
+  if (placement === "left") return "Left";
+  if (placement === "right") return "Right";
+  if (placement === "top") return "Top";
+  if (placement === "bottom") return "Bottom";
   return "Popup";
 }

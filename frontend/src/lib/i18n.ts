@@ -14,6 +14,15 @@ export const TRANSLATIONS = {
     settingsDiagnostics: "설정 및 진단",
     closeLauncher: "런처 닫기",
     openLauncher: "런처 열기",
+    placementChange: "배치 변경",
+    left: "왼쪽",
+    right: "오른쪽",
+    top: "위쪽",
+    bottom: "아래쪽",
+    moveSecondaryTitle: "보조 화면 위치 변경",
+    moveSecondaryDesc: "보조 화면이 위치할 영역을 선택하세요.",
+    multiwindow: "멀티윈도우",
+    placement: "화면 배치",
 
     // Tabs
     tab_autorun: "자동 실행",
@@ -79,6 +88,15 @@ export const TRANSLATIONS = {
     settingsDiagnostics: "Settings and diagnostics",
     closeLauncher: "Close launcher",
     openLauncher: "Open launcher",
+    placementChange: "Placement",
+    left: "Left",
+    right: "Right",
+    top: "Top",
+    bottom: "Bottom",
+    moveSecondaryTitle: "Move Secondary Window",
+    moveSecondaryDesc: "Select where the current secondary app should go.",
+    multiwindow: "Multiwindow",
+    placement: "Placement",
 
     // Tabs
     tab_autorun: "Auto-run",

@@ -2,6 +2,7 @@ package com.castla.mirror.service
 
 import com.castla.mirror.utils.LaunchMode
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -18,6 +19,21 @@ class LaunchRoutingTest {
         assertEquals("https://www.disneyplus.com", decision.launchTarget)
         assertEquals("com.disney.disneyplus", decision.sourceAppPackage)
         assertTrue(decision.allowEmbeddedFallback)
+        assertFalse(decision.forceEmbeddedBrowser)
+    }
+
+    @Test
+    fun forcesEmbeddedBrowserForNetflixOttLaunches() {
+        val decision = LaunchRouting.resolve(
+            packageName = "com.netflix.mediaclient",
+            className = "com.netflix.mediaclient/.ui.launch.UIWebViewActivity",
+            launchMode = LaunchMode.STANDARD_APP,
+        )
+
+        assertEquals(LaunchRoutingKind.WEB_URL, decision.kind)
+        assertEquals("https://www.netflix.com", decision.launchTarget)
+        assertEquals("com.netflix.mediaclient", decision.sourceAppPackage)
+        assertTrue(decision.forceEmbeddedBrowser)
     }
 
     @Test

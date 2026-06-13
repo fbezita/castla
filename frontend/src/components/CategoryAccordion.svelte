@@ -73,6 +73,7 @@
     if (!app.isPair) return [];
     return getAppPairPreviewPackages(app as any);
   }
+
 </script>
 
 <section class="browse-group" style={`--category-color: ${group.color}`}>
@@ -110,7 +111,7 @@
           tabindex="0"
         >
           {#if app.isPair && previewPackages(app).length > 1}
-            <div class="pair-icons split-pair-icon">
+            <div class={`pair-icons split-pair-icon placement-${app.secondaryPlacement || "right"}`}>
               <img
                 class="app-pair-icon-left"
                 src={`/api/icon?pkg=${encodeURIComponent(previewPackages(app)[0])}`}
@@ -125,6 +126,12 @@
                 loading="lazy"
                 draggable="false"
               />
+              <span class={`placement-badge-grid ${app.secondaryPlacement || "right"}`}>
+                <span class="grid-cell cell-1"></span>
+                <span class="grid-cell cell-2"></span>
+                <span class="grid-cell cell-3"></span>
+                <span class="grid-cell cell-4"></span>
+              </span>
             </div>
           {:else if app.isPair && previewPackages(app).length === 1}
             <img
@@ -410,18 +417,140 @@
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
     -webkit-user-drag: none;
     user-select: none;
+    transition: all 0.2s ease;
   }
 
-  .app-pair-icon-left {
+  /* Horizontal layout styles */
+  .placement-right .app-pair-icon-left {
     left: 0;
     top: 5px;
     z-index: 1;
   }
-
-  .app-pair-icon-right {
-    left: 12px;
+  .placement-right .app-pair-icon-right {
+    left: 14px;
     top: 5px;
     z-index: 2;
+  }
+
+  .placement-left .app-pair-icon-left {
+    left: 14px;
+    top: 5px;
+    z-index: 1;
+  }
+  .placement-left .app-pair-icon-right {
+    left: 0;
+    top: 5px;
+    z-index: 2;
+  }
+
+  /* Vertical layout styles */
+  .placement-bottom .app-pair-icon-left {
+    left: 8px;
+    top: 0;
+    z-index: 1;
+  }
+  .placement-bottom .app-pair-icon-right {
+    left: 8px;
+    top: 10px;
+    z-index: 2;
+  }
+
+  .placement-top .app-pair-icon-left {
+    left: 8px;
+    top: 10px;
+    z-index: 1;
+  }
+  .placement-top .app-pair-icon-right {
+    left: 8px;
+    top: 0;
+    z-index: 2;
+  }
+
+  /* Popup layout styles (overlay layout - center overlapping) */
+  .placement-popup .app-pair-icon-left {
+    left: 4px;
+    top: 1px;
+    width: 26px;
+    height: 26px;
+    z-index: 1;
+  }
+  .placement-popup .app-pair-icon-right {
+    left: 10px;
+    top: 7px;
+    width: 14px;
+    height: 14px;
+    z-index: 2;
+    border: 1.5px solid #0d101b;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+    box-sizing: border-box;
+  }
+
+  /* CSS Grid based Placement Indicator Badge */
+  .placement-badge-grid {
+    position: absolute;
+    right: -6px;
+    bottom: -6px;
+    width: 13px;
+    height: 13px;
+    background: #0d101b;
+    border: 1px solid rgba(0, 229, 255, 0.5);
+    border-radius: 3px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 1px;
+    padding: 1px;
+    box-sizing: border-box;
+    z-index: 10;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+    pointer-events: none;
+  }
+
+  .placement-badge-grid .grid-cell {
+    background: transparent;
+    border-radius: 0.5px;
+    transition: background 0.15s ease;
+  }
+
+  /* left: Fill left-half (cells 1 & 3) */
+  .placement-badge-grid.left .cell-1,
+  .placement-badge-grid.left .cell-3 {
+    background: #00e5ff;
+  }
+
+  /* right: Fill right-half (cells 2 & 4) */
+  .placement-badge-grid.right .cell-2,
+  .placement-badge-grid.right .cell-4 {
+    background: #00e5ff;
+  }
+
+  /* top: Fill top-half (cells 1 & 2) */
+  .placement-badge-grid.top .cell-1,
+  .placement-badge-grid.top .cell-2 {
+    background: #00e5ff;
+  }
+
+  /* bottom: Fill bottom-half (cells 3 & 4) */
+  .placement-badge-grid.bottom .cell-3,
+  .placement-badge-grid.bottom .cell-4 {
+    background: #00e5ff;
+  }
+
+  /* popup: Render a popup mini box inside instead of grid */
+  .placement-badge-grid.popup {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .placement-badge-grid.popup .grid-cell {
+    display: none;
+  }
+  .placement-badge-grid.popup::after {
+    content: "";
+    width: 5px;
+    height: 5px;
+    background: #00e5ff;
+    border-radius: 0.5px;
   }
 
   .launch-main {

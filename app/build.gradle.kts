@@ -91,7 +91,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 12
-        versionName = "2.4.7"
+        versionName = "2.5.0"
         buildConfigField("String", "BUILD_TIMESTAMP", "\"$buildTimestamp\"")
         buildConfigField("String", "CASTLA_CERT_PASSWORD", "\"${readSecret("CASTLA_CERT_PASSWORD")}\"")
         buildConfigField("String", "CASTLA_CERT_TOKEN", "\"${readSecret("CASTLA_CERT_TOKEN")}\"")

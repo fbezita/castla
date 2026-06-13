@@ -10,12 +10,18 @@ object OttCatalog {
         val packageName: String,
         val webUrl: String,
         val serviceName: String = "",
-        val allowEmbeddedFallback: Boolean = true
+        val allowEmbeddedFallback: Boolean = true,
+        val forceEmbeddedBrowser: Boolean = false,
     )
 
     private val targets = listOf(
         OttTarget("com.google.android.youtube", "https://m.youtube.com", "YouTube"),
-        OttTarget("com.netflix.mediaclient", "https://www.netflix.com", "Netflix"),
+        OttTarget(
+            "com.netflix.mediaclient",
+            "https://www.netflix.com",
+            "Netflix",
+            forceEmbeddedBrowser = true,
+        ),
         OttTarget("com.disney.disneyplus", "https://www.disneyplus.com", "Disney+"),
         OttTarget("com.disney.disneyplus.kr", "https://www.disneyplus.com", "Disney+ KR"),
         OttTarget("com.wavve.player", "https://m.wavve.com", "Wavve"),
@@ -31,6 +37,10 @@ object OttCatalog {
 
     /** Get the web URL for a package, or null if not an OTT app. */
     fun webUrlFor(packageName: String): String? = byPackage[packageName]?.webUrl
+
+    /** True when this OTT should bypass external mobile browsers and use the embedded WebView. */
+    fun forceEmbeddedBrowserFor(packageName: String?): Boolean =
+        packageName?.let { byPackage[it]?.forceEmbeddedBrowser } == true
 
     /** Check if a package is a known OTT app. */
     fun isOtt(packageName: String): Boolean = byPackage.containsKey(packageName)

@@ -5,9 +5,9 @@ import org.junit.Test
 
 class BrowserUserAgentPolicyTest {
     @Test
-    fun usesTabletUserAgentForNetflixEvenWhenFollowingDisplayShape() {
+    fun usesDesktopUserAgentForNetflixEvenWhenFollowingDisplayShape() {
         assertEquals(
-            BrowserUserAgentPolicy.IPAD_SAFARI_UA,
+            BrowserUserAgentPolicy.DESKTOP_CHROME_UA,
             BrowserUserAgentPolicy.resolve(
                 url = "https://www.netflix.com/browse",
                 followDisplayShape = true,
@@ -34,6 +34,25 @@ class BrowserUserAgentPolicyTest {
                 url = "https://example.com",
                 followDisplayShape = false,
             )
+        )
+    }
+
+    @Test
+    fun keepsDesktopUserAgentForNetflixInFullscreenFallbackMode() {
+        assertEquals(
+            BrowserUserAgentPolicy.DESKTOP_CHROME_UA,
+            BrowserUserAgentPolicy.resolve(
+                url = "https://www.netflix.com/title/80057281",
+                followDisplayShape = false,
+            )
+        )
+    }
+
+    @Test
+    fun recognizesNetflixAsDesktopPreferredHost() {
+        assertEquals(
+            true,
+            BrowserUserAgentPolicy.shouldUseDesktopExperience("https://www.netflix.com/browse"),
         )
     }
 }

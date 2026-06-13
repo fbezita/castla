@@ -134,24 +134,26 @@ class WebBrowserActivity : Activity() {
     }
 
     private fun setupWebView(webView: WebView, followDisplayShape: Boolean) {
+        val targetUrl = intent.getStringExtra("url") ?: "https://m.youtube.com"
+        val useDesktopExperience = BrowserUserAgentPolicy.shouldUseDesktopExperience(targetUrl)
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
             @Suppress("DEPRECATION")
             databaseEnabled = true
             mediaPlaybackRequiresUserGesture = false
-            useWideViewPort = !followDisplayShape
-            loadWithOverviewMode = !followDisplayShape
-            setSupportZoom(!followDisplayShape)
-            builtInZoomControls = !followDisplayShape
+            useWideViewPort = useDesktopExperience || !followDisplayShape
+            loadWithOverviewMode = useDesktopExperience || !followDisplayShape
+            setSupportZoom(useDesktopExperience || !followDisplayShape)
+            builtInZoomControls = useDesktopExperience || !followDisplayShape
             displayZoomControls = false
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             userAgentString = BrowserUserAgentPolicy.resolve(
-                url = intent.getStringExtra("url") ?: "https://m.youtube.com",
+                url = targetUrl,
                 followDisplayShape = followDisplayShape,
             )
         }
-        if (followDisplayShape) {
+        if (followDisplayShape && !useDesktopExperience) {
             webView.setInitialScale(100)
         }
 

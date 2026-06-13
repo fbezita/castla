@@ -961,3 +961,161 @@ stateDiagram-v2
 - 그 결과, 사용자가 보기엔 같은 앱/같은 페어처럼 보여도 실제로 recommit이 필요한 `split <-> popup`, `popup -> single`, barrier same-generation recommit 같은 경계 케이스를 정상 launch flow로 되돌릴 수 있게 되었습니다.
 - 여기에 더해, split target 자체를 `launchSequence`의 일부로 승격하면서 freeze/barrier와 launch FSM이 동일한 목표 geometry를 공유하게 되었고, stale metadata 기반 secondary reuse 오판까지 제거함으로써 2026-06-11 작업은 단순 no-op 최적화 보정 수준을 넘어 **split launch 상태머신의 데이터 소유권과 ready 판정 규칙을 함께 정리한 묶음**으로 확장되었습니다.
 - 또한 첫 프레임 bootstrap 관찰 지점과 pre-stream launch 순서를 백엔드/프론트 양쪽에 명시적으로 드러내고, 손상된 PKCS12 인증서에 대한 자동 복구 경로까지 추가하면서, 이번 묶음은 단순 UI/layout 안정화가 아니라 **launch, first frame, secure context 초기화까지 포함한 실차 재현 안정화 패치**로 정리할 수 있습니다.
+
+---
+
+## 22. 🪟 [NEW] 2026-06-12 ~ 2026-06-14 unified secondary placement 모델 도입과 split/popup 상호작용 재정렬
+
+2026년 6월 12일부터 14일까지는 멀티윈도우 UX 자체를 `single / split / popup` 중심 모델에서 **"primary + secondary placement"** 중심 모델로 재구성하는 작업이 집중적으로 진행됐습니다. 이번 묶음은 단순한 버튼 이동이나 스타일 수정이 아니라, **secondary window를 left/right/top/bottom/popup 어디에 둘 것인가**를 단일 개념으로 통합하고, 그에 맞춰 launch 재사용, barrier, 드래그 타깃, 사이드 드로어 UX, splitbar 상호작용까지 함께 다시 정리한 단계였습니다.
+
+### 22.1. split / popup을 unified secondary placement 모델로 재구성
+- **문제 배경**: 기존 구조는 `split`과 `popup`을 별개의 모드처럼 취급해, 같은 secondary app을 단지 다른 위치로 옮기고 싶은 경우에도 내부 경로가 지나치게 갈라졌습니다.
+- **해결 메커니즘**:
+  - `secondaryPlacement`를 `left | right | top | bottom | popup`의 단일 모델로 끌어올렸습니다.
+  - `split`은 docked placement의 표현으로, `popup`은 floating placement의 표현으로 해석되도록 구조를 정리했습니다.
+  - `buildSecondaryPlacementLaunchRequest()`, `placementToLayoutMode()`, `resolveSecondaryPlacement()`를 중심으로 placement 기반 launch request를 일관되게 생성하도록 묶었습니다.
+- **효과**: "보조 앱을 어디에 둘 것인가"가 제품 개념과 코드 경로 양쪽에서 동일한 축으로 정리되었고, `right -> popup`, `popup -> bottom`, `left -> top` 같은 이동이 별도 모드 전환이 아니라 같은 문제의 다른 placement 선택으로 다뤄지게 되었습니다.
+
+### 22.2. 드래그 기반 placement target 오버레이 도입
+- **문제 현상**: 예전에는 split/popup 버튼을 먼저 고르고 나서 앱을 넣는 흐름이 강했고, 실제 사용자는 "앱을 끌어서 원하는 위치에 놓는다"는 멘탈 모델이 더 자연스러웠습니다.
+- **해결 메커니즘**:
+  - 앱 long-press/drag 중 화면 위에 `left / right / top / bottom / popup` 드롭존이 뜨는 `DragDropOverlay` 경로를 정비했습니다.
+  - popup 상태에서도 드롭존이 팝업 뒤에 가려지지 않도록 z-index 계층을 재정렬했습니다.
+  - 활성 zone만 강하게 하이라이트하고 비활성 zone 가이드는 약하게 남기도록 시각 우선순위를 조정했습니다.
+- **효과**: 사용자는 모드를 먼저 기억하지 않아도, 앱을 드래그한 뒤 바로 secondary placement를 선택할 수 있게 되었고, "placement 변경" 자체가 같은 드롭존 UI를 재활용하는 방향으로 이어질 기반이 마련됐습니다.
+
+### 22.3. top / bottom placement와 vertical dock 경로 정식화
+- **문제 현상**:
+  - 초기엔 `left / right`는 어느 정도 동작했지만 `top / bottom`은 drop target 활성, 실행, 터치, resize bar, 비율 조절 범위가 모두 불안정했습니다.
+  - 특히 `top / bottom`으로 넣었는데 잠깐 세로 split처럼 보였다가 다시 가로 split으로 돌아가는 등 placement 유지가 흔들리는 경로가 있었습니다.
+- **해결 메커니즘**:
+  - `computeDockedPaneLayout()`와 `buildDockedPaneStyles()`를 통해 horizontal dock(`left/right`)과 vertical dock(`top/bottom`)을 동일한 레벨의 순수 계산으로 정리했습니다.
+  - `top/bottom`은 width 전체를 유지한 채 height만 분할하는 vertical split 경로로 고정했고, 관련 preview / pane style / layout dispatch도 그 계산을 공유하도록 맞췄습니다.
+  - vertical dock 최소 span을 예전 horizontal 기준보다 더 작게 허용해 `top/bottom`에서 비율을 더 깊게 조절할 수 있게 했습니다.
+- **효과**: `top / bottom` placement가 임시 실험 경로가 아니라 정식 secondary placement로 편입되었고, 실행/터치/비율 조절이 `left/right`와 동등한 구조로 정리됐습니다.
+
+### 22.4. popup 최소화/복원/닫기 semantics 재정렬
+- **문제 현상**:
+  - popup의 `-`와 `x`가 사실상 같은 동작처럼 보였고,
+  - 최소화 시 bubble이 사라지거나,
+  - 최소화 후 다시 복원했을 때 secondary app이 다시 로딩되는 문제가 반복됐습니다.
+- **해결 메커니즘**:
+  - `-`는 popup view만 숨기고 minimized bubble로 전환하는 동작으로, `x`는 popup secondary를 닫고 single로 돌아가는 동작으로 의미를 재분리했습니다.
+  - minimized는 `visible=false`가 아니라 "popup window는 접되 secondary session은 유지"하는 쪽으로 정리했습니다.
+  - 최소화 bubble이 렌더 조건에서 빠지지 않도록 popup state와 렌더 경로를 다시 맞췄습니다.
+- **효과**: popup minimize / restore가 "앱을 다시 켜는 것"이 아니라 "같은 secondary surface를 접고 다시 펴는 것"에 가까운 semantics로 회복됐고, `x`와 `-`의 사용자 의미도 다시 분리됐습니다.
+
+### 22.5. popup 배경 이중 실행과 barrier 잔류 문제 보정
+- **문제 현상**:
+  - popup으로 갈 때 배경(primary) 실행이 끝난 뒤 다시 한 번 더 도는 느낌,
+  - popup transition 뒤 background barrier가 남아 있는 느낌이 반복 보고됐습니다.
+- **해결 메커니즘**:
+  - popup 전환 시 primary / secondary launch reuse, generation start point, barrier freeze/release 타이밍을 다시 조정했습니다.
+  - 특히 재사용 경로에서 `primaryStartGen`, `secondaryStartGen`을 launch 특성에 맞춰 보정해 stale barrier가 남는 경우를 줄였습니다.
+  - popup 전용 barrier 판단은 strict한 임시 geometry 비교보다 committed / metadata freshness 위주로 단순화한 기존 방향을 더 밀어붙였습니다.
+- **효과**: popup 전환에서 배경이 "한 번 더 다시 실행되는 것처럼" 보이던 경로와 barrier 잔류 가능성이 줄어들었고, popup 모드 진입/이탈이 split과 더 비슷한 상태머신 semantics를 공유하게 됐습니다.
+
+### 22.6. webcodec 경로의 split/popup pane size strictness 완화
+- **문제 현상**:
+  - webcodec 경로에서는 실제 touch mapping과 stream decode가 viewport/stream/mapped size로 이미 분리됐는데도,
+  - launch reuse 쪽에서 split/popup pane width/height를 너무 엄격하게 비교해 불필요한 relaunch를 유발하는 경향이 있었습니다.
+- **해결 메커니즘**:
+  - `launchRequestReuse.ts`에서 `isJmuxerFrontendPath()` 여부에 따라 strict pane size 비교를 분기하도록 수정했습니다.
+  - `jmuxer` 경로에서는 기존처럼 strict width/height equivalence를 유지하고,
+  - `webcodec` 경로에서는 split/popup viewport size mismatch만으로 reuse를 깨지 않도록 완화했습니다.
+  - 테스트 환경에서는 `window`가 없을 수 있으므로 non-browser context에서는 strict 모드로 안전 폴백되도록 헬퍼를 추가했습니다.
+- **효과**: webcodec 기반 실사용 경로에서 "사이즈가 조금 달라졌다고 unnecessary relaunch"되는 현상이 줄었고, 반대로 `jmuxer` 경로의 보수적 안정성은 유지됐습니다.
+
+### 22.7. splitbar drag를 preview-only로 바꾸고 commit 시점만 적용하도록 정리
+- **문제 현상**:
+  - splitbar를 움직이는 동안 실제 레이아웃과 스트림이 계속 따라붙어 깜빡이거나,
+  - splitbar를 놓았을 때 축에 따라 앱이 재실행되거나, 반대로 UI만 바뀌고 실제 stream geometry는 안 바뀌는 비대칭 문제가 있었습니다.
+- **해결 메커니즘**:
+  - splitbar drag 중에는 `resizePreviewRatio`만 움직이고, 실제 `splitRatio` store commit은 pointer up 시점에만 일어나도록 정리했습니다.
+  - commit 시에는 오래된 `lastDispatchedSplitTargets`를 비우고, 최종 ratio 기준 layout만 즉시 한 번 보내도록 바꿨습니다.
+  - `shouldLockExplicitLayoutTargets()`는 launch transition / frozen barrier 동안만 split targets를 잠그고, 이미 settled된 이후에는 예전 sequence의 잠금이 남아 ratio 반영을 막지 않도록 별도 helper(`layoutTargetLock.ts`)로 분리해 정리했습니다.
+- **효과**:
+  - 드래그 중 실시간 재빌드 때문에 생기던 깜빡임이 줄었습니다.
+  - `left/right`는 UI만 바뀌고 실제 stream은 예전 크기로 남던 경로를 줄였고,
+  - `top/bottom`만 다르게 재실행되던 축별 비대칭도 완화됐습니다.
+
+### 22.8. splitbar 시각 가시성 강화와 경계선 단순화
+- **문제 현상**:
+  - splitbar가 너무 안 보여 경계가 불분명했고,
+  - 반대로 과한 내부 그림자나 파인 모서리 효과는 실제 앱 UI와 혼동을 일으켰습니다.
+- **해결 메커니즘**:
+  - pane 구분은 과한 음영보다 plain border 중심으로 단순화했습니다.
+  - splitbar는 얇은 선 + 짧은 thumb 손잡이 조합으로 보강하되, 드로어 그림자나 앱 자체의 그림자와 겹쳐 보이는 효과는 제거했습니다.
+  - drawer가 열렸을 때 splitbar가 위로 튀어나와 보이지 않도록 z-index 관계도 함께 보정했습니다.
+- **효과**: 창 경계는 더 명확해졌고, "안드로이드 앱의 그림자처럼 보이는 UI 착시"는 줄어들었습니다.
+
+### 22.9. splitbar hit area를 손잡이 중심으로 축소하고, 축별 이동형 thumb 개념 도입
+- **문제 현상**:
+  - 작은 pane의 가장자리 UI, 특히 지도 검색창이나 상단/하단 툴바가 splitbar hit area에 가려 터치가 어려운 상황이 남아 있었습니다.
+  - 단순히 hit area를 한쪽 pane 바깥으로 밀면 다른 쪽 핵심 UI를 다시 가리는 trade-off가 생겼습니다.
+- **해결 메커니즘**:
+  - 전체 경계선이 아니라 **thumb 손잡이 위치만 실제 드래그 가능 영역**이 되도록 splitbar hit area를 축소했습니다.
+  - 그리고 손잡이 자체는 고정된 한 점이 아니라:
+    - `left/right` 분할에서는 경계선을 따라 **위아래로 이동 가능**
+    - `top/bottom` 분할에서는 경계선을 따라 **좌우로 이동 가능**
+    하도록 바꿨습니다.
+  - 기본 thumb 위치는 중앙(50%)으로 두고, 사용자가 필요한 경우 검색창/툴바를 피해 손잡이를 덜 방해되는 위치로 옮길 수 있게 했습니다.
+- **효과**: splitbar를 "화면 전체를 막는 invisible strip"이 아니라, **필요할 때 이동 가능한 작은 조절 손잡이**로 바꾸는 방향이 구체화됐고, 작은 pane의 상단 UI가 splitbar 때문에 상시 막히는 문제를 크게 줄일 수 있는 기반이 마련됐습니다.
+
+### 22.10. 사이드 드로어 멀티윈도우 UX 재정비
+- **문제 현상**: 기존 사이드 드로어에는 single/split/popup 전환 버튼이 공존해 placement 기반 새 구조와 중복되거나 충돌할 여지가 있었습니다.
+- **해결 메커니즘**:
+  - 멀티윈도우 전용 섹션을 별도로 두고,
+  - 핵심 액션을 `배치 변경`, `주/보조 전환`, `보조 앱 닫기(싱글)` 중심으로 재구성하는 방향을 반영했습니다.
+  - placement 변경은 별도의 mode toggle이 아니라 overlay target picker를 다시 띄우는 작업으로 수렴시키는 설계를 정리했습니다.
+- **효과**: 모드 중심 UI에서 placement 중심 UI로의 전환이 제품 구조상으로도 더 일관되게 정리됐고, 다음 단계 리팩터링의 방향이 명확해졌습니다.
+
+### 22.11. 앱 페어를 "앱 2개 + 배치" 프리셋으로 확장
+- **문제 현상**: 저장된 앱 페어가 단순히 두 앱의 조합만 기억하면, 사용자는 "이 페어는 오른쪽 split인지, 아래 split인지, popup인지"를 따로 다시 골라야 했습니다.
+- **해결 메커니즘**:
+  - app pair 저장 구조에 `secondaryPlacement`를 포함시키고,
+  - pair 실행 시 `layoutMode`와 placement를 함께 복원하도록 경로를 정리했습니다.
+  - 드로어 리스트와 아코디언 목록에서 placement를 직관적으로 읽을 수 있도록 overlap icon / mini badge 시각화도 함께 보강했습니다.
+- **효과**: app pair가 단순 즐겨찾기가 아니라 **"앱 2개 + 배치까지 포함한 멀티윈도우 실행 프리셋"**으로 승격됐습니다.
+
+### 22.12. 테스트 및 검증
+- **프론트엔드 테스트 보강**:
+  - `launchRequestReuse.test.ts`
+    - webcodec 경로에서 split pane size mismatch를 무시하는 reuse 시나리오
+  - `layoutTargetLock.test.ts`
+    - split target 잠금이 launch transition / frozen barrier 동안만 유지되고, settled 이후에는 해제되는 조건 검증
+  - 기존 `secondaryPlacement.test.ts`, `splitTargets.test.ts`, `layoutModeTransition.test.ts`와 함께 placement / split target / transition semantics를 계속 회귀 방어
+- **실행 검증 결과**:
+  - `pnpm test` 통과 (`16 files, 76 tests passed`)
+  - `pnpm run build` 통과
+
+### 22.13. 최종 해석
+- 이번 2026-06-12 ~ 2026-06-14 작업의 핵심은 "split / popup 버그를 몇 개 더 잡았다" 수준이 아니라, **멀티윈도우 제품 모델 자체를 unified secondary placement 관점으로 재정의하기 시작한 것**입니다.
+- 그 과정에서 drag target, popup minimize semantics, splitbar commit timing, launch reuse strictness, split target locking, app pair preset 구조까지 같이 손을 대게 되었고, 이는 결국 **UI/UX 재설계와 launch/stream state machine 안정화가 분리된 문제가 아니라는 사실**을 다시 확인한 작업이기도 했습니다.
+- 아직 splitbar thumb의 위치 저장/복원, 더 정교한 mobile hit-area 정책, placement picker polish 같은 후속 보정은 남아 있지만, 이번 묶음으로 적어도 `secondary를 어디에 둘 것인가`라는 핵심 개념은 코드와 UX 양쪽에서 하나의 축으로 정렬되기 시작했다고 볼 수 있습니다.
+
+## 23. 🌐 [NEW] 2026-06-14 OTT 브라우저 경로의 모바일 감지 보정
+
+### 23.1. 넷플릭스 웹 런치를 외부 모바일 브라우저 우선 경로에서 제외
+- **문제 현상**: 넷플릭스 앱은 직접 미러링이 어려워 웹 브라우저 fallback이 필요했지만, 실제로는 삼성 인터넷/크롬 같은 외부 모바일 브라우저가 먼저 열리면서 `앱 열기` 유도 페이지로 빠지는 경우가 있었습니다.
+- **해결 메커니즘**:
+  - `OttCatalog`에 OTT별 `forceEmbeddedBrowser` 메타데이터를 추가했습니다.
+  - 넷플릭스(`com.netflix.mediaclient`)는 이 플래그를 켜서, 외부 브라우저 탐색보다 내부 `WebBrowserActivity`를 우선 사용하도록 launch 경로를 조정했습니다.
+  - `LaunchRoutingDecision`에도 해당 의도를 실어 서비스 런치 단계까지 보존하도록 연결했습니다.
+- **효과**: 넷플릭스는 더 이상 디바이스에 설치된 모바일 브라우저의 기본 UA/정책에 끌려가지 않고, Castla가 제어 가능한 내장 브라우저 정책 위에서 일관되게 열리게 됐습니다.
+
+### 23.2. 넷플릭스 전용 데스크톱 UA / 뷰포트 정책 도입
+- **문제 현상**: 기존 내부 브라우저 정책은 OTT 일부에 iPad Safari UA를 주는 수준이어서, 넷플릭스 입장에서는 여전히 모바일/태블릿 기기로 인식될 여지가 남아 있었습니다.
+- **해결 메커니즘**:
+  - `BrowserUserAgentPolicy`에 Windows 데스크톱 Chrome UA를 추가했습니다.
+  - `netflix.com` 계열 호스트는 `followDisplayShape` 여부와 무관하게 데스크톱 경험 대상으로 분류되도록 분리했습니다.
+  - 내부 `WebBrowserActivity`는 데스크톱 경험 대상 URL에 대해 `useWideViewPort`, `loadWithOverviewMode`, zoom support를 함께 켜서 단순 UA 문자열만 바꾸는 데서 끝나지 않도록 보정했습니다.
+- **효과**: 넷플릭스 웹 경로가 모바일 앱 유도 페이지보다 PC 웹 흐름에 더 가깝게 열릴 가능성이 높아졌고, OTT fallback browser의 실사용성이 개선됐습니다.
+
+### 23.3. 회귀 방어 테스트 추가
+- `BrowserUserAgentPolicyTest`
+  - 넷플릭스가 split/fullscreen 여부와 상관없이 데스크톱 UA를 받는지 검증
+  - 넷플릭스 호스트가 데스크톱 경험 대상으로 분류되는지 검증
+- `LaunchRoutingTest`
+  - 일반 OTT는 기존처럼 fallback 허용 + 외부 브라우저 가능 상태를 유지하는지 검증
+  - 넷플릭스는 embedded browser 강제 플래그가 라우팅 결과에 반영되는지 검증

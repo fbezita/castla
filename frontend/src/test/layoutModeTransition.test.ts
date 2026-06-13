@@ -38,6 +38,7 @@ describe("buildLayoutModeLaunchRequest", () => {
       primaryPkg: "com.google.android.youtube",
       secondaryPkg: "com.disney.disneyplus",
       layoutMode: "popup",
+      secondaryPlacement: "popup",
     });
   });
 
@@ -49,6 +50,7 @@ describe("buildLayoutModeLaunchRequest", () => {
       primaryPkg: "com.google.android.youtube",
       secondaryPkg: "com.disney.disneyplus",
       layoutMode: "split",
+      secondaryPlacement: "right",
     });
   });
 
