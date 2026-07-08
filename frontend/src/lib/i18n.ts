@@ -1,4 +1,4 @@
-export type Language = 'ko' | 'en';
+export type Language = "ko" | "en";
 
 export const TRANSLATIONS = {
   ko: {
@@ -28,16 +28,19 @@ export const TRANSLATIONS = {
     tab_autorun: "자동 실행",
     tab_starred: "즐겨찾기",
     tab_recent: "최근 사용",
+    tab_notifications: "알림",
     tab_browse: "앱 보관함",
 
     // Tab Empty Panels
     emptyAutorun: "연결 시 자동 실행할 앱 또는 앱 페어를 설정하세요.",
     emptyStarred: "앱에 별을 표시하여 바로가기 레인에 고정하세요.",
     emptyRecent: "최근 사용 기록을 만들려면 앱을 실행해 보세요.",
+    emptyNotifications: "알림을 받을 앱을 이 탭으로 끌어오세요.",
     allCategoriesCollapsed: "모든 카테고리가 접혀 있습니다",
     matches: "개 검색됨",
     releaseAutoRun: "자동 실행에 추가하려면 놓으세요",
     releaseStarred: "즐겨찾기에 추가하려면 놓으세요",
+    releaseNotifications: "알림 허용 목록에 추가하려면 놓으세요",
 
     // Time Ago Formatters
     justNow: "방금 전",
@@ -58,14 +61,17 @@ export const TRANSLATIONS = {
     toast_favorite_updated: "즐겨찾기가 업데이트되었습니다",
     toast_favorite_removed: "즐겨찾기가 제거되었습니다",
     toast_autorun_updated: "자동 실행이 업데이트되었습니다",
+    toast_notifications_updated: "알림 허용 목록이 업데이트되었습니다",
     toast_removed_shortcuts: "바로가기에서 제거되었습니다",
     toast_choose_different: "다른 앱을 선택하세요",
     toast_app_pair_updated: "앱 페어가 업데이트되었습니다",
     toast_app_pair_removed: "앱 페어가 제거되었습니다",
 
     // Standby Logo Screen
-    standbyReady: "스트리밍 준비 완료. 앱을 실행하려면 사이드바 드로어를 여세요.",
-    standbyLaunching: "애플리케이션 실행 중... 고해상도 스트림 링크 설정 중입니다.",
+    standbyReady:
+      "스트리밍 준비 완료. 앱을 실행하려면 사이드바 드로어를 여세요.",
+    standbyLaunching:
+      "애플리케이션 실행 중... 고해상도 스트림 링크 설정 중입니다.",
     serverActive: "서버 활성",
 
     // Viewport Host & Popups
@@ -102,16 +108,19 @@ export const TRANSLATIONS = {
     tab_autorun: "Auto-run",
     tab_starred: "Starred",
     tab_recent: "Recent",
+    tab_notifications: "Alerts",
     tab_browse: "Browse",
 
     // Tab Empty Panels
     emptyAutorun: "Set one app or app pair to auto-run on connect.",
     emptyStarred: "Star apps to pin them in your launcher lane.",
     emptyRecent: "Launch an app once to build your recent history.",
+    emptyNotifications: "Drag apps here to allow mirrored notifications.",
     allCategoriesCollapsed: "All categories collapsed",
     matches: "matches",
     releaseAutoRun: "Release to add to Auto Run",
     releaseStarred: "Release to add to Starred",
+    releaseNotifications: "Release to allow notifications",
 
     // Time Ago Formatters
     justNow: "Just now",
@@ -132,6 +141,7 @@ export const TRANSLATIONS = {
     toast_favorite_updated: "Favorite updated",
     toast_favorite_removed: "Favorite removed",
     toast_autorun_updated: "Auto-run updated",
+    toast_notifications_updated: "Notification list updated",
     toast_removed_shortcuts: "Removed from shortcuts",
     toast_choose_different: "Choose a different app",
     toast_app_pair_updated: "App Pair updated",
@@ -139,7 +149,8 @@ export const TRANSLATIONS = {
 
     // Standby Logo Screen
     standbyReady: "Ready to Stream. Open the sidebar drawer to launch an app.",
-    standbyLaunching: "Launching application... Establishing high-fidelity stream link.",
+    standbyLaunching:
+      "Launching application... Establishing high-fidelity stream link.",
     serverActive: "SERVER ACTIVE",
 
     // Viewport Host & Popups
@@ -148,10 +159,13 @@ export const TRANSLATIONS = {
     close: "Close",
     subWindow: "Sub Window",
     appPair: "App Pair",
-  }
+  },
 };
 
-export function t(lang: Language, key: keyof typeof TRANSLATIONS['en']): string {
-  const dictionary = TRANSLATIONS[lang] || TRANSLATIONS['en'];
-  return dictionary[key] || TRANSLATIONS['en'][key] || String(key);
+export function t(
+  lang: Language,
+  key: keyof (typeof TRANSLATIONS)["en"],
+): string {
+  const dictionary = TRANSLATIONS[lang] || TRANSLATIONS["en"];
+  return dictionary[key] || TRANSLATIONS["en"][key] || String(key);
 }

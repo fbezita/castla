@@ -9,8 +9,8 @@
     draggingApp,
     dropZone
   } = $props<{
-    activeTab: "autorun" | "starred" | "recent" | "browse";
-    selectTab: (tab: "autorun" | "starred" | "recent" | "browse") => void;
+    activeTab: "autorun" | "starred" | "recent" | "notifications" | "browse";
+    selectTab: (tab: "autorun" | "starred" | "recent" | "notifications" | "browse") => void;
     draggingApp: any | null;
     dropZone: string;
   }>();
@@ -50,6 +50,18 @@
   </button>
 
   <button
+    data-launcher-tab="notifications"
+    class:active={activeTab === "notifications"}
+    class:drop-target={draggingApp && dropZone === "notifications"}
+    onclick={() => selectTab("notifications")}
+  >
+    <span class="tab-label">{t($compositorStore.language, "tab_notifications")}</span>
+    {#if draggingApp && dropZone === "notifications"}
+      <span class="drop-badge">DROP</span>
+    {/if}
+  </button>
+
+  <button
     data-launcher-tab="browse"
     class:active={activeTab === "browse"}
     onclick={() => selectTab("browse")}
@@ -58,16 +70,16 @@
   </button>
 </nav>
 
-{#if draggingApp && (dropZone === "autorun" || dropZone === "favorite")}
+{#if draggingApp && (dropZone === "autorun" || dropZone === "favorite" || dropZone === "notifications")}
   <div class="drop-hint" aria-live="polite">
-    {dropZone === "autorun" ? t($compositorStore.language, "releaseAutoRun") : t($compositorStore.language, "releaseStarred")}
+    {dropZone === "autorun" ? t($compositorStore.language, "releaseAutoRun") : dropZone === "notifications" ? t($compositorStore.language, "releaseNotifications") : t($compositorStore.language, "releaseStarred")}
   </div>
 {/if}
 
 <style>
   .hub-tabs {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 6px;
     padding: 0 12px 12px;
     margin-bottom: 8px;

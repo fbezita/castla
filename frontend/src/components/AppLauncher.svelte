@@ -60,13 +60,21 @@
     viewportHost = undefined,
     overlayUiScale,
     overlayUiScalePreference,
+    notificationOverlayEnabled,
+    notificationApps = [],
     onOverlayUiScalePreferenceChange,
+    onNotificationOverlayEnabledChange,
+    onNotificationAppsChange,
   } = $props<{
     runtime: StreamRuntime;
     viewportHost?: any;
     overlayUiScale: number;
     overlayUiScalePreference: OverlayUiScalePreference;
+    notificationOverlayEnabled: boolean;
+    notificationApps: string[];
     onOverlayUiScalePreferenceChange: (preference: OverlayUiScalePreference) => void;
+    onNotificationOverlayEnabledChange: (enabled: boolean) => void;
+    onNotificationAppsChange: (apps: string[]) => void;
   }>();
 
   // Types definitions
@@ -84,10 +92,11 @@
     lastUsedAt: number;
   }
 
-  type LaunchHubTab = "autorun" | "starred" | "recent" | "browse";
+  type LaunchHubTab = "autorun" | "starred" | "recent" | "notifications" | "browse";
   type DropZone =
     | "favorite"
     | "autorun"
+    | "notifications"
     | "primary"
     | "secondary"
     | ExternalAppDropZone;
@@ -237,6 +246,7 @@
     if (activeTab === "autorun") return autorunApps;
     if (activeTab === "starred") return starredApps;
     if (activeTab === "recent") return recentApps;
+    if (activeTab === "notifications") return apps.filter((app) => notificationApps.includes(app.packageName));
     return [];
   });
 
@@ -244,6 +254,7 @@
     if (activeTab === "autorun") return t($compositorStore.language, "emptyAutorun");
     if (activeTab === "starred") return t($compositorStore.language, "emptyStarred");
     if (activeTab === "recent") return t($compositorStore.language, "emptyRecent");
+    if (activeTab === "notifications") return t($compositorStore.language, "emptyNotifications");
     return "";
   });
   let currentSecondaryPlacement = $derived(
@@ -1603,6 +1614,19 @@
     touchDrawer();
   }
 
+  function toggleNotification(packageName: string) {
+    const updated = notificationApps.includes(packageName)
+      ? notificationApps.filter((pkg) => pkg !== packageName)
+      : [...notificationApps, packageName];
+    onNotificationAppsChange(updated);
+    touchDrawer();
+  }
+
+  function toggleNotificationForApp(app: AppInfo) {
+    if (app.isPair) return;
+    toggleNotification(app.packageName);
+  }
+
   function recordRecentLaunch(packageName: string) {
     recentEntries = [
       { packageName, lastUsedAt: Date.now() },
@@ -2054,7 +2078,7 @@
       if (hoveredTab) {
         clearPairHoverState();
         clearCategoryHoverState();
-        dropZone = hoveredTab === "autorun" ? "autorun" : hoveredTab === "starred" ? "favorite" : "";
+        dropZone = hoveredTab === "autorun" ? "autorun" : hoveredTab === "starred" ? "favorite" : hoveredTab === "notifications" ? "notifications" : "";
         return;
       }
 
@@ -2192,6 +2216,9 @@
     } else if (zone === "autorun") {
       toggleAutorun(app.packageName);
       toast("Auto-run updated");
+    } else if (zone === "notifications") {
+      toggleNotification(app.packageName);
+      toast(t($compositorStore.language, "toast_notifications_updated"));
     } else if (zone === "primary") {
       launch(app, "primary");
     } else if (zone === "secondary") {
@@ -2255,7 +2282,7 @@
   function getHoveredLauncherTab(x: number, y: number): LaunchHubTab | null {
     const tab = document.elementFromPoint(x, y)?.closest("[data-launcher-tab]") as HTMLElement | null;
     const value = tab?.dataset.launcherTab;
-    return value === "autorun" || value === "starred" || value === "recent" || value === "browse"
+    return value === "autorun" || value === "starred" || value === "recent" || value === "notifications" || value === "browse"
       ? value
       : null;
   }
@@ -2470,6 +2497,27 @@
     return $compositorStore.language === "ko" ? "열기" : "Open";
   }
 
+  function notificationOverlayLabel(): string {
+    return $compositorStore.language === "ko" ? "알림 표시" : "Notifications";
+  }
+
+  function notificationOverlayActionLabel(): string {
+    if (notificationOverlayEnabled) {
+      return $compositorStore.language === "ko" ? "켜짐" : "On";
+    }
+    return $compositorStore.language === "ko" ? "꺼짐" : "Off";
+  }
+
+  function toggleNotificationOverlay() {
+    const enabled = !notificationOverlayEnabled;
+    onNotificationOverlayEnabledChange(enabled);
+    toast(
+      enabled
+        ? ($compositorStore.language === "ko" ? "알림 표시 켜짐" : "Notifications on")
+        : ($compositorStore.language === "ko" ? "알림 표시 꺼짐" : "Notifications off"),
+    );
+  }
+
   function formatUiScaleOption(option: OverlayUiScalePreference): string {
     return `${Math.round(option * 100)}%`;
   }
@@ -2597,6 +2645,16 @@
               {diagnosticsActionLabel()}
             </button>
           </div>
+          <div class="settings-inline-group">
+            <strong>{notificationOverlayLabel()}</strong>
+            <button
+              class="diag-toggle-btn"
+              class:active={notificationOverlayEnabled}
+              onclick={toggleNotificationOverlay}
+            >
+              {notificationOverlayActionLabel()}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -2702,11 +2760,13 @@
                   {activeTab}
                   isStarred={favorites.includes(app.packageName)}
                   isAutorun={isAppAutorun(app)}
+                  isNotification={notificationApps.includes(app.packageName)}
                   isDragActive={draggingApp !== null}
                   recentMeta={getRecentMeta(app.packageName)}
                   onLaunch={activateApp}
                   onToggleStar={toggleFavorite}
                   onToggleAutorun={toggleAutorunForApp}
+                  onToggleNotification={toggleNotification}
                   onOpenEdit={openAppPairEditor}
                   onStartPress={startPress}
                   onPointerMove={movePress}
@@ -2738,11 +2798,13 @@
             {draggingApp}
             {pairTarget}
             {favorites}
+            {notificationApps}
             isAutorun={isAppAutorun}
             onToggle={toggleCategory}
             onLaunch={activateApp}
             onToggleStar={toggleFavorite}
             onToggleAutorun={toggleAutorunForApp}
+            onToggleNotification={toggleNotification}
             onOpenEdit={openAppPairEditor}
             onStartPress={startPress}
             onPointerMove={movePress}
@@ -2763,6 +2825,7 @@
     {dragY}
     {dropZone}
     {pairTarget}
+    {overlayUiScale}
     drawerLeft={getExternalDropBounds().drawerLeft}
   />
 {/if}

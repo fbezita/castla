@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getAppPairPreviewPackages, type LayoutMode, type AppPair } from "../lib/appPair";
+  import { toOverlayPoint, toOverlayRect } from "../lib/overlayCoordinates";
   import {
     getDropTargetRect,
     getPlacementPreviewRect,
@@ -29,6 +30,7 @@
     dragY,
     dropZone,
     pairTarget,
+    overlayUiScale,
     drawerLeft
   } = $props<{
     draggingApp: AppInfo;
@@ -36,6 +38,7 @@
     dragY: number;
     dropZone: DropZone;
     pairTarget: AppInfo | null;
+    overlayUiScale: number;
     drawerLeft: number;
   }>();
 
@@ -55,6 +58,7 @@
     void dragY;
     void dropZone;
     void drawerLeft;
+    void overlayUiScale;
     targetRect = resolveHighlightRect(dropZone);
     previewRect = resolvePreviewRect(dropZone);
   });
@@ -142,6 +146,19 @@
     });
   }
 
+  function rectStyle(rect: HighlightRect): string {
+    const overlayRect = toOverlayRect(
+      { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+      overlayUiScale,
+    );
+    return `left:${overlayRect.x}px;top:${overlayRect.y}px;width:${overlayRect.width}px;height:${overlayRect.height}px;`;
+  }
+
+  function ghostStyle(): string {
+    const overlayPoint = toOverlayPoint({ x: dragX, y: dragY }, overlayUiScale);
+    return `left: ${overlayPoint.x}px; top: ${overlayPoint.y}px`;
+  }
+
   function previewPackages(app: AppInfo): string[] {
     if (!app.isPair) return [];
     return getAppPairPreviewPackages(app as any);
@@ -152,7 +169,7 @@
   {#if previewRect}
     <div
       class="placement-preview"
-      style={`left:${previewRect.left}px;top:${previewRect.top}px;width:${previewRect.width}px;height:${previewRect.height}px;`}
+      style={rectStyle(previewRect)}
     ></div>
   {/if}
   <div class="placement-targets">
@@ -161,7 +178,7 @@
       <div
         class="placement-target"
         class:active={dropZone === zone}
-        style={`left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;`}
+        style={rectStyle(rect)}
       >
         <span>{zone === "popup" ? "Popup" : zone[0].toUpperCase()}</span>
       </div>
@@ -171,7 +188,7 @@
     <div
       class:remove-highlight={dropZone === "remove"}
       class="window-highlight"
-      style={`left:${targetRect.left}px;top:${targetRect.top}px;width:${targetRect.width}px;height:${targetRect.height}px;`}
+      style={rectStyle(targetRect)}
     >
       <div class="highlight-frame"></div>
       <div class="highlight-glow"></div>
@@ -180,7 +197,7 @@
   {/if}
 </div>
 
-<div class="drag-ghost" style={`left: ${dragX}px; top: ${dragY}px`}>
+<div class="drag-ghost" style={ghostStyle()}>
   {#if draggingApp.isPair && previewPackages(draggingApp).length > 1}
     <div class="ghost-pair-icons">
       <img

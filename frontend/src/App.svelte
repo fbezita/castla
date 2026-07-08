@@ -7,6 +7,7 @@
 
   import ViewportHost from "./components/ViewportHost.svelte";
   import DiagnosticsOverlay from "./components/DiagnosticsOverlay.svelte";
+  import NotificationOverlay from "./components/NotificationOverlay.svelte";
   import AppLauncher from "./components/AppLauncher.svelte";
   import {
     compositorStore,
@@ -22,6 +23,13 @@
     writeOverlayUiScalePreference,
     type OverlayUiScalePreference,
   } from "./utils/overlayUiScalePreference";
+  import {
+    pruneOverlayNotifications,
+    readNotificationOverlayEnabled,
+    upsertOverlayNotification,
+    writeNotificationOverlayEnabled,
+    type OverlayNotification,
+  } from "./lib/notificationOverlay";
 
   // References to tie components together for launch sequence state machine
   let viewportHostRef: any = undefined;
@@ -35,6 +43,28 @@
   let showDiagnostics = false;
   let overlayUiScalePreference: OverlayUiScalePreference = readOverlayUiScalePreference();
   let overlayUiScale = 1;
+  const DEFAULT_NOTIFICATION_APPS = [
+    "com.android.phone",
+    "com.android.dialer",
+    "com.samsung.android.dialer",
+    "com.google.android.dialer",
+    "com.android.mms",
+    "com.android.messaging",
+    "com.samsung.android.messaging",
+    "com.google.android.apps.messaging",
+    "com.kakao.talk",
+    "org.telegram.messenger"
+  ];
+
+  let overlayNotifications: OverlayNotification[] = [];
+  let notificationOverlayEnabled = readNotificationOverlayEnabled();
+  let notificationApps = JSON.parse(localStorage.getItem("castla_notification_apps") ?? JSON.stringify(DEFAULT_NOTIFICATION_APPS)) as string[];
+  let notificationPruneTimer = 0;
+
+  function updateNotificationApps(appsList: string[]): void {
+    notificationApps = appsList;
+    localStorage.setItem("castla_notification_apps", JSON.stringify(appsList));
+  }
   let frontendResetCleanup: (() => void) | undefined;
   const JMUXER_SCRIPT_SRC = "/js/jmuxer.min.js";
   const FRONTEND_BUILD_MARKER = "frontend_ime_guard_v4_20260601";
@@ -66,6 +96,14 @@
     overlayUiScalePreference = nextPreference;
     writeOverlayUiScalePreference(nextPreference);
     refreshOverlayUiScale();
+  }
+
+  function updateNotificationOverlayEnabled(enabled: boolean): void {
+    notificationOverlayEnabled = enabled;
+    writeNotificationOverlayEnabled(enabled);
+    if (!enabled) {
+      overlayNotifications = [];
+    }
   }
 
   function verboseWarn(message: string, payload?: unknown) {
@@ -192,6 +230,7 @@
   }
 
   const REMOTE_IME_REFOCUS_DELAY_MS = 120;
+  const NOTIFICATION_TTL_MS = 7000;
   let audioStarted = false;
 
   function isLocalEditableTarget(target: EventTarget | null): boolean {
@@ -431,6 +470,18 @@
       if (msg.type === "requestFrontendDebugDump") {
         triggerDump(runtime, String((msg as any).reason ?? "native_share_logs"));
       }
+      if (msg.type === "notification" && notificationOverlayEnabled) {
+        if (notificationApps.includes(msg.packageName)) {
+          const notificationItem: OverlayNotification = {
+            ...(msg as OverlayNotification),
+            postedAtMs: Date.now(),
+          };
+          overlayNotifications = upsertOverlayNotification(
+            overlayNotifications,
+            notificationItem,
+          );
+        }
+      }
       if (msg.type === "ime" && msg.op === "androidFocusChanged") {
         const incomingSessionId = Number((msg as any).sessionId ?? 0);
         const active = (msg as any).focused === true;
@@ -552,6 +603,14 @@
       frontendResetEpoch += 1;
     });
     compositor.start();
+    window.clearInterval(notificationPruneTimer);
+    notificationPruneTimer = window.setInterval(() => {
+      overlayNotifications = pruneOverlayNotifications(
+        overlayNotifications,
+        Date.now(),
+        NOTIFICATION_TTL_MS,
+      );
+    }, 1000);
   }
 
   async function hardReset(reason: string): Promise<void> {
@@ -568,6 +627,8 @@
     imeActiveCleanup = undefined;
     lifecycleCleanup?.();
     lifecycleCleanup = undefined;
+    window.clearInterval(notificationPruneTimer);
+    overlayNotifications = [];
     touchRouter.dispose();
     compositor.dispose();
     runtime.dispose();
@@ -587,6 +648,7 @@
   window.addEventListener("resize", refreshOverlayUiScale);
   onDestroy(() => {
     window.removeEventListener("resize", refreshOverlayUiScale);
+    window.clearInterval(notificationPruneTimer);
   });
 
   console.info("[CastlaSession] page_boot", {
@@ -716,11 +778,18 @@
         viewportHost={viewportHostRef}
         overlayUiScale={overlayUiScale}
         overlayUiScalePreference={overlayUiScalePreference}
+        notificationOverlayEnabled={notificationOverlayEnabled}
+        notificationApps={notificationApps}
         onOverlayUiScalePreferenceChange={updateOverlayUiScalePreference}
+        onNotificationOverlayEnabledChange={updateNotificationOverlayEnabled}
+        onNotificationAppsChange={updateNotificationApps}
       />
     {/key}
     {#if showDiagnostics}
       <DiagnosticsOverlay />
+    {/if}
+    {#if notificationOverlayEnabled}
+      <NotificationOverlay items={overlayNotifications} />
     {/if}
   </div>
   <textarea
@@ -795,3 +864,5 @@
     pointer-events: auto;
   }
 </style>
+
+

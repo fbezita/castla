@@ -57,6 +57,8 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.castla.mirror.network.NetworkMonitor
 import com.castla.mirror.network.NetworkState
 import com.castla.mirror.network.CastlaDeviceId
+import com.castla.mirror.notifications.CastlaNotificationListenerService
+import com.castla.mirror.notifications.NotificationAccessSettingsHelper
 import com.castla.mirror.service.HotspotClientDetector
 import com.castla.mirror.service.MirrorForegroundService
 import com.castla.mirror.service.TeslaBleScanner
@@ -82,6 +84,8 @@ class MainActivity : AppCompatActivity() {
         private const val SHIZUKU_APK_FILENAME = "shizuku.apk"
         private const val USB_CONFIG_PREFS = "usb_config_advisory"
         private const val KEY_SUPPRESS_USB_CONFIG_WARNING = "suppress_warning"
+        private const val NOTIFICATION_ACCESS_PREFS = "notification_access_onboarding"
+        private const val KEY_NOTIFICATION_ACCESS_AUTO_PROMPTED = "notification_access_auto_prompted"
         private const val CASTLA_DOMAIN = "castla.fbezita.com"
         // User-facing stable entrypoint. The backend redirects this to the active
         // per-device relay URL: https://c-{deviceId}.castla.fbezita.com:9090
@@ -113,6 +117,7 @@ class MainActivity : AppCompatActivity() {
     private var isImeEnabled by mutableStateOf(false)
     private var isImeSelected by mutableStateOf(false)
     private var isCastlaImeActive by mutableStateOf(false)
+    private var isNotificationAccessEnabled by mutableStateOf(false)
 
     // Shizuku download state
     private var shizukuDownloadId: Long = -1L
@@ -174,6 +179,7 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
         Log.i(TAG, "Startup permissions: $results")
+        maybePromptNotificationAccessOnboarding()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -193,6 +199,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         loadAutoDetectState()
+        refreshNotificationAccessState()
         requestStartupPermissions()
         requestBatteryOptimizationExemption()
         refreshShizukuBatteryOptimizationState()
@@ -350,6 +357,7 @@ class MainActivity : AppCompatActivity() {
                         isImeEnabled = isImeEnabled,
                         isImeSelected = isImeSelected,
                         isCastlaImeActive = isCastlaImeActive,
+                        isNotificationAccessEnabled = isNotificationAccessEnabled,
                         onRestoreIme = {
                             lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                                 try {
@@ -376,6 +384,9 @@ class MainActivity : AppCompatActivity() {
                         },
                         onSelectIme = {
                             com.castla.mirror.input.TextInputSettingsHelper.showInputMethodPicker(this@MainActivity)
+                        },
+                        onOpenNotificationAccessSettings = {
+                            openNotificationAccessSettings()
                         },
                         shizukuDownloadProgress = shizukuDownloadProgress,
                         isHotspotActive = isHotspotActive,
@@ -537,6 +548,7 @@ class MainActivity : AppCompatActivity() {
         updateManager.onResume(this)
         refreshShizukuBatteryOptimizationState()
         refreshTextInputPermissions()
+        refreshNotificationAccessState()
     }
 
     private fun refreshTextInputPermissions() {
@@ -559,6 +571,53 @@ class MainActivity : AppCompatActivity() {
             pm.isIgnoringBatteryOptimizations(SHIZUKU_PACKAGE)
         } catch (_: Exception) {
             false
+        }
+    }
+
+    private fun refreshNotificationAccessState() {
+        isNotificationAccessEnabled = runCatching {
+            NotificationAccessSettingsHelper.isNotificationAccessEnabled(
+                this,
+                CastlaNotificationListenerService::class.java,
+            )
+        }.getOrDefault(false)
+    }
+
+    private fun hasPromptedNotificationAccessOnboarding(): Boolean =
+        getSharedPreferences(NOTIFICATION_ACCESS_PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_NOTIFICATION_ACCESS_AUTO_PROMPTED, false)
+
+    private fun markNotificationAccessOnboardingPrompted() {
+        getSharedPreferences(NOTIFICATION_ACCESS_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_NOTIFICATION_ACCESS_AUTO_PROMPTED, true)
+            .apply()
+    }
+
+    private fun maybePromptNotificationAccessOnboarding() {
+        refreshNotificationAccessState()
+        if (!NotificationAccessSettingsHelper.shouldAutoOpenSettings(
+                hasAccess = isNotificationAccessEnabled,
+                hasPromptedBefore = hasPromptedNotificationAccessOnboarding(),
+            )
+        ) {
+            return
+        }
+
+        markNotificationAccessOnboardingPrompted()
+        openNotificationAccessSettings()
+    }
+
+    private fun openNotificationAccessSettings() {
+        try {
+            startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to open notification listener settings", e)
+            Toast.makeText(
+                this,
+                getString(R.string.toast_notification_access_settings_fallback),
+                Toast.LENGTH_LONG,
+            ).show()
         }
     }
 
@@ -1059,6 +1118,8 @@ private fun resolveReachableMirrorIp(): String {
         if (needed.isNotEmpty()) {
             Log.i(TAG, "Requesting startup permissions: $needed")
             startupPermissionLauncher.launch(needed.toTypedArray())
+        } else {
+            maybePromptNotificationAccessOnboarding()
         }
     }
 
@@ -1301,6 +1362,7 @@ fun CastlaScreen(
     isImeEnabled: Boolean,
     isImeSelected: Boolean,
     isCastlaImeActive: Boolean = false,
+    isNotificationAccessEnabled: Boolean = false,
     onRestoreIme: () -> Unit = {},
     onStartClick: () -> Unit,
     onStopClick: () -> Unit,
@@ -1310,6 +1372,7 @@ fun CastlaScreen(
     onGrantShizukuPermission: () -> Unit = {},
     onEnableIme: () -> Unit,
     onSelectIme: () -> Unit,
+    onOpenNotificationAccessSettings: () -> Unit = {},
     shizukuDownloadProgress: Float = -1f,
     isHotspotActive: Boolean = false,
     onToggleHotspot: () -> Unit = {},
@@ -1776,6 +1839,51 @@ fun CastlaScreen(
                 Spacer(modifier = Modifier.height(24.dp))
             }
 
+            AnimatedVisibility(visible = !isNotificationAccessEnabled) {
+                Column {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(24.dp))
+                            .background(Color(0xFF0D2438).copy(alpha = 0.82f))
+                            .border(1.dp, Color(0xFF4FC3F7).copy(alpha = 0.3f), RoundedCornerShape(24.dp))
+                            .padding(20.dp)
+                    ) {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Text(
+                                text = stringResource(id = R.string.title_notification_overlay_setup),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(0xFF81D4FA)
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = stringResource(id = R.string.desc_notification_overlay_setup),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Color(0xFFB3E5FC),
+                                lineHeight = 20.sp
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Button(
+                                onClick = onOpenNotificationAccessSettings,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF0288D1)
+                                )
+                            ) {
+                                Text(
+                                    stringResource(id = R.string.btn_enable_notification_access),
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(24.dp))
+                }
+            }
+
             AnimatedVisibility(visible = shizukuRunning && !isShizukuOnPowerAllowlist) {
                 Column {
                     Box(
@@ -1989,3 +2097,16 @@ private fun UsbConfigWarningDialog(
         }
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+

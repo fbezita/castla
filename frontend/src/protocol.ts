@@ -59,9 +59,20 @@ export interface ServerInitMessage {
   verboseDiagnosticsEnabled?: boolean;
 }
 
+export interface NotificationMessage {
+  type: 'notification';
+  id: string;
+  packageName: string;
+  appLabel: string;
+  title: string;
+  text: string;
+  postedAtMs: number;
+}
+
 export type ControlMessage =
   | StreamMetadata
   | DiagnosticsMessage
+  | NotificationMessage
   | ServerInitMessage
   | Record<string, unknown>;
 
@@ -74,3 +85,4 @@ export interface EncodedFrame {
   keyFrame: boolean;
   config: boolean;
 }
+

@@ -18,11 +18,13 @@
     activeTab,
     isStarred,
     isAutorun,
+    isNotification,
     isDragActive,
     recentMeta,
     onLaunch,
     onToggleStar,
     onToggleAutorun,
+    onToggleNotification,
     onOpenEdit,
     onStartPress,
     onPointerMove,
@@ -30,14 +32,16 @@
     onPointerCancel
   } = $props<{
     app: AppInfo;
-    activeTab: "autorun" | "starred" | "recent" | "browse";
+    activeTab: "autorun" | "starred" | "recent" | "notifications" | "browse";
     isStarred: boolean;
     isAutorun: boolean;
+    isNotification: boolean;
     isDragActive: boolean;
     recentMeta: string;
     onLaunch: (app: AppInfo) => void;
     onToggleStar: (pkg: string) => void;
     onToggleAutorun: (app: AppInfo) => void;
+    onToggleNotification: (pkg: string) => void;
     onOpenEdit: (app: AppInfo) => void;
     onStartPress?: (event: PointerEvent, app: AppInfo, element: HTMLElement) => void;
     onPointerMove?: (event: PointerEvent) => void;
@@ -149,6 +153,20 @@
     >
       AUTO
     </button>
+
+    {#if !app.isPair}
+      <button
+        class="noti-btn"
+        class:active={isNotification}
+        title="Toggle notifications"
+        onclick={(event) => {
+          event.stopPropagation();
+          onToggleNotification(app.packageName);
+        }}
+      >
+        🔔
+      </button>
+    {/if}
 
     {#if app.isPair}
       <button
@@ -363,6 +381,34 @@
     align-items: center;
     justify-content: center;
     line-height: 1;
+  }
+
+  .noti-btn {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    color: rgb(255 255 255 / 0.4);
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+    transition:
+      background 0.16s ease,
+      color 0.16s ease,
+      transform 0.16s ease;
+  }
+
+  .noti-btn:hover {
+    background: rgb(255 255 255 / 0.08);
+    transform: scale(1.1);
+  }
+
+  .noti-btn.active {
+    color: #00e5ff;
+    text-shadow: 0 0 8px rgba(0, 229, 255, 0.4);
   }
 
 </style>
