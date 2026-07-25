@@ -3,6 +3,7 @@ package com.castla.mirror.input
 import android.os.SystemClock
 import android.util.Log
 import android.view.InputDevice
+import android.view.InputEvent
 import android.view.MotionEvent
 import com.castla.mirror.server.TouchEvent
 import kotlinx.coroutines.delay
@@ -64,7 +65,7 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
 
     init {
         // Initialize Shizuku binder connection
-        tryInitShizuku()
+        tryInitLegacyInputManager()
     }
 
     fun updateController(injector: ((TouchEvent, MotionEvent) -> Boolean)?) {
@@ -89,19 +90,80 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
         lastInjectedMovePositions.clear()
     }
 
-    private fun tryInitShizuku() {
+    private fun tryInitLegacyInputManager() {
         try {
-            val imClass = Class.forName("android.hardware.input.InputManager")
-            val getInstance = imClass.getMethod("getInstance")
-            inputManagerInstance = getInstance.invoke(null)
-            injectMethod = imClass.getMethod(
-                "injectInputEvent",
-                android.view.InputEvent::class.java,
-                Int::class.javaPrimitiveType
+            val candidates = arrayOf(
+                "android.hardware.input.InputManager",
+                "android.hardware.input.InputManagerGlobal"
             )
-            Log.i(TAG, "Shizuku InputManager initialized")
+
+            var imClass: Class<*>? = null
+            var instanceMethod: java.lang.reflect.Method? = null
+
+            for (className in candidates) {
+                try {
+                    val clazz = Class.forName(className)
+
+                    val method = clazz.getMethod("getInstance")
+
+                    imClass = clazz
+                    instanceMethod = method
+
+                    Log.i(TAG, "Legacy InputManager found: $className")
+                    break
+
+                } catch (e: Exception) {
+                    Log.i(TAG, "Legacy InputManager unavailable: $className")
+                }
+            }
+
+            if (imClass == null || instanceMethod == null) {
+                Log.w(TAG, "No legacy InputManager implementation found")
+                return
+            }
+
+            inputManagerInstance = instanceMethod.invoke(null)
+
+            injectMethod = inputManagerInstance!!
+                .javaClass
+                .methods
+                .firstOrNull { method ->
+                    if (method.name != "injectInputEvent") {
+                        return@firstOrNull false
+                    }
+
+                    val params = method.parameterTypes
+
+                    params.size == 2 &&
+                        params[0] == android.view.InputEvent::class.java &&
+                        params[1] == Int::class.javaPrimitiveType ||
+
+                    params.size == 3 &&
+                        params[0] == android.view.InputEvent::class.java &&
+                        params[1] == Int::class.javaPrimitiveType &&
+                        params[2] == Int::class.javaPrimitiveType
+                }
+
+            if (injectMethod == null) {
+                inputManagerInstance = null
+                Log.w(TAG, "injectInputEvent method not found")
+                return
+            }
+
+            Log.i(
+                TAG,
+                "Legacy InputManager initialized: ${imClass.name}, params=${injectMethod!!.parameterTypes.contentToString()}"
+            )
+
         } catch (e: Exception) {
-            Log.w(TAG, "Shizuku InputManager unavailable", e)
+            inputManagerInstance = null
+            injectMethod = null
+
+            Log.w(
+                TAG,
+                "Legacy InputManager initialization failed",
+                e
+            )
         }
     }
 
@@ -470,13 +532,35 @@ class TouchInjector(private var displayWidth: Int, private var displayHeight: In
         }
     }
 
+    private fun invokeInjectInputEvent(
+        event: InputEvent,
+        mode: Int
+    ): Boolean {
+        val method = injectMethod ?: return false
+        val instance = inputManagerInstance ?: return false
+
+        return try {
+            val result = when (method.parameterTypes.size) {
+                3 -> method.invoke(instance, event, mode, 0)
+                2 -> method.invoke(instance, event, mode)
+                else -> return false
+            }
+
+            result as? Boolean ?: false
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Legacy injectInputEvent failed", e)
+            false
+        }
+    }
+
     private fun injectMotionEvent(event: TouchEvent, motionEvent: MotionEvent): Boolean {
         val injector = controllerInjector
 
         return if (injector != null) {
             injector.invoke(event, motionEvent)
         } else {
-            (injectMethod?.invoke(inputManagerInstance, motionEvent, 0) as? Boolean) ?: true
+            invokeInjectInputEvent(motionEvent, 0)
         }
     }
 

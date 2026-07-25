@@ -299,17 +299,94 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
     private fun tryInitInputManager() {
         try {
-            val imClass = Class.forName("android.hardware.input.InputManager")
-            val getInstance = imClass.getMethod("getInstance")
-            inputManagerInstance = getInstance.invoke(null)
-            injectMethod = imClass.getMethod(
-                "injectInputEvent",
-                InputEvent::class.java,
-                Int::class.javaPrimitiveType
+            val sm = Class.forName("android.os.ServiceManager")
+            val getService = sm.getMethod("getService", String::class.java)
+            val binder = getService.invoke(null, "input") as android.os.IBinder
+
+            val stub = Class.forName("android.hardware.input.IInputManager\$Stub")
+            val asInterface = stub.getMethod("asInterface", android.os.IBinder::class.java)
+
+            inputManagerInstance = asInterface.invoke(null, binder)
+
+            val injectCandidates = listOf(
+                arrayOf(
+                    android.view.InputEvent::class.java,
+                    Int::class.javaPrimitiveType
+                ),
+                arrayOf(
+                    android.view.InputEvent::class.java,
+                    Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType
+                )
+            )         
+
+            injectMethod = inputManagerInstance!!
+                .javaClass.methods
+                .firstOrNull { method ->
+                    method.name == "injectInputEvent" &&
+                    injectCandidates.any { candidate ->
+                        method.parameterTypes.contentEquals(candidate)
+                    }
+                }
+
+            Log.i(TAG,
+                "inject method=${injectMethod}, params=${injectMethod?.parameterTypes?.contentToString()}"
             )
-            Log.i(TAG, "InputManager initialized in privileged process")
+
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to init InputManager", e)
+            Log.e(TAG, "Failed to init InputManager via Binder", e)
+        }
+    }
+
+    private fun invokeInjectInputEvent(
+        event: InputEvent,
+        mode: Int
+    ): Boolean {
+        val manager = inputManagerInstance ?: return false
+        val method = injectMethod ?: return false
+
+        return try {
+            val result = when (method.parameterTypes.size) {
+                2 -> {
+                    method.invoke(
+                        manager,
+                        event,
+                        mode
+                    )
+                }
+
+                3 -> {
+                    when (method.parameterTypes[2]) {
+                        Int::class.javaPrimitiveType -> {
+                            method.invoke(
+                                manager,
+                                event,
+                                mode,
+                                0
+                            )
+                        }
+
+                        Boolean::class.javaPrimitiveType -> {
+                            method.invoke(
+                                manager,
+                                event,
+                                mode,
+                                false
+                            )
+                        }
+
+                        else -> return false
+                    }
+                }
+
+                else -> return false
+            }
+
+            result as? Boolean ?: false
+
+        } catch (e: Exception) {
+            Log.e(TAG, "injectInputEvent failed", e)
+            false
         }
     }
 
@@ -758,7 +835,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
         } catch (_: Exception) {}
 
         try {
-            injectMethod?.invoke(inputManagerInstance, event, 0)
+            invokeInjectInputEvent(event, 0)
         } catch (e: Exception) {
             Log.e(TAG, "Input injection failed on display $displayId", e)
         } finally {
@@ -782,7 +859,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
         } catch (_: Exception) {}
 
         return try {
-            (injectMethod?.invoke(inputManagerInstance, event, 0) as? Boolean) ?: false
+            invokeInjectInputEvent(event, 0)
         } catch (e: Exception) {
             Log.e(TAG, "Input event injection failed on display $displayId", e)
             false
@@ -1324,10 +1401,10 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     )
                 }
                 setKeyEventDisplayIdMethod?.invoke(downEvent, displayId)
-                injectMethod?.invoke(inputManagerInstance, downEvent, 0)
+                invokeInjectInputEvent(downEvent, 0)
 
                 setKeyEventDisplayIdMethod?.invoke(upEvent, displayId)
-                injectMethod?.invoke(inputManagerInstance, upEvent, 0)
+                invokeInjectInputEvent(upEvent, 0)
                 Log.i(TAG, "Injected KEYCODE_HOME (3) natively on display $displayId")
             } catch (ex: Exception) {
                 Log.w(TAG, "Direct KEYCODE_HOME injection failed, falling back to legacy shell", ex)
@@ -1355,7 +1432,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     }
                     for (event in events) {
                         setKeyEventDisplayIdMethod?.invoke(event, displayId)
-                        injectMethod?.invoke(inputManagerInstance, event, 0)
+                        invokeInjectInputEvent(event, 0)
                     }
                     return
                 }
@@ -1401,10 +1478,10 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     )
                 }
                 setKeyEventDisplayIdMethod?.invoke(downEvent, displayId)
-                injectMethod?.invoke(inputManagerInstance, downEvent, 0)
+                invokeInjectInputEvent(downEvent, 0)
 
                 setKeyEventDisplayIdMethod?.invoke(upEvent, displayId)
-                injectMethod?.invoke(inputManagerInstance, upEvent, 0)
+                invokeInjectInputEvent(upEvent, 0)
                 Log.i(TAG, "Injected KEYCODE_PASTE natively on display $displayId")
             } catch (ex: Exception) {
             
@@ -1444,10 +1521,10 @@ class PrivilegedService : IPrivilegedService.Stub() {
                             )
                         }
                         setKeyEventDisplayIdMethod?.invoke(downEvent, displayId)
-                        injectMethod?.invoke(inputManagerInstance, downEvent, 0)
+                        invokeInjectInputEvent(downEvent, 0)
 
                         setKeyEventDisplayIdMethod?.invoke(upEvent, displayId)
-                        injectMethod?.invoke(inputManagerInstance, upEvent, 0)
+                        invokeInjectInputEvent(upEvent, 0)
                     }
                     Log.i(TAG, "Injected $backspaces KEYCODE_DEL natively on display $displayId")
                     
@@ -2017,10 +2094,10 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     )
                 }
                 setKeyEventDisplayIdMethod?.invoke(downEvent, displayId)
-                injectMethod?.invoke(inputManagerInstance, downEvent, 0)
+                invokeInjectInputEvent(downEvent, 0)
 
                 setKeyEventDisplayIdMethod?.invoke(upEvent, displayId)
-                injectMethod?.invoke(inputManagerInstance, upEvent, 0)
+                invokeInjectInputEvent(upEvent, 0)
                 // Log.i(TAG, "Injected KEYCODE_WAKEUP (224) natively on display $displayId")
                 
             } catch (e: Exception) {
