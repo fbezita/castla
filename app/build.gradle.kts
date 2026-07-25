@@ -73,7 +73,7 @@ val buildTimestamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ").format(Date(
 android {
     namespace = "com.castla.mirror"
     // Raised compileSdk to 36 to satisfy requirement of androidx.core:core:1.18.0 and other dependencies
-    compileSdk = 37
+    compileSdk = 36
 
     if (keystorePropertiesFile.exists()) {
         signingConfigs {
@@ -89,7 +89,7 @@ android {
     defaultConfig {
         applicationId = "com.castla.mirror"
         minSdk = 26
-        targetSdk = 37
+        targetSdk = 35
         versionCode = 12
         versionName = "2.6.1"
         buildConfigField("String", "BUILD_TIMESTAMP", "\"$buildTimestamp\"")
