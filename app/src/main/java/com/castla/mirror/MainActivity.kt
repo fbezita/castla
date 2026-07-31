@@ -1115,6 +1115,14 @@ private fun resolveReachableMirrorIp(): String {
             }
         }
 
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+            if (checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                needed.add(Manifest.permission.ACCESS_LOCAL_NETWORK)
+            }
+        }        
+
         if (needed.isNotEmpty()) {
             Log.i(TAG, "Requesting startup permissions: $needed")
             startupPermissionLauncher.launch(needed.toTypedArray())

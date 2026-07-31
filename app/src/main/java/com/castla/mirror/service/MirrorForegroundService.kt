@@ -2962,7 +2962,7 @@ class MirrorForegroundService : Service() {
     ): String {
         val resolvedComponent = resolveLaunchComponent(packageOrComponent)
         val launchTarget = resolvedComponent ?: packageOrComponent
-        val flags = if (reorderToFront) "0x10020000" else "0x10200000"
+        val flags = MultiDisplayLaunchPolicy.shellFlags(reorderToFront)
         return buildString {
             append("am start --display $displayId -f $flags ")
             if (resolvedComponent != null) {
@@ -4427,8 +4427,8 @@ class MirrorForegroundService : Service() {
             try {
                 if (forceColdStart && cleanPkg != "HOME") { try { service.execCommand("am force-stop $cleanPkg") } catch (_: Exception) {} }
                 val originalDisplayId = try { runBinderSafe { service.getDisplayIdForPackage(cleanPkg) } ?: -1 } catch (_: Exception) { -1 }
-                val activeDisplayIds = pipelines.values.map { it.displayId }.filter { it >= 0 }
-                val targetDisplayId = if (!needsFreshLaunchPreparation && !forceDisplayId && originalDisplayId >= 0 && activeDisplayIds.contains(originalDisplayId)) originalDisplayId else correctedDisplayId
+                // Always route to the requested virtual display. A package task on Display 0 must not redirect this launch to the phone.
+                val targetDisplayId = correctedDisplayId
 
                 Log.i(TAG, "[$name Pipeline] Symmetric task processing initialized -> Routing $cleanPkg to Display token: $targetDisplayId freshLaunchPrep=$needsFreshLaunchPreparation previousPkg=$previousPkg lastPrepared=$lastPreparedTargetPackage")
                 FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision pkg=$cleanPkg freshPrep=$needsFreshLaunchPreparation sameAppGuard=false originalDisplayId=$originalDisplayId correctedDisplayId=$correctedDisplayId targetDisplayId=$targetDisplayId previousPkg=$previousPkg lastPrepared=$lastPreparedTargetPackage forceDisplayId=$forceDisplayId")
@@ -4452,24 +4452,62 @@ class MirrorForegroundService : Service() {
                     )
                 }
                 val isWarmStart = matchingTaskIds.isNotEmpty()
+                val targetDisplayPackages = try {
+                    runBinderSafe(1000L) { service.getRunningTasksOnDisplay(targetDisplayId) } ?: emptyList()
+                } catch (_: Exception) {
+                    emptyList()
+                }
+                val targetDisplayHasTask = targetDisplayPackages.any {
+                    it == cleanPkg || it.startsWith("$cleanPkg/")
+                } || (isWarmStart && originalDisplayId == targetDisplayId)
+                val launchPlan = LaunchPlanner.plan(
+                    LaunchState(
+                        targetDisplayId = targetDisplayId,
+                        displayReady = targetDisplayId >= 0,
+                        targetTaskIds = if (targetDisplayHasTask) matchingTaskIds else emptyList(),
+                        otherDisplayTaskExists = isWarmStart && !targetDisplayHasTask && originalDisplayId >= 0 && originalDisplayId != targetDisplayId,
+                        forceColdStart = forceColdStart,
+                        displaySizeMatches = width == alignedW && height == alignedH,
+                        encoderReady = isEncoderActive,
+                        encoderDisplayId = if (isEncoderActive) displayId else -1,
+                    )
+                )
+                val canReuseWarmTask = launchPlan.taskAction == TaskLaunchAction.MOVE_TASK_TO_FRONT
+                Log.i(TAG, "[$name Pipeline] taskResidency pkg=$cleanPkg matching=${matchingTaskIds.size} originalDisplayId=$originalDisplayId targetDisplayId=$targetDisplayId targetDisplayHasTask=$targetDisplayHasTask targetEntries=${targetDisplayPackages.size} plan=${launchPlan.taskAction} reason=${launchPlan.reason} resize=${launchPlan.resizeRequired} encoderReconnect=${launchPlan.encoderReconnectRequired}")
                 scheduleDisplayRoutingDiagnostics(
                     pane = name,
                     service = service,
                     targetPkg = cleanPkg,
                     targetDisplayId = targetDisplayId,
                     phase = "prelaunch",
-                    launchMode = if (isWarmStart) "warm_task_move" else "pending",
+                    launchMode = when (launchPlan.taskAction) { TaskLaunchAction.MOVE_TASK_TO_FRONT -> "warm_task_move"; TaskLaunchAction.CREATE_NEW_TASK -> "new_task_required"; TaskLaunchAction.MOVE_TASK_TO_DISPLAY_AND_FRONT -> "task_move"; TaskLaunchAction.WAIT_FOR_DISPLAY -> "pending" },
                     vdDisplayId = displayId
                 )
 
-                for (taskId in matchingTaskIds) {
-                    try { runBinderSafe { service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId"); service.execCommand("cmd activity task move-to-front $taskId") } } catch (_: Exception) {}
+                if (launchPlan.taskAction == TaskLaunchAction.MOVE_TASK_TO_FRONT) {
+                    for (taskId in matchingTaskIds) {
+                        try {
+                            val moveResult = runBinderSafe {
+                                if (service.moveTaskToFrontNative(taskId)) {
+                                    "native"
+                                } else {
+                                    // Compatibility fallback for releases without the native ATM method.
+                                    "shell=" + service.execCommand("cmd activity task move-to-front $taskId")
+                                }
+                            } ?: "false"
+                            Log.i(TAG, "[$name Pipeline] warmTaskMove taskId=$taskId displayId=$targetDisplayId result=$moveResult")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "[$name Pipeline] warmTaskMove failed taskId=$taskId displayId=$targetDisplayId", e)
+                        }
+                    }
+                } else if (isWarmStart) {
+                    FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision existingTaskOnOtherDisplay=true existingDisplayId=$originalDisplayId targetDisplayId=$targetDisplayId; creating separate task")
                 }
 
                 // Prevent redundant 'am start' shell command execution immediately following async task migration command.
                 // Re-launching via 'am start' in parallel with active task displacement commands causes Android OS task stack conflict,
                 // frequently forcing the primary Display 0 (MainActivity) to recede to the background Recents view.
-                if (isWarmStart && !forceColdStart && !BrowserLaunchPolicy.shouldBypassWarmTaskMove(cleanPkg)) {
+                if (canReuseWarmTask && !BrowserLaunchPolicy.shouldBypassWarmTaskMove(cleanPkg)) {
                     markServiceMutation("launch_component_warm_start")
                     FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision warmStart=true pkg=$cleanPkg taskCount=${matchingTaskIds.size} targetDisplayId=$targetDisplayId freshPrep=$effectiveNeedsFreshLaunchPreparation")
                     scheduleDisplayRoutingDiagnostics(name, service, cleanPkg, targetDisplayId, "postlaunch", "warm_task_move", displayId)
@@ -4544,7 +4582,7 @@ class MirrorForegroundService : Service() {
                     FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision nativeStarted=false usingShell=true pkg=$cleanPkg targetDisplayId=$targetDisplayId warmStart=$isWarmStart")
                     // Introduce a 150ms delay for stabilization of window manager and focus subsystems.
                     delay(150L)
-                    val command = buildShellLaunchCommand(targetDisplayId, packageOrComponent, extraKey, extraValue, reorderToFront = isWarmStart)
+                    val command = buildShellLaunchCommand(targetDisplayId, packageOrComponent, extraKey, extraValue, reorderToFront = canReuseWarmTask)
                     val result = runBinderSafe { service.execCommand(command) } ?: ""
                     if (result.contains("SecurityException") || result.contains("Permission Denial")) {
                         val retryTasks = try { runBinderSafe { service.getTaskIdsForPackage(cleanPkg) } ?: intArrayOf() } catch (_: Exception) { intArrayOf() }
@@ -4864,3 +4902,10 @@ class MirrorForegroundService : Service() {
         }
     }
 }
+
+
+
+
+
+
+

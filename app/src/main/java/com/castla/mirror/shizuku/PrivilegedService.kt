@@ -19,6 +19,7 @@ import android.view.InputEvent
 import android.view.MotionEvent
 import android.view.Surface
 import com.castla.mirror.ui.StreamSettings
+import com.castla.mirror.service.MultiDisplayLaunchPolicy
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 
@@ -108,6 +109,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
     private var activityTaskManagerInstance: Any? = null
     private var startActivityMethod: Method? = null
     private var moveTaskToDisplayMethod: Method? = null
+    private var moveTaskToFrontMethod: Method? = null
     
     private var inputManagerInstance: Any? = null
     private var injectMethod: Method? = null
@@ -428,6 +430,13 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     startActivityMethod = atmInterface?.methods?.find { m ->
                         m.name == "startActivity" && m.parameterTypes.size in 10..12
                     }
+                    val moveToFrontCandidates = (atmInterface?.methods?.toList().orEmpty() + runCatching {
+                        Class.forName("android.app.IActivityTaskManager").methods.toList()
+                    }.getOrDefault(emptyList())).filter { method ->
+                        method.name == "moveTaskToFront" && method.parameterTypes.count { it == Int::class.javaPrimitiveType } >= 1
+                    }.distinctBy { method -> method.parameterTypes.joinToString(",") }
+                    moveTaskToFrontMethod = moveToFrontCandidates.minByOrNull { method -> method.parameterTypes.size }
+                    Log.i(TAG, "IActivityTaskManager.moveTaskToFront resolved=${moveTaskToFrontMethod != null} candidates=${moveToFrontCandidates.size} signature=${moveTaskToFrontMethod?.parameterTypes?.joinToString { it.simpleName }}")
                     if (startActivityMethod != null) {
                         Log.i(TAG, "IActivityTaskManager reflection binder successfully prepared (params=${startActivityMethod?.parameterTypes?.size})")
                     } else {
@@ -1229,7 +1238,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
     ): String {
         val resolvedComponent = resolveLaunchComponent(packageOrComponent)
         return buildString {
-            append("am start --display $displayId -f 0x10200000 ") // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+            append("am start --display $displayId -f ${MultiDisplayLaunchPolicy.shellFlags(reorderToFront = false)} ")
             append("-a android.intent.action.MAIN -c android.intent.category.LAUNCHER ")
             if (resolvedComponent != null) {
                 append("-n ${escapeShellArg(resolvedComponent)} ")
@@ -1264,7 +1273,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 } else {
                     `package` = packageName
                 }
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+                addFlags(MultiDisplayLaunchPolicy.flags(reorderToFront = false))
             }
 
             val options = android.app.ActivityOptions.makeBasic()
@@ -1294,6 +1303,31 @@ class PrivilegedService : IPrivilegedService.Stub() {
         }
     }
 
+    override fun moveTaskToFrontNative(taskId: Int): Boolean {
+        val atm = activityTaskManagerInstance ?: return false
+        val method = moveTaskToFrontMethod ?: return false
+        return try {
+            val args = Array<Any?>(method.parameterTypes.size) { null }
+            var intOrdinal = 0
+            method.parameterTypes.forEachIndexed { index, type ->
+                when {
+                    type == Int::class.javaPrimitiveType -> {
+                        args[index] = if (intOrdinal++ == 0) taskId else 0
+                    }
+                    type == String::class.java -> args[index] = "com.android.shell"
+                    type == Boolean::class.javaPrimitiveType -> args[index] = false
+                    else -> args[index] = null
+                }
+            }
+            val result = method.invoke(atm, *args)
+            val success = result as? Boolean ?: true
+            Log.i(TAG, "Native moveTaskToFront taskId=$taskId success=$success")
+            success
+        } catch (e: Exception) {
+            Log.w(TAG, "Native moveTaskToFront failed taskId=$taskId", e)
+            false
+        }
+    }
     override fun moveTaskToDisplayNative(taskId: Int, displayId: Int): Boolean {
         val atm = activityTaskManagerInstance ?: return false
         val method = moveTaskToDisplayMethod ?: return false
@@ -1322,7 +1356,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 } else {
                     `package` = packageName
                 }
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+                addFlags(MultiDisplayLaunchPolicy.flags(reorderToFront = false))
                 putExtra(extraKey, extraValue)
             }
 
@@ -2329,6 +2363,30 @@ class PrivilegedService : IPrivilegedService.Stub() {
         }
     }
 
+    private fun invokeGetTasks(service: Any?, displayId: Int?): List<*> {
+        if (service == null) return emptyList<Any>()
+        val methods = service.javaClass.methods.filter { it.name == "getTasks" }
+        val method = methods.firstOrNull { candidate ->
+            candidate.parameterTypes.count { it == Int::class.javaPrimitiveType } >= 2
+        } ?: throw NoSuchMethodException("No compatible getTasks method found")
+        val intCount = method.parameterTypes.count { it == Int::class.javaPrimitiveType }
+        val args = Array<Any?>(method.parameterTypes.size) { index ->
+            val type = method.parameterTypes[index]
+            if (type == Int::class.javaPrimitiveType) null
+            else if (type == Boolean::class.javaPrimitiveType) false
+            else null
+        }
+        val intArgs = GetTasksQueryPolicy.intArguments(intCount, displayId)
+        var intOrdinal = 0
+        method.parameterTypes.forEachIndexed { index, type ->
+            if (type == Int::class.javaPrimitiveType) {
+                args[index] = intArgs[intOrdinal++]
+            }
+        }
+        val result = method.invoke(service, *args) as? List<*> ?: emptyList<Any>()
+        Log.i(TAG, "getTasks signature=${method.parameterTypes.joinToString { it.simpleName }} displayId=$displayId result=${result.size}")
+        return result
+    }
     override fun getRunningTasksOnDisplay(displayId: Int): List<String> {
         val packages = mutableListOf<String>()
         try {
@@ -2336,21 +2394,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
             val getService = atmClass.getMethod("getService")
             val service = getService.invoke(null)
 
-            val getTasksMethod = service.javaClass.methods.firstOrNull { it.name == "getTasks" }
-                ?: throw NoSuchMethodException("No getTasks method found on ATM")
-
-            val params = getTasksMethod.parameterTypes
-            val args = Array(params.size) { index ->
-                val type = params[index]
-                when {
-                    type == Int::class.javaPrimitiveType -> {
-                        if (index == 0) 100 else 0
-                    }
-                    type == Boolean::class.javaPrimitiveType -> false
-                    else -> null
-                }
-            }
-            val tasks = getTasksMethod.invoke(service, *args) as List<*>
+            val tasks = invokeGetTasks(service, displayId)
 
             for (task in tasks) {
                 if (task == null) continue
@@ -2427,21 +2471,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
             val getService = atmClass.getMethod("getService")
             val service = getService.invoke(null)
 
-            val getTasksMethod = service.javaClass.methods.firstOrNull { it.name == "getTasks" }
-                ?: throw NoSuchMethodException("No getTasks method found on ATM")
-
-            val params = getTasksMethod.parameterTypes
-            val args = Array(params.size) { index ->
-                val type = params[index]
-                when {
-                    type == Int::class.javaPrimitiveType -> {
-                        if (index == 0) 100 else 0
-                    }
-                    type == Boolean::class.javaPrimitiveType -> false
-                    else -> null
-                }
-            }
-            val tasks = getTasksMethod.invoke(service, *args) as List<*>
+            val tasks = invokeGetTasks(service, null)
 
             Log.d(TAG, "getTaskIdsForPackage natively: queried ${tasks.size} tasks for package $packageName")
 
@@ -2539,19 +2569,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 Log.w(TAG, "[FocusTrace] focused_root_failed displayId=$displayId", e)
             }
 
-            val getTasksMethod = service.javaClass.methods.firstOrNull { it.name == "getTasks" }
-                ?: throw NoSuchMethodException("No getTasks method found on ATM")
-
-            val params = getTasksMethod.parameterTypes
-            val args = Array(params.size) { index ->
-                val type = params[index]
-                when {
-                    type == Int::class.javaPrimitiveType -> if (index == 0) 100 else 0
-                    type == Boolean::class.javaPrimitiveType -> false
-                    else -> null
-                }
-            }
-            val tasks = getTasksMethod.invoke(service, *args) as List<*>
+            val tasks = invokeGetTasks(service, displayId)
 
             for (task in tasks) {
                 if (task == null) continue
@@ -2613,21 +2631,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
             val getService = atmClass.getMethod("getService")
             val service = getService.invoke(null)
 
-            val getTasksMethod = service.javaClass.methods.firstOrNull { it.name == "getTasks" }
-                ?: throw NoSuchMethodException("No getTasks method found on ATM")
-
-            val params = getTasksMethod.parameterTypes
-            val args = Array(params.size) { index ->
-                val type = params[index]
-                when {
-                    type == Int::class.javaPrimitiveType -> {
-                        if (index == 0) 100 else 0
-                    }
-                    type == Boolean::class.javaPrimitiveType -> false
-                    else -> null
-                }
-            }
-            val tasks = getTasksMethod.invoke(service, *args) as List<*>
+            val tasks = invokeGetTasks(service, null)
 
             for (task in tasks) {
                 if (task == null) continue
@@ -2728,3 +2732,9 @@ class PrivilegedService : IPrivilegedService.Stub() {
         return android.os.Process.myPid()
     }
 }
+
+
+
+
+
+

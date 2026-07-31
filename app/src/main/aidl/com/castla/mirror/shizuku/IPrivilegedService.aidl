@@ -201,6 +201,9 @@ interface IPrivilegedService {
      */
     boolean moveTaskToDisplayNative(int taskId, int displayId) = 33;
 
+    /** Bring an existing task to the front without starting its launcher activity. */
+    boolean moveTaskToFrontNative(int taskId) = 38;
+
     /**
      * Inject a full MotionEvent on the specified display and return whether InputManager accepted it.
      */
@@ -212,3 +215,5 @@ interface IPrivilegedService {
     String getTopActivityForDisplay(int displayId) = 35;
     int getProcessPid() = 36;
 }
+
+
