@@ -84,7 +84,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
     private val virtualDisplays = mutableMapOf<Int, VirtualDisplay>()
     private val virtualDisplayNames = mutableMapOf<Int, String>()
-    
+
     // Cache map to throttle heavy dumpsys shell commands for each displayId
     private val lastWakeUpTimeMap = ConcurrentHashMap<Int, Long>()
 
@@ -105,12 +105,12 @@ class PrivilegedService : IPrivilegedService.Stub() {
     private var displayWindowListenerProxy: Any? = null
     private var displayWindowListenerDescriptor: String = "android.view.IDisplayWindowListener"
     @Volatile private var displayWindowListenerRegistered = false
-    
+
     private var activityTaskManagerInstance: Any? = null
     private var startActivityMethod: Method? = null
     private var moveTaskToDisplayMethod: Method? = null
     private var moveTaskToFrontMethod: Method? = null
-    
+
     private var inputManagerInstance: Any? = null
     private var injectMethod: Method? = null
     private var shellContext: android.content.Context? = null
@@ -123,7 +123,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
         MotionEvent.PointerCoords().apply { pressure = 1.0f; size = 1.0f }
     )
     private var setDisplayIdMethod: Method? = null
-    
+
     private var setKeyEventDisplayIdMethod: Method? = null
     private val displayTopActivityCache = ConcurrentHashMap<Int, String>()
     private val displayTopActivityUpdatedAt = ConcurrentHashMap<Int, Long>()
@@ -135,10 +135,10 @@ class PrivilegedService : IPrivilegedService.Stub() {
         bypassHiddenApiRestrictions()
         tryInitInputManager()
         tryInitShellContext()
-        
+
         // Pre-initialize system binders for activity manager and window manager
         tryInitSystemServices()
-        
+
         // Must run AFTER shell context init so ActivityThread state is prepared. This makes
         // any subsequent AudioRecord/AudioTrack use packageName="com.android.shell"
         // matching our shell uid 2000 — required for AudioFlinger's attribution validator.
@@ -272,7 +272,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 null
             }
 
-            
+
             // Create a proper package context for "com.android.shell" to align our identity
             // with shell UID 2000, resolving SecurityException when starting activities.
             val rawShellContext = try {
@@ -292,7 +292,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     return super.getAttributionSource()
                 }
             }
-            
+
             Log.i(TAG, "Shell context initialized: pkg=${shellContext?.packageName}, attr=${shellAttribution != null}")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to init shell context", e)
@@ -320,7 +320,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     Int::class.javaPrimitiveType,
                     Int::class.javaPrimitiveType
                 )
-            )         
+            )
 
             injectMethod = inputManagerInstance!!
                 .javaClass.methods
@@ -392,7 +392,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
         }
     }
 
-    
+
     // Initialize standard system services natively via reflection to bypass shell
     private fun tryInitSystemServices() {
         try {
@@ -417,7 +417,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 Log.w(TAG, "Failed to prepare IActivityManager binder interface", e)
             }
 
-            
+
             // Cache ActivityTaskManager binder interface
             try {
                 val atmBinder = getService.invoke(null, "activity_task") as? android.os.IBinder
@@ -425,7 +425,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     val atmClass = Class.forName("android.app.IActivityTaskManager\$Stub")
                     val asInterface = atmClass.getMethod("asInterface", android.os.IBinder::class.java)
                     activityTaskManagerInstance = asInterface.invoke(null, atmBinder)
-                    
+
                     val atmInterface = activityTaskManagerInstance?.javaClass
                     startActivityMethod = atmInterface?.methods?.find { m ->
                         m.name == "startActivity" && m.parameterTypes.size in 10..12
@@ -540,7 +540,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to prepare IActivityTaskManager binder interface", e)
             }
-            
+
 
             // Cache WindowManager binder interface
             try {
@@ -549,7 +549,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     val wmClass = Class.forName("android.view.IWindowManager\$Stub")
                     val asInterface = wmClass.getMethod("asInterface", android.os.IBinder::class.java)
                     windowManagerInstance = asInterface.invoke(null, wmBinder)
-                    
+
                     val wmInterface = windowManagerInstance?.javaClass
                     setForcedDisplaySizeMethod = wmInterface?.getMethod(
                         "setForcedDisplaySize",
@@ -645,7 +645,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
         }
     }
 
-    
+
     // Start activity natively via IActivityTaskManager to bypass OS package matching restrictions
     private fun nativeStartActivity(intent: Intent, options: android.os.Bundle?): Boolean {
         val atm = activityTaskManagerInstance ?: return false
@@ -680,7 +680,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
             false
         }
     }
-    
+
 
     override fun createVirtualDisplay(width: Int, height: Int, dpi: Int, name: String): Int {
         val existingDisplayIds = virtualDisplayNames
@@ -1251,7 +1251,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
         }.trim()
     }
 
-    
+
     override fun launchAppOnDisplay(displayId: Int, packageName: String) {
         launchAppOnDisplayV2(displayId, packageName, true)
     }
@@ -1368,7 +1368,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 Log.w(TAG, "setLaunchDisplayId option failed to apply", e)
             }
 
-            
+
             val started = nativeStartActivity(intent, options.toBundle())
             if (started) {
                 Log.i(TAG, "Natively launched app $packageName with extras on display $displayId via IActivityTaskManager")
@@ -1383,7 +1383,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     execCommand(cmd)
                 }
             }
-            
+
         } catch (e: SecurityException) {
             Log.e(TAG, "Failed to launch $packageName with extra on display $displayId (display not found?)", e)
             throw e
@@ -1405,7 +1405,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 options.javaClass.getMethod("setLaunchDisplayId", Int::class.javaPrimitiveType).invoke(options, displayId)
             } catch (_: Exception) {}
 
-            
+
             val started = nativeStartActivity(intent, options.toBundle())
             if (started) {
                 Log.i(TAG, "Natively launched VirtualDisplayHomeActivity on display $displayId via IActivityTaskManager")
@@ -1419,10 +1419,10 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     execCommand(cmd)
                 }
             }
-            
+
         } catch (e: Exception) {
             Log.e(TAG, "Failed to launch custom HOME on display $displayId", e)
-            
+
             // Inject KEYCODE_HOME (3) directly into the virtual display to bypass shell fork
             try {
                 val now = SystemClock.uptimeMillis()
@@ -1444,12 +1444,12 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 Log.w(TAG, "Direct KEYCODE_HOME injection failed, falling back to legacy shell", ex)
                 try { execCommand("input -d $displayId keyevent 3") } catch (_: Exception) {}
             }
-            
+
         }
     }
-    
 
-    
+
+
     override fun injectText(text: String, displayId: Int) {
         if (text.isEmpty()) return
         val isAsciiOnly = text.all { it.code < 128 }
@@ -1457,7 +1457,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
             try {
                 val charMap = android.view.KeyCharacterMap.load(android.view.KeyCharacterMap.VIRTUAL_KEYBOARD)
                 val events = charMap.getEvents(text.toCharArray())
-                
+
                 if (events != null) {
                     if (setKeyEventDisplayIdMethod == null) {
                         setKeyEventDisplayIdMethod = android.view.KeyEvent::class.java.getMethod(
@@ -1470,7 +1470,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     }
                     return
                 }
-                
+
             } catch (e: Exception) {
                 Log.w(TAG, "KeyCharacterMap conversion failed, falling back to clipboard", e)
             }
@@ -1499,7 +1499,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
             }
             Thread.sleep(50)
 
-            
+
             // Inject KEYCODE_PASTE (279) directly to skip expensive shell execution
             try {
                 val now = SystemClock.uptimeMillis()
@@ -1518,7 +1518,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 invokeInjectInputEvent(upEvent, 0)
                 Log.i(TAG, "Injected KEYCODE_PASTE natively on display $displayId")
             } catch (ex: Exception) {
-            
+
                 Log.w(TAG, "Direct KEYCODE_PASTE injection failed, falling back to shell", ex)
                 val pasteCmd = if (displayId > 0) {
                     "input -d $displayId keyevent ${android.view.KeyEvent.KEYCODE_PASTE}"
@@ -1548,7 +1548,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                         val downEvent = android.view.KeyEvent(now, now, android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_DEL, 0, 0, android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD)
                         val upEvent = android.view.KeyEvent(now, now, android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_DEL, 0, 0, android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD)
 
-                        
+
                         if (setKeyEventDisplayIdMethod == null) {
                             setKeyEventDisplayIdMethod = android.view.KeyEvent::class.java.getMethod(
                                 "setDisplayId", Int::class.javaPrimitiveType
@@ -1561,7 +1561,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                         invokeInjectInputEvent(upEvent, 0)
                     }
                     Log.i(TAG, "Injected $backspaces KEYCODE_DEL natively on display $displayId")
-                    
+
                 } catch (ex: Exception) {
                     Log.w(TAG, "Direct KEYCODE_DEL injection failed, falling back to shell", ex)
                     val bsKeys = (1..backspaces).joinToString(" ") { "67" }
@@ -1574,7 +1574,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
             Log.e(TAG, "injectComposingText failed", e)
         }
     }
-    
+
 
     override fun addInterfaceAddress(ifName: String, address: String, prefixLength: Int): Boolean { return true }
     override fun removeInterfaceAddress(ifName: String, address: String, prefixLength: Int): Boolean { return true }
@@ -2010,7 +2010,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
     private fun doCleanupVirtualDisplayResourcesSync(displayId: Int, vd: android.hardware.display.VirtualDisplay) {
         try {
             Log.i(TAG, "Cleaning up resources for virtual display: id=$displayId")
-            
+
             val apps = getRunningTasksOnDisplay(displayId)
             apps.forEach { app ->
                 if (app.isNotEmpty() && !app.contains("/") && app != "com.castla.mirror" && app != "com.castla.mirror.debug") {
@@ -2022,7 +2022,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     }
                 }
             }
-            
+
             try {
                 if (windowManagerInstance != null && clearForcedDisplaySizeMethod != null) {
                     clearForcedDisplaySizeMethod?.invoke(windowManagerInstance, displayId)
@@ -2046,7 +2046,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 Log.w(TAG, "Native WindowManager density reset failed, falling back to shell", e)
                 try { execCommand("wm density reset -d $displayId") } catch (_: Exception) {}
             }
-            
+
         } catch (e: Exception) {
             Log.e(TAG, "Error in cleanupVirtualDisplayResources for display $displayId", e)
         } finally {
@@ -2121,7 +2121,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     InputDevice.SOURCE_KEYBOARD
                 )
 
-                
+
                 if (setKeyEventDisplayIdMethod == null) {
                     setKeyEventDisplayIdMethod = android.view.KeyEvent::class.java.getMethod(
                         "setDisplayId", Int::class.javaPrimitiveType
@@ -2133,7 +2133,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 setKeyEventDisplayIdMethod?.invoke(upEvent, displayId)
                 invokeInjectInputEvent(upEvent, 0)
                 // Log.i(TAG, "Injected KEYCODE_WAKEUP (224) natively on display $displayId")
-                
+
             } catch (e: Exception) {
                 Log.w(TAG, "Direct KEYCODE_WAKEUP injection failed, falling back to shell dumpsys power", e)
                 try {
@@ -2157,9 +2157,9 @@ class PrivilegedService : IPrivilegedService.Stub() {
             Log.e(TAG, "keepVirtualDisplayAlive failed for display $displayId", e)
         }
     }
-    
 
-    
+
+
     override fun resizeVirtualDisplay(displayId: Int, width: Int, height: Int, densityDpi: Int) {
         val vd = virtualDisplays[displayId]
         if (vd == null) {
@@ -2185,17 +2185,17 @@ class PrivilegedService : IPrivilegedService.Stub() {
             } catch (_: Exception) {}
         }
     }
-    
+
 
     override fun registerDeathToken(token: android.os.IBinder) {
         try {
             token.linkToDeath({
                 Log.w(TAG, "Client died! Cleaning up PrivilegedService and killing VDs.")
                 destroy()
-                
+
                 // REMOVED System.exit(0) to prevent the privileged shell process from exploding immediately,
                 // which was causing a race condition interrupting the asynchronous Binder release IPC transactions of VirtualDisplays.
-                
+
             }, 0)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to link to death", e)
@@ -2384,7 +2384,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
             }
         }
         val result = method.invoke(service, *args) as? List<*> ?: emptyList<Any>()
-        Log.i(TAG, "getTasks signature=${method.parameterTypes.joinToString { it.simpleName }} displayId=$displayId result=${result.size}")
+        Log.d(TAG, "getTasks signature=${method.parameterTypes.joinToString { it.simpleName }} displayId=$displayId result=${result.size}")
         return result
     }
     override fun getRunningTasksOnDisplay(displayId: Int): List<String> {
@@ -2732,7 +2732,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
         return android.os.Process.myPid()
     }
 }
-
 
 
 
