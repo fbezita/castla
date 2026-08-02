@@ -12,6 +12,9 @@ export class StreamRuntime {
   readonly health = new StreamHealthMonitor();
   private serverInstanceId = "unknown";
   private controlSessionId = 0;
+  private screenOff = false;
+  private videoFrozen = false;
+  private screenOffHoldUntil = 0;
   private videoTransports = new Map<PaneId, VideoTransport>();
   private frameListeners = new Map<
     PaneId,
@@ -42,6 +45,11 @@ export class StreamRuntime {
   private wasConnected = false;
   private started = false;
   private controlMessageCleanup?: () => void;
+
+  get isScreenOff(): boolean {
+    return this.screenOff || performance.now() < this.screenOffHoldUntil;
+  }
+   get isVideoFrozen(): boolean {     return this.videoFrozen;   }
   
   // E2E ACK and handshake capabilities indicators
   private ackListeners = new Set<(message: any) => void>();
@@ -127,6 +135,35 @@ export class StreamRuntime {
         const supportsAck = Boolean((message as any).supportsAck ?? (message as any).supportsAckFeatures ?? false);
         this.setHandshakeInfo(version, supportsAck);
       }
+      const controlReason = String((message as { reason?: unknown }).reason ?? "unknown");
+      const controlTimestamp = String((message as { timestampMs?: unknown }).timestampMs ?? "unknown");
+      if (type === "freezeVideo") {
+        this.videoFrozen = true;
+        console.warn(`[CastlaVideo] frozen reason=${controlReason} ts=${controlTimestamp}`);
+      } else if (type === "resumeVideo") {
+        this.videoFrozen = false;
+        this.screenOff = false;
+        this.screenOffHoldUntil = 0;
+        console.warn(`[CastlaVideo] resumed reason=${controlReason} ts=${controlTimestamp}`);
+        this.requestKeyframe("primary");
+      }
+      if (type === "diagnostics") {
+        const server = (message as { server?: { screenOff?: unknown } }).server;
+        if (typeof server?.screenOff === "boolean") {
+          const nextScreenOff = server.screenOff;
+          if (nextScreenOff !== this.screenOff) {
+            console.info("[CastlaScreenOff] " + (this.screenOff ? "OFF" : "ON") + " -> " + (nextScreenOff ? "OFF" : "ON"));
+          }
+          this.screenOff = nextScreenOff;
+          if (nextScreenOff) {
+            this.screenOffHoldUntil = performance.now() + 1500;
+          } else {
+            this.videoFrozen = false;
+            this.screenOffHoldUntil = 0;
+          }
+        }
+      }
+
       if (type === "streamMetadata") {
         const metadata = message as StreamMetadata;
         this.generations.update(metadata);
@@ -159,6 +196,9 @@ export class StreamRuntime {
     this.controlMessageCleanup?.();
     this.controlMessageCleanup = undefined;
     this.started = false;
+    this.screenOff = false;
+    this.videoFrozen = false; this.screenOff = false; this.screenOffHoldUntil = 0;
+    this.screenOffHoldUntil = 0;
     this.control.close();
     this.audio.stop();
     this.videoTransports.forEach((transport) => transport.close());

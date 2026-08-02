@@ -716,7 +716,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
             // Critical fix for screen off issue:
             // Added DISPLAY_FLAG_OWN_DISPLAY_GROUP to isolate virtual display power context from the default group
-            var flags = DISPLAY_FLAG_PUBLIC or DISPLAY_FLAG_OWN_CONTENT_ONLY or DISPLAY_FLAG_PRESENTATION or DISPLAY_FLAG_DESTROY_CONTENT or DISPLAY_FLAG_OWN_DISPLAY_GROUP
+            var flags = DISPLAY_FLAG_PUBLIC or DISPLAY_FLAG_PRESENTATION or DISPLAY_FLAG_OWN_CONTENT_ONLY or DISPLAY_FLAG_DESTROY_CONTENT or DISPLAY_FLAG_OWN_DISPLAY_GROUP
             if (android.os.Build.VERSION.SDK_INT >= 33) {
                 flags = flags or DISPLAY_FLAG_ALWAYS_UNLOCKED or DISPLAY_FLAG_TRUSTED
             }

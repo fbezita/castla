@@ -220,3 +220,18 @@ Keep 1-2 active encoders, reduce FPS/bitrate for visible-but-secondary panes, su
 5. Replace direct server callbacks with `DisplaySessionRegistry` session methods.
 6. Enable worker-owned frame synchronization and decoder lifecycle.
 7. Move diagnostics overlay from optional debug UI to a feature flag.
+
+## 23. Target-Display Task Routing and Session Reuse
+
+App launch routing is scoped to the requested VirtualDisplay. A package task on the phone display must not cause a launch request for a VD to be redirected back to Display 0.
+
+`LaunchPlanner` selects one of the following actions:
+
+- create a new task on the target display;
+- move an existing target-display task to the front;
+- create a task when the package only exists on another display;
+- wait when the display is not ready.
+
+Task reuse and display-session preparation are separate decisions. `DisplayLaunchSession` prepares the VD/encoder state, while task routing decides whether Android should launch or only bring an existing task forward. `DisplaySizePolicy` guarantees that the size used for VD resize and encoder creation is calculated identically.
+
+A same-size task reuse does not restart the encoder. A changed size or missing encoder starts a new encoder session and stream generation, followed by a keyframe request. The privileged Binder path is reflection-compatible across ActivityTaskManager signatures and keeps a shell fallback for older system releases.

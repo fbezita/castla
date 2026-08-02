@@ -1119,3 +1119,56 @@ stateDiagram-v2
 - `LaunchRoutingTest`
   - 일반 OTT는 기존처럼 fallback 허용 + 외부 브라우저 가능 상태를 유지하는지 검증
   - 넷플릭스는 embedded browser 강제 플래그가 라우팅 결과에 반영되는지 검증
+
+## 2026-08-02 One UI 9 VirtualDisplay Task Routing and Encoder Lifecycle
+
+One UI 9에서 Display 0에 이미 실행 중인 앱이 VirtualDisplay launch 요청을 가로채는 현상을 분석하고, 앱 실행 경로를 target-display Task 기준으로 재구성했습니다.
+
+### 주요 변경
+
+- `getTasks` 호출 시 display ID를 전달해 target VD의 Task를 분리 조회
+- `LaunchPlanner`로 새 Task 생성과 기존 target Task 전환을 분리
+- native `moveTaskToFront` Binder 호출 및 구형 시스템 shell fallback 추가
+- `DisplayLaunchSession`으로 launch 전 VD/encoder 준비를 분리
+- `DisplaySizePolicy`로 VD와 encoder의 유효 해상도 계산 통합
+- 해상도 변경 시 encoder release/create, surface 연결, stream generation, keyframe 순서를 로그로 검증
+- primary/secondary pipeline이 서로의 display Task를 재사용하지 않도록 target display 기준을 적용
+
+### 검증 결과
+
+One UI 9에서 다음 시나리오를 확인했습니다.
+
+- 앱 없음: `CREATE_NEW_TASK`
+- target VD에 앱 있음: `MOVE_TASK_TO_FRONT`
+- 동일 해상도 복귀: `resize=false`, encoder 재연결 없음
+- 해상도 변경: encoder session 재생성 및 새 stream generation
+- 작은 해상도와 큰 해상도를 연속 변경: 각 viewport 최종 크기에 맞는 별도 rebuild
+
+One UI 8.5는 reflection 및 shell fallback을 유지한 상태이며, 실기기 검증은 장비 준비 후 수행합니다.
+
+## 2026-08-02 Screen-Off Video Gate and Wake Recovery Stabilization
+
+### 현재 동작
+
+삼성 One UI의 물리 화면 OFF 과정에서 VirtualDisplay가 일시적으로 감광되거나 검은 프레임을 생성해도 브라우저에 해당 프레임을 전달하지 않도록 서버 측 video gate를 적용했습니다.
+
+- MirrorForegroundService가 PowerManager.isInteractive와 기본 Display 상태를 32ms 주기로 감시합니다.
+- 물리 화면이 interactive에서 non-interactive로 바뀌면 즉시 freezeVideo를 전송합니다.
+- MirrorServer는 freeze 동안 H.264/MJPEG 프레임을 브라우저로 broadcast하지 않습니다.
+- SCREEN_ON 이벤트가 Display 상태보다 먼저 도착하면 최대 2초 동안 Display.STATE_ON이 될 때까지 재확인합니다.
+- 복귀가 안정화되면 resumeVideo와 keyframe 요청을 전송합니다.
+
+### Wake pulse 관련 SCREEN_ON 처리
+
+Android 이벤트에는 SCREEN_ON의 원인이 포함되지 않으므로 ScreenOffLoopGuard는 keep-alive/revive pulse 직후의 이벤트를 시간 창으로 추정합니다. 이 이벤트의 이름은 WAKE_PULSE_RELATED입니다.
+
+WAKE_PULSE_RELATED SCREEN_ON에서는 물리 패널을 다시 OFF시키지 않고 BLACKOUT_ACTIVE 상태와 VD keep-alive를 유지합니다. 500ms 후 resumeVideo를 전송하며, USER_PRESENT 또는 사용자로 분류된 SCREEN_ON에서만 ACTIVE로 전환합니다.
+
+### 프론트엔드 처리
+
+- StreamRuntime은 freezeVideo/resumeVideo와 서버 diagnostics를 관리합니다.
+- WebCodecsBackend는 screen-off/freeze 중 마지막 정상 canvas 프레임을 유지하고 감광·근검 프레임을 지연 처리합니다.
+- 실제 WebSocket 연결이 끊긴 경우에만 ViewportPane의 재연결 오버레이를 표시합니다.
+- 화면 OFF에 따른 video freeze는 연결 끊김이 아니므로 재연결 오버레이를 표시하지 않습니다.
+
+단위 테스트는 실행하지 않았고, debug APK assemble 및 실기기 설치로 검증했습니다.

@@ -273,3 +273,16 @@ If continuing in a new conversation, start from this summary:
    - bottom
    - popup
 5. `single -> split` should become "prepare/add secondary" rather than immediate hard split
+
+## 2026-08-02 Task Reuse and Resize Interpretation
+
+멀티윈도우 레이아웃 변경으로 여러 viewport 이벤트가 발생하는 것은 앱 Task 재실행과 구분해야 합니다. 브라우저가 작은 크기에서 큰 크기로 드래그하면 여러 `viewportEvent`가 연속으로 발생하고, 최종 안정 크기에 따라 encoder rebuild가 발생할 수 있습니다.
+
+확인 기준:
+
+- `plan=MOVE_TASK_TO_FRONT`: target VD의 기존 앱 Task 재사용
+- `plan=CREATE_NEW_TASK`: target VD에 앱 Task가 없어 새 Task 생성
+- `resize=false`: Task 전환만 수행하고 encoder 유지
+- `encoderLifecycle`: 해상도 변경에 따른 encoder 세션 재구성
+
+따라서 해상도 변경으로 발생한 Activity relayout/rebuild 로그를 앱 launch 중복 실행으로 해석하지 않습니다. 앱이 실제로 다시 launch됐는지는 `ActivityTaskManager`의 START 로그와 `taskResidency`를 함께 비교해야 합니다.

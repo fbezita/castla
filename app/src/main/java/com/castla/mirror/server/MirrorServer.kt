@@ -536,6 +536,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
 
     @Volatile private var primaryCodecMode: String = "h264"
     @Volatile private var secondaryCodecMode: String = "h264"
+    @Volatile private var videoFrozen = false
 
     private var cachedSpsPps: ByteArray? = null
     private val streamGenerations = ConcurrentHashMap<String, AtomicInteger>()
@@ -910,7 +911,13 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         FileLogger.i("STREAM_GENERATION", "clearCachedSpsPps channel=$channel")
     }
 
+    fun setVideoFrozen(frozen: Boolean, reason: String) {
+        videoFrozen = frozen
+        Log.i(TAG, "[WEB_VIDEO] serverFrameGate frozen=$frozen reason=$reason")
+    }
+
     fun broadcastFrame(data: ByteArray, isKeyFrame: Boolean, channel: String = "primary") {
+        if (videoFrozen) return
         val normalized = normalizeChannel(channel)
         val seq = if (normalized == "secondary") ++secondaryFrameSeqNum else ++primaryFrameSeqNum
         val flags: Byte = if (isKeyFrame) 0x01 else 0x00

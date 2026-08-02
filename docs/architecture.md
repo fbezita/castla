@@ -515,3 +515,23 @@ sequenceDiagram
   - 신설된 IP 역추적 API를 간편하게 연동 테스트할 수 있도록 `C1.1. Device ID 기반 IP 주소 및 릴레이 정보 조회` Mock 통신 시나리오 템플릿을 새롭게 편입시켰습니다.
 
 
+
+## 17. 2026-08-02 Target VD Task Reuse and Encoder Session Stabilization
+
+### 17.1 Task routing policy
+
+앱 실행 시 패키지 전체의 Task 존재 여부가 아니라 요청된 `targetDisplayId` 위의 Task 존재 여부를 기준으로 판단합니다. Display 0에 앱이 떠 있어도 target VD에 Task가 없으면 target VD에 새 Task를 실행합니다. target VD에 동일 앱 Task가 있으면 새 Activity 실행 대신 해당 Task를 앞으로 가져옵니다.
+
+이 정책은 `LaunchPlanner`로 분리되어 있으며, native `moveTaskToFront` 호출과 구형 시스템용 shell fallback을 함께 제공합니다. 따라서 One UI에서 ActivityTaskManager 메서드 시그니처가 달라져도 기존 launch 경로를 유지할 수 있습니다.
+
+### 17.2 DisplaySizePolicy
+
+VD와 encoder가 서로 다른 크기를 사용하는 문제를 막기 위해 `DisplaySizePolicy`를 단일 해상도 계산 지점으로 사용합니다. 요청 크기에 최대 높이 제한, 비율 보정, 16픽셀 정렬, 320픽셀 최소값을 순서대로 적용합니다.
+
+### 17.3 Encoder 연결
+
+해상도가 같으면 기존 encoder와 stream을 유지합니다. 해상도가 달라지면 다음 lifecycle을 수행합니다.
+
+`release -> create -> attach surface -> begin stream generation -> start encoder -> request keyframe`
+
+실기기 로그에서 One UI 9의 앱 전환, 같은 VD Task 재사용, 해상도 변경, encoder 재연결을 확인했습니다. One UI 8.5는 호환성 fallback을 유지하지만 실기기 회귀 테스트는 별도 환경이 필요합니다.

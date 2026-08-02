@@ -103,6 +103,9 @@
         nextDecoder = new WebCodecsBackend(
           () => markReady(),
           () => runtime.requestKeyframe(viewport.pane),
+          (event, detail) => runtime.reportDecoderStatus(viewport.pane, event, detail),
+          () => runtime.isScreenOff,
+          () => runtime.isVideoFrozen,
         );
         await nextDecoder.initialize(canvas);
         runtime.setCodec(viewport.pane, "h264", "High");
@@ -159,6 +162,9 @@
     if (resizingSplit || activeTouchPanesSize > 0) return;
     if (!viewport.visible || !decoder) return;
     if (currentGeneration <= 0) return;
+    // Samsung may pause VirtualDisplay frames during physical screen-off.
+    // Keep the last canvas frame and defer decoder recovery until SCREEN_ON.
+    if (runtime.isScreenOff) return;
     const sample = runtime.health.sample(viewport.pane);
     if (!sample.decoderStalled) {
       recoveryAttempt = 0;
@@ -216,6 +222,7 @@
       <p class="reconnect-text">연결이 일시적으로 중단되었습니다. 복구 중...</p>
     </div>
   {/if}
+
 </section>
 
 <style>
@@ -265,6 +272,7 @@
     font-size: 12px;
     z-index: 20;
   }
+
 
   .reconnect-overlay {
     position: absolute;

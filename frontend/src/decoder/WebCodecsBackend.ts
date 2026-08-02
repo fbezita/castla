@@ -1,5 +1,5 @@
-import type { EncodedFrame } from '../protocol';
-import type { DecoderBackend } from './DecoderBackend';
+import type { EncodedFrame } from "../protocol";
+import type { DecoderBackend } from "./DecoderBackend";
 
 /**
  * WebCodecs backend.
@@ -20,7 +20,7 @@ export class WebCodecsBackend implements DecoderBackend {
   private decoder?: VideoDecoder;
   private ctx?: CanvasRenderingContext2D;
   private configPayload?: ArrayBuffer;
-  private configuredCodec = '';
+  private configuredCodec = "";
   private hasDecodedKeyframe = false;
   private pendingConfigure = false;
   private destroyed = false;
@@ -31,32 +31,58 @@ export class WebCodecsBackend implements DecoderBackend {
   private onFrame?: () => void;
   private requestKeyframe?: () => void;
   private onStatus?: (event: string, detail?: string) => void;
+  private isScreenOff?: () => boolean;
+  private isVideoFrozen?: () => boolean;
+  private probeCanvas?: HTMLCanvasElement;
+  private probeCtx?: CanvasRenderingContext2D;
+  private lastGoodCanvas?: HTMLCanvasElement;
+  private lastGoodCtx?: CanvasRenderingContext2D;
+  private normalBrightnessSamples: number[] = [];
+  private normalBrightnessReference = 0;
+  private dimFrameStreak = 0;
+  private pendingBlackFrame?: VideoFrame;
+  private pendingBlackTimer?: number;
 
   constructor(
     onFrame?: () => void,
     requestKeyframe?: () => void,
     onStatus?: (event: string, detail?: string) => void,
+    isScreenOff?: () => boolean,
+    isVideoFrozen?: () => boolean,
   ) {
     this.onFrame = onFrame;
     this.requestKeyframe = requestKeyframe;
     this.onStatus = onStatus;
+    this.isScreenOff = isScreenOff;
+    this.isVideoFrozen = isVideoFrozen;
   }
 
-  async initialize(target: HTMLCanvasElement | HTMLVideoElement): Promise<void> {
+  async initialize(
+    target: HTMLCanvasElement | HTMLVideoElement,
+  ): Promise<void> {
     if (!(target instanceof HTMLCanvasElement)) {
-      throw new Error('WebCodecs backend requires canvas');
+      throw new Error("WebCodecs backend requires canvas");
     }
-    if (!window.isSecureContext || typeof VideoDecoder === 'undefined') {
-      throw new Error('WebCodecs unavailable');
+    if (!window.isSecureContext || typeof VideoDecoder === "undefined") {
+      throw new Error("WebCodecs unavailable");
     }
 
     this.destroyed = false;
     this.canvas = target;
-    this.ctx = target.getContext('2d') ?? undefined;
-    if (!this.ctx) throw new Error('2D canvas context unavailable');
+    this.ctx = target.getContext("2d") ?? undefined;
+    if (!this.ctx) throw new Error("2D canvas context unavailable");
+    this.probeCanvas = document.createElement("canvas");
+    this.probeCanvas.width = 8;
+    this.probeCanvas.height = 8;
+    this.probeCtx = this.probeCanvas.getContext("2d") ?? undefined;
+    this.normalBrightnessSamples = [];
+    this.normalBrightnessReference = 0;
+    this.dimFrameStreak = 0;
+    this.lastGoodCanvas = document.createElement("canvas");
+    this.lastGoodCtx = this.lastGoodCanvas.getContext("2d") ?? undefined;
 
     this.createDecoder();
-    this.onStatus?.('webcodecsReady', `secure=${window.isSecureContext}`);
+    this.onStatus?.("webcodecsReady", `secure=${window.isSecureContext}`);
   }
 
   decode(frame: EncodedFrame): void {
@@ -66,8 +92,8 @@ export class WebCodecsBackend implements DecoderBackend {
     // This is equivalent to JMuxerBackend storing configPayload and returning.
     if (frame.config) {
       this.configPayload = frame.payload;
-      this.configureDecoderIfNeeded('config_frame');
-      this.onStatus?.('webcodecsConfig', `bytes=${frame.payload.byteLength}`);
+      this.configureDecoderIfNeeded("config_frame");
+      this.onStatus?.("webcodecsConfig", `bytes=${frame.payload.byteLength}`);
       return;
     }
 
@@ -80,7 +106,7 @@ export class WebCodecsBackend implements DecoderBackend {
     if (!frame.keyFrame && !this.hasDecodedKeyframe) {
       this.droppedDeltaBeforeKeyframe += 1;
       this.throttledStatus(
-        'webcodecsDropDeltaBeforeKeyframe',
+        "webcodecsDropDeltaBeforeKeyframe",
         `seq=${frame.sequence} dropped=${this.droppedDeltaBeforeKeyframe}`,
         3000,
       );
@@ -88,36 +114,42 @@ export class WebCodecsBackend implements DecoderBackend {
     }
 
     if (frame.keyFrame) {
-      this.configureDecoderIfNeeded('keyframe');
+      this.configureDecoderIfNeeded("keyframe");
       this.hasDecodedKeyframe = true;
       this.droppedDeltaBeforeKeyframe = 0;
     }
 
     const decoder = this.decoder;
-    if (!decoder || decoder.state === 'closed') return;
+    if (!decoder || decoder.state === "closed") return;
 
     // If no config has arrived yet, wait for a keyframe/config sequence instead
     // of trying to decode and triggering an exception loop.
     if (!this.configuredCodec) {
       if (frame.keyFrame) {
-        this.requestKeyframeThrottled('keyframe_without_config');
+        this.requestKeyframeThrottled("keyframe_without_config");
       }
       return;
     }
 
     try {
-      const timestampMs = frame.timestampMs ?? frame.serverTimestampMs ?? performance.now();
+      const timestampMs =
+        frame.timestampMs ?? frame.serverTimestampMs ?? performance.now();
       let payload = frame.payload;
       if (frame.keyFrame && this.configPayload) {
         // Concatenate SPS/PPS config payload before the keyframe in Annex-B mode
-        const combined = new Uint8Array(this.configPayload.byteLength + frame.payload.byteLength);
+        const combined = new Uint8Array(
+          this.configPayload.byteLength + frame.payload.byteLength,
+        );
         combined.set(new Uint8Array(this.configPayload), 0);
-        combined.set(new Uint8Array(frame.payload), this.configPayload.byteLength);
+        combined.set(
+          new Uint8Array(frame.payload),
+          this.configPayload.byteLength,
+        );
         payload = combined.buffer;
       }
 
       const chunk = new EncodedVideoChunk({
-        type: frame.keyFrame ? 'key' : 'delta',
+        type: frame.keyFrame ? "key" : "delta",
         timestamp: timestampMs * 1000,
         data: payload,
       });
@@ -127,11 +159,11 @@ export class WebCodecsBackend implements DecoderBackend {
       // packet; mark that we need the next keyframe/config pair.
       this.hasDecodedKeyframe = false;
       this.throttledStatus(
-        'webcodecsDecodeError',
+        "webcodecsDecodeError",
         error instanceof Error ? error.message : String(error),
         3000,
       );
-      this.requestKeyframeThrottled('decode_error');
+      this.requestKeyframeThrottled("decode_error");
     }
   }
 
@@ -140,7 +172,7 @@ export class WebCodecsBackend implements DecoderBackend {
     // caused generation/config-frame recovery loops.
     this.hasDecodedKeyframe = false;
     this.droppedDeltaBeforeKeyframe = 0;
-    this.requestKeyframeThrottled('soft_reset');
+    this.requestKeyframeThrottled("soft_reset");
   }
 
   destroy(): void {
@@ -154,39 +186,46 @@ export class WebCodecsBackend implements DecoderBackend {
     this.canvas = undefined;
     this.ctx = undefined;
     this.configPayload = undefined;
-    this.configuredCodec = '';
+    this.configuredCodec = "";
+    this.normalBrightnessSamples = [];
+    this.normalBrightnessReference = 0;
+    this.dimFrameStreak = 0;
+    this.lastGoodCanvas = undefined;
+    this.lastGoodCtx = undefined;
+    this.cancelPendingBlackFrame();
     this.hasDecodedKeyframe = false;
   }
 
   private createDecoder(): void {
-    if (this.decoder && this.decoder.state !== 'closed') return;
+    if (this.decoder && this.decoder.state !== "closed") return;
 
     this.decoder = new VideoDecoder({
       output: (frame) => this.renderFrame(frame),
       error: (error) => {
         console.error(`[WebCodecs] VideoDecoder error: ${error.message}`);
         this.hasDecodedKeyframe = false;
-        this.configuredCodec = '';
+        this.configuredCodec = "";
         try {
           this.decoder?.close();
         } catch {}
         this.decoder = undefined;
-        this.throttledStatus('webcodecsDecoderError', error.message, 3000);
-        this.requestKeyframeThrottled('decoder_error');
+        this.throttledStatus("webcodecsDecoderError", error.message, 3000);
+        this.requestKeyframeThrottled("decoder_error");
       },
     });
 
     if (this.configPayload) {
-      this.configureDecoderIfNeeded('decoder_created');
+      this.configureDecoderIfNeeded("decoder_created");
     }
   }
 
   private configureDecoderIfNeeded(reason: string): void {
-    if (!this.decoder || this.decoder.state === 'closed') return;
+    if (!this.decoder || this.decoder.state === "closed") return;
     if (!this.configPayload) return;
     if (this.pendingConfigure) return;
 
-    const codec = this.resolveCodecFromAvcConfig(this.configPayload) ?? 'avc1.64002a';
+    const codec =
+      this.resolveCodecFromAvcConfig(this.configPayload) ?? "avc1.64002a";
 
     // Avoid reconfiguring the decoder for the same SPS/PPS repeatedly.
     if (this.configuredCodec === codec) return;
@@ -201,12 +240,12 @@ export class WebCodecsBackend implements DecoderBackend {
       this.decoder.configure(config);
       this.configuredCodec = codec;
       this.hasDecodedKeyframe = false;
-      this.onStatus?.('webcodecsConfigured', `${codec} reason=${reason}`);
+      this.onStatus?.("webcodecsConfigured", `${codec} reason=${reason}`);
       console.warn(`[WebCodecs] configured ${codec}`);
     } catch (error) {
-      this.configuredCodec = '';
+      this.configuredCodec = "";
       this.throttledStatus(
-        'webcodecsConfigureError',
+        "webcodecsConfigureError",
         error instanceof Error ? error.message : String(error),
         3000,
       );
@@ -221,17 +260,71 @@ export class WebCodecsBackend implements DecoderBackend {
       const ctx = this.ctx;
       if (!canvas || !ctx) return;
 
-      if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+      const frameBrightness = this.sampleFrameBrightness(frame);
+      const hasLastGoodFrame = !!this.lastGoodCanvas && this.lastGoodCanvas.width > 0 && this.lastGoodCanvas.height > 0;
+      const baseline = this.getNormalBrightnessBaseline();
+      const spread = this.getNormalBrightnessSpread(baseline);
+      const suddenDim =
+        this.normalBrightnessSamples.length >= 3 &&
+        frameBrightness < Math.max(4, baseline * 0.95);
+      const hardBlack = hasLastGoodFrame && this.isNearBlackFrame(frame);
+      const protectionActive = this.isScreenOff?.() || this.isVideoFrozen?.();
+      if (protectionActive && suddenDim) this.dimFrameStreak += 1; else this.dimFrameStreak = 0;
+      const nearBlack = !!protectionActive && (hardBlack || (suddenDim && this.dimFrameStreak >= 3));
+      if (protectionActive && suddenDim) {
+        this.throttledStatus(
+          "webcodecsDimFrame",
+          `brightness=${Math.round(frameBrightness)},baseline=${Math.round(baseline)},spread=${Math.round(spread)}`,
+          1000,
+        );
+      }
+      if (this.isVideoFrozen?.()) {
+        const restoreDetail = this.restoreLastGoodFrame();
+      this.throttledStatus("webcodecsFreeze", "last_frame_preserved " + restoreDetail, 3000);
+        return;
+      }
+      if (nearBlack && !this.isScreenOff?.() && this.lastGoodCanvas && this.lastGoodCanvas.width > 0) {         this.deferBlackFrame(frame);         return;       }
+      if (this.isScreenOff?.() && nearBlack && this.lastGoodCanvas && this.lastGoodCanvas.width > 0) {
+        this.restoreLastGoodFrame();
+        this.throttledStatus(
+          "webcodecsSkipBlackFrameScreenOff",
+          "last_frame_preserved",
+          3000,
+        );
+        return;
+      }
+
+      this.cancelPendingBlackFrame();
+      if (
+        canvas.width !== frame.displayWidth ||
+        canvas.height !== frame.displayHeight
+      ) {
         canvas.width = frame.displayWidth;
         canvas.height = frame.displayHeight;
       }
 
       ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+      const lastGoodCanvas = this.lastGoodCanvas;
+      const lastGoodCtx = this.lastGoodCtx;
+      if (lastGoodCanvas && lastGoodCanvas.width !== frame.displayWidth)
+        lastGoodCanvas.width = frame.displayWidth;
+      if (lastGoodCanvas && lastGoodCanvas.height !== frame.displayHeight)
+        lastGoodCanvas.height = frame.displayHeight;
+      if (!hardBlack && (!protectionActive || !suddenDim) && lastGoodCtx && lastGoodCanvas) {
+        lastGoodCtx.drawImage(
+          frame,
+          0,
+          0,
+          lastGoodCanvas.width,
+          lastGoodCanvas.height,
+        );
+      }
+      if (!hardBlack && (!protectionActive || !suddenDim)) this.recordNormalBrightness(frameBrightness);
       this.renderedFrames += 1;
 
       if (this.renderedFrames === 1 || this.renderedFrames % 120 === 0) {
         this.onStatus?.(
-          'webcodecsFrame',
+          "webcodecsFrame",
           `rendered=${this.renderedFrames} ${canvas.width}x${canvas.height}`,
         );
       }
@@ -242,15 +335,144 @@ export class WebCodecsBackend implements DecoderBackend {
     }
   }
 
+  private deferBlackFrame(frame: VideoFrame): void {
+    if (this.pendingBlackFrame) return;
+    this.pendingBlackFrame = frame.clone();
+    this.pendingBlackTimer = window.setTimeout(() => {
+      const pending = this.pendingBlackFrame;
+      this.pendingBlackFrame = undefined;
+      this.pendingBlackTimer = undefined;
+      if (!pending) return;
+      if (this.isVideoFrozen?.() || this.isScreenOff?.()) {
+        this.restoreLastGoodFrame();
+        pending.close();
+        return;
+      }
+      const canvas = this.canvas;
+      const ctx = this.ctx;
+      if (canvas && ctx) {
+        if (canvas.width !== pending.displayWidth || canvas.height !== pending.displayHeight) {
+          canvas.width = pending.displayWidth;
+          canvas.height = pending.displayHeight;
+        }
+        ctx.drawImage(pending, 0, 0, canvas.width, canvas.height);
+        this.renderedFrames += 1;
+        this.onFrame?.();
+      }
+      pending.close();
+    }, 800);
+  }
+
+  private cancelPendingBlackFrame(): void {
+    if (this.pendingBlackTimer !== undefined) {
+      window.clearTimeout(this.pendingBlackTimer);
+      this.pendingBlackTimer = undefined;
+    }
+    this.pendingBlackFrame?.close();
+    this.pendingBlackFrame = undefined;
+  }
+
+
+  private restoreLastGoodFrame(): string {
+    const canvas = this.canvas;
+    const ctx = this.ctx;
+    const lastGoodCanvas = this.lastGoodCanvas;
+    if (
+      !canvas ||
+      !ctx ||
+      !lastGoodCanvas ||
+      lastGoodCanvas.width <= 0 ||
+      lastGoodCanvas.height <= 0
+    )
+      return 'empty';
+    if (
+      canvas.width !== lastGoodCanvas.width ||
+      canvas.height !== lastGoodCanvas.height
+    ) {
+      canvas.width = lastGoodCanvas.width;
+      canvas.height = lastGoodCanvas.height;
+    }
+    ctx.drawImage(lastGoodCanvas, 0, 0, canvas.width, canvas.height);
+    return String.fromCharCode(98, 61) + this.sampleCanvas(lastGoodCanvas) + String.fromCharCode(44, 109, 61) + this.sampleCanvas(canvas);
+  }
+
+  private sampleCanvas(canvas: HTMLCanvasElement): number {
+    if (canvas.width <= 0 || canvas.height <= 0) return 0;
+    const probe = document.createElement('canvas');
+    probe.width = 8;
+    probe.height = 8;
+    const context = probe.getContext('2d');
+    if (!context) return 0;
+    context.drawImage(canvas, 0, 0, 8, 8);
+    const pixels = context.getImageData(0, 0, 8, 8).data;
+    let total = 0;
+    for (let i = 0; i < pixels.length; i += 4) total += Math.max(pixels[i], pixels[i + 1], pixels[i + 2]);
+    return Math.round(total / 64);
+  }
+
+  private recordNormalBrightness(brightness: number): void {
+    this.normalBrightnessSamples.push(brightness);
+    if (this.normalBrightnessSamples.length > 30) this.normalBrightnessSamples.shift();
+    if (this.normalBrightnessReference === 0) {
+      this.normalBrightnessReference = brightness;
+    } else if (brightness >= this.normalBrightnessReference * 0.98) {
+      this.normalBrightnessReference = this.normalBrightnessReference * 0.95 + brightness * 0.05;
+    }
+  }
+
+  private getNormalBrightnessBaseline(): number {
+    if (this.normalBrightnessSamples.length === 0) return 0;
+    return this.normalBrightnessReference || this.normalBrightnessSamples.reduce((sum, value) => sum + value, 0) / this.normalBrightnessSamples.length;
+  }
+
+  private getNormalBrightnessSpread(baseline: number): number {
+    if (this.normalBrightnessSamples.length < 2) return 0;
+    const variance = this.normalBrightnessSamples.reduce((sum, value) => sum + (value - baseline) ** 2, 0) / this.normalBrightnessSamples.length;
+    return Math.sqrt(variance);
+  }
+  private sampleFrameBrightness(frame: VideoFrame): number {
+    const ctx = this.probeCtx;
+    if (!ctx) return 0;
+    ctx.clearRect(0, 0, 8, 8);
+    ctx.drawImage(frame, 0, 0, 8, 8);
+    const pixels = ctx.getImageData(0, 0, 8, 8).data;
+    let total = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+      total += Math.max(pixels[i], pixels[i + 1], pixels[i + 2]);
+    }
+    return total / 64;
+  }
+
+
+  private isNearBlackFrame(frame: VideoFrame): boolean {
+    const ctx = this.probeCtx;
+    if (!ctx) return false;
+    ctx.clearRect(0, 0, 8, 8);
+    ctx.drawImage(frame, 0, 0, 8, 8);
+    const pixels = ctx.getImageData(0, 0, 8, 8).data;
+    let litPixels = 0;
+    let totalBrightness = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+      const brightness = Math.max(pixels[i], pixels[i + 1], pixels[i + 2]);
+      totalBrightness += brightness;
+      if (brightness > 12) litPixels += 1;
+    }
+    return litPixels <= 1 || totalBrightness / 64 <= 24;
+  }
+
   private requestKeyframeThrottled(reason: string): void {
     const now = performance.now();
     if (now - this.lastKeyframeRequestAt < 1500) return;
     this.lastKeyframeRequestAt = now;
-    this.onStatus?.('webcodecsRequestKeyframe', reason);
+    this.onStatus?.("webcodecsRequestKeyframe", reason);
     this.requestKeyframe?.();
   }
 
-  private throttledStatus(event: string, detail: string, intervalMs: number): void {
+  private throttledStatus(
+    event: string,
+    detail: string,
+    intervalMs: number,
+  ): void {
     const now = performance.now();
     if (now - this.lastDropLogAt < intervalMs) return;
     this.lastDropLogAt = now;
@@ -285,14 +507,17 @@ export class WebCodecsBackend implements DecoderBackend {
 }
 
 function hex(value: number): string {
-  return value.toString(16).padStart(2, '0');
+  return value.toString(16).padStart(2, "0");
 }
 
 function findAnnexBSps(bytes: Uint8Array): number {
   for (let i = 0; i < bytes.length - 5; i += 1) {
     const isStart3 = bytes[i] === 0 && bytes[i + 1] === 0 && bytes[i + 2] === 1;
     const isStart4 =
-      bytes[i] === 0 && bytes[i + 1] === 0 && bytes[i + 2] === 0 && bytes[i + 3] === 1;
+      bytes[i] === 0 &&
+      bytes[i + 1] === 0 &&
+      bytes[i + 2] === 0 &&
+      bytes[i + 3] === 1;
 
     const nalIndex = isStart3 ? i + 3 : isStart4 ? i + 4 : -1;
     if (nalIndex < 0) continue;

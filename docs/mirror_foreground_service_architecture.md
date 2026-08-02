@@ -209,3 +209,48 @@ graph TD
 2. **이중 빌드 방지**:
    - 가상 디스플레이의 소멸/생성은 오직 **클라이언트 뷰포트 업데이트 신호**를 단일 진실 공급원(Single Source of Truth)으로 삼아 동작해야 합니다.
    - 서비스 내부 소멸 시점에 primary display를 강제로 흔들어 깨우는 식의 비동기 리빌드 루프를 절대 삽입하지 마십시오.
+
+## 📌 5. 현재 앱 Task 라우팅 및 Encoder 세션 정책
+
+### 5.1 Target VD 기준 Task 라우팅
+
+앱 패키지가 폰 Display 0 또는 다른 디스플레이에 존재하는지만으로 기존 Task를 재사용하지 않습니다. 현재 요청의 `targetDisplayId`에 해당 앱 Task가 있는지를 우선 판단합니다.
+
+- target VD에 Task 없음: 해당 VD에 새 Task를 생성합니다.
+- target VD에 Task 있음: 기존 Task ID를 `moveTaskToFront`로 전환합니다.
+- 다른 Display에만 Task 있음: target VD를 계속 launch destination으로 유지하고 필요한 경우 새 Task를 생성합니다.
+- 강제 cold start: 기존 force-stop 및 새 실행 경로를 사용합니다.
+
+판단 로직은 `LaunchPlanner`로 분리되어 있으며, native privileged Binder 호출을 우선 사용하고 구형 시스템에서는 shell fallback을 사용합니다. 따라서 primary와 secondary pipeline이 서로의 Task를 잘못 재사용하지 않습니다.
+
+### 5.2 DisplayLaunchSession 및 해상도 정책
+
+`prepareDisplaySessionForLaunch()`는 Task 실행 전에 VD와 encoder 세션 상태를 준비하고 `DisplayLaunchSession`으로 결과를 반환합니다. 해상도 계산은 `DisplaySizePolicy`에서 단일화합니다.
+
+- 최대 높이 제한 적용
+- 비율 보정
+- 16픽셀 단위 정렬
+- 최소 320픽셀 보장
+
+동일 해상도에서 Task를 앞으로 가져오는 경우에는 encoder를 재생성하지 않습니다. 해상도가 달라지거나 encoder가 해제된 경우에만 VD surface와 encoder를 재구성합니다.
+
+### 5.3 Encoder lifecycle
+
+해상도 변경 시 lifecycle은 다음 순서입니다.
+
+`release -> create -> setSurface -> beginStreamGeneration -> encoder start -> keyframe`
+
+`encoderLifecycle` 로그로 각 단계, 세션 ID, display ID, 적용 해상도를 확인할 수 있습니다. 브라우저 viewport가 드래그 중 여러 번 변하는 경우 각 최종 안정 해상도에 맞춰 rebuild가 발생할 수 있으며, 이는 Task 재실행과는 별개의 동작입니다.
+
+## 2026-08-02 Screen-Off Video Gate and Wake Recovery
+
+화면 OFF 복구는 VirtualDisplay/MediaCodec lifecycle과 별도의 video gate 및 power-state recovery 계층으로 처리합니다.
+
+1. physicalScreenStateMonitor가 기본 Display의 PowerManager.isInteractive와 Display.STATE를 조기 감시합니다.
+2. non-interactive 전환 시 MirrorServer.setVideoFrozen(true, reason)을 호출하고 freezeVideo control message를 전송합니다.
+3. freeze 동안 MirrorServer.broadcastFrame()은 프레임을 WebSocket으로 전달하지 않습니다.
+4. 실제 기본 Display가 STATE_ON이 된 뒤 resumeVideo와 keyframe 요청으로 스트림을 재개합니다.
+5. keep-alive/revive 직후의 WAKE_PULSE_RELATED SCREEN_ON은 BLACKOUT_ACTIVE와 VD keep-alive를 유지하며 panel-off를 재호출하지 않습니다.
+6. 사용자 복귀 이벤트에서만 ACTIVE 전환과 keep-alive 정리가 수행됩니다.
+
+프론트엔드는 연결 장애와 화면 OFF freeze를 구분합니다. 연결 장애일 때만 재연결 오버레이를 표시하고, 화면 OFF 중에는 마지막 정상 프레임을 유지합니다.

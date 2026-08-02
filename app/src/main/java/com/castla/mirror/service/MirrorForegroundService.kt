@@ -449,6 +449,11 @@ class MirrorForegroundService : Service() {
     private var vdKeepAliveStopJob: Job? = null
     private var appExitMonitorJob: Job? = null
     private var screenOffReviveMonitorJob: Job? = null
+    private var physicalScreenStateMonitorJob: Job? = null
+    @Volatile private var earlyPhysicalScreenOffFreezeSent = false
+    @Volatile private var physicalScreenOnForVideo = false
+    private var screenOnResumeJob: Job? = null
+    private var earlyVdKeepAliveJob: Job? = null
     private var pendingBrowserDisconnectJob: Job? = null
     @Volatile private var browserTeardownPhase: String = "idle"
     private val inputDebugLaunchSeq = java.util.concurrent.atomic.AtomicInteger(0)
@@ -556,6 +561,7 @@ class MirrorForegroundService : Service() {
     private fun broadcastWebDiagnostics(reason: String) {
         val server = mirrorServer ?: return
         try {
+            val timestampMs = System.currentTimeMillis()
             server.broadcastControlMessage(
                 JSONObject().apply {
                     put("type", "diagnostics")
@@ -567,14 +573,14 @@ class MirrorForegroundService : Service() {
                             put("serverBrowserConnected", server.isBrowserConnected())
                             put("pendingDisconnect", pendingBrowserDisconnectJob != null)
                             put("disconnectGraceMs", DisconnectPolicy.graceMs(screenOffPolicy.isScreenOff))
-                            put("screenOff", screenOffPolicy.isScreenOff)
+                            put("screenOff", screenOffPolicy.isScreenOff && !physicalScreenOnForVideo)
                             put("teardownPhase", browserTeardownPhase)
                             put("socketSummary", server.socketDebugSummary())
                             put("pipelineSnapshot", pipelineTouchSnapshot())
                             put("injectorSnapshot", injectorTouchSnapshot())
                             put("launchSeq", currentInputDebugLaunchSeq)
                             put("lastTouchPane", lastTouchPane)
-                            put("timestampMs", System.currentTimeMillis())
+                    put("timestampMs", timestampMs)
                             put("touchTrace", JSONArray(recentServerTouchTraceSnapshot()))
                             put("rejectProbe", lastRejectProbeSummary)
                         }
@@ -585,6 +591,25 @@ class MirrorForegroundService : Service() {
             Log.w(TAG, "Failed to broadcast web diagnostics", e)
         }
     }
+
+    private fun broadcastVideoFreeze(type: String, reason: String) {
+        val server = mirrorServer ?: return
+        try {
+            server.setVideoFrozen(type == "freezeVideo", reason)
+            val timestampMs = System.currentTimeMillis()
+            server.broadcastControlMessage(
+                JSONObject().apply {
+                    put("type", type)
+                    put("reason", reason)
+                    put("timestampMs", timestampMs)
+                }.toString()
+            )
+            Log.i(TAG, "[SCREEN_OFF] [WEB_VIDEO] control=$type reason=$reason ts=$timestampMs")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to broadcast video control type=$type reason=$reason", e)
+        }
+    }
+
 
     private fun isAnyTouchInteractionActive(): Boolean {
         return pipelines.values.any { it.isTouchInteractionActive() }
@@ -922,9 +947,12 @@ class MirrorForegroundService : Service() {
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_USER_PRESENT)
         })
+        startPhysicalScreenStateMonitor()
     }
 
     override fun onDestroy() {
+        stopPhysicalScreenStateMonitor()
+
         Log.i(TAG, "onDestroy() - Service is being destroyed by stopService() or system.")
 
 
@@ -1374,12 +1402,18 @@ class MirrorForegroundService : Service() {
     }
 
     private fun onPhoneScreenOff() {
+        screenOnResumeJob?.cancel()
+        screenOnResumeJob = null
         MirrorDiagnostics.log(DiagnosticEvent.SCREEN_OFF)
         logScreenState("onPhoneScreenOff() called")
+        physicalScreenOnForVideo = false
+        broadcastVideoFreeze("freezeVideo", "screen_off_event")
+        broadcastWebDiagnostics("screen_off_event")
 
         val source = screenOffLoopGuard.classifyScreenOff(android.os.SystemClock.elapsedRealtime())
         logScreenOffLoop("SCREEN_OFF", source)
-        if (source == ScreenOffLoopGuard.EventSource.SELF_INDUCED) {
+        startEarlyVdKeepAliveBurst("screen_off_event")
+        if (source == ScreenOffLoopGuard.EventSource.WAKE_PULSE_RELATED) {
             return
         }
 
@@ -1524,24 +1558,55 @@ class MirrorForegroundService : Service() {
         logScreenState("onPhoneScreenOn() called")
 
         if (!isPhysicalScreenReallyOn()) {
-            logScreenOffInfo("[SCREEN_OFF] [SCREEN_ON] ignored because physical display is not STATE_ON")
-            return
-        }
-
-        val source = screenOffLoopGuard.classifyScreenOn(android.os.SystemClock.elapsedRealtime())
-        logScreenOffLoop("SCREEN_ON", source)
-        if (source == ScreenOffLoopGuard.EventSource.SELF_INDUCED) {
-            if (screenOffReviveStrategy == ScreenOffReviveStrategy.BLACKOUT_KEEP_ALIVE) {
-                if (!isBlackoutActivityRunning) {
-                    startScreenOffBlackout("self_induced_screen_on")
+            logScreenOffInfo("[SCREEN_OFF] [SCREEN_ON] waiting for physical display to reach STATE_ON")
+            screenOnResumeJob?.cancel()
+            screenOnResumeJob = serviceScope.launch {
+                repeat(20) { attempt ->
+                    delay(100L)
+                    if (isPhysicalScreenReallyOn()) {
+                        Log.i(TAG, "[SCREEN_OFF] [SCREEN_ON] physical display became STATE_ON attempt=$attempt")
+                        onPhoneScreenOn()
+                        return@launch
+                    }
                 }
-                reassertPhysicalPanelOff("self_induced_screen_on")
-            } else if (!isBlackoutActivityRunning) {
-                reassertPhysicalPanelOff("self_induced_screen_on")
+                Log.w(TAG, "[SCREEN_OFF] [SCREEN_ON] physical display did not reach STATE_ON within 2s")
             }
             return
         }
 
+
+        physicalScreenOnForVideo = true
+        val source = screenOffLoopGuard.classifyScreenOn(android.os.SystemClock.elapsedRealtime())
+        logScreenOffLoop("SCREEN_ON", source)
+        if (source == ScreenOffLoopGuard.EventSource.WAKE_PULSE_RELATED) {
+            // A real STATE_ON event must be allowed to reach the user. The
+            // keep-alive/blackout classifier can label it wake-pulse-related, but
+            // reasserting panel-off here would swallow a physical power-button wake.
+            Log.i(TAG, "[SCREEN_OFF] [SCREEN_ON] wake-pulse-related classification accepted without panel re-off")
+            screenOnResumeJob?.cancel()
+            screenOnResumeJob = serviceScope.launch {
+                delay(500L)
+                if (!isPhysicalScreenReallyOn()) return@launch
+                earlyPhysicalScreenOffFreezeSent = false
+                broadcastVideoFreeze("resumeVideo", "screen_on_stable_wake_pulse_related")
+            }
+            // A wake-pulse-related wake pulse is not a user restore. Keep the
+            // blackout state so VD keep-alive/revive remains active, while
+            // avoiding panel re-off so a real double-tap wake can remain on.
+            // USER_PRESENT or a later user-classified SCREEN_ON will transition
+            // the FSM to ACTIVE.
+            logScreenOffInfo("[SCREEN_OFF] [FSM] wake-pulse-related SCREEN_ON accepted: state kept=${screenOffPolicy.state}")
+            return
+        }
+
+        screenOnResumeJob?.cancel()
+        screenOnResumeJob = serviceScope.launch {
+            delay(500L)
+            if (!isPhysicalScreenReallyOn() || screenOffPolicy.isScreenOff) return@launch
+            earlyPhysicalScreenOffFreezeSent = false
+            broadcastVideoFreeze("resumeVideo", "screen_on_stable")
+            broadcastWebDiagnostics("screen_on_stable")
+        }
         handleFsmTransition(ScreenOffEvent.SCREEN_ON)
     }
 
@@ -1608,6 +1673,63 @@ class MirrorForegroundService : Service() {
     private fun cancelPendingVdKeepAliveStop() {
         vdKeepAliveStopJob?.cancel()
         vdKeepAliveStopJob = null
+    }
+
+    private fun startPhysicalScreenStateMonitor() {
+        stopPhysicalScreenStateMonitor()
+        physicalScreenStateMonitorJob = serviceScope.launch {
+            var lastInteractive = readPhysicalDisplayInteractive()
+            while (isActive) {
+                val interactive = readPhysicalDisplayInteractive()
+                if (lastInteractive && !interactive && !earlyPhysicalScreenOffFreezeSent) {
+                    earlyPhysicalScreenOffFreezeSent = true
+                    Log.i(TAG, "[SCREEN_OFF] [EARLY_DETECT] physical display became non-interactive")
+                    broadcastVideoFreeze("freezeVideo", "physical_display_state")
+                    broadcastWebDiagnostics("physical_display_state")
+                    startEarlyVdKeepAliveBurst("physical_display_state")
+                } else if (!lastInteractive && interactive) {
+                    Log.i(TAG, "[SCREEN_OFF] [EARLY_DETECT] interactive bounce ignored until SCREEN_ON")
+                }
+                lastInteractive = interactive
+                delay(32L)
+            }
+        }
+    }
+
+    private fun stopPhysicalScreenStateMonitor() {
+        physicalScreenStateMonitorJob?.cancel()
+        physicalScreenStateMonitorJob = null
+    }
+
+    private fun startEarlyVdKeepAliveBurst(reason: String) {
+        earlyVdKeepAliveJob?.cancel()
+        earlyVdKeepAliveJob = serviceScope.launch(Dispatchers.IO) {
+            try {
+                repeat(12) { attempt ->
+                    pipelines.values.forEach { pipeline ->
+                        val displayId = pipeline.controller.getDisplayId()
+                        val service = pipeline.controller.getPrivilegedService()
+                        if (pipeline.controller.hasVirtualDisplay() && displayId > 0 && service != null) {
+                            try {
+                                service.keepVirtualDisplayAlive(displayId)
+                                logScreenOffInfo("[SCREEN_OFF] [EARLY_VD_KEEPALIVE] reason=$reason displayId=$displayId attempt=$attempt")
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Early VD keep-alive failed displayId=$displayId attempt=$attempt", e)
+                            }
+                        }
+                    }
+                    kotlinx.coroutines.delay(80L)
+                }
+            } finally {
+                earlyVdKeepAliveJob = null
+            }
+        }
+    }
+    private fun readPhysicalDisplayInteractive(): Boolean {
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        val displayOn = displayManager.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.state != android.view.Display.STATE_OFF
+        return powerManager.isInteractive && displayOn
     }
 
     private fun startScreenOffReviveMonitor() {
@@ -1932,7 +2054,7 @@ class MirrorForegroundService : Service() {
         val now = android.os.SystemClock.elapsedRealtime()
         if (now - lastDiagnosticsBroadcastAtMs < DIAGNOSTICS_BROADCAST_MIN_INTERVAL_MS) return
         lastDiagnosticsBroadcastAtMs = now
-        broadcastDiagnosticsDebounced()
+        broadcastWebDiagnostics("diagnostics_debounced")
     }
 
     private fun dismissKeyguardForRecovery(
@@ -2298,7 +2420,7 @@ class MirrorForegroundService : Service() {
             }
         } catch (t: Throwable) { Log.e(TAG, "Failed onBrowserConnected", t); markTerminal(TerminalReason.BROWSER_ACTIVATION_FAILED) }
 
-        broadcastDiagnosticsDebounced()
+        broadcastWebDiagnostics("diagnostics_debounced")
         broadcastWebDiagnostics("browser_connected")
     }
 
@@ -2396,7 +2518,7 @@ class MirrorForegroundService : Service() {
             broadcastWebDiagnostics("browser_disconnected_async_done")
         }
 
-        broadcastDiagnosticsDebounced()
+        broadcastWebDiagnostics("diagnostics_debounced")
         broadcastWebDiagnostics("browser_disconnected")
     }
 
@@ -3482,7 +3604,7 @@ class MirrorForegroundService : Service() {
                         runBinderSafe { controller.releaseVirtualDisplay() }
                         displayId = -1
                     }
-                    broadcastDiagnosticsDebounced()
+                    broadcastWebDiagnostics("diagnostics_debounced")
                 }
             }
         }
@@ -3982,7 +4104,7 @@ class MirrorForegroundService : Service() {
                 }
             }
 
-            broadcastDiagnosticsDebounced()
+            broadcastWebDiagnostics("diagnostics_debounced")
         }
 
         fun invalidateVd(reason: String): Long {

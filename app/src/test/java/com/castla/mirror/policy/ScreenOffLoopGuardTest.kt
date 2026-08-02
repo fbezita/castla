@@ -14,7 +14,7 @@ class ScreenOffLoopGuardTest {
     fun `screen off inside suppression window is self induced`() {
         guard.markPowerBurst(nowMs = 1_000L)
 
-        assertEquals(ScreenOffLoopGuard.EventSource.SELF_INDUCED, guard.classifyScreenOff(nowMs = 2_000L))
+        assertEquals(ScreenOffLoopGuard.EventSource.WAKE_PULSE_RELATED, guard.classifyScreenOff(nowMs = 2_000L))
     }
 
     @Test
@@ -28,7 +28,7 @@ class ScreenOffLoopGuardTest {
     fun `screen on shortly after keepalive is self induced`() {
         guard.markKeepAlive(nowMs = 5_000L)
 
-        assertEquals(ScreenOffLoopGuard.EventSource.SELF_INDUCED, guard.classifyScreenOn(nowMs = 5_800L))
+        assertEquals(ScreenOffLoopGuard.EventSource.WAKE_PULSE_RELATED, guard.classifyScreenOn(nowMs = 5_800L))
     }
 
     @Test
@@ -55,7 +55,7 @@ class ScreenOffLoopGuardTest {
     fun `screen on shortly after blackout start is self induced`() {
         guard.markBlackoutStart(nowMs = 5_000L)
 
-        assertEquals(ScreenOffLoopGuard.EventSource.SELF_INDUCED, guard.classifyScreenOn(nowMs = 5_500L))
+        assertEquals(ScreenOffLoopGuard.EventSource.WAKE_PULSE_RELATED, guard.classifyScreenOn(nowMs = 5_500L))
     }
 
     @Test

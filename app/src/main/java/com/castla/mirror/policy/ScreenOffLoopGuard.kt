@@ -14,7 +14,7 @@ class ScreenOffLoopGuard(
 
     enum class EventSource {
         USER,
-        SELF_INDUCED,
+        WAKE_PULSE_RELATED,
     }
 
     private var suppressScreenOffUntilMs: Long = 0L
@@ -35,14 +35,14 @@ class ScreenOffLoopGuard(
     }
 
     fun classifyScreenOff(nowMs: Long): EventSource {
-        return if (nowMs <= suppressScreenOffUntilMs) EventSource.SELF_INDUCED else EventSource.USER
+        return if (nowMs <= suppressScreenOffUntilMs) EventSource.WAKE_PULSE_RELATED else EventSource.USER
     }
 
     fun classifyScreenOn(nowMs: Long): EventSource {
         val keepAliveValid = lastKeepAliveAtMs > 0L && nowMs - lastKeepAliveAtMs <= suppressScreenOnAfterKeepAliveMs
         val blackoutStartValid = lastBlackoutStartedAtMs > 0L && nowMs - lastBlackoutStartedAtMs <= suppressBlackoutWindowMs
         return if (keepAliveValid || blackoutStartValid) {
-            EventSource.SELF_INDUCED
+            EventSource.WAKE_PULSE_RELATED
         } else {
             EventSource.USER
         }

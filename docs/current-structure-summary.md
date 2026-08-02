@@ -669,3 +669,45 @@ The hot restart stream recovery loop and embedded server SSL configurations have
     - 터치 다운 후 슥 밀어 네이티브 스크롤이 시작되는 즉시 브라우저가 **`pointercancel`** 이벤트를 쏴서 터치 세션을 종료합니다. 이 이벤트가 `pointerup`과 혼선되어 `endPress`를 태우면서, 미처 움직이기 전이라 숏클릭 조건을 타서 앱이 즉시 실행되던 마지막 논리 구멍을 적발했습니다.
     - **해결**: 앱 기동 분기를 100% 원천 제거하고 오직 안전한 초기화만 실행하는 **`cancelPress` 전용 취소 핸들러**를 별도 신설하고, 마크업에 `on:pointercancel={cancelPress}`로 엄격 격리 교체 매핑했습니다.
     - **반응성 10px 복원**: 캔슬 오작동이 원천 봉쇄됨에 따라 흔들림 임계치를 기분 좋고 예민한 표준 **`10px`**로 돌려놓아 완벽한 스위프 및 드래그앤드롭 감도를 이룩했습니다.
+
+## 2026-08-02 Virtual Display Task Routing and Encoder Lifecycle Update
+
+### Current app launch policy
+
+`MirrorForegroundService.MirroringPipeline.launchComponent()` now routes an app using the target VirtualDisplay rather than package-global task presence:
+
+1. No matching task on the target VD: launch a new task on that display.
+2. A matching task exists on the target VD: move that task to the front without launching a new activity.
+3. A task exists only on another display: keep the target VD as the launch destination and create the target-display task when required.
+4. A forced cold start: use the existing force-stop/new-task path.
+
+The task decision is centralized in `LaunchPlanner`. Native `moveTaskToFront` is preferred through the privileged Binder service; the shell command fallback is retained for older Android/One UI releases.
+
+### Display session and encoder policy
+
+`DisplayLaunchSession` separates launch preparation from task routing. `DisplaySizePolicy` is the single source for the effective VD/encoder size:
+
+- apply the pipeline maximum-height constraint;
+- preserve aspect ratio when the height is capped;
+- align both dimensions to the 16-pixel encoder boundary;
+- enforce the 320-pixel minimum hardware boundary.
+
+A size change rebuilds the encoder surface and starts a new stream generation. The lifecycle is release -> create -> attach the surface to the VD -> begin stream generation -> start encoder -> request a keyframe. Same-size task reuse does not rebuild the encoder.
+
+### Compatibility and verification
+
+The task query and privileged ActivityTaskManager calls remain reflection-based to tolerate signature differences between Android/One UI versions. The current One UI 9 verification covers new-task launch, same-VD task reuse, multi-app switching, resolution changes, and encoder reconnection. One UI 8.5 remains a pending device regression check.
+
+## 2026-08-02 Screen-Off Mirroring Recovery
+
+### Native service
+
+MirrorForegroundService는 기본 Display의 interactive/state 변화를 조기 감시하고, 화면 OFF 직전에 freezeVideo를 서버에 전달합니다. SCREEN_ON이 빠르게 도착하는 One UI 환경에서는 실제 Display.STATE_ON을 확인할 때까지 최대 2초간 재시도합니다.
+
+WAKE_PULSE_RELATED 이벤트는 자동 keep-alive/revive pulse 직후의 SCREEN_ON으로 추정되는 이벤트입니다. 이 경우 상태를 BLACKOUT_ACTIVE로 유지하고 panel-off 재시도는 하지 않으며, 영상만 안정화 후 재개합니다. 사용자 복귀는 USER_PRESENT 또는 사용자 분류 SCREEN_ON에서 ACTIVE로 전환됩니다.
+
+### Server and frontend
+
+MirrorServer.videoFrozen gate는 freeze 상태 동안 인코더 프레임의 WebSocket broadcast를 차단합니다. 복귀 시 keyframe을 요청해 디코더가 정상 프레임부터 재개하도록 합니다.
+
+WebCodecsBackend는 마지막 정상 canvas 프레임을 보존하고, 감광/근검 프레임을 즉시 화면에 반영하지 않습니다. ViewportPane의 재연결 오버레이는 isConnected == false인 실제 연결 장애에만 표시됩니다.
