@@ -2,15 +2,6 @@ package com.castla.mirror.server
 
 import android.content.Context
 import android.util.Log
-import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
-import java.io.IOException
-import java.net.HttpURLConnection
-import java.net.URL
-import java.security.KeyStore
-import javax.net.ssl.KeyManagerFactory
-import javax.net.ssl.SSLContext
 import fi.iki.elonen.NanoWSD
 import fi.iki.elonen.NanoWSD.WebSocket
 import org.json.JSONObject
@@ -20,8 +11,6 @@ import com.castla.mirror.diagnostics.DiagnosticEvent
 import com.castla.mirror.diagnostics.FileLogger
 import com.castla.mirror.diagnostics.MirrorDiagnostics
 import com.castla.mirror.BuildConfig
-import com.castla.mirror.utils.AppCategoryClassifier
-import com.castla.mirror.ott.OttCatalog
 
 import com.castla.mirror.network.DeviceRelayDnsManager
 import kotlinx.coroutines.CoroutineScope
@@ -76,16 +65,16 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         scope = dnsScope,
         relayUpdateToken = getRelayTokenOrEmpty()
     )
+    private val tlsConfigurator = ServerTlsConfigurator(context) { updateAvailability(it) }
+    private val streamSessions = StreamSessionCoordinator(::broadcastControlMessage, ::dispatchSessionReady)
+    private val httpContent = ServerHttpContent(context)
 
 
     companion object {
         private const val TAG = "MirrorServer"
         const val DEFAULT_PORT = 9090
 
-        private const val CERT_API_URL = "https://car.fbezita.com/api/castla/cert"
         @Volatile private var verboseServerAvailabilityLogging = false
-        private const val DYNAMIC_CERT_FILE_NAME = "dynamic_castla.p12"
-        private const val DYNAMIC_CERT_LAST_CHECK_FILE_NAME = "dynamic_castla.p12.last_check"
 
         fun isVerboseServerAvailabilityLoggingEnabled(): Boolean = verboseServerAvailabilityLogging
     }    
@@ -113,30 +102,8 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         verboseServerAvailabilityLogging = enabled
     }
 
-    private fun getCertDownloadTokenOrEmpty(): String {
-        return BuildConfig.CASTLA_CERT_TOKEN.trim()
-    }
-
     private fun getRelayTokenOrEmpty(): String {
         return BuildConfig.CASTLA_RELAY_TOKEN.trim()
-    }
-
-    private fun getCertificatePasswordOrNull(): CharArray? {
-        val password = BuildConfig.CASTLA_CERT_PASSWORD.trim()
-        if (password.isEmpty()) {
-            updateAvailability(
-                MirrorServerAvailability(
-                    state = MirrorServerAvailabilityState.ERROR,
-                    detail = "cert_password_missing",
-                )
-            )
-            Log.e(
-                TAG,
-                "[Certificate Sync] CASTLA_CERT_PASSWORD is missing. Set it via local.properties or environment variables."
-            )
-            return null
-        }
-        return password.toCharArray()
     }
 
     init {
@@ -170,243 +137,36 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     }
 
     private fun configureSecureContext() {
-        refreshCertificateIfNeededBlocking(context)
-
-        // Load settings to check if WebCodecs hardware accelerated decoding is enabled
-        val settings = com.castla.mirror.ui.StreamSettings.load(context)
-
-        // ✅ Only enable SSL/HTTPS socket binding if WebCodecs option is enabled
-        if (settings.webCodecsEnabled) {
-            try {
-                val password = getCertificatePasswordOrNull() ?: return
-                val dynamicKeyStoreFile = File(context.filesDir, DYNAMIC_CERT_FILE_NAME)
-                val loadedKeystore = TlsKeystoreLoader.loadDynamicPkcs12WithRefresh(
-                    password = password,
-                    dynamicFile = dynamicKeyStoreFile,
-                ) {
-                    Log.w(TAG, "[TLS] dynamic_castla.p12 invalid or missing. Re-downloading certificate.")
-                    downloadCertIfAvailableBlocking(context)
-                }
-                val keyStore = loadedKeystore.keyStore
-                val certSource = loadedKeystore.source
-                Log.i(
-                    TAG,
-                    if (certSource == "dynamic") {
-                        "🔓 [Success] SSL Cert source: dynamic_castla.p12 loaded from local app storage"
-                    } else {
-                        "🔓 [Success] SSL Cert source: dynamic_castla.p12 refreshed from remote API"
-                    }
-                )
-                val keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
-                keyManagerFactory.init(keyStore, password)
-
-                val sslContext = SSLContext.getInstance("TLS")
-                sslContext.init(keyManagerFactory.keyManagers, null, null)
-
-                // ✅ SSL socket binding (HTTPS) with advanced decorator logging
-                makeSecure(sslContext.serverSocketFactory, null)
-                val originalFactory = serverSocketFactory
-                if (originalFactory != null) {
-                    val loggingFactory = object : fi.iki.elonen.NanoHTTPD.ServerSocketFactory {
-                        override fun create(): java.net.ServerSocket {
-                            val originalServerSocket = originalFactory.create()
-                            return LoggingServerSocket(originalServerSocket)
-                        }
-                    }
-                    serverSocketFactory = loggingFactory
-                }
-                logServerAvailability(
-                    "tls_configured mode=https certSource=$certSource " +
-                        "relayUrl=${relayDnsManager.getDeviceRelayUrl()}"
-                )
-                updateAvailability(
-                    MirrorServerAvailability(
-                        state = MirrorServerAvailabilityState.WAITING_RELAY,
-                        detail = "tls_ready",
-                    )
-                )
-                Log.i(TAG, "🚀 HTTPS server started")
-                Log.i(TAG, "🌐 Public URL = ${relayDnsManager.getPublicEntryUrl()}")
-                Log.i(TAG, "🔗 Device relay URL = ${relayDnsManager.getDeviceRelayUrl()}")
-                return
-            } catch (e: Exception) {
-                logServerAvailability("tls_config_failed error=${e.message ?: e::class.java.simpleName}")
-                updateAvailability(
-                    MirrorServerAvailability(
-                        state = MirrorServerAvailabilityState.ERROR,
-                        detail = "tls_config_failed",
-                    )
-                )
-                Log.e(TAG, "❌ SSL load failed, falling back to HTTP mode", e)
-            }
-        }
-
-        // 🌐 When WebCodecs is disabled, makeSecure() is bypassed so the server automatically runs in HTTP mode.
-        logServerAvailability("tls_bypassed mode=http reason=webcodecs_disabled")
-        updateAvailability(
-            MirrorServerAvailability(
-                state = MirrorServerAvailabilityState.READY_HTTP,
-                detail = "http_mode",
-            )
-        )
-        Log.w(TAG, "⚠️ [HTTP Mode] WebCodecs is disabled; running as a standard HTTP server.")
-    }
-
-    private fun refreshCertificateIfNeededBlocking(context: Context): Boolean {
-        val password = getCertificatePasswordOrNull() ?: return false
-        val targetFile = File(context.filesDir, DYNAMIC_CERT_FILE_NAME)
-        val nowMs = System.currentTimeMillis()
-        val certificateNotAfterMs = try {
-            TlsKeystoreLoader.readCertificateNotAfterMs(password, targetFile)
-        } catch (_: Exception) {
-            null
-        }
-        val lastRefreshCheckMs = readLastCertificateRefreshCheckMs(context)
-        val shouldRefresh = TlsCertificateRefreshPolicy.shouldRefresh(
-            nowMs = nowMs,
-            certificateNotAfterMs = certificateNotAfterMs,
-            lastRefreshCheckMs = lastRefreshCheckMs,
-        )
-
-        if (!shouldRefresh) {
-            Log.i(
-                TAG,
-                "[Certificate Sync] Reusing cached certificate. expiresAt=$certificateNotAfterMs lastCheckAt=$lastRefreshCheckMs"
-            )
-            return false
-        }
-
-        if (getCertDownloadTokenOrEmpty().isEmpty()) {
-            updateAvailability(
-                MirrorServerAvailability(
-                    state = MirrorServerAvailabilityState.ERROR,
-                    detail = "cert_token_missing",
-                )
-            )
-            Log.e(
-                TAG,
-                "[Certificate Sync] CASTLA_CERT_TOKEN is missing. Set it via local.properties or environment variables."
-            )
-            return false
-        }
-
-        val downloadSucceeded = downloadCertIfAvailableBlocking(context)
-        if (downloadSucceeded || certificateNotAfterMs?.let { it > nowMs } == true) {
-            writeLastCertificateRefreshCheckMs(context, nowMs)
-        }
-        return downloadSucceeded
-    }
-
-    private fun readLastCertificateRefreshCheckMs(context: Context): Long? {
-        val checkFile = File(context.filesDir, DYNAMIC_CERT_LAST_CHECK_FILE_NAME)
-        if (!checkFile.exists()) {
-            return null
-        }
-
-        return try {
-            checkFile.readText().trim().toLongOrNull()
-        } catch (_: IOException) {
-            null
-        }
-    }
-
-    private fun writeLastCertificateRefreshCheckMs(context: Context, timestampMs: Long) {
-        val checkFile = File(context.filesDir, DYNAMIC_CERT_LAST_CHECK_FILE_NAME)
+        val webCodecsEnabled = com.castla.mirror.ui.StreamSettings.load(context).webCodecsEnabled
         try {
-            checkFile.writeText(timestampMs.toString())
-        } catch (e: IOException) {
-            Log.w(TAG, "[Certificate Sync] Failed to persist last refresh check timestamp.", e)
-        }
-    }
-
-    /**
-     * Function to download the latest .p12 certificate from a remote cloud or NAS server
-     */
-    fun downloadCertIfAvailableBlocking(context: Context): Boolean {
-        val password = getCertificatePasswordOrNull() ?: return false
-        val certToken = getCertDownloadTokenOrEmpty()
-        if (certToken.isEmpty()) {
-            updateAvailability(
-                MirrorServerAvailability(
-                    state = MirrorServerAvailabilityState.ERROR,
-                    detail = "cert_token_missing",
-                )
-            )
-            Log.e(
-                TAG,
-                "[Certificate Sync] CASTLA_CERT_TOKEN is missing. Set it via local.properties or environment variables."
-            )
-            return false
-        }
-        val targetFile = File(context.filesDir, DYNAMIC_CERT_FILE_NAME)
-        val tempFile = File(context.filesDir, "$DYNAMIC_CERT_FILE_NAME.tmp")
-
-        return try {
-            val connection = (URL(CERT_API_URL).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 5000
-                readTimeout = 5000
-                requestMethod = "GET"
-                setRequestProperty("Authorization", "Bearer $certToken")
-            }
-
-            try {
-                when (connection.responseCode) {
-                    HttpURLConnection.HTTP_OK -> {
-                        connection.inputStream.use { input ->
-                            FileOutputStream(tempFile).use { output ->
-                                input.copyTo(output)
-                            }
-                        }
-
-                        if (!tempFile.exists() || tempFile.length() <= 0L) {
-                            tempFile.delete()
-                            Log.w(TAG, "[Certificate Sync] Empty p12 downloaded. Keeping existing certificate.")
-                            return false
-                        }
-
-                        val keyStore = KeyStore.getInstance("PKCS12")
-                        FileInputStream(tempFile).use { stream ->
-                            keyStore.load(stream, password)
-                        }
-
-                        if (targetFile.exists()) {
-                            targetFile.delete()
-                        }
-
-                        if (!tempFile.renameTo(targetFile)) {
-                            tempFile.copyTo(targetFile, overwrite = true)
-                            tempFile.delete()
-                        }
-
-                        Log.i(TAG, "[Certificate Sync] Downloaded and verified castla.p12 from authenticated API.")
-                        true
-                    }
-
-                    HttpURLConnection.HTTP_UNAUTHORIZED,
-                    HttpURLConnection.HTTP_FORBIDDEN -> {
-                        Log.e(TAG, "[Certificate Sync] Unauthorized. Check CASTLA_CERT_TOKEN.")
-                        false
-                    }
-
-                    HttpURLConnection.HTTP_NOT_FOUND -> {
-                        Log.e(TAG, "[Certificate Sync] Certificate API returned 404. Check server cert path.")
-                        false
-                    }
-
-                    else -> {
-                        Log.w(TAG, "[Certificate Sync] Server returned HTTP ${connection.responseCode}. Keeping existing certificate.")
-                        false
+            val secureContext = tlsConfigurator.prepare()
+            if (secureContext != null) {
+                makeSecure(secureContext.socketFactory, null)
+                serverSocketFactory?.let { originalFactory ->
+                    serverSocketFactory = object : fi.iki.elonen.NanoHTTPD.ServerSocketFactory {
+                        override fun create(): java.net.ServerSocket = LoggingServerSocket(originalFactory.create())
                     }
                 }
-            } finally {
-                connection.disconnect()
+                Log.i(TAG, "SSL certificate loaded from ${secureContext.certSource}")
+                logServerAvailability("tls_configured mode=https certSource=${secureContext.certSource} relayUrl=${relayDnsManager.getDeviceRelayUrl()}")
+                updateAvailability(MirrorServerAvailability(MirrorServerAvailabilityState.WAITING_RELAY, "tls_ready"))
+                Log.i(TAG, "HTTPS server configured: ${relayDnsManager.getPublicEntryUrl()}")
+                return
             }
+            if (webCodecsEnabled) return
         } catch (e: Exception) {
-            tempFile.delete()
-            Log.w(TAG, "[Certificate Sync] Network or validation error. Keeping existing certificate.", e)
-            false
+            logServerAvailability("tls_config_failed error=${e.message ?: e::class.java.simpleName}")
+            updateAvailability(MirrorServerAvailability(MirrorServerAvailabilityState.ERROR, "tls_config_failed"))
+            Log.e(TAG, "SSL load failed, falling back to HTTP mode", e)
         }
+
+        logServerAvailability("tls_bypassed mode=http reason=webcodecs_disabled")
+        updateAvailability(MirrorServerAvailability(MirrorServerAvailabilityState.READY_HTTP, "http_mode"))
+        Log.w(TAG, "[HTTP Mode] WebCodecs is disabled; running as a standard HTTP server.")
     }
+
+    fun downloadCertIfAvailableBlocking(context: Context): Boolean =
+        tlsConfigurator.downloadCertIfAvailableBlocking()
 
     fun setRelayPublishIp(ip: String) {
         val nextIp = ip.takeIf { it.isNotBlank() } ?: "0.0.0.0"
@@ -539,9 +299,6 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     @Volatile private var videoFrozen = false
 
     private var cachedSpsPps: ByteArray? = null
-    private val streamGenerations = ConcurrentHashMap<String, AtomicInteger>()
-    private val firstFrameReady = ConcurrentHashMap<String, Boolean>()
-    private val latestStreamMetadata = ConcurrentHashMap<String, String>()
 
     fun setLayoutUpdateListener(listener: (org.json.JSONArray) -> Unit) {
         onLayoutUpdateListener = listener
@@ -726,10 +483,8 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             sendControlSocketAsync(socket, json, "cached thermal status")
         }
 
-        var replayedMetadata = 0
-        latestStreamMetadata.values.forEach { json ->
+        val replayedMetadata = streamSessions.replayMetadata { json ->
             sendControlSocketAsync(socket, json, "stream metadata replay")
-            replayedMetadata++
         }
         if (replayedMetadata > 0) {
             Log.i(TAG, "Replayed $replayedMetadata cached stream metadata message(s) to new control socket")
@@ -770,90 +525,35 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     private var primaryFrameSeqNum: Int = 0
     private var secondaryFrameSeqNum: Int = 0
 
-    fun beginStreamGeneration(channel: String = "primary", vdId: Int, width: Int, height: Int): Int {
-        val normalized = normalizeChannel(channel)
-        val generation = streamGenerations
-            .getOrPut(normalized) { AtomicInteger(0) }
-            .incrementAndGet()
-        firstFrameReady[normalized] = false
-        // Log.i(TAG, "[FRAME_DEBUG] beginStreamGeneration channel=$normalized vdId=$vdId generation=$generation ${width}x$height")
-        FileLogger.i("FRAME_DEBUG", "beginStreamGeneration channel=$normalized vdId=$vdId generation=$generation ${width}x$height")
-        FileLogger.i("STREAM_GENERATION", "begin channel=$normalized vdId=$vdId generation=$generation width=$width height=$height")
-        broadcastStreamMetadata(normalized, vdId, generation, width, height, streamReady = true, firstFrame = false)
+    fun beginStreamGeneration(channel: String = "primary", vdId: Int, width: Int, height: Int): Int =
+        streamSessions.begin(channel, vdId, width, height)
 
-        // When VirtualDisplay is created and stream encoder engine starts, dispatch session_ready packet
+    fun markFirstFrameReady(channel: String = "primary", vdId: Int, width: Int, height: Int) {
+        streamSessions.markFirstFrameReady(channel, vdId, width, height)
+    }
+
+    fun getCurrentStreamGeneration(channel: String = "primary"): Int =
+        streamSessions.currentGeneration(channel)
+
+    fun pauseStream(channel: String = "primary", vdId: Int, width: Int, height: Int) {
+        streamSessions.pause(channel, vdId, width, height)
+    }
+
+    private fun dispatchSessionReady(channel: String, vdId: Int, generation: Int, width: Int, height: Int) {
         val socket = synchronized(controlSocketLock) { activeControlSocket }
         if (socket != null && socket.currentLaunchSeqId != -1) {
-            if (MirrorServer.isVerboseServerAvailabilityLoggingEnabled()) {
-                FileLogger.i(
-                    "SESSION_READY",
-                    "dispatch channel=$normalized vdId=$vdId generation=$generation width=$width height=$height " +
-                        "seqId=${socket.currentLaunchSeqId} controlSession=${socket.debugId}"
-                )
+            if (isVerboseServerAvailabilityLoggingEnabled()) {
+                FileLogger.i("SESSION_READY", "dispatch channel=$channel vdId=$vdId generation=$generation width=$width height=$height seqId=${socket.currentLaunchSeqId} controlSession=${socket.debugId}")
             }
             val response = JSONObject().apply {
                 put("type", "session_ready")
                 put("seqId", socket.currentLaunchSeqId)
-                put("pane", normalized)
+                put("pane", channel)
             }
             sendControlSocketAsync(socket, response.toString(), "session_ready")
-        } else if (MirrorServer.isVerboseServerAvailabilityLoggingEnabled()) {
-            FileLogger.i(
-                "SESSION_READY",
-                "dispatch_skipped channel=$normalized vdId=$vdId generation=$generation width=$width height=$height " +
-                    "hasSocket=${socket != null} seqId=${socket?.currentLaunchSeqId ?: -1}"
-            )
+        } else if (isVerboseServerAvailabilityLoggingEnabled()) {
+            FileLogger.i("SESSION_READY", "dispatch_skipped channel=$channel vdId=$vdId generation=$generation width=$width height=$height hasSocket=${socket != null} seqId=${socket?.currentLaunchSeqId ?: -1}")
         }
-
-        return generation
-    }
-
-    fun markFirstFrameReady(channel: String = "primary", vdId: Int, width: Int, height: Int) {
-        val normalized = normalizeChannel(channel)
-        if (firstFrameReady[normalized] == true) return
-        firstFrameReady[normalized] = true
-        val generation = streamGenerations[normalized]?.get() ?: 0
-        // Log.i(TAG, "[FRAME_DEBUG] firstFrameReady channel=$normalized vdId=$vdId generation=$generation ${width}x$height")
-        FileLogger.i("FRAME_DEBUG", "firstFrameReady channel=$normalized vdId=$vdId generation=$generation ${width}x$height")
-        FileLogger.i("VD_FRAME", "firstFrameReady channel=$normalized vdId=$vdId generation=$generation width=$width height=$height")
-        broadcastStreamMetadata(normalized, vdId, generation, width, height, streamReady = true, firstFrame = true)
-    }
-
-    fun getCurrentStreamGeneration(channel: String = "primary"): Int {
-        val normalized = normalizeChannel(channel)
-        return streamGenerations[normalized]?.get() ?: 0
-    }
-
-    fun pauseStream(channel: String = "primary", vdId: Int, width: Int, height: Int) {
-        val normalized = normalizeChannel(channel)
-        firstFrameReady[normalized] = false
-        val generation = streamGenerations[normalized]?.get() ?: 0
-        broadcastStreamMetadata(normalized, vdId, generation, width, height, streamReady = false, firstFrame = false)
-    }
-
-    private fun broadcastStreamMetadata(
-        channel: String,
-        vdId: Int,
-        generation: Int,
-        width: Int,
-        height: Int,
-        streamReady: Boolean,
-        firstFrame: Boolean
-    ) {
-        val json = JSONObject().apply {
-            put("type", "streamMetadata")
-            put("sessionId", channel)
-            put("vdId", vdId)
-            put("generation", generation)
-            put("width", width)
-            put("height", height)
-            put("streamReady", streamReady)
-            put("firstFrameReady", firstFrame)
-        }
-        val payload = json.toString()
-        latestStreamMetadata[channel] = payload
-        Log.i(TAG, "Stream metadata: channel=$channel vdId=$vdId generation=$generation ${width}x$height streamReady=$streamReady firstFrame=$firstFrame")
-        broadcastControlMessage(payload)
     }
 
     private fun fillVideoHeader(data: ByteArray, flags: Byte, seq: Int) {
@@ -938,7 +638,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         }
 
         if (shouldLogBroadcastFrame(seq)) {
-            val generation = streamGenerations[normalized]?.get() ?: 0
+            val generation = streamSessions.currentGeneration(normalized)
             // Log.i(
             //     TAG,
             //     "[FRAME_DEBUG] broadcastFrame channel=$normalized generation=$generation seq=$seq key=$isKeyFrame bytes=${frame.size} sockets=${if (normalized == "secondary") secondaryVideoSockets.size else primaryVideoSockets.size}"
@@ -1338,118 +1038,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             )
         }
         
-        // Handle API routes for Native Web Launcher
-        if (uri == "/api/apps") {
-            return serveAppList()
-        } else if (uri.startsWith("/api/icon")) {
-            val pkg = session.parameters["pkg"]?.firstOrNull()
-            if (pkg != null) {
-                return serveAppIcon(pkg)
-            }
-        }
-        
-        return serveAsset(uri)
-    }
-    
-    private fun serveAppList(): Response {
-        try {
-            val pm = context.packageManager
-            val intent = android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
-                addCategory(android.content.Intent.CATEGORY_LAUNCHER)
-            }
-            val resolveInfos = pm.queryIntentActivities(intent, android.content.pm.PackageManager.MATCH_ALL)
-            
-            val jsonArray = org.json.JSONArray()
-            resolveInfos.forEach { ri ->
-                if (ri.activityInfo.packageName != context.packageName) {
-                    val obj = JSONObject().apply {
-                        val pkgName = ri.activityInfo.packageName
-                        val className = ri.activityInfo.name
-                        val componentName = android.content.ComponentName(pkgName, className)
-                            .flattenToShortString()
-                        val label = ri.loadLabel(pm).toString()
-                        put("packageName", pkgName)
-                        put("className", className)
-                        put("componentName", componentName)
-                        put("label", label)
-                        put("category", AppCategoryClassifier.classify(pkgName, label))
-                        
-                        // Check if it's a DRM-restricted OTT app
-                        val ottTarget = OttCatalog.resolve(pkgName)
-                        put("isWeb", ottTarget != null)
-                        put("webUrl", ottTarget?.webUrl ?: JSONObject.NULL)
-                        put("launchMode", if (ottTarget != null) "EXTERNAL_BROWSER_URL" else "STANDARD_APP")
-                    }
-                    jsonArray.put(obj)
-                }
-            }
-            
-            val responseObj = JSONObject().apply {
-                put("isPremium", true)
-                put("fitMode", "contain")
-                put("autoFit", true)
-                put("layoutMode", "single")
-                put("apps", jsonArray)
-            }
-            
-            return newFixedLengthResponse(Response.Status.OK, "application/json", responseObj.toString())
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to serve app list", e)
-            return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", e.message)
-        }
-    }
-    
-    private fun serveAppIcon(packageName: String): Response {
-        try {
-            val pm = context.packageManager
-            val icon = pm.getApplicationIcon(packageName)
-            val bmp = android.graphics.Bitmap.createBitmap(
-                icon.intrinsicWidth.coerceAtLeast(1), 
-                icon.intrinsicHeight.coerceAtLeast(1), 
-                android.graphics.Bitmap.Config.ARGB_8888
-            )
-            val canvas = android.graphics.Canvas(bmp)
-            icon.setBounds(0, 0, canvas.width, canvas.height)
-            icon.draw(canvas)
-            
-            val stream = java.io.ByteArrayOutputStream()
-            bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, stream)
-            val bytes = stream.toByteArray()
-            
-            return newFixedLengthResponse(Response.Status.OK, "image/png", java.io.ByteArrayInputStream(bytes), bytes.size.toLong())
-        } catch (e: Exception) {
-            return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Icon not found")
-        }
-    }
-
-    private fun serveAsset(uri: String): Response {
-        return try {
-            var path = uri.substringBefore('?').trimStart('/')
-            if (path.isEmpty()) path = "index.html"
-            val stream = context.assets.open("web/$path")
-            val mimeType = when {
-                path.endsWith(".html") -> "text/html"
-                path.endsWith(".js") -> "application/javascript"
-                path.endsWith(".css") -> "text/css"
-                path.endsWith(".ico") -> "image/x-icon"
-                path.endsWith(".png") -> "image/png"
-                path.endsWith(".svg") -> "image/svg+xml"
-                path.endsWith(".webp") -> "image/webp"
-                path.endsWith(".jpg") || path.endsWith(".jpeg") -> "image/jpeg"
-                else -> "application/octet-stream"
-            }
-            val response = newChunkedResponse(Response.Status.OK, mimeType, stream)
-            response.addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
-            response.addHeader("Pragma", "no-cache")
-            response.addHeader("Expires", "0")
-            response
-        } catch (e: Exception) {
-            val response = newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not Found")
-            response.addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
-            response.addHeader("Pragma", "no-cache")
-            response.addHeader("Expires", "0")
-            response
-        }
+        return httpContent.serve(uri, session.parameters)
     }
 
     fun closeAllSockets(reason: String) {

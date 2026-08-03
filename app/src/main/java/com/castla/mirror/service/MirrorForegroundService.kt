@@ -38,8 +38,6 @@ import com.castla.mirror.capture.VideoEncoder
 import com.castla.mirror.capture.VirtualDisplayController
 import com.castla.mirror.compositor.DisplayTier
 import com.castla.mirror.input.TouchInjector
-import com.castla.mirror.input.RemoteImeBridge
-import com.castla.mirror.input.ImeCommand
 import com.castla.mirror.input.CastlaTextInputRouter
 import com.castla.mirror.server.MirrorServer
 import com.castla.mirror.server.MirrorServerAvailability
@@ -157,7 +155,7 @@ class MirrorForegroundService : Service() {
         private val _panelOffStateFlow = MutableStateFlow(ScreenOffState.ACTIVE)
         val panelOffStateFlow: StateFlow<ScreenOffState> = _panelOffStateFlow
 
-        @Volatile private var isAppLaunchingContext = false
+        @Volatile internal var isAppLaunchingContext = false
 
         var isServiceRunning: Boolean
             get() = _serviceRunningFlow.value
@@ -185,158 +183,21 @@ class MirrorForegroundService : Service() {
     fun getMirrorServer(): MirrorServer? = mirrorServer
 
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private val imeTimeoutRunnable = Runnable {
-        if (!castlaImeProxyEnabled) {
-            FileLogger.i("IME_ROUTING", "timeout_ignored reason=system_ime_mode")
-            return@Runnable
-        }
-        Log.i(TAG, "IME input inactivity timeout (30 seconds) reached. Triggering FSM Timeout.")
-        val svc = shizukuSetup?.privilegedService
-        if (svc != null) {
-            serviceScope.launch {
-                try {
-                    com.castla.mirror.input.ImeSwitchManager.sendEvent(
-                        this@MirrorForegroundService,
-                        com.castla.mirror.input.ImeEvent.Timeout
-                    ) { cmd ->
-                        svc.execCommand(cmd)
-                    }
-                } catch (e: java.lang.Exception) {
-                    Log.e(TAG, "FSM Timeout event failed", e)
-                }
-            }
-        }
-    }
+    private val remoteInputCoordinator = RemoteInputCoordinator(this) { castlaImeProxyEnabled }
 
-    fun resetImeTimeoutTimer() {
-        mainHandler.removeCallbacks(imeTimeoutRunnable)
-        if (!castlaImeProxyEnabled) {
-            FileLogger.i("IME_ROUTING", "resetImeTimeoutTimer skipped reason=system_ime_mode")
-            return
-        }
-        // Switch to Castla IME dynamically if not already active when remote input occurs
-        ensureCastlaImeActiveDynamically()
-        mainHandler.postDelayed(imeTimeoutRunnable, 30000L) // 30 seconds
-    }
-
-    fun ensureCastlaImeActiveDynamically() {
-        if (!castlaImeProxyEnabled) {
-            FileLogger.i("IME_ROUTING", "ensureCastlaImeActiveDynamically skipped reason=system_ime_mode")
-            return
-        }
-        val svc = shizukuSetup?.privilegedService
-        if (svc != null) {
-            serviceScope.launch {
-                try {
-                    com.castla.mirror.input.ImeSwitchManager.sendEvent(
-                        this@MirrorForegroundService,
-                        com.castla.mirror.input.ImeEvent.RemoteTextFocus
-                    ) { cmd ->
-                        svc.execCommand(cmd)
-                    }
-                } catch (e: java.lang.Exception) {
-                    Log.e(TAG, "FSM remote text focus event failed", e)
-                }
-            }
-        }
-    }
-
-    fun restoreUserKeyboardSilently() {
-        if (!castlaImeProxyEnabled) {
-            FileLogger.i("IME_ROUTING", "restoreUserKeyboardSilently skipped reason=system_ime_mode")
-            return
-        }
-        val svc = shizukuSetup?.privilegedService
-        if (svc != null) {
-            serviceScope.launch {
-                try {
-                    com.castla.mirror.input.ImeSwitchManager.sendEvent(
-                        this@MirrorForegroundService,
-                        com.castla.mirror.input.ImeEvent.RemoteTextBlur
-                    ) { cmd ->
-                        svc.execCommand(cmd)
-                    }
-                } catch (e: java.lang.Exception) {
-                    Log.e(TAG, "FSM remote text blur event failed", e)
-                }
-            }
-        }
-    }
-
-    fun onRemoteFocusLost() {
-        Log.i(TAG, "onRemoteFocusLost -> restoring user keyboard silently")
-        mainHandler.removeCallbacks(imeTimeoutRunnable)
-        if (!castlaImeProxyEnabled) {
-            FileLogger.i("IME_ROUTING", "onRemoteFocusLost ignored reason=system_ime_mode")
-            return
-        }
-        restoreUserKeyboardSilently()
-    }
-
-    fun handleRemoteFocusHint(packageName: String?, inputType: Int, imeOptions: Int, privateImeOptions: String?) {
-        Log.i(TAG, "handleRemoteFocusHint: pkg=$packageName, inputType=$inputType, options=$imeOptions")
-        if (!castlaImeProxyEnabled) {
-            FileLogger.i(
-                "IME_ROUTING",
-                "remoteFocusHint ignored reason=system_ime_mode pkg=${packageName ?: ""} inputType=$inputType imeOptions=$imeOptions"
-            )
-            return
-        }
-
-        remoteImeWatchdogJob?.cancel()
-        remoteImeWatchdogJob = null
-
-        val router = com.castla.mirror.input.CastlaTextInputRouter.getInstance()
-        val currentSessionId = router.getCachedImeFocusState().sessionId
-        val imeState = com.castla.mirror.input.ImeFocusState(
-            sessionId = currentSessionId,
-            packageName = packageName,
-            inputType = inputType,
-            imeOptions = imeOptions,
-            privateImeOptions = privateImeOptions,
-            isFocused = true,
-            timestamp = System.currentTimeMillis()
-        )
-        router.updateImeFocusState(imeState)
-
-        resetImeTimeoutTimer()
-    }
-
-    fun handleRemoteBlurHint() {
-        Log.i(TAG, "handleRemoteBlurHint received. Scheduling 500ms blur debounce & 3s watchdog.")
-        if (!castlaImeProxyEnabled) {
-            FileLogger.i("IME_ROUTING", "remoteBlurHint ignored reason=system_ime_mode")
-            return
-        }
-
-        remoteImeWatchdogJob?.cancel()
-        remoteImeWatchdogJob = serviceScope.launch(Dispatchers.Main) {
-            // 500ms hold interval
-            kotlinx.coroutines.delay(500L)
-
-            val router = com.castla.mirror.input.CastlaTextInputRouter.getInstance()
-            val state = router.getCachedImeFocusState()
-            if (state.isFocused) {
-                Log.i(TAG, "Watchdog: 500ms blur delay expired. Setting IME registry focused = false.")
-                router.updateImeFocusState(state.copy(isFocused = false, timestamp = System.currentTimeMillis()))
-            }
-
-            // Wait total 3 seconds (2500ms more)
-            kotlinx.coroutines.delay(2500L)
-
-            val activeState = router.getCachedImeFocusState()
-            if (!activeState.isFocused) {
-                Log.w(TAG, "Watchdog: 3s of remote blur inactivity. Forcing restore phone keyboard.")
-                onRemoteFocusLost()
-            }
-        }
-    }
+    fun resetImeTimeoutTimer() = remoteInputCoordinator.resetTimeout()
+    fun ensureCastlaImeActiveDynamically() = remoteInputCoordinator.ensureActive()
+    fun restoreUserKeyboardSilently() = remoteInputCoordinator.restoreKeyboard()
+    fun onRemoteFocusLost() = remoteInputCoordinator.onFocusLost()
+    fun handleRemoteFocusHint(packageName: String?, inputType: Int, imeOptions: Int, privateImeOptions: String?) =
+        remoteInputCoordinator.handleFocusHint(packageName, inputType, imeOptions, privateImeOptions)
+    fun handleRemoteBlurHint() = remoteInputCoordinator.handleBlurHint()
 
     // Core map collection for symmetric pipeline extension
     val pipelines = java.util.concurrent.ConcurrentHashMap<String, MirroringPipeline>()
 
     internal lateinit var powerLockManager: PowerLockManager
-    private lateinit var thermalThrottleManager: ThermalThrottleManager
+    internal lateinit var thermalThrottleManager: ThermalThrottleManager
     internal lateinit var adaptiveBitrateManager: AdaptiveBitrateManager
     lateinit var contentAwareQualityEngine: ContentAwareQualityEngine
 
@@ -365,10 +226,8 @@ class MirrorForegroundService : Service() {
         set(value) { adaptiveBitrateManager.lastQualityBacklogDrops = value }
 
     private var audioCapture: AudioCapture? = null
-    private var audioOrchestrator: AudioCaptureOrchestrator? = null
+    internal var audioOrchestrator: AudioCaptureOrchestrator? = null
     private var shizukuSetup: ShizukuSetup? = null
-    private var remoteImeBridge: RemoteImeBridge? = null
-    private var remoteImeWatchdogJob: Job? = null
     private var mirroringMode: String = "FULL_SCREEN"
     private var targetPackage: String = ""
     private var browserConnectionListener: ((Boolean) -> Unit)? = null
@@ -378,9 +237,9 @@ class MirrorForegroundService : Service() {
     internal var serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
     internal var browserConnected = false
-    private var isInitialRebuildTriggered = false
+    internal var isInitialRebuildTriggered = false
     @Volatile internal var currentCodecMode: String = "h264"
-    private val paneVisibility = java.util.concurrent.ConcurrentHashMap<String, Boolean>().apply {
+    internal val paneVisibility = java.util.concurrent.ConcurrentHashMap<String, Boolean>().apply {
         put("primary", true)
         put("secondary", false)
     }
@@ -403,8 +262,6 @@ class MirrorForegroundService : Service() {
         ) : VdHardwareRequest()
     }
 
-    private val vdRequestChannel = kotlinx.coroutines.channels.Channel<VdHardwareRequest>(kotlinx.coroutines.channels.Channel.UNLIMITED)
-    private var vdWorkerJob: Job? = null
 
 
     enum class PipelineState { IDLE, REBUILDING }
@@ -420,17 +277,6 @@ class MirrorForegroundService : Service() {
         val forceSingle: Boolean,
         val onComplete: kotlinx.coroutines.CompletableDeferred<Unit>? = null
     )
-    private data class RebuildRequestSnapshot(
-        val width: Int,
-        val height: Int,
-        val force: Boolean,
-        val forceSingle: Boolean,
-        val reason: String,
-        val requestedAt: Long
-    )
-
-    private val rebuildRequestMutex = Mutex()
-    private val lastRebuildRequestByPane = java.util.concurrent.ConcurrentHashMap<String, RebuildRequestSnapshot>()
     internal val rebuildRequestIdGenerator = java.util.concurrent.atomic.AtomicLong(0)
 
     private var dpiScale: Float = 0.7f
@@ -443,8 +289,11 @@ class MirrorForegroundService : Service() {
     private var pendingAudioEnabled = false
     private var deferredAudioStartJob: Job? = null
 
-    private var pendingBrowserDisconnectJob: Job? = null
-    @Volatile private var browserTeardownPhase: String = "idle"
+    private val browserSessionCoordinator = BrowserSessionCoordinator(this)
+    internal val hasReceivedBrowserLayout: Boolean get() = browserSessionCoordinator.hasReceivedLayout
+    private val vdRebuildCoordinator = VirtualDisplayRebuildCoordinator(this)
+    private val displayRoutingDiagnostics = DisplayRoutingDiagnostics(this, { vdImeVerboseLogging }, vdImeLogPrefix)
+    @Volatile internal var browserTeardownPhase: String = "idle"
     private val inputDebugLaunchSeq = java.util.concurrent.atomic.AtomicInteger(0)
     @Volatile private var currentInputDebugLaunchSeq = 0
     private val inputDebugPacketCounts = java.util.concurrent.ConcurrentHashMap<Int, java.util.concurrent.atomic.AtomicInteger>()
@@ -550,7 +399,7 @@ class MirrorForegroundService : Service() {
                             put("reason", reason)
                             put("browserConnected", browserConnected)
                             put("serverBrowserConnected", server.isBrowserConnected())
-                            put("pendingDisconnect", pendingBrowserDisconnectJob != null)
+                            put("pendingDisconnect", browserSessionCoordinator.pendingDisconnectJob != null)
                             put("disconnectGraceMs", DisconnectPolicy.graceMs(screenOffPolicy.isScreenOff))
                             put("screenOff", screenOffPolicy.isScreenOff && !screenOffCoordinator.isPhysicalScreenOnForVideo)
                             put("teardownPhase", browserTeardownPhase)
@@ -558,7 +407,7 @@ class MirrorForegroundService : Service() {
                             put("pipelineSnapshot", pipelineTouchSnapshot())
                             put("injectorSnapshot", injectorTouchSnapshot())
                             put("launchSeq", currentInputDebugLaunchSeq)
-                            put("lastTouchPane", lastTouchPane)
+                            put("lastTouchPane", remoteInputCoordinator.lastTouchPane)
                     put("timestampMs", timestampMs)
                             put("touchTrace", JSONArray(recentServerTouchTraceSnapshot()))
                             put("rejectProbe", lastRejectProbeSummary)
@@ -590,7 +439,7 @@ class MirrorForegroundService : Service() {
     }
 
 
-    private fun isAnyTouchInteractionActive(): Boolean {
+    internal fun isAnyTouchInteractionActive(): Boolean {
         return pipelines.values.any { it.isTouchInteractionActive() }
     }
 
@@ -613,7 +462,7 @@ class MirrorForegroundService : Service() {
             normalized.contains("splash")
     }
 
-    private fun mostRecentTouchAgeMs(now: Long = android.os.SystemClock.elapsedRealtime()): Long? {
+    internal fun mostRecentTouchAgeMs(now: Long = android.os.SystemClock.elapsedRealtime()): Long? {
         val lastTouchAt = pipelines.values
             .map { it.lastTouchEventAt }
             .filter { it > 0L }
@@ -629,175 +478,10 @@ class MirrorForegroundService : Service() {
         return age in 0..maxAgeMs
     }
 
-    internal suspend fun requestRebuild(request: RebuildRequest) {
-        val pipeline = pipelines[request.pipelineName]
-        if (pipeline == null || isAppLaunchingContext || request.width <= 0 || request.height <= 0) {
-            request.onComplete?.complete(Unit)
-            return
-        }
-        logLaunchRecoveryInfo(
-            "rebuild_request_received id=${request.requestId} pane=${request.pipelineName} reason=${request.reason} " +
-                "priority=${request.priority} target=${request.width}x${request.height} force=${request.force} " +
-                "forceSingle=${request.forceSingle} launchingContext=$isAppLaunchingContext"
-        )
+    internal suspend fun requestRebuild(request: RebuildRequest) =
+        vdRebuildCoordinator.request(request)
 
-        val now = android.os.SystemClock.elapsedRealtime()
-        var coalesced = false
-        rebuildRequestMutex.withLock {
-            val last = lastRebuildRequestByPane[request.pipelineName]
-            val duplicate = last != null &&
-                last.width == request.width &&
-                last.height == request.height &&
-                last.force == request.force &&
-                last.forceSingle == request.forceSingle &&
-                now - last.requestedAt <= 120L
-
-            if (duplicate && request.onComplete == null && request.priority != RebuildPriority.IMMEDIATE) {
-                coalesced = true
-            } else {
-                lastRebuildRequestByPane[request.pipelineName] = RebuildRequestSnapshot(
-                    request.width,
-                    request.height,
-                    request.force,
-                    request.forceSingle,
-                    request.reason,
-                    now
-                )
-            }
-        }
-        if (coalesced) {
-            logLaunchRecoveryInfo(
-                "rebuild_request_coalesced id=${request.requestId} pane=${request.pipelineName} reason=${request.reason} " +
-                    "target=${request.width}x${request.height}"
-            )
-            Log.d(
-                TAG,
-                "[RebuildCoordinator] coalesced pane=${request.pipelineName} reason=${request.reason} " +
-                    "target=${request.width}x${request.height}"
-            )
-            return
-        }
-
-        val deferStart = android.os.SystemClock.elapsedRealtime()
-        var deferredForTouch = false
-        var skippedForTouchQuietWindow = false
-        while (request.priority != RebuildPriority.IMMEDIATE) {
-            val recentTouchAgeMs = mostRecentTouchAgeMs()
-            val requiresQuietWindow = request.priority == RebuildPriority.LOW
-            val touchBlocked = isAnyTouchInteractionActive() ||
-                (requiresQuietWindow && recentTouchAgeMs != null && recentTouchAgeMs < 2500L)
-            if (!touchBlocked) break
-
-            deferredForTouch = true
-            delay(60L)
-            if (android.os.SystemClock.elapsedRealtime() - deferStart >= 1500L) {
-                if (requiresQuietWindow) skippedForTouchQuietWindow = true
-                break
-            }
-        }
-        if (deferredForTouch) {
-        }
-        if (skippedForTouchQuietWindow) {
-            logLaunchRecoveryInfo(
-                "rebuild_request_skipped id=${request.requestId} pane=${request.pipelineName} reason=${request.reason} " +
-                    "priority=${request.priority} source=touch_quiet_window target=${request.width}x${request.height}"
-            )
-            Log.i(
-                TAG,
-                "[RebuildCoordinator] skipped pane=${request.pipelineName} reason=${request.reason} priority=${request.priority} " +
-                    "source=touch_quiet_window recentTouchAgeMs=${mostRecentTouchAgeMs() ?: -1L} target=${request.width}x${request.height}"
-            )
-            request.onComplete?.complete(Unit)
-            return
-        }
-
-        pipeline.debugRebuildRequests += 1
-        logLaunchRecoveryInfo(
-            "rebuild_request_enqueue id=${request.requestId} pane=${request.pipelineName} reason=${request.reason} " +
-                "priority=${request.priority} target=${request.width}x${request.height} force=${request.force} " +
-                "forceSingle=${request.forceSingle}"
-        )
-        val enqueueResult = vdRequestChannel.trySend(
-            VdHardwareRequest.Rebuild(
-                request.requestId,
-                request.reason,
-                request.pipelineName,
-                request.width,
-                request.height,
-                request.force,
-                request.forceSingle,
-                request.onComplete
-            )
-        )
-        if (enqueueResult.isFailure) {
-            val error = enqueueResult.exceptionOrNull()
-            if (error != null) {
-                request.onComplete?.completeExceptionally(error)
-                throw error
-            }
-            request.onComplete?.complete(Unit)
-        }
-    }
-
-
-    // Start sequential background worker loop to process all virtual display operations FIFO
-    private fun startVdHardwareWorker() {
-        vdWorkerJob?.cancel()
-        vdWorkerJob = serviceScope.launch(vdDispatcher) {
-            for (request in vdRequestChannel) {
-                if (!isActive) break
-                try {
-                    when (request) {
-                        is VdHardwareRequest.Rebuild -> {
-                            try {
-                                logLaunchRecoveryInfo(
-                                    "rebuild_worker_begin id=${request.requestId} pane=${request.pipelineName} " +
-                                        "reason=${request.reason} target=${request.targetWidth}x${request.targetHeight} force=${request.force} " +
-                                        "forceSingle=${request.forceSingle}"
-                                )
-                                val pipeline = pipelines[request.pipelineName]
-                                if (pipeline != null) {
-                                    val skipStaleRequest = RebuildRequestPolicy.shouldSkipStaleRequest(
-                                        requestWidth = request.targetWidth,
-                                        requestHeight = request.targetHeight,
-                                        viewport = RebuildRequestPolicy.PendingViewport(
-                                            requestedWidth = pipeline.requestedWidth,
-                                            requestedHeight = pipeline.requestedHeight,
-                                            hasReceivedBrowserLayout = hasReceivedBrowserLayout,
-                                        ),
-                                    )
-                                    if (skipStaleRequest) {
-                                        logLaunchRecoveryInfo(
-                                            "rebuild_worker_skip_stale id=${request.requestId} pane=${request.pipelineName} " +
-                                                "reason=${request.reason} target=${request.targetWidth}x${request.targetHeight} " +
-                                                "latest=${pipeline.requestedWidth}x${pipeline.requestedHeight}"
-                                        )
-                                        continue
-                                    }
-                                    pipeline.executeActualRebuild(
-                                        request.requestId,
-                                        request.reason,
-                                        request.targetWidth,
-                                        request.targetHeight,
-                                        request.force,
-                                        request.forceSingle
-                                    )
-                                }
-                            } finally {
-                                logLaunchRecoveryInfo(
-                                    "rebuild_worker_end id=${request.requestId} pane=${request.pipelineName}"
-                                )
-                                request.onComplete?.complete(Unit)
-                            }
-                        }
-                    }
-                } catch (e: Throwable) {
-                    Log.e(TAG, "[VdWorker] Failed to process sequential hardware request", e)
-                }
-            }
-        }
-    }
-
+    private fun startVdHardwareWorker() = vdRebuildCoordinator.start()
 
     fun turnPanelOffForMirroring(): Boolean =
         screenOffCoordinator.turnPanelOffForMirroring()
@@ -835,10 +519,7 @@ class MirrorForegroundService : Service() {
 
         instance = this
         isServiceRunning = true
-        remoteImeBridge = RemoteImeBridge(
-            privilegedServiceProvider = { shizukuSetup?.privilegedService },
-            displayIdProvider = { activeInputDisplayId() }
-        )
+        remoteInputCoordinator.initialize()
         isCleanupInProgress = false
         createNotificationChannel()
         observeAppLaunchRequests()
@@ -885,8 +566,7 @@ class MirrorForegroundService : Service() {
 
 
         // Terminate the sequential virtual display hardware worker loop
-        vdWorkerJob?.cancel()
-        vdWorkerJob = null
+        vdRebuildCoordinator.stop()
 
 
         if (!cleanupCompleted) {
@@ -930,7 +610,7 @@ class MirrorForegroundService : Service() {
                         forceFallbackCancel = shouldForceCancel,
                         reason = "app_launch_transition"
                     );
-                    lastTouchPane = "primary"
+                    remoteInputCoordinator.lastTouchPane = "primary"
                     Log.i(TAG, "[Touch] Cleared pane touch state before app launch pane=$pane pkg=${request.packageName}")
                 } catch (_: Exception) {}
 
@@ -1136,174 +816,10 @@ class MirrorForegroundService : Service() {
         targetDisplayId: Int,
         phase: String,
         launchMode: String,
-        vdDisplayId: Int
-    ) {
-        if (!vdImeVerboseLogging) return
-        if (service == null || targetPkg.isBlank() || targetDisplayId < 0) return
-        Log.i(
-            TAG,
-            "$vdImeLogPrefix [IME_ROUTING] phase=$phase pane=$pane targetPkg=$targetPkg targetDisplayId=$targetDisplayId launchMode=$launchMode vdDisplayId=$vdDisplayId"
-        )
-        FileLogger.i(
-            "IME_ROUTING",
-            "$vdImeLogPrefix phase=$phase pane=$pane targetPkg=$targetPkg targetDisplayId=$targetDisplayId launchMode=$launchMode vdDisplayId=$vdDisplayId"
-        )
-        serviceScope.launch(Dispatchers.IO) {
-            val delays = if (phase == "prelaunch") listOf(0L) else listOf(250L, 1000L)
-            for (delayMs in delays) {
-                if (delayMs > 0L) delay(delayMs)
-                captureDisplayRoutingSnapshot(pane, service, targetPkg, targetDisplayId, phase, launchMode, vdDisplayId, delayMs)
-            }
-        }
-    }
-
-    private suspend fun captureDisplayRoutingSnapshot(
-        pane: String,
-        service: IPrivilegedService,
-        targetPkg: String,
-        targetDisplayId: Int,
-        phase: String,
-        launchMode: String,
         vdDisplayId: Int,
-        delayMs: Long
-    ) {
-        val appDisplayId = try {
-            runBinderSafe { service.getDisplayIdForPackage(targetPkg) } ?: -1
-        } catch (_: Exception) {
-            -1
-        }
-        val imeDump = try {
-            runBinderSafe(1500L) { service.execCommand("dumpsys input_method") } ?: ""
-        } catch (_: Exception) {
-            ""
-        }
-        val windowDump = try {
-            runBinderSafe(1500L) { service.execCommand("dumpsys window displays") } ?: ""
-        } catch (_: Exception) {
-            ""
-        }
-        val imeDisplayId = extractImeDisplayId(imeDump, windowDump)
-        val imeSummary = buildImeSummary(imeDump, windowDump)
-        val localIme =
-            appDisplayId != -1 &&
-                imeDisplayId != -1 &&
-                appDisplayId == imeDisplayId &&
-                imeDisplayId == vdDisplayId
-        Log.i(
-            TAG,
-            "$vdImeLogPrefix [VD] pane=$pane phase=$phase vdDisplayId=$vdDisplayId targetDisplayId=$targetDisplayId launchMode=$launchMode delayMs=$delayMs"
-        )
-        Log.i(
-            TAG,
-            "$vdImeLogPrefix [APP_DISPLAY] pane=$pane phase=$phase pkg=$targetPkg appDisplayId=$appDisplayId targetDisplayId=$targetDisplayId vdDisplayId=$vdDisplayId delayMs=$delayMs"
-        )
-        Log.i(
-            TAG,
-            "$vdImeLogPrefix [IME_DISPLAY] pane=$pane phase=$phase pkg=$targetPkg imeDisplayId=$imeDisplayId targetDisplayId=$targetDisplayId vdDisplayId=$vdDisplayId delayMs=$delayMs summary=$imeSummary"
-        )
-        Log.i(
-            TAG,
-            "$vdImeLogPrefix [IME_ROUTING] pane=$pane phase=$phase pkg=$targetPkg localIme=$localIme targetDisplayId=$targetDisplayId appDisplayId=$appDisplayId imeDisplayId=$imeDisplayId vdDisplayId=$vdDisplayId launchMode=$launchMode delayMs=$delayMs"
-        )
-        FileLogger.i(
-            "VD",
-            "$vdImeLogPrefix pane=$pane phase=$phase vdDisplayId=$vdDisplayId targetDisplayId=$targetDisplayId launchMode=$launchMode delayMs=$delayMs"
-        )
-        FileLogger.i(
-            "APP_DISPLAY",
-            "$vdImeLogPrefix pane=$pane phase=$phase pkg=$targetPkg appDisplayId=$appDisplayId targetDisplayId=$targetDisplayId vdDisplayId=$vdDisplayId delayMs=$delayMs"
-        )
-        FileLogger.i(
-            "IME_DISPLAY",
-            "$vdImeLogPrefix pane=$pane phase=$phase pkg=$targetPkg imeDisplayId=$imeDisplayId targetDisplayId=$targetDisplayId vdDisplayId=$vdDisplayId delayMs=$delayMs summary=$imeSummary"
-        )
-        FileLogger.i(
-            "IME_ROUTING",
-            "$vdImeLogPrefix pane=$pane phase=$phase pkg=$targetPkg localIme=$localIme targetDisplayId=$targetDisplayId appDisplayId=$appDisplayId imeDisplayId=$imeDisplayId vdDisplayId=$vdDisplayId launchMode=$launchMode delayMs=$delayMs"
-        )
-    }
-
-    private fun extractImeDisplayId(imeDump: String, windowDump: String): Int {
-        listOf(
-            Regex("""mCurTokenDisplayId\s*[=:]\s*(-?\d+)"""),
-            Regex("""imeDisplayId\s*[=:]\s*(-?\d+)""")
-        ).forEach { pattern ->
-            pattern.find(imeDump)
-                ?.groupValues
-                ?.getOrNull(1)
-                ?.toIntOrNull()
-                ?.let { return it }
-        }
-
-        val imeRelatedText = buildImeRelatedText(imeDump, windowDump)
-        val scopedPatterns = listOf(
-            Regex("""mDisplayId\s*[=:]\s*(-?\d+)"""),
-            Regex("""displayId\s*[=:]\s*(-?\d+)"""),
-            Regex("""display\s*[=:]\s*(-?\d+)""")
-        )
-        for (pattern in scopedPatterns) {
-            pattern.find(imeRelatedText)
-                ?.groupValues
-                ?.getOrNull(1)
-                ?.toIntOrNull()
-                ?.let { return it }
-        }
-        return -1
-    }
-
-    private fun buildImeRelatedText(imeDump: String, windowDump: String): String {
-        val keywords = listOf(
-            "InputMethod",
-            "input method",
-            "IME",
-            "ime",
-            "mIme",
-            "mInputMethod",
-            "mCurTokenDisplayId",
-            "imeDisplayId",
-            "imeLayeringTarget",
-            "mInputMethodTarget",
-            "mCurFocusedWindow",
-            "mServedView"
-        )
-
-        fun isImeLine(line: String): Boolean =
-            keywords.any { line.contains(it, ignoreCase = true) }
-
-        return buildString {
-            imeDump.lineSequence()
-                .filter(::isImeLine)
-                .forEach { appendLine(it.trim()) }
-
-            windowDump.lineSequence()
-                .filter(::isImeLine)
-                .forEach { appendLine(it.trim()) }
-        }
-    }
-
-    private fun buildImeSummary(imeDump: String, windowDump: String): String {
-        val related = buildImeRelatedText(imeDump, windowDump)
-
-        return related
-            .lineSequence()
-            .filter { line ->
-                line.contains("mCurMethodId", true) ||
-                    line.contains("mCurTokenDisplayId", true) ||
-                    line.contains("imeDisplayId", true) ||
-                    line.contains("mCurFocusedWindow", true) ||
-                    line.contains("mServedView", true) ||
-                    line.contains("displayId", true) ||
-                    line.contains("mDisplayId", true) ||
-                    line.contains("InputMethod", true) ||
-                    line.contains("imeLayeringTarget", true) ||
-                    line.contains("mInputMethodTarget", true)
-            }
-            .map { it.trim() }
-            .distinct()
-            .take(16)
-            .joinToString(" | ")
-            .take(1200)
-    }
+    ) = displayRoutingDiagnostics.schedule(
+        pane, service, targetPkg, targetDisplayId, phase, launchMode, vdDisplayId,
+    )
 
     private fun requestStopAsync(reason: String) {
         if (stopRequested) return
@@ -1327,11 +843,11 @@ class MirrorForegroundService : Service() {
         screenOffCoordinator.onUserRequestRestoreFromBlackout()
     }
 
-    private fun startVdKeepAlive() {
+    internal fun startVdKeepAlive() {
         screenOffCoordinator.startVdKeepAlive()
     }
 
-    private fun stopVdKeepAlive() {
+    internal fun stopVdKeepAlive() {
         screenOffCoordinator.stopVdKeepAlive()
     }
 
@@ -1448,7 +964,7 @@ class MirrorForegroundService : Service() {
 
         pipelines.values.forEach { try { it.resizeJob?.cancel() } catch (_: Exception) {} }
         adaptiveBitrateManager.stopAllLoops()
-        pendingBrowserDisconnectJob?.cancel()
+        browserSessionCoordinator.cleanup()
         reconnectJob?.cancel()
         reconnectJob = null
 
@@ -1489,7 +1005,7 @@ class MirrorForegroundService : Service() {
 
             shizukuSetup = null
             try { serviceScope.cancel() } catch (_: Exception) {}
-            try { compositionDispatcher.close() } catch (_: Exception) {}
+            try { remoteInputCoordinator.cleanup() } catch (_: Exception) {}
             try { vdDispatcher.close() } catch (_: Exception) {}
             Log.i("MirrorServiceCleanup", "threadsStopped=true")
 
@@ -1575,7 +1091,7 @@ class MirrorForegroundService : Service() {
                             "clientTs=${event.clientTsMs} recv=${event.receivedAtElapsedMs}"
                     )
                     targetPipeline?.touchInjector?.onTouchEvent(event)
-                    if (event.action == "up") { lastTouchPane = event.pane }
+                    if (event.action == "up") { remoteInputCoordinator.lastTouchPane = event.pane }
                     if (event.action != "move") {
                         broadcastWebDiagnostics("touch_${event.action}")
                     }
@@ -1589,7 +1105,7 @@ class MirrorForegroundService : Service() {
                         }
                         catch (_: Exception) {}
                     }
-                    lastTouchPane = "primary"
+                    remoteInputCoordinator.lastTouchPane = "primary"
                     logInputDebugSnapshot("touch_reset")
                 }
                 server.setCodecModeListener { onCodecModeRequest(it) }
@@ -1708,251 +1224,29 @@ class MirrorForegroundService : Service() {
         } catch (e: Exception) { Log.e(TAG, "Fatal error on startPipeline", e); stopSelf() }
     }
 
-    private fun onBrowserConnected() {
-        try {
-            Log.i(TAG, "onBrowserConnected() - WebSocket link stabilized. Launching encoder engines.")
-            powerLockManager.acquireWakeLocks()
-            startVdKeepAlive()
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) thermalThrottleManager.broadcastThermalStatus(thermalThrottleManager.thermalStatus.value)
+    private fun onBrowserConnected() = browserSessionCoordinator.onConnected()
 
-            adaptiveBitrateManager.startAllLoops()
+    private fun applyBrowserLayoutUpdate(panes: JSONArray) = browserSessionCoordinator.applyLayout(panes)
 
-            serviceScope.launch {
-                kotlinx.coroutines.delay(200)
-                isInitialRebuildTriggered = true
-                val primary = pipelines["primary"] ?: return@launch
-                primary.markFreshLaunchPreparation("browser_connected")
-                paneVisibility["primary"] = true
-                primary.setTier(DisplayTier.ACTIVE, "browser_connected")
-                if (!LaunchRecoveryPolicy.shouldDeferInitialBrowserConnectedRebuild(hasReceivedBrowserLayout, primary.displayId)) {
-                    val finalW = if (primary.width > 1) primary.width
-                                 else if (primary.requestedWidth > 1) primary.requestedWidth
-                                 else primary.lastValidWidth.coerceAtLeast(720)
-                    val finalH = if (primary.height > 1) primary.height
-                                 else if (primary.requestedHeight > 1) primary.requestedHeight
-                                 else primary.lastValidHeight.coerceAtLeast(720)
-                    triggerPipelineRebuildWithPolicy(primary.name, finalW, finalH, force = true)
-                } else {
-                    logLaunchRecoveryInfo(
-                        "initial_rebuild_deferred pane=${primary.name} reason=await_first_browser_layout " +
-                            "displayId=${primary.displayId} requested=${primary.requestedWidth}x${primary.requestedHeight}"
-                    )
-                }
+    private fun onBrowserDisconnected() = browserSessionCoordinator.onDisconnected()
 
-                pipelines["secondary"]?.let { secondary ->
-                    secondary.markFreshLaunchPreparation("browser_connected_secondary")
-                    if (paneVisibility["secondary"] != true) {
-                        secondary.setTier(DisplayTier.SUSPENDED, "browser_connected_secondary_hidden")
-                    }
-                }
-            }
-        } catch (t: Throwable) { Log.e(TAG, "Failed onBrowserConnected", t); markTerminal(TerminalReason.BROWSER_ACTIVATION_FAILED) }
+    internal fun cancelPendingBrowserDisconnect(reason: String) =
+        browserSessionCoordinator.cancelPendingDisconnect(reason)
 
-        broadcastWebDiagnostics("diagnostics_debounced")
-        broadcastWebDiagnostics("browser_connected")
-    }
+    private fun scheduleBrowserDisconnect() = browserSessionCoordinator.scheduleDisconnect()
 
-    private var lastVisiblePaneCount = 1
-    @Volatile private var hasReceivedBrowserLayout = false
-
-    private fun applyBrowserLayoutUpdate(panes: JSONArray) {
-        hasReceivedBrowserLayout = panes.length() > 0
-        val paneStates = mutableListOf<Triple<String, android.util.Size, Boolean>>()
-        val seen = mutableSetOf<String>()
-        for (i in 0 until panes.length()) {
-            val paneObj = panes.optJSONObject(i) ?: continue
-            val paneId = paneObj.optString("id")
-            if (paneId.isBlank()) continue
-            val w = paneObj.optInt("width", 0)
-            val h = paneObj.optInt("height", 0)
-            val visible = paneObj.optBoolean("visible", w > 0 && h > 0)
-            seen += paneId
-            paneVisibility[paneId] = visible
-            paneStates += Triple(paneId, android.util.Size(w, h), visible)
-        }
-
-        val visiblePanes = paneStates.filter { (_, size, visible) -> visible && size.width > 0 && size.height > 0 }
-        val visiblePaneCount = visiblePanes.size
-        val singleVisiblePane = if (visiblePaneCount == 1) visiblePanes.first().first else null
-
-        for ((paneId, size, visible) in paneStates) {
-            val pipeline = pipelines[paneId] ?: continue
-            if (visible && size.width > 0 && size.height > 0) {
-                val forceLayoutRealign = BrowserLayoutPolicy.shouldForceViewportRealign(
-                    previousVisiblePaneCount = lastVisiblePaneCount,
-                    currentVisiblePaneCount = visiblePaneCount,
-                    previousWidth = pipeline.requestedWidth,
-                    previousHeight = pipeline.requestedHeight,
-                    nextWidth = size.width,
-                    nextHeight = size.height,
-                )
-                val targetTier = if (singleVisiblePane == paneId || (singleVisiblePane == null && paneId == "primary")) {
-                    DisplayTier.ACTIVE
-                } else {
-                    DisplayTier.VISIBLE
-                }
-                serviceScope.launch { pipeline.setTier(targetTier, "browser_layout_visible") }
-                pipeline.onViewportChange(size.width, size.height, forceLayoutRealign)
-            } else {
-                serviceScope.launch { pipeline.setTier(DisplayTier.SUSPENDED, "browser_layout_hidden") }
-            }
-        }
-        lastVisiblePaneCount = visiblePaneCount
-
-        pipelines.forEach { (paneId, pipeline) ->
-            if (!seen.contains(paneId) && paneVisibility[paneId] == true) {
-                paneVisibility[paneId] = false
-                serviceScope.launch { pipeline.setTier(DisplayTier.SUSPENDED, "browser_layout_absent") }
-            }
-        }
-    }
-
-    private fun onBrowserDisconnected() {
-        Log.w(TAG, "onBrowserDisconnected() - Target web panel dropped connection link.")
-        pendingBrowserDisconnectJob = null; browserConnected = false; isInitialRebuildTriggered = false; hasReceivedBrowserLayout = false
-        browserTeardownPhase = "begin"
-        stopVdKeepAlive()
-
-        val oldEncoders = pipelines.values.map {
-            val vEnc = it.videoEncoder; val jEnc = it.jpegEncoder
-            it.videoEncoder = null; it.jpegEncoder = null
-            it.currentEncoderSurface?.let { surf ->
-                com.castla.mirror.diagnostics.ResourceTracker.trackSurfaceRelease(surf.hashCode(), "VideoEncoderInputSurface@${surf.hashCode()}")
-                try { surf.release() } catch (_: Exception) {}
-            }
-            it.currentEncoderSurface = null
-            vEnc to jEnc
-        }
-
-        pipelines.values.forEach { pipeline ->
-            try { pipeline.touchInjector?.detachController("browser_disconnected") } catch (_: Exception) {}
-            pipeline.markFreshLaunchPreparation("browser_disconnected")
-            pipeline.invalidateVd("browser_disconnected")
-            try { pipeline.controller.release() } catch (_: Exception) {}
-        }
-
-        audioOrchestrator?.stop()
-        adaptiveBitrateManager.stopAllLoops()
-        powerLockManager.releaseWakeLocks()
-        broadcastWebDiagnostics("browser_disconnected_sync")
-
-        serviceScope.launch(Dispatchers.IO) {
-            browserTeardownPhase = "releasing"
-            oldEncoders.forEach { (v, j) -> try { v?.release() } catch (_: Exception) {}; try { j?.release() } catch (_: Exception) {} }
-            pipelines.values.forEach { try { it.release() } catch (_: Exception) {} }
-            try { removeAllVdTasks() } catch (_: Exception) {}
-            browserTeardownPhase = "released"
-            broadcastWebDiagnostics("browser_disconnected_async_done")
-        }
-
-        broadcastWebDiagnostics("diagnostics_debounced")
-        broadcastWebDiagnostics("browser_disconnected")
-    }
-
-    internal fun cancelPendingBrowserDisconnect(reason: String) {
-        pendingBrowserDisconnectJob?.cancel()
-        pendingBrowserDisconnectJob = null
-        broadcastWebDiagnostics("cancel_pending_disconnect:$reason")
-    }
-
-    private fun scheduleBrowserDisconnect() {
-        if (pendingBrowserDisconnectJob != null) return
-        val screenOff = screenOffPolicy.isScreenOff
-        broadcastWebDiagnostics("schedule_disconnect")
-        pendingBrowserDisconnectJob = serviceScope.launch {
-            kotlinx.coroutines.delay(DisconnectPolicy.graceMs(screenOff))
-            pendingBrowserDisconnectJob = null
-            broadcastWebDiagnostics("disconnect_grace_elapsed")
-            if (mirrorServer?.isBrowserConnected() == true) return@launch
-            if (!DisconnectPolicy.shouldTeardown(screenOff, isBrowserConnected = false)) return@launch
-            if (browserConnected) { browserConnected = false; onBrowserDisconnected() }
-            browserConnectionListener?.invoke(false)
-        }
-    }
+    internal fun notifyBrowserConnection(connected: Boolean) { browserConnectionListener?.invoke(connected) }
 
     private fun ensureAudioCaptureState(codecOverride: String? = null) {
         audioOrchestrator?.apply { audioEnabled = pendingAudioEnabled && AudioCapture.isSupported(); browserConnected = this@MirrorForegroundService.browserConnected; ensure(codecOverride) }
     }
 
-    private fun activeInputDisplayId(): Int {
-        val targetPipeline = pipelines[lastTouchPane] ?: pipelines["primary"]
-        return targetPipeline?.displayId ?: -1
-    }
+    private fun activeInputDisplayId(): Int = remoteInputCoordinator.activeInputDisplayId()
+    private fun injectText(text: String) = remoteInputCoordinator.injectText(text)
+    private fun injectCompositionUpdate(backspaces: Int, text: String) = remoteInputCoordinator.injectComposition(backspaces, text)
+    private fun injectKeyEvent(keyCode: Int) = remoteInputCoordinator.injectKeyEvent(keyCode)
 
-    private fun injectText(text: String) {
-        resetImeTimeoutTimer()
-        val displayId = activeInputDisplayId()
-        val router = CastlaTextInputRouter.getInstance()
-        val (isValid, _) = router.validateConnectionForTarget(displayId)
-        if (isValid) {
-            router.setRemoteTextDirty(true)
-            val nextGenId = System.currentTimeMillis()
-            remoteImeBridge?.dispatch(ImeCommand.CommitText(nextGenId, text))
-        } else {
-            serviceScope.launch(compositionDispatcher) {
-                try {
-                    shizukuSetup?.privilegedService?.injectText(text, displayId)
-                } catch (_: Exception) {}
-            }
-        }
-    }
-
-    private var lastTouchPane = "primary"
-
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    private val compositionDispatcher = kotlinx.coroutines.newSingleThreadContext("composition")
-
-    private fun injectCompositionUpdate(backspaces: Int, text: String) {
-        resetImeTimeoutTimer()
-        val displayId = activeInputDisplayId()
-        val router = CastlaTextInputRouter.getInstance()
-        val (isValid, _) = router.validateConnectionForTarget(displayId)
-        if (isValid) {
-            router.setRemoteTextDirty(true)
-            if (text.isEmpty() && backspaces == 0) {
-                remoteImeBridge?.dispatch(ImeCommand.FinishComposingText)
-            } else {
-                val nextGenId = System.currentTimeMillis()
-                remoteImeBridge?.dispatch(
-                    ImeCommand.SetComposingText(
-                        compositionId = nextGenId,
-                        text = text,
-                        selectionStart = -1,
-                        selectionEnd = -1
-                    )
-                )
-            }
-        } else {
-            serviceScope.launch(compositionDispatcher) {
-                try {
-                    shizukuSetup?.privilegedService?.injectComposingText(backspaces, text, displayId)
-                } catch (_: Exception) {}
-            }
-        }
-    }
-
-    private fun injectKeyEvent(keyCode: Int) {
-        resetImeTimeoutTimer()
-        val displayId = activeInputDisplayId()
-        val router = CastlaTextInputRouter.getInstance()
-        val (isValid, _) = router.validateConnectionForTarget(displayId)
-        if (isValid && keyCode == 67) {
-            router.setRemoteTextDirty(true)
-            remoteImeBridge?.dispatch(ImeCommand.DeleteSurroundingText(beforeLength = 1, afterLength = 0))
-        } else if (isValid && keyCode == 66) {
-            router.setRemoteTextDirty(true)
-            remoteImeBridge?.dispatch(ImeCommand.PerformEnter)
-        } else {
-            serviceScope.launch(compositionDispatcher) {
-                try {
-                    shizukuSetup?.privilegedService?.execCommand(
-                        if (displayId > 0) "input -d $displayId keyevent $keyCode" else "input keyevent $keyCode"
-                    )
-                } catch (_: Exception) {}
-            }
-        }
-    }
-
+    internal fun currentPrivilegedService(): IPrivilegedService? = shizukuSetup?.privilegedService
 
     private fun ensureShizukuSetup(): ShizukuSetup? {
         shizukuSetup?.let { return it }
@@ -2363,7 +1657,7 @@ class MirrorForegroundService : Service() {
     }
 
     internal fun computeVirtualDisplayDpi(width: Int, height: Int): Int = StreamMath.applyDensityScale(StreamMath.calculateDpi(minOf(width, height)), dpiScale)
-    private suspend fun removeAllVdTasks() = withContext(Dispatchers.IO) { pipelines.values.forEach { cleanupDisplay(it.displayId) } }
+    internal suspend fun removeAllVdTasks() = withContext(Dispatchers.IO) { pipelines.values.forEach { cleanupDisplay(it.displayId) } }
 
     internal suspend fun cleanupDisplay(displayId: Int) = withContext(Dispatchers.IO) {
         if (displayId < 0) return@withContext
@@ -2381,7 +1675,7 @@ class MirrorForegroundService : Service() {
     }
 
     private val BROWSER_PACKAGES = setOf("com.android.chrome", "com.sec.android.app.sbrowser", "org.mozilla.firefox", "com.microsoft.emmx")
-    private fun markTerminal(reason: TerminalReason) { if (terminalReason.compareAndSet(null, reason)) requestStopAsync("terminal_${reason.name.lowercase()}") }
+    internal fun markTerminal(reason: TerminalReason) { if (terminalReason.compareAndSet(null, reason)) requestStopAsync("terminal_${reason.name.lowercase()}") }
     private fun resolveLaunchComponent(packageOrComponent: String): String? {
         if (packageOrComponent.contains('/')) return packageOrComponent
         return try { packageManager.getLaunchIntentForPackage(packageOrComponent)?.component?.flattenToShortString() } catch (_: Exception) { null }
