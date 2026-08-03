@@ -609,6 +609,7 @@
     Math.round(hostRect.height),
     $compositorStore.layoutMode,
     $compositorStore.splitRatio.toFixed(4),
+    $compositorStore.secondaryPlacement ?? "",
     `${$compositorStore.popup.visible ? 1 : 0}:${$compositorStore.popup.minimized ? 1 : 0}:${Math.round($compositorStore.popup.x)}:${Math.round($compositorStore.popup.y)}:${Math.round($compositorStore.popup.width)}:${Math.round($compositorStore.popup.height)}`,
     visibleViewports
       .map(

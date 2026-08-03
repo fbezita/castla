@@ -113,6 +113,9 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
 
         private val encoderSession = java.util.concurrent.atomic.AtomicLong(0)
 
+        internal val hostService: MirrorForegroundService get() = host
+        private val encoderLifecycle = EncoderLifecycleCoordinator(this)
+
         var videoEncoder: VideoEncoder? = null; var jpegEncoder: JpegEncoder? = null; var currentEncoderSurface: Surface? = null
         var pipelineState = MirrorForegroundService.PipelineState.IDLE; var pendingRebuildRequest: MirrorForegroundService.RebuildRequest? = null
         @Volatile var displayTier: DisplayTier = if (name == "primary") DisplayTier.ACTIVE else DisplayTier.SUSPENDED
@@ -166,7 +169,49 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
         var requestedWidth: Int = 0; var requestedHeight: Int = 0
 
         private val pipelineMutex = Mutex()
+        private val touchFocusRecoveryCoordinator = TouchFocusRecoveryCoordinator()
 
+        private fun beginStreamGeneration(displayId: Int, width: Int, height: Int): Long =
+            host.mirrorServer?.beginStreamGeneration(name, displayId, width, height)?.toLong() ?: 0L
+        internal fun nextEncoderSessionId(): Long = encoderSession.incrementAndGet()
+
+        internal fun isCurrentEncoderSession(sessionId: Long): Boolean = encoderSession.get() == sessionId
+
+        internal fun publishEncodedFrame(
+            data: ByteArray,
+            key: Boolean,
+            sessionId: Long,
+            frameWidth: Int,
+            frameHeight: Int,
+            rebuildStartedAtMs: Long,
+        ) {
+            lastFrameRenderedTime = System.currentTimeMillis()
+            if (!firstFrameMetadataSent) {
+                firstFrameMetadataSent = true
+                cancelBootstrapNudge("first_frame_publish")
+                host.logStreamBootstrapInfo(
+                    "pane=$name session=$sessionId phase=first_frame_publish codec=${host.currentCodecMode} displayId=$displayId " +
+                        "generation=${host.mirrorServer?.getCurrentStreamGeneration(name) ?: 0} bytes=${data.size} key=$key " +
+                        "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
+                )
+                host.mirrorServer?.markFirstFrameReady(name, displayId, frameWidth, frameHeight)
+            }
+            host.mirrorServer?.broadcastFrame(data, key, name)
+        }
+
+        internal fun requestThrottledKeyframe(force: Boolean, reason: String) {
+            val now = System.currentTimeMillis()
+            if (!force && now - lastKeyframeRequestTime < 1000L) return
+            lastKeyframeRequestTime = now
+            host.serviceScope.launch {
+                try {
+                    if (displayId >= 0) host.wakeDisplayForRecovery(controller.getPrivilegedService(), displayId, reason)
+                    if (host.currentCodecMode != "mjpeg") host.requestKeyFrameForRecovery(this@MirroringPipeline, reason)
+                } catch (e: Exception) {
+                    Log.w(TAG, "[$name Pipeline] Failed to recover graphics for keyframe request", e)
+                }
+            }
+        }
         fun isEncoderRunning(): Boolean {
             return if (host.currentCodecMode == "mjpeg") jpegEncoder != null else videoEncoder != null
         }
@@ -616,141 +661,18 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
                     "target=${w}x${h} elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
             )
 
-            if (videoEncoder != null || jpegEncoder != null) debugEncoderReleases += 1
-            videoEncoder?.release(); videoEncoder = null
-            jpegEncoder?.release(); jpegEncoder = null
-            Log.i(TAG, "[$name Pipeline] encoderLifecycle phase=release session=$sessionId codec=${host.currentCodecMode} displayId=$displayId target=${w}x${h}")
-             currentEncoderSurface?.let { surf ->
-                com.castla.mirror.diagnostics.ResourceTracker.trackSurfaceRelease(surf.hashCode(), "VideoEncoderInputSurface@${surf.hashCode()}")
-                try { surf.release() } catch (_: Exception) {}
-            }
-            currentEncoderSurface = null
+            encoderLifecycle.release(sessionId, "rebuild_prepare")
             delay(50)
 
-            var startEncoderTask: (() -> Unit)? = null
-            val surface = if (host.currentCodecMode == "mjpeg") {
-                val jpeg = JpegEncoder(w, h, fps = 15, quality = 65); val inputSurface = jpeg.createInputSurface(); jpegEncoder = jpeg
-                debugEncoderCreates += 1
-                jpeg.onCaptureEvent = { detail ->
-                    host.logStreamBootstrapInfo(
-                        "pane=$name session=$sessionId phase=jpeg_encoder $detail displayId=$displayId " +
-                            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                    )
-                }
-                startEncoderTask = {
-                    if (encoderSession.get() != sessionId || jpegEncoder !== jpeg || currentEncoderSurface !== inputSurface) {
-                        host.logStreamBootstrapInfo(
-                            "pane=$name session=$sessionId phase=encoder_start_skipped reason=stale codec=mjpeg displayId=$displayId " +
-                                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                        )
-                        Log.i(TAG, "[$name Pipeline] Skipping stale JPEG encoder start for session=$sessionId")
-                    } else {
-                        host.logStreamBootstrapInfo(
-                            "pane=$name session=$sessionId phase=encoder_start codec=mjpeg displayId=$displayId " +
-                                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                        )
-                        jpeg.start { data, key ->
-                            lastFrameRenderedTime = System.currentTimeMillis()
-                            if (!firstFrameMetadataSent) {
-                                firstFrameMetadataSent = true
-                                cancelBootstrapNudge("first_frame_publish")
-                                host.logStreamBootstrapInfo(
-                                    "pane=$name session=$sessionId phase=first_frame_publish codec=mjpeg displayId=$displayId " +
-                                        "generation=${host.mirrorServer?.getCurrentStreamGeneration(name) ?: 0} bytes=${data.size} key=$key " +
-                                        "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                                )
-                                host.mirrorServer?.markFirstFrameReady(name, displayId, w, h)
-                            }
-                            host.mirrorServer?.broadcastFrame(data, key, name)
-                        }
-                    }
-                }
-
-                // Throttle keyframe requests to once per 1000ms, bypassing if force is true.
-                host.mirrorServer?.setKeyframeRequester(name) { force ->
-                    val now = System.currentTimeMillis()
-                    if (!force && now - lastKeyframeRequestTime < 1000L) return@setKeyframeRequester
-                    lastKeyframeRequestTime = now
-                    host.serviceScope.launch {
-                        try {
-                            if (displayId >= 0) {
-                                host.wakeDisplayForRecovery(controller.getPrivilegedService(), displayId, "frame_watchdog_primary")
-                            }
-                            // Bypassed restoreContent() on keyframe request to prevent relaunch loop
-                        } catch (e: Exception) {
-                            Log.w(TAG, "[$name Pipeline] Failed to force graphics wakeup on MJPEG keyframe request", e)
-                        }
-                    }
-                }
-                inputSurface
-            } else {
-                val preferredProfile = host.mirrorServer?.getPreferredProfile(name) ?: "High"
-                val encoder = VideoEncoder(w, h, calculatedBitrate, host.thermalFpsOverride ?: targetFps, preferredProfile)
-                val inputSurface = encoder.createInputSurface()
-                videoEncoder = encoder
-                debugEncoderCreates += 1
-                Log.i(TAG, "[$name Pipeline] encoderLifecycle phase=created session=$sessionId codec=h264 displayId=$displayId target=${w}x${h}")
-                encoder.onCodecEvent = { detail ->
-                    host.logStreamBootstrapInfo(
-                        "pane=$name session=$sessionId phase=video_encoder $detail displayId=$displayId " +
-                            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                    )
-                }
-                encoder.onSpsPps = {
-                    host.logStreamBootstrapInfo(
-                        "pane=$name session=$sessionId phase=sps_pps_ready size=${it.size} displayId=$displayId " +
-                            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                    )
-                    host.mirrorServer?.broadcastSpsPps(it, name)
-                }
-                startEncoderTask = {
-                    if (encoderSession.get() != sessionId || videoEncoder !== encoder || currentEncoderSurface !== inputSurface) {
-                        host.logStreamBootstrapInfo(
-                            "pane=$name session=$sessionId phase=encoder_start_skipped reason=stale codec=h264 displayId=$displayId " +
-                                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                        )
-                        Log.i(TAG, "[$name Pipeline] Skipping stale video encoder start for session=$sessionId")
-                    } else {
-                        host.logStreamBootstrapInfo(
-                            "pane=$name session=$sessionId phase=encoder_start codec=h264 displayId=$displayId " +
-                                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                        )
-                        encoder.start { data, key ->
-                            lastFrameRenderedTime = System.currentTimeMillis()
-                            if (!firstFrameMetadataSent) {
-                                firstFrameMetadataSent = true
-                                cancelBootstrapNudge("first_frame_publish")
-                                host.logStreamBootstrapInfo(
-                                    "pane=$name session=$sessionId phase=first_frame_publish codec=h264 displayId=$displayId " +
-                                        "generation=${host.mirrorServer?.getCurrentStreamGeneration(name) ?: 0} bytes=${data.size} key=$key " +
-                                        "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                                )
-                                host.mirrorServer?.markFirstFrameReady(name, displayId, w, h)
-                            }
-                            host.mirrorServer?.broadcastFrame(data, key, name)
-                        }
-                    }
-                }
-
-                host.mirrorServer?.setKeyframeRequester(name) { force ->
-                    val now = System.currentTimeMillis()
-                    if (!force && now - lastKeyframeRequestTime < 1000L) return@setKeyframeRequester
-                    lastKeyframeRequestTime = now
-                    host.serviceScope.launch {
-                        try {
-                            if (displayId >= 0) {
-                                host.wakeDisplayForRecovery(controller.getPrivilegedService(), displayId, "frame_watchdog_secondary")
-                            }
-                            host.requestKeyFrameForRecovery(this@MirroringPipeline, "frame_watchdog_secondary")
-                        } catch (e: Exception) {
-                            Log.w(TAG, "[$name Pipeline] Failed to force graphics wakeup on keyframe request", e)
-                        }
-                    }
-                }
-
-                inputSurface
-            }
-
+            val startEncoderTask = encoderLifecycle.prepare(
+                sessionId = sessionId,
+                width = w,
+                height = h,
+                bitrate = calculatedBitrate,
+                targetFps = targetFps,
+                rebuildStartedAtMs = rebuildStartedAtMs,
+            )
+            val surface = currentEncoderSurface ?: throw IllegalStateException("Encoder input surface was not created")
             currentEncoderSurface = surface; width = w; height = h; currentBitrate = calculatedBitrate
             host.logStreamBootstrapInfo(
                 "pane=$name session=$sessionId phase=surface_ready codec=${host.currentCodecMode} surfaceHash=${surface.hashCode()} " +
@@ -855,7 +777,7 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
                         "pane=$name session=$sessionId phase=stream_generation_begin_request displayId=$activeId isNewVd=$isNewVd " +
                             "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
                     )
-                    val streamGeneration = host.mirrorServer?.beginStreamGeneration(name, activeId, w, h) ?: 0
+                    val streamGeneration = beginStreamGeneration(activeId, w, h)
                     Log.i(TAG, "[$name Pipeline] encoderLifecycle phase=stream_generation session=$sessionId generation=$streamGeneration displayId=$activeId target=${w}x${h}")
                     host.logStreamBootstrapInfo(
                         "pane=$name session=$sessionId phase=stream_generation_begin_done displayId=$activeId generation=$streamGeneration " +
@@ -929,7 +851,7 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
                             "pane=$name session=$sessionId phase=stream_generation_begin_request displayId=$displayId isNewVd=true " +
                                 "fallbackPath=true elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
                         )
-                        val streamGeneration = host.mirrorServer?.beginStreamGeneration(name, displayId, w, h) ?: 0
+                        val streamGeneration = beginStreamGeneration(displayId, w, h)
                         host.logStreamBootstrapInfo(
                             "pane=$name session=$sessionId phase=stream_generation_begin_done displayId=$displayId generation=$streamGeneration " +
                                 "fallbackPath=true elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
@@ -1048,8 +970,14 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
             val cleanPkg = targetApp.substringBefore('/').substringBefore('?').substringBefore(' ').trim()
             if (cleanPkg.isBlank() || cleanPkg == "HOME" || cleanPkg == "com.android.settings" || cleanPkg == host.packageName) return
 
-            val hasExpectedTask = topTask?.contains(cleanPkg) == true
-            if (hasExpectedTask) return
+            if (!touchFocusRecoveryCoordinator.shouldRecover(
+                    activeDisplayId = activeId,
+                    touchInteractionActive = isTouchInteractionActive(),
+                    targetApp = targetApp,
+                    topTask = topTask,
+                    packageName = cleanPkg,
+                    lastRecoveryAt = lastTouchFocusRecoveryAt,
+                ) || cleanPkg == host.packageName) return
             debugTopTaskMisses += 1
 
             val now = android.os.SystemClock.elapsedRealtime()
@@ -1155,7 +1083,7 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
                 debugFirstInjectFailureProbeLogged = true
                 logInjectionFailureProbe(activeId, action, pointerCount)
             }
-            if (now - lastInjectionRecoveryAt >= 2000L) {
+            if (touchFocusRecoveryCoordinator.shouldRecoverFromInjectionReject(now, lastInjectionRecoveryAt)) {
                 lastInjectionRecoveryAt = now
                 debugInjectionRecoveries += 1
                 Log.w(
@@ -1281,7 +1209,7 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
             val encoderActive = if (host.currentCodecMode == "mjpeg") jpegEncoder != null else videoEncoder != null
             if (!encoderActive || width <= 0 || height <= 0) return
             firstFrameMetadataSent = false
-            host.mirrorServer?.beginStreamGeneration(name, token.second, width, height)
+            beginStreamGeneration(token.second, width, height)
         }
 
         fun launchOwnActivity(activityClassName: String, url: String) {
@@ -1396,7 +1324,7 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
                 val token = currentVdToken()
                 if (token != null) {
                     firstFrameMetadataSent = false
-                    host.mirrorServer?.beginStreamGeneration(name, token.second, width, height)
+                    beginStreamGeneration(token.second, width, height)
                 }
                 return@withContext true
             }
@@ -1518,7 +1446,7 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
                         val token = currentVdToken()
                         if (token != null) {
                             firstFrameMetadataSent = false
-                            host.mirrorServer?.beginStreamGeneration(name, token.second, width, height)
+                            beginStreamGeneration(token.second, width, height)
                         }
                     }
                     return@withContext true
@@ -1541,7 +1469,7 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
                     val token = currentVdToken()
                     if (token != null && !suppressStreamGenerationRestart) {
                         firstFrameMetadataSent = false
-                        host.mirrorServer?.beginStreamGeneration(name, token.second, width, height)
+                        beginStreamGeneration(token.second, width, height)
                     }
                     return@withContext true
                 }
@@ -1630,7 +1558,7 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
                     val token = currentVdToken()
                     if (token != null) {
                         firstFrameMetadataSent = false
-                        host.mirrorServer?.beginStreamGeneration(name, token.second, width, height)
+                        beginStreamGeneration(token.second, width, height)
                     }
                 }
                 return@withContext true

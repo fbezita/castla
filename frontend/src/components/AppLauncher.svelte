@@ -17,6 +17,7 @@
   import { buildLayoutModeLaunchRequest } from "../lib/layoutModeTransition";
   import {
     buildSecondaryPlacementLaunchRequest,
+    isDockedPlacement,
     placementToLayoutMode,
     resolveExternalAppDropZone,
     resolveSecondaryPlacement,
@@ -400,6 +401,21 @@
     const primary = store.viewports.get("primary");
     const secondary = store.viewports.get("secondary");
     if (!primary || !secondary) return;
+
+    // Split swap moves the rendered panes without re-launching either package.
+    const currentPlacement = resolveSecondaryPlacement(
+      store.layoutMode,
+      store.secondaryPlacement,
+    );
+    if (store.layoutMode === "split" && isDockedPlacement(currentPlacement)) {
+      const nextPlacement =
+        currentPlacement === "left" ? "right" :
+          currentPlacement === "right" ? "left" :
+            currentPlacement === "top" ? "bottom" : "top";
+      compositorStore.update((state) => ({ ...state, secondaryPlacement: nextPlacement }));
+      drawerOpen = false;
+      return;
+    }
 
     if (primaryPkg && secondaryPkg) {
       const pairsRaw = localStorage.getItem("castla_app_pairs");
