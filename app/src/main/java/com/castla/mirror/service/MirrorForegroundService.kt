@@ -92,7 +92,7 @@ import java.util.concurrent.ConcurrentHashMap
     kotlinx.coroutines.DelicateCoroutinesApi::class
 )
 class MirrorForegroundService : Service() {
-    private val vdDispatcher = kotlinx.coroutines.newSingleThreadContext("vd-operations")
+    internal val vdDispatcher = kotlinx.coroutines.newSingleThreadContext("vd-operations")
     @Volatile private var useNativeVirtualDisplayIme = true
     private val castlaImeProxyEnabled: Boolean
         get() = !useNativeVirtualDisplayIme
@@ -109,27 +109,27 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    private fun logScreenOffWarn(message: String) {
+    internal fun logScreenOffWarn(message: String) {
         if (verboseScreenOffLogging) {
             Log.w(TAG, message)
         }
     }
 
-    private fun logLaunchRecoveryInfo(message: String) {
+    internal fun logLaunchRecoveryInfo(message: String) {
         if (verboseDiagnosticsEnabled) {
             FileLogger.i("LAUNCH_RECOVERY", message)
             Log.i(TAG, message)
         }
     }
 
-    private fun logStreamBootstrapInfo(message: String) {
+    internal fun logStreamBootstrapInfo(message: String) {
         if (verboseDiagnosticsEnabled) {
             FileLogger.i("STREAM_BOOTSTRAP", message)
             Log.i(TAG, message)
         }
     }
 
-    private suspend fun <T> runBinderSafe(timeoutMs: Long = 3000L, block: suspend () -> T): T? {
+    internal suspend fun <T> runBinderSafe(timeoutMs: Long = 3000L, block: suspend () -> T): T? {
         return withTimeoutOrNull(timeoutMs) { block() }
     }
 
@@ -172,7 +172,6 @@ class MirrorForegroundService : Service() {
             private set
 
         private const val RECOVERY_ACTION_MIN_INTERVAL_MS = 900L
-        private const val DIAGNOSTICS_BROADCAST_MIN_INTERVAL_MS = 1_000L
     }
 
     inner class LocalBinder : Binder() {
@@ -181,9 +180,8 @@ class MirrorForegroundService : Service() {
 
     private val binder = LocalBinder()
     @Volatile private var backFallbackLastTriggeredTime = 0L
-    private var mirrorServer: MirrorServer? = null
+    internal var mirrorServer: MirrorServer? = null
     private val recentRecoveryActionAtMs = ConcurrentHashMap<Int, Long>()
-    @Volatile private var lastDiagnosticsBroadcastAtMs = 0L
     fun getMirrorServer(): MirrorServer? = mirrorServer
 
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -339,13 +337,13 @@ class MirrorForegroundService : Service() {
 
     private lateinit var powerLockManager: PowerLockManager
     private lateinit var thermalThrottleManager: ThermalThrottleManager
-    private lateinit var adaptiveBitrateManager: AdaptiveBitrateManager
+    internal lateinit var adaptiveBitrateManager: AdaptiveBitrateManager
     lateinit var contentAwareQualityEngine: ContentAwareQualityEngine
 
     val thermalStatus: kotlinx.coroutines.flow.StateFlow<Int>
         get() = thermalThrottleManager.thermalStatus
 
-    private var thermalFpsOverride: Int?
+    internal var thermalFpsOverride: Int?
         get() = thermalThrottleManager.thermalFpsOverride
         set(value) { thermalThrottleManager.thermalFpsOverride = value }
     private var thermalTransformationOverride: Int? = null
@@ -377,18 +375,18 @@ class MirrorForegroundService : Service() {
     @Volatile private var stopRequested = false
     @Volatile private var cleanupCompleted = false
     private val terminalReason = java.util.concurrent.atomic.AtomicReference<TerminalReason?>(null)
-    private var serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    internal var serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
-    private var browserConnected = false
+    internal var browserConnected = false
     private var isInitialRebuildTriggered = false
-    @Volatile private var currentCodecMode: String = "h264"
+    @Volatile internal var currentCodecMode: String = "h264"
     private val paneVisibility = java.util.concurrent.ConcurrentHashMap<String, Boolean>().apply {
         put("primary", true)
         put("secondary", false)
     }
 
-    private val virtualDisplayHardwareMutex = Mutex()
-    private val vdOperationGlobalMutex = Mutex()
+    internal val virtualDisplayHardwareMutex = Mutex()
+    internal val vdOperationGlobalMutex = Mutex()
 
 
     // Hardware request envelope to sequentialize all VirtualDisplay operations
@@ -433,7 +431,7 @@ class MirrorForegroundService : Service() {
 
     private val rebuildRequestMutex = Mutex()
     private val lastRebuildRequestByPane = java.util.concurrent.ConcurrentHashMap<String, RebuildRequestSnapshot>()
-    private val rebuildRequestIdGenerator = java.util.concurrent.atomic.AtomicLong(0)
+    internal val rebuildRequestIdGenerator = java.util.concurrent.atomic.AtomicLong(0)
 
     private var dpiScale: Float = 0.7f
     private val shizukuSetupMutex = Mutex()
@@ -463,12 +461,12 @@ class MirrorForegroundService : Service() {
     private val inputDebugLaunchStartElapsedMs = java.util.concurrent.ConcurrentHashMap<Int, Long>()
     private val recentServerTouchTrace = java.util.ArrayDeque<String>()
     private val recentServerTouchTraceMutex = Any()
-    @Volatile private var lastRejectProbeSummary: String = ""
+    @Volatile internal var lastRejectProbeSummary: String = ""
 
     @Volatile private var lastAppLaunchTime: Long = 0L
     private val paneLastLaunchTimes = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val paneLastLaunchPackages = java.util.concurrent.ConcurrentHashMap<String, String>()
-    private val screenOffPolicy = ScreenOffPolicy()
+    internal val screenOffPolicy = ScreenOffPolicy()
     private val screenOffLoopGuard = ScreenOffLoopGuard()
     private val screenOffReviveStrategy = ScreenOffReviveStrategy.select(Build.MANUFACTURER, Build.BRAND)
     private val keyguardManager by lazy { getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager }
@@ -504,7 +502,7 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    private fun logInputDebugSnapshot(reason: String) {
+    internal fun logInputDebugSnapshot(reason: String) {
         val server = mirrorServer
         val launchElapsedMs = (android.os.SystemClock.elapsedRealtime() - (inputDebugLaunchStartElapsedMs[currentInputDebugLaunchSeq] ?: android.os.SystemClock.elapsedRealtime())).coerceAtLeast(1L)
         val movePackets = inputDebugMovePacketCounts[currentInputDebugLaunchSeq]?.get() ?: 0
@@ -513,11 +511,6 @@ class MirrorForegroundService : Service() {
 //            val injectorState = try { pipeline.touchInjector?.debugState() ?: "injector=null" } catch (_: Exception) { "injector=error" }
 //            "${pipeline.name}:displayId=${pipeline.displayId},app=${pipeline.currentApp},requested=${pipeline.requestedWidth}x${pipeline.requestedHeight},${pipeline.inputDebugSummary()},$injectorState"
 //        }
-    }
-
-    private fun countActiveServiceJobs(): Int {
-        val rootJob = serviceScope.coroutineContext[Job] ?: return -1
-        return rootJob.children.count { it.isActive }
     }
 
     private fun pipelineTouchSnapshot(): String {
@@ -543,7 +536,7 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    private fun appendRecentServerTouchTrace(line: String) {
+    internal fun appendRecentServerTouchTrace(line: String) {
         synchronized(recentServerTouchTraceMutex) {
             recentServerTouchTrace.addLast(line)
             while (recentServerTouchTrace.size > 18) {
@@ -558,7 +551,7 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    private fun broadcastWebDiagnostics(reason: String) {
+    internal fun broadcastWebDiagnostics(reason: String) {
         val server = mirrorServer ?: return
         try {
             val timestampMs = System.currentTimeMillis()
@@ -634,22 +627,6 @@ class MirrorForegroundService : Service() {
             normalized.contains("splash")
     }
 
-    private fun extractTopResumedLineForDisplay(raw: String, displayId: Int): String {
-        if (raw.isBlank() || displayId < 0) return ""
-        val lines = raw.lineSequence().map { it.trim() }.toList()
-        var inTargetDisplay = false
-        for (line in lines) {
-            if (line.startsWith("Display #")) {
-                inTargetDisplay = line.contains("Display #$displayId", ignoreCase = true)
-            }
-            if (!inTargetDisplay) continue
-            if (line.contains("topResumedActivity", ignoreCase = true) || line.contains("mResumedActivity", ignoreCase = true)) {
-                return line
-            }
-        }
-        return ""
-    }
-
     private fun mostRecentTouchAgeMs(now: Long = android.os.SystemClock.elapsedRealtime()): Long? {
         val lastTouchAt = pipelines.values
             .map { it.lastTouchEventAt }
@@ -666,7 +643,7 @@ class MirrorForegroundService : Service() {
         return age in 0..maxAgeMs
     }
 
-    private suspend fun requestRebuild(request: RebuildRequest) {
+    internal suspend fun requestRebuild(request: RebuildRequest) {
         val pipeline = pipelines[request.pipelineName]
         if (pipeline == null || isAppLaunchingContext || request.width <= 0 || request.height <= 0) {
             request.onComplete?.complete(Unit)
@@ -885,8 +862,8 @@ class MirrorForegroundService : Service() {
         startVdHardwareWorker()
 
 
-        pipelines["primary"] = MirroringPipeline("primary", "Castla")
-        pipelines["secondary"] = MirroringPipeline("secondary", "Castla_Sec")
+        pipelines["primary"] = MirroringPipeline(this, "primary", "Castla")
+        pipelines["secondary"] = MirroringPipeline(this, "secondary", "Castla_Sec")
 
         instance = this
         isServiceRunning = true
@@ -1211,7 +1188,7 @@ class MirrorForegroundService : Service() {
         FileLogger.i("IME_SERVICE_STATE", "$vdImeLogPrefix $line")
     }
 
-    private fun scheduleDisplayRoutingDiagnostics(
+    internal fun scheduleDisplayRoutingDiagnostics(
         pane: String,
         service: IPrivilegedService?,
         targetPkg: String,
@@ -1930,7 +1907,7 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    private suspend fun requestScreenOffRebuild(pipeline: MirroringPipeline, reason: String) {
+    internal suspend fun requestScreenOffRebuild(pipeline: MirroringPipeline, reason: String) {
         val targetW = if (pipeline.requestedWidth > 0) pipeline.requestedWidth else pipeline.width.coerceAtLeast(384)
         val targetH = if (pipeline.requestedHeight > 0) pipeline.requestedHeight else pipeline.height.coerceAtLeast(672)
         logScreenOffInfo("[SCREEN_OFF] [REVIVE_REBUILD] pane=${pipeline.name} reason=$reason target=${targetW}x${targetH} currentDisplayId=${pipeline.displayId}")
@@ -1973,7 +1950,7 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    private fun wakeDisplayForRecovery(
+    internal fun wakeDisplayForRecovery(
         service: IPrivilegedService?,
         displayId: Int,
         reason: String,
@@ -2015,7 +1992,7 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    private fun requestKeyFrameForRecovery(
+    internal fun requestKeyFrameForRecovery(
         pipeline: MirroringPipeline,
         reason: String,
     ) {
@@ -2050,14 +2027,7 @@ class MirrorForegroundService : Service() {
         return false
     }
 
-    private fun broadcastDiagnosticsDebounced() {
-        val now = android.os.SystemClock.elapsedRealtime()
-        if (now - lastDiagnosticsBroadcastAtMs < DIAGNOSTICS_BROADCAST_MIN_INTERVAL_MS) return
-        lastDiagnosticsBroadcastAtMs = now
-        broadcastWebDiagnostics("diagnostics_debounced")
-    }
-
-    private fun dismissKeyguardForRecovery(
+    internal fun dismissKeyguardForRecovery(
         service: IPrivilegedService?,
         reason: String,
     ) {
@@ -2626,8 +2596,6 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    private fun buildExternalBrowserCommand(displayId: Int, url: String, browserComponent: String): String =
-        "am start --display $displayId -f 0x18000000 -a android.intent.action.VIEW -d ${escapeShellArg(url)} -n ${escapeShellArg(browserComponent)}".trim()
 
     private fun ensureShizukuSetup(): ShizukuSetup? {
         shizukuSetup?.let { return it }
@@ -2739,7 +2707,7 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    private suspend fun trySetupVirtualDisplay(width: Int, height: Int, surface: Surface): Boolean = withContext(vdDispatcher) {
+    internal suspend fun trySetupVirtualDisplay(width: Int, height: Int, surface: Surface): Boolean = withContext(vdDispatcher) {
         shizukuSetupMutex.withLock {
             val trySetupStartedAt = android.os.SystemClock.elapsedRealtime()
             val setup = ensureShizukuSetup() ?: return@withContext false
@@ -3037,10 +3005,10 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    private fun computeVirtualDisplayDpi(width: Int, height: Int): Int = StreamMath.applyDensityScale(StreamMath.calculateDpi(minOf(width, height)), dpiScale)
+    internal fun computeVirtualDisplayDpi(width: Int, height: Int): Int = StreamMath.applyDensityScale(StreamMath.calculateDpi(minOf(width, height)), dpiScale)
     private suspend fun removeAllVdTasks() = withContext(Dispatchers.IO) { pipelines.values.forEach { cleanupDisplay(it.displayId) } }
 
-    private suspend fun cleanupDisplay(displayId: Int) = withContext(Dispatchers.IO) {
+    internal suspend fun cleanupDisplay(displayId: Int) = withContext(Dispatchers.IO) {
         if (displayId < 0) return@withContext
         val service = pipelines.values.firstOrNull()?.controller?.getPrivilegedService() ?: return@withContext
         try {
@@ -3055,27 +3023,15 @@ class MirrorForegroundService : Service() {
         } catch (_: Exception) {}
     }
 
-    private suspend fun forceStopAppIfNeeded(packageName: String) {
-        val pkg = packageName.substringBefore('/')
-        if (pkg.isBlank() || pkg == "HOME" || pkg == "com.android.settings" || pkg == applicationContext.packageName) return
-        try {
-            val service = pipelines.values.firstOrNull()?.controller?.getPrivilegedService() ?: return
-            val matchingTaskIds = try { runBinderSafe(1000L) { service.getTaskIdsForPackage(pkg).toList() } ?: emptyList() } catch (_: Exception) { emptyList() }
-            matchingTaskIds.forEach { try { service.removeTask(it) } catch (_: Exception) {} }
-            if (!BROWSER_PACKAGES.contains(pkg)) service.execCommand("am force-stop $pkg")
-        } catch (_: Exception) {}
-    }
-
     private val BROWSER_PACKAGES = setOf("com.android.chrome", "com.sec.android.app.sbrowser", "org.mozilla.firefox", "com.microsoft.emmx")
     private fun markTerminal(reason: TerminalReason) { if (terminalReason.compareAndSet(null, reason)) requestStopAsync("terminal_${reason.name.lowercase()}") }
-    private fun escapeShellArg(value: String): String = "'" + value.replace("'", "'\''") + "'"
     private fun resolveLaunchComponent(packageOrComponent: String): String? {
         if (packageOrComponent.contains('/')) return packageOrComponent
         return try { packageManager.getLaunchIntentForPackage(packageOrComponent)?.component?.flattenToShortString() } catch (_: Exception) { null }
     }
-    private fun normalizeLaunchTarget(packageOrComponent: String): String = resolveLaunchComponent(packageOrComponent) ?: packageOrComponent
+    internal fun normalizeLaunchTarget(packageOrComponent: String): String = resolveLaunchComponent(packageOrComponent) ?: packageOrComponent
 
-    private fun buildShellLaunchCommand(
+    internal fun buildShellLaunchCommand(
         displayId: Int,
         packageOrComponent: String,
         extraKey: String? = null,
@@ -3083,23 +3039,17 @@ class MirrorForegroundService : Service() {
         reorderToFront: Boolean = false
     ): String {
         val resolvedComponent = resolveLaunchComponent(packageOrComponent)
-        val launchTarget = resolvedComponent ?: packageOrComponent
-        val flags = MultiDisplayLaunchPolicy.shellFlags(reorderToFront)
-        return buildString {
-            append("am start --display $displayId -f $flags ")
-            if (resolvedComponent != null) {
-                append("-n ${escapeShellArg(resolvedComponent)} ")
-            } else {
-                append("-a android.intent.action.MAIN -c android.intent.category.LAUNCHER ")
-                append("-p ${escapeShellArg(launchTarget)} ")
-            }
-            if (!extraKey.isNullOrEmpty() && extraValue != null) {
-                append("--es $extraKey ${escapeShellArg(extraValue)} ")
-            }
-        }.trim()
+        return ShellLaunchCommandBuilder.buildAppLaunchCommand(
+            displayId = displayId,
+            packageOrComponent = packageOrComponent,
+            resolvedComponent = resolvedComponent,
+            flags = MultiDisplayLaunchPolicy.shellFlags(reorderToFront),
+            extraKey = extraKey,
+            extraValue = extraValue,
+        )
     }
 
-    private fun verifySurfaceAndFallback(pipeline: MirroringPipeline, service: IPrivilegedService, displayId: Int, pkg: String, taskIds: List<Int>, packageOrComponent: String, extraKey: String?, extraValue: String?) {
+    internal fun verifySurfaceAndFallback(pipeline: MirroringPipeline, service: IPrivilegedService, displayId: Int, pkg: String, taskIds: List<Int>, packageOrComponent: String, extraKey: String?, extraValue: String?) {
         // Clean package check without hardcoded maps filter
         if (pkg.contains("com.castla.mirror") || pkg == "HOME" || pkg.isBlank()) return
 
@@ -3212,1826 +3162,5 @@ class MirrorForegroundService : Service() {
     // ==========================================
     // ENCAPSULATED VIRTUAL DISPLAY PIPELINE
     // ==========================================
-    inner class MirroringPipeline(val name: String, val displayName: String) {
-        val controller = VirtualDisplayController(displayName)
-        private val released = java.util.concurrent.atomic.AtomicBoolean(false)
-        private val releasing = java.util.concurrent.atomic.AtomicBoolean(false)
 
-        var width = 0; var height = 0; var displayId = -1
-        val vdGeneration = java.util.concurrent.atomic.AtomicLong(0)
-
-        // Timestamp of the last processed keyframe request to prevent coroutine and binder flood
-        @Volatile var lastKeyframeRequestTime = 0L
-        @Volatile var firstFrameMetadataSent = false
-        // Backup fields to remember the last valid viewport dimensions for self-healing recovery
-        @Volatile var lastValidWidth: Int = 384
-        @Volatile var lastValidHeight: Int = 672
-
-        // State guards to prevent concurrent self-healing re-entry which triggers duplicate am start shell command floods
-        @Volatile var isSelfHealingInProgress = false
-        @Volatile var activeFallbackJob: kotlinx.coroutines.Job? = null
-        @Volatile var bootstrapNudgeJob: kotlinx.coroutines.Job? = null
-        @Volatile var bootstrapNudgeAttempts = 0
-        @Volatile var lastFrameRenderedTime = 0L
-        @Volatile var lastMoveRejectLoggedAt = 0L
-
-        private val encoderSession = java.util.concurrent.atomic.AtomicLong(0)
-
-        var videoEncoder: VideoEncoder? = null; var jpegEncoder: JpegEncoder? = null; var currentEncoderSurface: Surface? = null
-        var pipelineState = PipelineState.IDLE; var pendingRebuildRequest: RebuildRequest? = null
-        @Volatile var displayTier: DisplayTier = if (name == "primary") DisplayTier.ACTIVE else DisplayTier.SUSPENDED
-
-        var currentBitrate = 0; var currentApp = ""; var currentWebUrl: String? = null
-        @Volatile var requiresFreshLaunchPreparation = true
-        @Volatile var lastPreparedTargetPackage = ""
-        @Volatile var lastTouchFocusRecoveryAt = 0L
-        @Volatile var debugLaunchSeq = 0
-        @Volatile var debugTopTaskMisses = 0
-        @Volatile var debugFocusRecoveryAttempts = 0
-        @Volatile var debugFocusRecoveryEscalations = 0
-        @Volatile var debugRebuildRequests = 0
-        @Volatile var debugRebuildExecutions = 0
-        @Volatile var debugResizeSchedules = 0
-        @Volatile var debugResizeCancels = 0
-        @Volatile var debugFallbackStarts = 0
-        @Volatile var debugFallbackCancels = 0
-        @Volatile var debugEncoderCreates = 0
-        @Volatile var debugEncoderReleases = 0
-        @Volatile var debugInjectionRejects = 0
-        @Volatile var debugInjectionRecoveries = 0
-        @Volatile var debugInjectAttempts = 0
-        @Volatile var debugInjectAccepted = 0
-        @Volatile var debugInjectRejected = 0
-        @Volatile var debugMoveInjectAttempts = 0
-        @Volatile var debugMoveInjectAccepted = 0
-        @Volatile var debugMoveInjectRejected = 0
-        @Volatile var debugFirstInjectFailureProbeLogged = false
-        @Volatile var lastInjectionRecoveryAt = 0L
-        @Volatile var lastServiceMutationAt = 0L
-        @Volatile var lastServiceMutationReason = "init"
-        @Volatile var activeTouchCount = 0
-        @Volatile var lastTouchEventAt = 0L
-        @Volatile var touchFocusGateArmedAt = 0L
-        @Volatile var touchFocusGateTarget = ""
-        @Volatile var touchFocusGateLastProbe = ""
-        @Volatile var touchFocusGateEscalatedAt = 0L
-        @Volatile var touchFocusGateNudgedAt = 0L
-        @Volatile var touchFocusGateNudgeInFlight = false
-        @Volatile var touchFocusGateNudgeJob: Job? = null
-        @Volatile var consecutiveInjectionRejects = 0
-        private val gatedPointerIds = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
-        var isVideoApp = false
-        var autoResolution: Boolean = false
-        var autoFps: Boolean = false
-        var currentMaxHeight: Int = 720
-        var targetFps: Int = 30
-
-        var touchInjector: TouchInjector? = null; var resizeJob: Job? = null
-        var requestedWidth: Int = 0; var requestedHeight: Int = 0
-
-        private val pipelineMutex = Mutex()
-
-        fun isEncoderRunning(): Boolean {
-            return if (currentCodecMode == "mjpeg") jpegEncoder != null else videoEncoder != null
-        }
-
-        fun markInputDebugLaunch(launchSeq: Int) {
-            debugLaunchSeq = launchSeq
-            debugTopTaskMisses = 0
-            debugFocusRecoveryAttempts = 0
-            debugFocusRecoveryEscalations = 0
-            debugRebuildRequests = 0
-            debugRebuildExecutions = 0
-            debugResizeSchedules = 0
-            debugResizeCancels = 0
-            debugFallbackStarts = 0
-            debugFallbackCancels = 0
-            debugEncoderCreates = 0
-            debugEncoderReleases = 0
-            debugInjectionRejects = 0
-            debugInjectionRecoveries = 0
-            debugInjectAttempts = 0
-            debugInjectAccepted = 0
-            debugInjectRejected = 0
-            debugMoveInjectAttempts = 0
-            debugMoveInjectAccepted = 0
-            debugMoveInjectRejected = 0
-            debugFirstInjectFailureProbeLogged = false
-            consecutiveInjectionRejects = 0
-//            touchInjector?.markDebugLaunch(launchSeq)
-            Log.i(
-                TAG,
-                "[$name Pipeline] Input debug launch reset launchSeq=$launchSeq displayId=$displayId app=$currentApp"
-            )
-        }
-
-        fun markFreshLaunchPreparation(reason: String) {
-            requiresFreshLaunchPreparation = true
-            lastPreparedTargetPackage = ""
-            lastFrameRenderedTime = 0L
-            bootstrapNudgeAttempts = 0
-            lastKeyframeRequestTime = 0L
-            activeFallbackJob?.cancel()
-            activeFallbackJob = null
-            bootstrapNudgeJob?.cancel()
-            bootstrapNudgeJob = null
-            mirrorServer?.clearCachedSpsPps(name)
-            mirrorServer?.pauseStream(name, displayId, width, height)
-            Log.i(
-                TAG,
-                "[$name Pipeline] Marked fresh launch preparation required. reason=$reason displayId=$displayId currentApp=$currentApp"
-            )
-        }
-
-        private fun cancelBootstrapNudge(reason: String) {
-            bootstrapNudgeJob?.cancel()
-            bootstrapNudgeJob = null
-            logLaunchRecoveryInfo("bootstrap_nudge_cancel pane=$name reason=$reason displayId=$displayId")
-        }
-
-        private fun scheduleBootstrapNudge(
-            sessionId: Long,
-            targetDisplayId: Int,
-        ) {
-            bootstrapNudgeJob?.cancel()
-            bootstrapNudgeJob = serviceScope.launch {
-                val scheduledAtMs = android.os.SystemClock.elapsedRealtime()
-                logLaunchRecoveryInfo(
-                    "bootstrap_nudge_scheduled pane=$name session=$sessionId displayId=$targetDisplayId delayMs=${LaunchRecoveryPolicy.INITIAL_BOOTSTRAP_NUDGE_DELAY_MS}"
-                )
-                kotlinx.coroutines.delay(LaunchRecoveryPolicy.INITIAL_BOOTSTRAP_NUDGE_DELAY_MS)
-                val elapsedMs = android.os.SystemClock.elapsedRealtime() - scheduledAtMs
-                val shouldTrigger = LaunchRecoveryPolicy.shouldTriggerInitialBootstrapNudge(
-                    elapsedMs = elapsedMs,
-                    firstFramePublished = firstFrameMetadataSent,
-                    nudgeAttempts = bootstrapNudgeAttempts,
-                )
-                if (!shouldTrigger) {
-                    logLaunchRecoveryInfo(
-                        "bootstrap_nudge_noop pane=$name session=$sessionId displayId=$targetDisplayId elapsedMs=$elapsedMs " +
-                            "firstFramePublished=$firstFrameMetadataSent attempts=$bootstrapNudgeAttempts"
-                    )
-                    return@launch
-                }
-                if (!browserConnected ||
-                    (displayTier != DisplayTier.ACTIVE && displayTier != DisplayTier.VISIBLE) ||
-                    displayId < 0 ||
-                    displayId != targetDisplayId
-                ) {
-                    logLaunchRecoveryInfo(
-                        "bootstrap_nudge_skipped pane=$name session=$sessionId targetDisplayId=$targetDisplayId " +
-                            "currentDisplayId=$displayId browserConnected=$browserConnected tier=$displayTier elapsedMs=$elapsedMs"
-                    )
-                    return@launch
-                }
-                bootstrapNudgeAttempts += 1
-                logLaunchRecoveryInfo(
-                    "bootstrap_nudge_fire pane=$name session=$sessionId displayId=$displayId elapsedMs=$elapsedMs"
-                )
-                val target = recoveryLaunchTarget()
-                if (LaunchRecoveryPolicy.shouldAttemptBootstrapRealign(
-                        currentApp = target,
-                        displayId = displayId,
-                        browserConnected = browserConnected,
-                    )
-                ) {
-                    logLaunchRecoveryInfo(
-                        "bootstrap_realign_begin pane=$name session=$sessionId displayId=$displayId target=$target"
-                    )
-                    val launched = launchComponent(
-                        target,
-                        forceColdStart = false,
-                        forceTaskRealign = true,
-                    )
-                    logLaunchRecoveryInfo(
-                        "bootstrap_realign_done pane=$name session=$sessionId displayId=$displayId target=$target launched=$launched"
-                    )
-                } else {
-                    logLaunchRecoveryInfo(
-                        "bootstrap_realign_skipped pane=$name session=$sessionId displayId=$displayId target=$target"
-                    )
-                }
-            }
-        }
-
-        fun recordInjectionResult(motionEvent: android.view.MotionEvent, accepted: Boolean) {
-            val action = motionEvent.actionMasked
-            debugInjectAttempts += 1
-            if (accepted) debugInjectAccepted += 1 else debugInjectRejected += 1
-            if (accepted && action != android.view.MotionEvent.ACTION_MOVE) {
-                consecutiveInjectionRejects = 0
-            }
-
-            if (action == android.view.MotionEvent.ACTION_MOVE) {
-                debugMoveInjectAttempts += 1
-                if (accepted) debugMoveInjectAccepted += 1 else debugMoveInjectRejected += 1
-            }
-        }
-
-        fun noteTouchEvent(action: String) {
-            lastTouchEventAt = android.os.SystemClock.elapsedRealtime()
-            when (action) {
-                "down" -> {
-                    activeTouchCount += 1
-                    cancelFallbackDuringTouch("touch_down")
-                }
-                "up", "cancel" -> {
-                    activeTouchCount = (activeTouchCount - 1).coerceAtLeast(0)
-                }
-            }
-        }
-
-        fun isTouchInteractionActive(): Boolean {
-            if (activeTouchCount > 0) return true
-            val lastAt = lastTouchEventAt
-            if (lastAt <= 0L) return false
-            return android.os.SystemClock.elapsedRealtime() - lastAt <= 250L
-        }
-
-        fun armTouchFocusGate(target: String) {
-            touchFocusGateArmedAt = android.os.SystemClock.elapsedRealtime()
-            touchFocusGateTarget = target
-            touchFocusGateLastProbe = "disabled:$target"
-            touchFocusGateEscalatedAt = 0L
-            touchFocusGateNudgedAt = 0L
-            touchFocusGateNudgeInFlight = false
-            touchFocusGateNudgeJob?.cancel()
-            touchFocusGateNudgeJob = null
-            gatedPointerIds.clear()
-            Log.i(TAG, "[FocusTrace] gate_disabled pane=$name target=$target displayId=$displayId")
-        }
-
-        private fun triggerInternalFocusNudge(
-            activeId: Int,
-            reason: String,
-        ) {
-            val now = android.os.SystemClock.elapsedRealtime()
-            if (touchFocusGateNudgeInFlight) return
-            if (now - touchFocusGateNudgedAt < 250L) return
-
-            val targetWidth = when {
-                width > 0 -> width
-                requestedWidth > 0 -> requestedWidth
-                lastValidWidth > 0 -> lastValidWidth
-                else -> 0
-            }
-            val targetHeight = when {
-                height > 0 -> height
-                requestedHeight > 0 -> requestedHeight
-                lastValidHeight > 0 -> lastValidHeight
-                else -> 0
-            }
-            if (targetWidth <= 0 || targetHeight <= 0) return
-
-            touchFocusGateNudgeInFlight = true
-            touchFocusGateNudgedAt = now
-            val tapX = (targetWidth * 0.5f).coerceAtLeast(8f)
-            val tapY = (targetHeight * 0.5f).coerceAtLeast(8f)
-            val internalPointerId = 9001
-
-            serviceScope.launch {
-                var downAccepted = false
-                var upAccepted = false
-                try {
-                    Log.i(
-                        TAG,
-                        "[FocusTrace] inject_focus_nudge pane=$name displayId=$activeId reason=$reason x=${"%.1f".format(java.util.Locale.US, tapX)} y=${"%.1f".format(java.util.Locale.US, tapY)}"
-                    )
-                    wakeDisplayForRecovery(controller.getPrivilegedService(), activeId, "launch_soft_recovery")
-                    val downTime = android.os.SystemClock.uptimeMillis()
-                    val downEvent = android.view.MotionEvent.obtain(
-                        downTime,
-                        downTime,
-                        android.view.MotionEvent.ACTION_DOWN,
-                        tapX,
-                        tapY,
-                        0
-                    )
-                    val upEvent = android.view.MotionEvent.obtain(
-                        downTime,
-                        downTime + 24L,
-                        android.view.MotionEvent.ACTION_UP,
-                        tapX,
-                        tapY,
-                        0
-                    )
-                    try {
-                        downAccepted = controller.injectMotionEventWithResult(downEvent)
-                        delay(24L)
-                        upAccepted = controller.injectMotionEventWithResult(upEvent)
-                    } finally {
-                        downEvent.recycle()
-                        upEvent.recycle()
-                    }
-                    Log.i(
-                        TAG,
-                        "[FocusTrace] inject_focus_nudge_result pane=$name displayId=$activeId pointerId=$internalPointerId down=$downAccepted up=$upAccepted reason=$reason"
-                    )
-
-                    // [FocusTrace] If regular binder injection fails or is rejected,
-                    // execute raw "input" shell command as the ultimate fallback to force display focus!
-                    if (!downAccepted) {
-                        Log.w(TAG, "[FocusTrace] Binder nudge failed on display $activeId. Invoking fallback raw shell input tap.")
-                        try {
-                            controller.getPrivilegedService()?.execCommand("input -d $activeId tap $tapX $tapY")
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Raw shell input nudge fallback failed", e)
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "[FocusTrace] inject_focus_nudge_failed pane=$name displayId=$activeId reason=$reason", e)
-                } finally {
-                    touchFocusGateNudgeInFlight = false
-                }
-            }
-        }
-
-        fun shouldDeferTouchForFocusGate(event: TouchEvent): Boolean {
-            touchFocusGateArmedAt = 0L
-            touchFocusGateNudgedAt = 0L
-            touchFocusGateNudgeInFlight = false
-            touchFocusGateNudgeJob?.cancel()
-            touchFocusGateNudgeJob = null
-            gatedPointerIds.clear()
-            touchFocusGateLastProbe = "disabled_passthrough"
-            return false
-        }
-
-        fun focusGateSummary(): String {
-            val armed = touchFocusGateArmedAt > 0L
-            return "armed=$armed gatedPointers=${gatedPointerIds.size} probe=${touchFocusGateLastProbe}"
-        }
-
-        private fun cancelFallbackDuringTouch(reason: String) {
-            val job = activeFallbackJob ?: return
-            if (!job.isActive) return
-            debugFallbackCancels += 1
-            activeFallbackJob = null
-            job.cancel()
-        }
-
-        fun markServiceMutation(reason: String) {
-            lastServiceMutationAt = android.os.SystemClock.elapsedRealtime()
-            lastServiceMutationReason = reason
-        }
-
-        fun recentServiceActionSummary(): String {
-            val at = lastServiceMutationAt
-            if (at <= 0L) return "none"
-            val age = (android.os.SystemClock.elapsedRealtime() - at).coerceAtLeast(0L)
-            return "$lastServiceMutationReason@${age}ms"
-        }
-
-        fun shouldMaterializeVirtualDisplay(): Boolean =
-            displayTier != DisplayTier.PARKED
-
-        suspend fun setTier(next: DisplayTier, reason: String) {
-            if (displayTier == next && (next == DisplayTier.ACTIVE || next == DisplayTier.VISIBLE)) return
-            displayTier = next
-            Log.i(TAG, "[$name Pipeline] Display tier -> $next ($reason)")
-            when (next) {
-                DisplayTier.ACTIVE, DisplayTier.VISIBLE -> {
-                    val targetW = requestedWidth.takeIf { it > 1 } ?: lastValidWidth.coerceAtLeast(720)
-                    val targetH = requestedHeight.takeIf { it > 1 } ?: lastValidHeight.coerceAtLeast(720)
-                    if (!isEncoderRunning() && displayId >= 0 && browserConnected) {
-                        requestRebuild("tier_resume", RebuildPriority.HIGH, targetW, targetH, force = true)
-                    }
-                }
-                DisplayTier.SUSPENDED, DisplayTier.PARKED -> {
-                    suspendEncoder(reason)
-                    if (next == DisplayTier.PARKED && displayId >= 0) {
-                        Log.i(TAG, "[$name Pipeline] Releasing parked VirtualDisplay id=$displayId ($reason)")
-                        runBinderSafe { controller.releaseVirtualDisplay() }
-                        displayId = -1
-                    }
-                    broadcastWebDiagnostics("diagnostics_debounced")
-                }
-            }
-        }
-
-        suspend fun suspendEncoder(reason: String) {
-            Log.i(TAG, "[$name Pipeline] Suspending encoder and stream while preserving VD/app session. Reason=$reason")
-            cancelBootstrapNudge("suspend_encoder:$reason")
-            if (resizeJob?.isActive == true) debugResizeCancels += 1
-            resizeJob?.cancel()
-            if (videoEncoder != null || jpegEncoder != null) debugEncoderReleases += 1
-            videoEncoder?.release(); videoEncoder = null
-            jpegEncoder?.release(); jpegEncoder = null
-            currentEncoderSurface?.let { surf ->
-                com.castla.mirror.diagnostics.ResourceTracker.trackSurfaceRelease(surf.hashCode(), "VideoEncoderInputSurface@${surf.hashCode()}")
-                try { surf.release() } catch (_: Exception) {}
-            }
-            currentEncoderSurface = null
-            lastFrameRenderedTime = 0L
-            try { touchInjector?.detachController("suspend_encoder") } catch (_: Exception) {}
-            if (displayId >= 0) {
-                runBinderSafe { controller.setSurface(null) }
-            }
-            mirrorServer?.setKeyframeRequester(name) { _ -> }
-            mirrorServer?.pauseStream(name, displayId, width, height)
-            adaptiveBitrateManager.rebalanceBitrates()
-        }
-
-        fun onViewportChange(w: Int, h: Int, forceLayoutRealign: Boolean = false) {
-            if (w <= 0 || h <= 0) {
-                Log.w(TAG, "[$name Pipeline] Viewport hidden or invalid -> suspending encoder without destroying VD.")
-                resizeJob?.cancel(); serviceScope.launch { setTier(DisplayTier.SUSPENDED, "viewport_invalid") }; return
-            }
-
-            // Align dimensions to a 16-pixel grid and enforce a minimum threshold of 320px to match hardware virtual display constraints.
-            val alignedW = ((w + 15) and 15.inv()).coerceAtLeast(320)
-            val alignedH = ((h + 15) and 15.inv()).coerceAtLeast(320)
-            // Log.i(TAG, "[$name Pipeline] viewportEvent raw=${w}x${h} aligned=${alignedW}x${alignedH} previous=${requestedWidth}x${requestedHeight} current=${width}x${height} forceLayoutRealign=$forceLayoutRealign displayId=$displayId")
-
-            // Check if this is the initial setup phase. Runtime viewport changes use a short debounce.
-            val isFirstSetup = requestedWidth <= 0 || displayId < 0
-
-            // Cache the latest valid viewport sizes for runtime self-healing recovery
-            lastValidWidth = alignedW
-            lastValidHeight = alignedH
-            requestedWidth = alignedW
-            requestedHeight = alignedH
-            if (resizeJob?.isActive == true) debugResizeCancels += 1
-            resizeJob?.cancel()
-            debugResizeSchedules += 1
-            resizeJob = serviceScope.launch {
-                if (!isFirstSetup) {
-                    kotlinx.coroutines.delay(120L)
-                }
-                val forceResume = !isEncoderRunning()
-                val nextPriority = when {
-                    forceLayoutRealign -> RebuildPriority.IMMEDIATE
-                    isFirstSetup || forceResume -> RebuildPriority.HIGH
-                    else -> RebuildPriority.NORMAL
-                }
-                requestRebuild(
-                    reason = "viewport_change",
-                    priority = nextPriority,
-                    newWidth = alignedW,
-                    newHeight = alignedH,
-                    force = forceResume,
-                    forceSingle = forceLayoutRealign
-                )
-            }
-        }
-
-
-        // Rebuild is non-blocking and always enqueues the latest request to the sequential
-        // hardware worker. We intentionally do not collapse requests behind an active rebuild,
-        // because split-ratio drags and fullscreen promotion depend on the final viewport size
-        // being applied after any in-flight rebuild completes.
-        suspend fun requestRebuild(
-            reason: String,
-            priority: RebuildPriority = RebuildPriority.NORMAL,
-            newWidth: Int,
-            newHeight: Int,
-            force: Boolean = false,
-            forceSingle: Boolean = false,
-            onComplete: kotlinx.coroutines.CompletableDeferred<Unit>? = null
-        ) {
-            this@MirrorForegroundService.requestRebuild(
-                RebuildRequest(
-                    requestId = rebuildRequestIdGenerator.incrementAndGet(),
-                    pipelineName = name,
-                    reason = reason,
-                    priority = priority,
-                    width = newWidth,
-                    height = newHeight,
-                    force = force,
-                    forceSingle = forceSingle,
-                    onComplete = onComplete,
-                )
-            )
-        }
-
-        suspend fun rebuild(
-            newWidth: Int,
-            newHeight: Int,
-            force: Boolean = false,
-            forceSingle: Boolean = false,
-            onComplete: kotlinx.coroutines.CompletableDeferred<Unit>? = null
-        ) {
-            requestRebuild("legacy_direct", RebuildPriority.NORMAL, newWidth, newHeight, force, forceSingle, onComplete)
-        }
-
-        suspend fun executeActualRebuild(requestId: Long, rebuildReason: String, targetWidth: Int, targetHeight: Int, force: Boolean = false, forceSingle: Boolean = false) {
-            debugRebuildExecutions += 1
-            markServiceMutation("rebuild_begin(force=$force,forceSingle=$forceSingle,target=${targetWidth}x${targetHeight})")
-            val sessionId = encoderSession.incrementAndGet()
-            val rebuildStartedAtMs = android.os.SystemClock.elapsedRealtime()
-            val effectiveSize = DisplaySizePolicy.resolve(targetWidth, targetHeight, currentMaxHeight)
-            val alignedWidth = effectiveSize.width
-            val alignedHeight = effectiveSize.height
-
-            if (!force && alignedWidth == width && alignedHeight == height) return
-            if (alignedWidth > 3840 || alignedHeight > 3840) return
-
-            val w = alignedWidth; val h = alignedHeight; val dpi = computeVirtualDisplayDpi(w, h)
-            val calculatedBitrate = adaptiveBitrateManager.getSharedBitrateForPipeline(this)
-            Log.i(
-                TAG,
-                "[PIPELINE_DEBUG] [$name] rebuild session=$sessionId target=${targetWidth}x${targetHeight} aligned=${w}x${h} force=$force forceSingle=$forceSingle currentDisplayId=$displayId currentApp=$currentApp"
-            )
-            logLaunchRecoveryInfo(
-                "rebuild_execute_begin id=$requestId pane=$name session=$sessionId reason=$rebuildReason target=${targetWidth}x${targetHeight} " +
-                    "aligned=${w}x${h} force=$force forceSingle=$forceSingle displayId=$displayId currentApp=$currentApp"
-            )
-            FileLogger.i("PIPELINE_DEBUG", "[$name] rebuild session=$sessionId target=${targetWidth}x${targetHeight} aligned=${w}x${h} force=$force forceSingle=$forceSingle currentDisplayId=$displayId currentApp=$currentApp")
-            FileLogger.i("DISPLAY_STATE", "[$name] rebuild session=$sessionId displayId=$displayId currentApp=$currentApp target=${w}x${h}")
-
-            // Reset frame indicator on viewport/encoder layout reconstruction to guarantee correct watchdog operation
-            lastFrameRenderedTime = 0L
-            bootstrapNudgeAttempts = 0
-            mirrorServer?.clearCachedSpsPps(name)
-            firstFrameMetadataSent = false
-            cancelBootstrapNudge("rebuild_prepare")
-            logStreamBootstrapInfo(
-                "pane=$name session=$sessionId phase=rebuild_prepare codec=$currentCodecMode displayId=$displayId " +
-                    "target=${w}x${h} elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-            )
-
-            if (videoEncoder != null || jpegEncoder != null) debugEncoderReleases += 1
-            videoEncoder?.release(); videoEncoder = null
-            jpegEncoder?.release(); jpegEncoder = null
-            Log.i(TAG, "[$name Pipeline] encoderLifecycle phase=release session=$sessionId codec=$currentCodecMode displayId=$displayId target=${w}x${h}")
-             currentEncoderSurface?.let { surf ->
-                com.castla.mirror.diagnostics.ResourceTracker.trackSurfaceRelease(surf.hashCode(), "VideoEncoderInputSurface@${surf.hashCode()}")
-                try { surf.release() } catch (_: Exception) {}
-            }
-            currentEncoderSurface = null
-            delay(50)
-
-            var startEncoderTask: (() -> Unit)? = null
-            val surface = if (currentCodecMode == "mjpeg") {
-                val jpeg = JpegEncoder(w, h, fps = 15, quality = 65); val inputSurface = jpeg.createInputSurface(); jpegEncoder = jpeg
-                debugEncoderCreates += 1
-                jpeg.onCaptureEvent = { detail ->
-                    logStreamBootstrapInfo(
-                        "pane=$name session=$sessionId phase=jpeg_encoder $detail displayId=$displayId " +
-                            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                    )
-                }
-                startEncoderTask = {
-                    if (encoderSession.get() != sessionId || jpegEncoder !== jpeg || currentEncoderSurface !== inputSurface) {
-                        logStreamBootstrapInfo(
-                            "pane=$name session=$sessionId phase=encoder_start_skipped reason=stale codec=mjpeg displayId=$displayId " +
-                                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                        )
-                        Log.i(TAG, "[$name Pipeline] Skipping stale JPEG encoder start for session=$sessionId")
-                    } else {
-                        logStreamBootstrapInfo(
-                            "pane=$name session=$sessionId phase=encoder_start codec=mjpeg displayId=$displayId " +
-                                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                        )
-                        jpeg.start { data, key ->
-                            lastFrameRenderedTime = System.currentTimeMillis()
-                            if (!firstFrameMetadataSent) {
-                                firstFrameMetadataSent = true
-                                cancelBootstrapNudge("first_frame_publish")
-                                logStreamBootstrapInfo(
-                                    "pane=$name session=$sessionId phase=first_frame_publish codec=mjpeg displayId=$displayId " +
-                                        "generation=${mirrorServer?.getCurrentStreamGeneration(name) ?: 0} bytes=${data.size} key=$key " +
-                                        "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                                )
-                                mirrorServer?.markFirstFrameReady(name, displayId, w, h)
-                            }
-                            mirrorServer?.broadcastFrame(data, key, name)
-                        }
-                    }
-                }
-
-                // Throttle keyframe requests to once per 1000ms, bypassing if force is true.
-                mirrorServer?.setKeyframeRequester(name) { force ->
-                    val now = System.currentTimeMillis()
-                    if (!force && now - lastKeyframeRequestTime < 1000L) return@setKeyframeRequester
-                    lastKeyframeRequestTime = now
-                    serviceScope.launch {
-                        try {
-                            if (displayId >= 0) {
-                                wakeDisplayForRecovery(controller.getPrivilegedService(), displayId, "frame_watchdog_primary")
-                            }
-                            // Bypassed restoreContent() on keyframe request to prevent relaunch loop
-                        } catch (e: Exception) {
-                            Log.w(TAG, "[$name Pipeline] Failed to force graphics wakeup on MJPEG keyframe request", e)
-                        }
-                    }
-                }
-                inputSurface
-            } else {
-                val preferredProfile = mirrorServer?.getPreferredProfile(name) ?: "High"
-                val encoder = VideoEncoder(w, h, calculatedBitrate, thermalFpsOverride ?: targetFps, preferredProfile)
-                val inputSurface = encoder.createInputSurface()
-                videoEncoder = encoder
-                debugEncoderCreates += 1
-                Log.i(TAG, "[$name Pipeline] encoderLifecycle phase=created session=$sessionId codec=h264 displayId=$displayId target=${w}x${h}")
-                encoder.onCodecEvent = { detail ->
-                    logStreamBootstrapInfo(
-                        "pane=$name session=$sessionId phase=video_encoder $detail displayId=$displayId " +
-                            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                    )
-                }
-                encoder.onSpsPps = {
-                    logStreamBootstrapInfo(
-                        "pane=$name session=$sessionId phase=sps_pps_ready size=${it.size} displayId=$displayId " +
-                            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                    )
-                    mirrorServer?.broadcastSpsPps(it, name)
-                }
-                startEncoderTask = {
-                    if (encoderSession.get() != sessionId || videoEncoder !== encoder || currentEncoderSurface !== inputSurface) {
-                        logStreamBootstrapInfo(
-                            "pane=$name session=$sessionId phase=encoder_start_skipped reason=stale codec=h264 displayId=$displayId " +
-                                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                        )
-                        Log.i(TAG, "[$name Pipeline] Skipping stale video encoder start for session=$sessionId")
-                    } else {
-                        logStreamBootstrapInfo(
-                            "pane=$name session=$sessionId phase=encoder_start codec=h264 displayId=$displayId " +
-                                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                        )
-                        encoder.start { data, key ->
-                            lastFrameRenderedTime = System.currentTimeMillis()
-                            if (!firstFrameMetadataSent) {
-                                firstFrameMetadataSent = true
-                                cancelBootstrapNudge("first_frame_publish")
-                                logStreamBootstrapInfo(
-                                    "pane=$name session=$sessionId phase=first_frame_publish codec=h264 displayId=$displayId " +
-                                        "generation=${mirrorServer?.getCurrentStreamGeneration(name) ?: 0} bytes=${data.size} key=$key " +
-                                        "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                                )
-                                mirrorServer?.markFirstFrameReady(name, displayId, w, h)
-                            }
-                            mirrorServer?.broadcastFrame(data, key, name)
-                        }
-                    }
-                }
-
-                mirrorServer?.setKeyframeRequester(name) { force ->
-                    val now = System.currentTimeMillis()
-                    if (!force && now - lastKeyframeRequestTime < 1000L) return@setKeyframeRequester
-                    lastKeyframeRequestTime = now
-                    serviceScope.launch {
-                        try {
-                            if (displayId >= 0) {
-                                wakeDisplayForRecovery(controller.getPrivilegedService(), displayId, "frame_watchdog_secondary")
-                            }
-                            requestKeyFrameForRecovery(this@MirroringPipeline, "frame_watchdog_secondary")
-                        } catch (e: Exception) {
-                            Log.w(TAG, "[$name Pipeline] Failed to force graphics wakeup on keyframe request", e)
-                        }
-                    }
-                }
-
-                inputSurface
-            }
-
-            currentEncoderSurface = surface; width = w; height = h; currentBitrate = calculatedBitrate
-            logStreamBootstrapInfo(
-                "pane=$name session=$sessionId phase=surface_ready codec=$currentCodecMode surfaceHash=${surface.hashCode()} " +
-                    "displayId=$displayId width=$w height=$h elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-            )
-            delay(100)
-
-            if (controller.isBound()) {
-                var success = false
-                var activeId = -1
-                var isNewVd = false
-                var gen = -1L
-
-                // Minimize mutex scope to exclude binder activity launches and delay suspends, preventing deadlocks.
-                vdOperationGlobalMutex.withLock {
-                    virtualDisplayHardwareMutex.withLock {
-                        val currentId = controller.getDisplayId()
-                        if (currentId >= 0) {
-                            logStreamBootstrapInfo(
-                                "pane=$name session=$sessionId phase=vd_reuse_begin displayId=$currentId width=$w height=$h dpi=$dpi " +
-                                    "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                            )
-                            Log.i(TAG, "[DISPLAY_DEBUG] [$name] reusing VirtualDisplay id=$currentId resize=${w}x${h} dpi=$dpi")
-                            FileLogger.i("DISPLAY_DEBUG", "[$name] reuseVirtualDisplay id=$currentId resize=${w}x${h} dpi=$dpi")
-                            FileLogger.i("DISPLAY_STATE", "[$name] reuseVirtualDisplay id=$currentId width=$w height=$h dpi=$dpi")
-                            runBinderSafe { controller.resizeDisplay(w, h, dpi) }
-                            Log.i(TAG, "[DISPLAY_DEBUG] [$name] attaching surface to existing display id=$currentId")
-                            FileLogger.i("DISPLAY_DEBUG", "[$name] setSurface existing id=$currentId")
-                            FileLogger.i("DISPLAY_STATE", "[$name] setSurface existing id=$currentId")
-                            runBinderSafe { controller.setSurface(surface) }
-                            displayId = currentId
-                            activeId = currentId
-                            gen = markVdCreated(currentId, "${name}_reuse")
-                            isNewVd = false
-                            success = true
-                            logStreamBootstrapInfo(
-                                "pane=$name session=$sessionId phase=vd_reuse_ready displayId=$currentId generation=$gen " +
-                                    "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                            )
-                        } else {
-                            logStreamBootstrapInfo(
-                                "pane=$name session=$sessionId phase=vd_create_begin width=$w height=$h dpi=$dpi " +
-                                    "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                            )
-                            Log.i(TAG, "[DISPLAY_DEBUG] [$name] creating new VirtualDisplay target=${w}x${h} dpi=$dpi")
-                            FileLogger.i("DISPLAY_DEBUG", "[$name] createVirtualDisplay target=${w}x${h} dpi=$dpi")
-                            FileLogger.i("DISPLAY_STATE", "[$name] createVirtualDisplay width=$w height=$h dpi=$dpi")
-                            runBinderSafe { controller.releaseVirtualDisplay() }
-                            runBinderSafe { controller.createVirtualDisplay(w, h, dpi, surface) }
-                            if (controller.hasVirtualDisplay()) {
-                                val newActiveId = controller.getDisplayId()
-                                displayId = newActiveId
-                                activeId = newActiveId
-                                gen = markVdCreated(newActiveId, "${name}_rebuild")
-                                isNewVd = true
-                                success = true
-                                logStreamBootstrapInfo(
-                                    "pane=$name session=$sessionId phase=vd_create_ready displayId=$newActiveId generation=$gen " +
-                                        "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                                )
-                            }
-                        }
-                    }
-                }
-
-                if (success && activeId >= 0) {
-                    touchInjector = (touchInjector ?: TouchInjector(w, h)).also { injector ->
-                        injector.updateDimensions(w, h)
-                        injector.updateController { touchEvent, event ->
-                            val accepted = controller.injectMotionEventWithResult(event)
-                            recordInjectionResult(event, accepted)
-                            if (!accepted) {
-                                handleInjectionRejected(event.actionMasked, event.pointerCount)
-                            }
-                            accepted
-                        }
-                    }
-                    val preStreamTarget = preStreamLaunchTarget()
-                    val shouldLaunchBeforeStream = LaunchRecoveryPolicy.shouldLaunchTargetBeforeStreamBootstrap(
-                        hasLaunchTarget = preStreamTarget != null,
-                        requiresFreshLaunchPreparation = requiresFreshLaunchPreparation,
-                        isNewVirtualDisplay = isNewVd,
-                    )
-                    if (shouldLaunchBeforeStream && preStreamTarget != null) {
-                        logLaunchRecoveryInfo(
-                            "prestream_launch_begin pane=$name session=$sessionId displayId=$activeId target=$preStreamTarget " +
-                                "reason=$rebuildReason currentApp=$currentApp"
-                        )
-                        val launched = launchComponent(
-                            preStreamTarget,
-                            forceColdStart = false,
-                            forceTaskRealign = true,
-                            skipLaunchSelfHeal = true,
-                            suppressStreamGenerationRestart = true,
-                        )
-                        logLaunchRecoveryInfo(
-                            "prestream_launch_done pane=$name session=$sessionId displayId=$activeId target=$preStreamTarget " +
-                                "reason=$rebuildReason launched=$launched"
-                        )
-                    }
-                    logStreamBootstrapInfo(
-                        "pane=$name session=$sessionId phase=stream_generation_begin_request displayId=$activeId isNewVd=$isNewVd " +
-                            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                    )
-                    val streamGeneration = mirrorServer?.beginStreamGeneration(name, activeId, w, h) ?: 0
-                    Log.i(TAG, "[$name Pipeline] encoderLifecycle phase=stream_generation session=$sessionId generation=$streamGeneration displayId=$activeId target=${w}x${h}")
-                    logStreamBootstrapInfo(
-                        "pane=$name session=$sessionId phase=stream_generation_begin_done displayId=$activeId generation=$streamGeneration " +
-                            "elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                    )
-                    startEncoderTask?.invoke()
-                    scheduleBootstrapNudge(
-                        sessionId = sessionId,
-                        targetDisplayId = activeId,
-                    )
-
-                    delay(100) // Small stabilization delay outside lock
-                    runBinderSafe { controller.keepDisplayAwake() }
-
-                    if (isNewVd) {
-                        try {
-                            wakeDisplayForRecovery(controller.getPrivilegedService(), activeId, "rebuild_new_vd")
-                            Log.i(TAG, "[DISPLAY_DEBUG] [$name] wakeUpDisplay after new VD id=$activeId")
-                            FileLogger.i("DISPLAY_DEBUG", "[$name] wakeUpDisplay after new VD id=$activeId")
-                            FileLogger.i("DISPLAY_STATE", "[$name] wakeUpDisplay id=$activeId")
-                        } catch (e: Exception) {
-                            Log.w(TAG, "[$name Pipeline] Failed to trigger early wakeup guard", e)
-                        }
-                    }
-
-                    if (currentApp.isBlank()) {
-                        currentApp = "HOME"
-                        markServiceMutation("launch_home_after_rebuild")
-                        runBinderSafe { controller.launchHomeOnDisplay() }
-                    } else if (shouldLaunchBeforeStream) {
-                        markServiceMutation("prestream_launch_after_rebuild")
-                    } else if (isNewVd || forceSingle) {
-                        markServiceMutation("soft_recovery_after_rebuild")
-                        Log.i(TAG, "[$name Pipeline] Rebuild completed without automatic app relaunch. Waiting for explicit launch path.")
-                    }
-                    markServiceMutation("rebuild_end(newVd=$isNewVd,activeId=$activeId)")
-                    Log.i(TAG, "[$name Pipeline] VirtualDisplay configured successfully. ID: $activeId (New VD: $isNewVd)")
-                    Log.i(TAG, "[DISPLAY_DEBUG] [$name] configured activeId=$activeId generation=$gen isNewVd=$isNewVd currentApp=$currentApp")
-                    FileLogger.i("DISPLAY_DEBUG", "[$name] configured activeId=$activeId generation=$gen isNewVd=$isNewVd currentApp=$currentApp")
-                    FileLogger.i("DISPLAY_STATE", "[$name] configured activeId=$activeId generation=$gen isNewVd=$isNewVd currentApp=$currentApp")
-                } else {
-                    throw IllegalStateException("VirtualDisplay allocation completely failed via binder server.")
-                }
-            } else {
-                if (trySetupVirtualDisplay(w, h, surface)) {
-                    val preStreamTarget = preStreamLaunchTarget()
-                    val shouldLaunchBeforeStream = LaunchRecoveryPolicy.shouldLaunchTargetBeforeStreamBootstrap(
-                        hasLaunchTarget = preStreamTarget != null,
-                        requiresFreshLaunchPreparation = requiresFreshLaunchPreparation,
-                        isNewVirtualDisplay = displayId >= 0,
-                    )
-                    if (displayId >= 0 && shouldLaunchBeforeStream && preStreamTarget != null) {
-                        logLaunchRecoveryInfo(
-                            "prestream_launch_begin pane=$name session=$sessionId displayId=$displayId target=$preStreamTarget " +
-                                "reason=$rebuildReason fallbackPath=true currentApp=$currentApp"
-                        )
-                        val launched = launchComponent(
-                            preStreamTarget,
-                            forceColdStart = false,
-                            forceTaskRealign = true,
-                            skipLaunchSelfHeal = true,
-                            suppressStreamGenerationRestart = true,
-                        )
-                        logLaunchRecoveryInfo(
-                            "prestream_launch_done pane=$name session=$sessionId displayId=$displayId target=$preStreamTarget " +
-                                "reason=$rebuildReason fallbackPath=true launched=$launched"
-                        )
-                    }
-                    if (displayId >= 0) {
-                        logStreamBootstrapInfo(
-                            "pane=$name session=$sessionId phase=stream_generation_begin_request displayId=$displayId isNewVd=true " +
-                                "fallbackPath=true elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                        )
-                        val streamGeneration = mirrorServer?.beginStreamGeneration(name, displayId, w, h) ?: 0
-                        logStreamBootstrapInfo(
-                            "pane=$name session=$sessionId phase=stream_generation_begin_done displayId=$displayId generation=$streamGeneration " +
-                                "fallbackPath=true elapsedMs=${android.os.SystemClock.elapsedRealtime() - rebuildStartedAtMs}"
-                        )
-                    }
-                    startEncoderTask?.invoke()
-                    if (displayId >= 0) {
-                        scheduleBootstrapNudge(
-                            sessionId = sessionId,
-                            targetDisplayId = displayId,
-                        )
-                    }
-                    if (displayId >= 0 && shouldLaunchBeforeStream) {
-                        markServiceMutation("prestream_launch_after_rebuild_fallback")
-                    }
-                }
-            }
-            if (displayId >= 0) {
-                try { mirrorServer?.broadcastControlMessage(org.json.JSONObject().apply { put("type", "resolutionChanged"); put("pane", name); put("width", w); put("height", h) }.toString()) } catch (_: Exception) {}
-                // Wake the display and request a fresh frame without injecting synthetic touches
-                // that can affect apps like maps during repeated split/expand cycles.
-                serviceScope.launch {
-                    try {
-                        delay(150)
-                        markServiceMutation("post_rebuild_wakeup")
-                        wakeDisplayForRecovery(controller.getPrivilegedService(), displayId, "restore_content")
-                        if (currentCodecMode != "mjpeg") {
-                            markServiceMutation("post_rebuild_keyframe")
-                        }
-                        requestKeyFrameForRecovery(this@MirroringPipeline, "restore_content")
-                        // Log.i(TAG, "[FRAME_DEBUG] [$name] post-rebuild wakeup/keyframe displayId=$displayId codec=$currentCodecMode")
-                        FileLogger.i("FRAME_DEBUG", "[$name] post-rebuild wakeup/keyframe displayId=$displayId codec=$currentCodecMode")
-                        FileLogger.i("KEYFRAME_REQUEST", "[$name] postRebuild displayId=$displayId codec=$currentCodecMode")
-                        Log.i(TAG, "[$name Pipeline] Requested post-rebuild wakeup/keyframe (codec: $currentCodecMode)")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "[$name Pipeline] Failed to force graphics wakeup post rebuild", e)
-                    }
-                }
-            }
-
-            broadcastWebDiagnostics("diagnostics_debounced")
-        }
-
-        fun invalidateVd(reason: String): Long {
-            Log.w(TAG, "[$name Pipeline] Invalidating display channel cache token. Reason: $reason")
-            Log.w(TAG, "[DISPLAY_DEBUG] [$name] invalidateVd reason=$reason oldDisplayId=$displayId currentApp=$currentApp")
-            FileLogger.i("DISPLAY_DEBUG", "[$name] invalidateVd reason=$reason oldDisplayId=$displayId currentApp=$currentApp")
-            FileLogger.i("DISPLAY_STATE", "[$name] invalidateVd reason=$reason oldDisplayId=$displayId currentApp=$currentApp")
-            displayId = -1
-            return vdGeneration.incrementAndGet()
-        }
-
-        private fun summarizeProbeDump(raw: String, needles: List<String>): String {
-            if (raw.isBlank()) return "none"
-            val matched = raw
-                .lineSequence()
-                .map { it.trim() }
-                .filter { line -> line.isNotEmpty() && needles.any { needle -> needle.isNotBlank() && line.contains(needle, ignoreCase = true) } }
-                .take(12)
-                .map { line -> line.replace(Regex("\\s+"), " ") }
-                .toList()
-            return if (matched.isEmpty()) "none" else matched.joinToString(" || ")
-        }
-
-        // Periodically monitors task residency on the virtual display to inject layout wakeup events adaptively as soon as the app mounts.
-        private fun executeAdaptiveWakeup(targetDisplayId: Int, cleanPkg: String, service: IPrivilegedService) {
-            if (targetDisplayId < 0) return
-            serviceScope.launch {
-                var appMounted = false
-                // Poll task residency so touch can be released as soon as the app is actually mounted.
-                for (attempt in 1..25) {
-                    val runningTasks = try { service.getRunningTasksOnDisplay(targetDisplayId) } catch (_: Exception) { null }
-                    val isPresent = runningTasks?.any { it.contains(cleanPkg) } ?: false
-                    if (isPresent) {
-                        appMounted = true
-                        Log.i(TAG, "[$name Pipeline] Adaptive wakeup detected target app $cleanPkg in display $targetDisplayId on attempt $attempt")
-                        break
-                    }
-                    delay(100)
-                }
-
-                if (!appMounted) {
-                    Log.w(TAG, "[$name Pipeline] Adaptive wakeup timed out waiting for $cleanPkg on display $targetDisplayId. Proceeding with fallback wakeup.")
-                }
-
-                // Acquire the hardware mutex briefly to ensure any active rebuild has finalized before
-                // we request a wakeup/keyframe refresh.
-                try {
-                    virtualDisplayHardwareMutex.withLock {
-                        wakeDisplayForRecovery(service, targetDisplayId, "launch_component")
-                    }
-                    delay(40)
-                    requestKeyFrameForRecovery(this@MirroringPipeline, "launch_component")
-                    Log.i(TAG, "[$name Pipeline] Symmetrical adaptive wakeup successfully completed on display $targetDisplayId")
-                } catch (e: Exception) {
-                    Log.w(TAG, "[$name Pipeline] Failed to trigger adaptive wakeup sequence", e)
-                }
-            }
-        }
-
-        fun recoverTouchFocusIfNeeded(topTask: String?, trigger: String) {
-            val activeId = displayId
-            if (activeId < 0) return
-            if (isTouchInteractionActive()) return
-            val targetApp = currentApp
-
-            // [FocusTrace] Skip focus recovery to prevent splash loop if the target app is a splash/launcher activity
-            val normalizedTarget = targetApp.lowercase(java.util.Locale.US)
-            if (normalizedTarget.contains("launchactivity") ||
-                normalizedTarget.contains("introactivity") ||
-                normalizedTarget.contains("splash")) {
-                Log.i(TAG, "[FocusTrace] Skip touch focus recovery to prevent splash loop for $targetApp")
-                return
-            }
-
-            val cleanPkg = targetApp.substringBefore('/').substringBefore('?').substringBefore(' ').trim()
-            if (cleanPkg.isBlank() || cleanPkg == "HOME" || cleanPkg == "com.android.settings" || cleanPkg == packageName) return
-
-            val hasExpectedTask = topTask?.contains(cleanPkg) == true
-            if (hasExpectedTask) return
-            debugTopTaskMisses += 1
-
-            val now = android.os.SystemClock.elapsedRealtime()
-            if (now - lastTouchFocusRecoveryAt < 2000L) return
-            lastTouchFocusRecoveryAt = now
-            debugFocusRecoveryAttempts += 1
-
-            val token = currentVdToken()
-            if (token == null) {
-                Log.w(TAG, "[$name Pipeline] Touch focus recovery skipped ($trigger): no active VD token for app=$targetApp")
-                return
-            }
-
-            serviceScope.launch(vdDispatcher) {
-                if (!isCurrentVd(token.first, token.second)) {
-                    Log.w(TAG, "[$name Pipeline] Touch focus recovery aborted ($trigger): VD token changed for app=$targetApp")
-                    return@launch
-                }
-
-                val service = controller.getPrivilegedService()
-                if (service == null) {
-                    Log.w(TAG, "[$name Pipeline] Touch focus recovery skipped ($trigger): privileged service unavailable for app=$targetApp")
-                    return@launch
-                }
-
-                Log.w(
-                    TAG,
-                    "[$name Pipeline] Touch focus recovery triggered ($trigger) displayId=$activeId app=$targetApp topTask=${topTask ?: "none"}"
-                )
-                markServiceMutation("touch_focus_recovery:$trigger")
-
-                wakeDisplayForRecovery(service, activeId, "touch_focus_recovery")
-                dismissKeyguardForRecovery(service, "touch_focus_recovery")
-
-                val taskIds = try {
-                    runBinderSafe(1000L) { service.getTaskIdsForPackage(cleanPkg).toList() } ?: emptyList()
-                } catch (_: Exception) {
-                    emptyList()
-                }
-
-                var moveAttempted = false
-                for (taskId in taskIds) {
-                    try {
-                        runBinderSafe {
-                            service.execCommand("cmd activity task move-to-display $taskId $activeId")
-                            service.execCommand("cmd activity task move-to-front $taskId")
-                        }
-                        moveAttempted = true
-                    } catch (_: Exception) {}
-                }
-
-                if (moveAttempted) {
-                    executeAdaptiveWakeup(activeId, cleanPkg, service)
-                    delay(120L)
-                }
-
-                val recoveredTopTask = try {
-                    runBinderSafe(1000L) { service.getRunningTasksOnDisplay(activeId).firstOrNull() }
-                } catch (_: Exception) {
-                    null
-                }
-
-                if (recoveredTopTask?.contains(cleanPkg) == true) {
-                    Log.i(
-                        TAG,
-                        "[$name Pipeline] Touch focus recovery restored app=$targetApp on displayId=$activeId topTask=$recoveredTopTask moveAttempted=$moveAttempted"
-                    )
-                    return@launch
-                }
-
-                Log.w(
-                    TAG,
-                    "[$name Pipeline] Touch focus recovery deferred displayId=$activeId app=$targetApp topTask=${recoveredTopTask ?: "none"} moveAttempted=$moveAttempted"
-                )
-                debugFocusRecoveryEscalations += 1
-                Log.i(TAG, "[$name Pipeline] Touch-triggered recovery will not relaunch app. Waiting for explicit launch/rebuild path.")
-            }
-        }
-
-        // Safely detach and re-attach the virtual display's Surface to break WindowManagerService transition locks.
-        suspend fun resetSurfaceToBreakWmsLock() {
-            val activeId = displayId
-            val surface = currentEncoderSurface
-            if (activeId >= 0 && surface != null) {
-                Log.w(TAG, "[$name Pipeline] Initiating Surface reset sequence to clear WMS transition stagnation on display $activeId")
-                try {
-                    controller.setSurface(null)
-                    delay(80L)
-                    controller.setSurface(surface)
-                    Log.i(TAG, "[$name Pipeline] Surface reset sequence successfully completed on display $activeId")
-                } catch (e: Exception) {
-                    Log.e(TAG, "[$name Pipeline] Failed to execute Surface reset recovery", e)
-                }
-            }
-        }
-
-        fun handleInjectionRejected(action: Int, pointerCount: Int) {
-            debugInjectionRejects += 1
-            val activeId = displayId
-            if (activeId < 0) return
-
-            // Allow ACTION_MOVE to accumulate reject counts with a 200ms throttle interval
-            // to detect stagnation during drag gestures without flooding recovery calls.
-            val isMove = action == android.view.MotionEvent.ACTION_MOVE
-            val now = android.os.SystemClock.elapsedRealtime()
-            if (isMove) {
-                if (now - lastMoveRejectLoggedAt < 200L) {
-                    return
-                }
-                lastMoveRejectLoggedAt = now
-            }
-
-            consecutiveInjectionRejects += 1
-
-            appendRecentServerTouchTrace(
-                "reject pane=$name displayId=$activeId action=$action pointerCount=$pointerCount app=$currentApp"
-            )
-            broadcastWebDiagnostics("inject_reject:$name:$action")
-            if (!debugFirstInjectFailureProbeLogged) {
-                debugFirstInjectFailureProbeLogged = true
-                logInjectionFailureProbe(activeId, action, pointerCount)
-            }
-            if (now - lastInjectionRecoveryAt >= 2000L) {
-                lastInjectionRecoveryAt = now
-                debugInjectionRecoveries += 1
-                Log.w(
-                    TAG,
-                    "[FocusTrace] inject_reject pane=$name displayId=$activeId action=$action pointerCount=$pointerCount app=$currentApp"
-                )
-                val relaunchTarget = recoveryLaunchTarget().ifBlank { touchFocusGateTarget.ifBlank { currentApp } }
-                serviceScope.launch {
-                    try {
-                        touchInjector?.release(forceFallbackCancel = false, reason = "inject_reject")
-                        Log.w(
-                            TAG,
-                            "[FocusTrace] inject_input_session_reset pane=$name displayId=$activeId action=$action app=$currentApp consecutive=$consecutiveInjectionRejects"
-                        )
-                    } catch (e: Exception) {
-                        Log.w(TAG, "[$name Pipeline] inject reject input-session reset failed", e)
-                    }
-                    Log.w(
-                        TAG,
-                        "[FocusTrace] inject_realign pane=$name displayId=$activeId action=$action app=$currentApp target=$relaunchTarget consecutive=$consecutiveInjectionRejects"
-                    )
-                    Log.i(TAG, "[$name Pipeline] Injection recovery will not relaunch app automatically. Applying soft recovery only.")
-                    if (screenOffPolicy.isScreenOff) {
-                        logScreenOffWarn("[SCREEN_OFF] [REVIVE_REBUILD] pane=$name reason=inject_reject displayId=$activeId")
-                        requestScreenOffRebuild(this@MirroringPipeline, "inject_reject")
-                    }
-                    try {
-                        wakeDisplayForRecovery(controller.getPrivilegedService(), activeId, "inject_reject")
-                        dismissKeyguardForRecovery(controller.getPrivilegedService(), "inject_reject")
-                    } catch (_: Exception) {}
-                    delay(60L)
-                    triggerInternalFocusNudge(activeId, "inject_reject")
-                    delay(120L)
-                    try {
-                        if (currentCodecMode != "mjpeg") {
-                            videoEncoder?.requestKeyFrame()
-                        } else {
-                            // Bypassed restoreContent() on inject reject to prevent relaunch loop
-                        }
-                    } catch (_: Exception) {}
-                    Log.w(
-                        TAG,
-                        "[FocusTrace] inject_recover pane=$name displayId=$activeId action=$action app=$currentApp target=$relaunchTarget"
-                    )
-                }
-            }
-        }
-
-        private fun logInjectionFailureProbe(activeId: Int, action: Int, pointerCount: Int) {
-            serviceScope.launch(vdDispatcher) {
-                val service = controller.getPrivilegedService()
-                if (service == null) {
-                    Log.w(
-                        TAG,
-                        "[FocusTrace] inject_false_probe pane=$name displayId=$activeId action=$action pointerCount=$pointerCount app=$currentApp service=unavailable recentServiceAction=${recentServiceActionSummary()}"
-                    )
-                    return@launch
-                }
-
-                val targetApp = currentApp
-                val cleanPkg = targetApp.substringBefore('/').substringBefore('?').substringBefore(' ').trim()
-                val activitiesDump = try {
-                    runBinderSafe(1500L) { service.execCommand("dumpsys activity activities") } ?: ""
-                } catch (_: Exception) {
-                    ""
-                }
-                val windowsDump = try {
-                    runBinderSafe(1500L) { service.execCommand("dumpsys window windows") } ?: ""
-                } catch (_: Exception) {
-                    ""
-                }
-
-                val activitySummary = summarizeProbeDump(
-                    activitiesDump,
-                    listOf("Display #$activeId", "topResumedActivity", "mResumedActivity", "ResumedActivity", cleanPkg)
-                )
-                val windowSummary = summarizeProbeDump(
-                    windowsDump,
-                    listOf("mCurrentFocus", "mFocusedApp", "mTopFocusedDisplayId", "Display #$activeId", "mDisplayId=$activeId", cleanPkg)
-                )
-                lastRejectProbeSummary =
-                    "pane=$name displayId=$activeId app=$targetApp activities=$activitySummary windows=$windowSummary recent=${recentServiceActionSummary()}"
-                Log.w(
-                    TAG,
-                    "[FocusTrace] inject_false_probe pane=$name displayId=$activeId action=$action pointerCount=$pointerCount app=$targetApp activities=$activitySummary windows=$windowSummary recentServiceAction=${recentServiceActionSummary()}"
-                )
-                broadcastWebDiagnostics("inject_false_probe:$name:$action")
-            }
-        }
-
-        fun markVdCreated(activeId: Int, reason: String): Long { displayId = activeId; return vdGeneration.incrementAndGet() }
-        fun isCurrentVd(expectedGeneration: Long, expectedDisplayId: Int): Boolean = expectedDisplayId >= 0 && expectedGeneration == vdGeneration.get() && expectedDisplayId == displayId && controller.hasVirtualDisplay() && controller.getDisplayId() == expectedDisplayId
-        fun currentVdToken(): Pair<Long, Int>? { val gen = vdGeneration.get(); val activeId = displayId; return if (isCurrentVd(gen, activeId)) gen to activeId else null }
-        fun inputDebugSummary(): String =
-            "injectAttempts=$debugInjectAttempts injectAccepted=$debugInjectAccepted injectRejected=$debugInjectRejected " +
-                "moveInjectAttempts=$debugMoveInjectAttempts moveInjectAccepted=$debugMoveInjectAccepted moveInjectRejected=$debugMoveInjectRejected " +
-            "launchSeq=$debugLaunchSeq topTaskMisses=$debugTopTaskMisses focusRecoveryAttempts=$debugFocusRecoveryAttempts " +
-                "focusRecoveryEscalations=$debugFocusRecoveryEscalations rebuildRequests=$debugRebuildRequests rebuildExecutions=$debugRebuildExecutions " +
-                "resizeSchedules=$debugResizeSchedules resizeCancels=$debugResizeCancels fallbackStarts=$debugFallbackStarts " +
-                "fallbackCancels=$debugFallbackCancels encoderCreates=$debugEncoderCreates encoderReleases=$debugEncoderReleases " +
-                "injectRejects=$debugInjectionRejects injectRecoveries=$debugInjectionRecoveries " +
-                "resizeJobActive=${resizeJob?.isActive == true} fallbackJobActive=${activeFallbackJob?.isActive == true} " +
-                "encoderActive=${videoEncoder != null || jpegEncoder != null} " +
-                "focusGateArmed=${touchFocusGateArmedAt > 0L} gatedPointers=${gatedPointerIds.size} focusGateProbe=${touchFocusGateLastProbe}"
-
-        private fun internalComponentName(activityClassName: String): String = if (activityClassName.contains('/')) activityClassName else "$packageName/$activityClassName"
-        private fun recoveryLaunchTarget(): String {
-            val active = currentApp.trim()
-            if (active.isBlank() || active == "HOME" || active == "com.android.settings") return active
-            if (active.startsWith("$packageName/") || active.contains("WebBrowserActivity")) return active
-            return active.substringBefore('/').ifBlank { active }
-        }
-
-        private fun preStreamLaunchTarget(): String? {
-            val active = currentApp.trim()
-            if (active.isBlank() || active == "HOME" || active == "com.android.settings") return null
-            if (active.startsWith("$packageName/") || active.contains("WebBrowserActivity")) return null
-            return recoveryLaunchTarget().ifBlank { null }
-        }
-
-        private fun restartActiveStreamGeneration() {
-            val token = currentVdToken() ?: return
-            val encoderActive = if (currentCodecMode == "mjpeg") jpegEncoder != null else videoEncoder != null
-            if (!encoderActive || width <= 0 || height <= 0) return
-            firstFrameMetadataSent = false
-            mirrorServer?.beginStreamGeneration(name, token.second, width, height)
-        }
-
-        fun launchOwnActivity(activityClassName: String, url: String) {
-            val targetDisplayId = this.displayId
-            if (targetDisplayId < 0) return
-            Log.i(TAG, "[$name Pipeline] Spawning internal container panel component: $activityClassName")
-            FileLogger.i(
-                "IME_ROUTING",
-                "pane=$name phase=internal_activity targetDisplayId=$targetDisplayId vdDisplayId=$displayId launchMode=activity_options activity=$activityClassName"
-            )
-            val options = android.app.ActivityOptions.makeBasic().apply { launchDisplayId = targetDisplayId }
-            val intent = Intent().apply {
-                setClassName(this@MirrorForegroundService, activityClassName)
-                if (activityClassName.contains("WebBrowserActivity")) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
-                else addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                putExtra("url", url); putExtra("pane", name)
-            }
-            try { startActivity(intent, options.toBundle()) } catch (_: Exception) {
-                serviceScope.launch { launchComponent(internalComponentName(activityClassName), "url", url, forceColdStart = false, forceDisplayId = true) }
-            }
-        }
-        private suspend fun prepareDisplaySessionForLaunch(skipSelfHeal: Boolean): DisplayLaunchSession {
-            val encoderReleased = if (currentCodecMode == "mjpeg") jpegEncoder == null else videoEncoder == null
-            val targetWidth = if (requestedWidth > 0) requestedWidth else (if (lastValidWidth > 0) lastValidWidth else 384)
-            val targetHeight = if (requestedHeight > 0) requestedHeight else (if (lastValidHeight > 0) lastValidHeight else 672)
-            val effectiveSize = DisplaySizePolicy.resolve(targetWidth, targetHeight, currentMaxHeight)
-            val alignedWidth = effectiveSize.width
-            val alignedHeight = effectiveSize.height
-            val needsRealignment = width != alignedWidth || height != alignedHeight
-
-            if (!skipSelfHeal && (encoderReleased || width <= 1 || needsRealignment) && !isSelfHealingInProgress) {
-                isSelfHealingInProgress = true
-                try {
-                    Log.i(TAG, "[$name Pipeline] Display session preparation: target=${targetWidth}x${targetHeight} encoderReleased=$encoderReleased needsRealignment=$needsRealignment")
-                    val rebuildDeferred = kotlinx.coroutines.CompletableDeferred<Unit>()
-                    requestRebuild(
-                        reason = "launch_display_session_prepare",
-                        priority = RebuildPriority.HIGH,
-                        newWidth = targetWidth,
-                        newHeight = targetHeight,
-                        onComplete = rebuildDeferred,
-                    )
-                    try {
-                        rebuildDeferred.await()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "[$name Pipeline] Display session preparation await failed", e)
-                        delay(300)
-                    }
-                } finally {
-                    isSelfHealingInProgress = false
-                }
-            } else if (!skipSelfHeal && isSelfHealingInProgress) {
-                Log.d(TAG, "[$name Pipeline] Display session preparation already in progress")
-            }
-
-            return DisplayLaunchSession(
-                targetWidth = targetWidth,
-                targetHeight = targetHeight,
-                alignedWidth = alignedWidth,
-                alignedHeight = alignedHeight,
-                encoderReady = if (currentCodecMode == "mjpeg") jpegEncoder != null else videoEncoder != null,
-            )
-        }
-        suspend fun launchComponent(
-            packageOrComponent: String,
-            extraKey: String? = null,
-            extraValue: String? = null,
-            forceColdStart: Boolean = false,
-            forceDisplayId: Boolean = false,
-            forceTaskRealign: Boolean = false,
-            skipLaunchSelfHeal: Boolean = false,
-            suppressStreamGenerationRestart: Boolean = false,
-        ): Boolean = withContext(vdDispatcher) {
-            markServiceMutation("launch_component_begin(target=$packageOrComponent,cold=$forceColdStart,realign=$forceTaskRealign)")
-            // Ensure lastFrameRenderedTime is reset only when actually switching to a different application package
-            // or when a clean cold start is explicitly requested. This preserves frame rendering timestamps for
-            // the active app, allowing the Command Equivalence Guard to accurately prevent duplicate launch floods.
-            val cleanPkg = packageOrComponent.substringBefore('/').substringBefore('?').substringBefore(' ').trim()
-            if (cleanPkg.isBlank() || cleanPkg == packageName || cleanPkg.contains("com.castla.mirror")) return@withContext false
-
-            val previousPkg = currentApp.substringBefore('/').substringBefore('?').substringBefore(' ').trim()
-            val isNewApp = currentApp.substringBefore('/') != cleanPkg
-            val needsFreshLaunchPreparation = requiresFreshLaunchPreparation
-            if (isNewApp || forceColdStart) {
-                lastFrameRenderedTime = 0L
-            }
-
-            // Bypassed: Do not force stop the previous app on application switching to support warm start
-            // Command Equivalence Guard: If target app is already active and rendering on this virtual display, skip redundant window displacement commands.
-            // However, if the screen streaming has stagnated or has not yet rendered its first frame, bypass this safeguard to enforce visual recovery.
-            val isAlreadyActive = currentApp == packageOrComponent || currentApp.substringBefore('/') == cleanPkg
-            val isEncoderActiveBeforeSession = if (currentCodecMode == "mjpeg") jpegEncoder != null else videoEncoder != null
-            val now = System.currentTimeMillis()
-            val isFrameStreamingNormal = lastFrameRenderedTime > 0L && (now - lastFrameRenderedTime < 3000L)
-
-            if (isAlreadyActive && isEncoderActiveBeforeSession && isFrameStreamingNormal && !needsFreshLaunchPreparation && !forceColdStart && !forceTaskRealign && !isSelfHealingInProgress) {
-                Log.i(TAG, "[$name Pipeline] Command Equivalence Guard activated. $cleanPkg is already running and active on display $displayId. Bypassing redundant launch command.")
-                FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision sameAppGuard=true pkg=$cleanPkg displayId=$displayId freshPrep=$needsFreshLaunchPreparation frameStreamingNormal=$isFrameStreamingNormal forceColdStart=$forceColdStart forceTaskRealign=$forceTaskRealign")
-                // Keep-awake graphic trigger
-                val correctedDisplayId = if (displayId >= 0) displayId else controller.getDisplayId()
-                val service = controller.getPrivilegedService()
-                if (correctedDisplayId >= 0 && service != null) {
-                    executeAdaptiveWakeup(correctedDisplayId, cleanPkg, service)
-                }
-                val token = currentVdToken()
-                if (token != null) {
-                    firstFrameMetadataSent = false
-                    mirrorServer?.beginStreamGeneration(name, token.second, width, height)
-                }
-                return@withContext true
-            }
-
-
-            val displaySession = prepareDisplaySessionForLaunch(skipLaunchSelfHeal)
-            val targetW = displaySession.targetWidth
-            val targetH = displaySession.targetHeight
-            val alignedW = displaySession.alignedWidth
-            val alignedH = displaySession.alignedHeight
-            val isEncoderActive = displaySession.encoderReady
-
-            val correctedDisplayId = if (displayId >= 0) displayId else controller.getDisplayId()
-            if (correctedDisplayId < 0) return@withContext false
-            val service = controller.getPrivilegedService() ?: return@withContext false
-
-            try {
-                if (forceColdStart && cleanPkg != "HOME") { try { service.execCommand("am force-stop $cleanPkg") } catch (_: Exception) {} }
-                val originalDisplayId = try { runBinderSafe { service.getDisplayIdForPackage(cleanPkg) } ?: -1 } catch (_: Exception) { -1 }
-                // Always route to the requested virtual display. A package task on Display 0 must not redirect this launch to the phone.
-                val targetDisplayId = correctedDisplayId
-
-                Log.i(TAG, "[$name Pipeline] Symmetric task processing initialized -> Routing $cleanPkg to Display token: $targetDisplayId freshLaunchPrep=$needsFreshLaunchPreparation previousPkg=$previousPkg lastPrepared=$lastPreparedTargetPackage")
-                FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision pkg=$cleanPkg freshPrep=$needsFreshLaunchPreparation sameAppGuard=false originalDisplayId=$originalDisplayId correctedDisplayId=$correctedDisplayId targetDisplayId=$targetDisplayId previousPkg=$previousPkg lastPrepared=$lastPreparedTargetPackage forceDisplayId=$forceDisplayId")
-
-                val matchingTaskIds = try { runBinderSafe(1000L) { service.getTaskIdsForPackage(cleanPkg).toList() } ?: emptyList() } catch (_: Exception) { emptyList() }
-                val tasklessActiveRelaunch = LaunchRecoveryPolicy.shouldForceFreshPreparationForTasklessRelaunch(
-                    targetPkg = cleanPkg,
-                    currentAppPkg = currentApp.substringBefore('/'),
-                    matchingTaskCount = matchingTaskIds.size,
-                    forceTaskRealign = forceTaskRealign,
-                    encoderActive = isEncoderActive,
-                    requiresFreshLaunchPreparation = needsFreshLaunchPreparation,
-                )
-                val effectiveNeedsFreshLaunchPreparation = needsFreshLaunchPreparation || tasklessActiveRelaunch
-                if (tasklessActiveRelaunch) {
-                    lastFrameRenderedTime = 0L
-                    requiresFreshLaunchPreparation = true
-                    FileLogger.i(
-                        "PIPELINE_DEBUG",
-                        "[$name] launchDecision tasklessActiveRelaunch=true pkg=$cleanPkg currentApp=$currentApp forceTaskRealign=$forceTaskRealign"
-                    )
-                }
-                val isWarmStart = matchingTaskIds.isNotEmpty()
-                val targetDisplayPackages = try {
-                    runBinderSafe(1000L) { service.getRunningTasksOnDisplay(targetDisplayId) } ?: emptyList()
-                } catch (_: Exception) {
-                    emptyList()
-                }
-                val targetDisplayHasTask = targetDisplayPackages.any {
-                    it == cleanPkg || it.startsWith("$cleanPkg/")
-                } || (isWarmStart && originalDisplayId == targetDisplayId)
-                val launchPlan = LaunchPlanner.plan(
-                    LaunchState(
-                        targetDisplayId = targetDisplayId,
-                        displayReady = targetDisplayId >= 0,
-                        targetTaskIds = if (targetDisplayHasTask) matchingTaskIds else emptyList(),
-                        otherDisplayTaskExists = isWarmStart && !targetDisplayHasTask && originalDisplayId >= 0 && originalDisplayId != targetDisplayId,
-                        forceColdStart = forceColdStart,
-                        displaySizeMatches = width == alignedW && height == alignedH,
-                        encoderReady = isEncoderActive,
-                        encoderDisplayId = if (isEncoderActive) displayId else -1,
-                    )
-                )
-                val canReuseWarmTask = launchPlan.taskAction == TaskLaunchAction.MOVE_TASK_TO_FRONT
-                Log.i(TAG, "[$name Pipeline] taskResidency pkg=$cleanPkg matching=${matchingTaskIds.size} originalDisplayId=$originalDisplayId targetDisplayId=$targetDisplayId targetDisplayHasTask=$targetDisplayHasTask targetEntries=${targetDisplayPackages.size} plan=${launchPlan.taskAction} reason=${launchPlan.reason} resize=${launchPlan.resizeRequired} encoderReconnect=${launchPlan.encoderReconnectRequired}")
-                scheduleDisplayRoutingDiagnostics(
-                    pane = name,
-                    service = service,
-                    targetPkg = cleanPkg,
-                    targetDisplayId = targetDisplayId,
-                    phase = "prelaunch",
-                    launchMode = when (launchPlan.taskAction) { TaskLaunchAction.MOVE_TASK_TO_FRONT -> "warm_task_move"; TaskLaunchAction.CREATE_NEW_TASK -> "new_task_required"; TaskLaunchAction.MOVE_TASK_TO_DISPLAY_AND_FRONT -> "task_move"; TaskLaunchAction.WAIT_FOR_DISPLAY -> "pending" },
-                    vdDisplayId = displayId
-                )
-
-                if (launchPlan.taskAction == TaskLaunchAction.MOVE_TASK_TO_FRONT) {
-                    for (taskId in matchingTaskIds) {
-                        try {
-                            val moveResult = runBinderSafe {
-                                if (service.moveTaskToFrontNative(taskId)) {
-                                    "native"
-                                } else {
-                                    // Compatibility fallback for releases without the native ATM method.
-                                    "shell=" + service.execCommand("cmd activity task move-to-front $taskId")
-                                }
-                            } ?: "false"
-                            Log.i(TAG, "[$name Pipeline] warmTaskMove taskId=$taskId displayId=$targetDisplayId result=$moveResult")
-                        } catch (e: Exception) {
-                            Log.w(TAG, "[$name Pipeline] warmTaskMove failed taskId=$taskId displayId=$targetDisplayId", e)
-                        }
-                    }
-                } else if (isWarmStart) {
-                    FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision existingTaskOnOtherDisplay=true existingDisplayId=$originalDisplayId targetDisplayId=$targetDisplayId; creating separate task")
-                }
-
-                // Prevent redundant 'am start' shell command execution immediately following async task migration command.
-                // Re-launching via 'am start' in parallel with active task displacement commands causes Android OS task stack conflict,
-                // frequently forcing the primary Display 0 (MainActivity) to recede to the background Recents view.
-                if (canReuseWarmTask && !BrowserLaunchPolicy.shouldBypassWarmTaskMove(cleanPkg)) {
-                    markServiceMutation("launch_component_warm_start")
-                    FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision warmStart=true pkg=$cleanPkg taskCount=${matchingTaskIds.size} targetDisplayId=$targetDisplayId freshPrep=$effectiveNeedsFreshLaunchPreparation")
-                    scheduleDisplayRoutingDiagnostics(name, service, cleanPkg, targetDisplayId, "postlaunch", "warm_task_move", displayId)
-                    // Trigger adaptive task residency-aware wakeup asynchronously instead of waiting on hardcoded timings
-                    executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
-                    if (effectiveNeedsFreshLaunchPreparation) {
-                        mirrorServer?.onKeyframeRequest(name, "fresh_launch_prepare")
-                    }
-
-                    // Trigger the 4-second frame-based watchdog for graceful recovery on warm start layout transition
-                    verifySurfaceAndFallback(
-                        pipeline = this@MirroringPipeline,
-                        service = service,
-                        displayId = targetDisplayId,
-                        pkg = cleanPkg,
-                        taskIds = matchingTaskIds,
-                        packageOrComponent = packageOrComponent,
-                        extraKey = extraKey,
-                        extraValue = extraValue
-                    )
-
-                    requiresFreshLaunchPreparation = false
-                    lastPreparedTargetPackage = cleanPkg
-                    currentApp = packageOrComponent
-                    if (isEncoderActive && !suppressStreamGenerationRestart) {
-                        val token = currentVdToken()
-                        if (token != null) {
-                            firstFrameMetadataSent = false
-                            mirrorServer?.beginStreamGeneration(name, token.second, width, height)
-                        }
-                    }
-                    return@withContext true
-                }
-
-                // WMS Transition Lock Prevention Guard:
-                // If this is a realign/recovery request (forceTaskRealign = true) for the ALREADY ACTIVE application
-                // (i.e. cleanPkg is already currentApp and we are currently streaming/encoder is running),
-                // we MUST NOT execute native launchAppOnDisplayV2 or buildShellLaunchCommand.
-                // Doing so forces Android OS to initiate a new Window Manager transition state,
-                // which locks display focus and causes a perpetual touch injection rejection loop.
-                val isAlreadyActiveApp = cleanPkg == currentApp.substringBefore('/')
-                val isEncoderActive = if (currentCodecMode == "mjpeg") jpegEncoder != null else videoEncoder != null
-                if (forceTaskRealign && isAlreadyActiveApp && isEncoderActive && !effectiveNeedsFreshLaunchPreparation) {
-                    Log.w(TAG, "[$name Pipeline] Realignment requested for active app $cleanPkg. Bypassing native cold start to prevent WMS focus transition lock.")
-                    FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision realignBypass=true pkg=$cleanPkg targetDisplayId=$targetDisplayId freshPrep=$effectiveNeedsFreshLaunchPreparation")
-                    scheduleDisplayRoutingDiagnostics(name, service, cleanPkg, targetDisplayId, "postlaunch", "realign_bypass", displayId)
-                    executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
-                    currentApp = packageOrComponent
-                    val token = currentVdToken()
-                    if (token != null && !suppressStreamGenerationRestart) {
-                        firstFrameMetadataSent = false
-                        mirrorServer?.beginStreamGeneration(name, token.second, width, height)
-                    }
-                    return@withContext true
-                }
-
-                // 1. Try native binder launchAppOnDisplayV2 first (only for Standard package without complex query strings)
-                var nativeStarted = false
-                val isStandardAppLaunch = extraKey.isNullOrEmpty() && extraValue == null && !packageOrComponent.contains("/")
-                if (isStandardAppLaunch && !BrowserLaunchPolicy.shouldBypassNativeLaunchShortcut(cleanPkg)) {
-                    try {
-                        nativeStarted = runBinderSafe { controller.launchAppOnDisplayV2(cleanPkg, forceStop = false) } ?: false
-                    } catch (e: Exception) {
-                        Log.w(TAG, "[$name Pipeline] Native launchAppOnDisplayV2 failed, preparing shell fallback", e)
-                    }
-                }
-
-                // 2. Fallback to buildShellLaunchCommand if native launch is inapplicable or failed
-                if (!nativeStarted) {
-                    markServiceMutation("launch_component_shell_start")
-                    Log.i(TAG, "[$name Pipeline] Executing fallback shell launch command for $packageOrComponent")
-                    FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision nativeStarted=false usingShell=true pkg=$cleanPkg targetDisplayId=$targetDisplayId warmStart=$isWarmStart")
-                    // Introduce a 150ms delay for stabilization of window manager and focus subsystems.
-                    delay(150L)
-                    val command = buildShellLaunchCommand(targetDisplayId, packageOrComponent, extraKey, extraValue, reorderToFront = canReuseWarmTask)
-                    val result = runBinderSafe { service.execCommand(command) } ?: ""
-                    if (result.contains("SecurityException") || result.contains("Permission Denial")) {
-                        val retryTasks = try { runBinderSafe { service.getTaskIdsForPackage(cleanPkg) } ?: intArrayOf() } catch (_: Exception) { intArrayOf() }
-                        for (taskId in retryTasks) {
-                            try {
-                                // val retryNativeMoved = runBinderSafe { controller.moveTaskToDisplayNative(taskId) } ?: false
-                                val retryNativeMoved = false
-                                if (!retryNativeMoved) {
-                                    service.execCommand("cmd activity task move-to-display $taskId $targetDisplayId")
-                                    service.execCommand("cmd activity task move-to-front $taskId")
-                                }
-                            } catch (_: Exception) {}
-                        }
-                    }
-                }
-                scheduleDisplayRoutingDiagnostics(
-                    name,
-                    service,
-                    cleanPkg,
-                    targetDisplayId,
-                    "postlaunch",
-                    if (nativeStarted) "native_launch_on_display" else "shell_am_start_display",
-                    displayId
-                )
-
-                // Force an immediate graphics wakeup sequence and request encoder keyframe for Cold-Start apps to prevent early stream corruption.
-                if (!isWarmStart || forceColdStart) {
-                    markServiceMutation("launch_component_cold_start")
-                    FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision coldStartPath=true pkg=$cleanPkg targetDisplayId=$targetDisplayId freshPrep=$effectiveNeedsFreshLaunchPreparation forceColdStart=$forceColdStart")
-                    executeAdaptiveWakeup(targetDisplayId, cleanPkg, service)
-                    markServiceMutation("launch_component_keyframe")
-                    mirrorServer?.onKeyframeRequest(name, if (effectiveNeedsFreshLaunchPreparation) "fresh_launch_prepare" else "launch_component")
-                }
-
-                // Trigger the 4-second frame-based watchdog for graceful recovery on cold start layout transition
-                verifySurfaceAndFallback(
-                    pipeline = this@MirroringPipeline,
-                    service = service,
-                    displayId = targetDisplayId,
-                    pkg = cleanPkg,
-                    taskIds = matchingTaskIds,
-                    packageOrComponent = packageOrComponent,
-                    extraKey = extraKey,
-                    extraValue = extraValue
-                )
-
-                requiresFreshLaunchPreparation = false
-                lastPreparedTargetPackage = cleanPkg
-                currentApp = packageOrComponent
-                if (isEncoderActive && !suppressStreamGenerationRestart) {
-                    val token = currentVdToken()
-                    if (token != null) {
-                        firstFrameMetadataSent = false
-                        mirrorServer?.beginStreamGeneration(name, token.second, width, height)
-                    }
-                }
-                return@withContext true
-            } catch (e: Exception) { Log.e(TAG, "[$name Pipeline] Component push crashed inside system shell launcher layer.", e); return@withContext false }
-        }
-
-        private fun buildExternalBrowserCommand(displayId: Int, url: String, browserComponent: String): String {
-            return buildString {
-                append("am start --display $displayId -f 0x18000000 ")
-                append("-a android.intent.action.VIEW ")
-                append("-d ${escapeShellArg(url)} ")
-                append("-n ${escapeShellArg(browserComponent)} ")
-            }.trim()
-        }
-        suspend fun launchBrowser(
-            url: String,
-            sourceAppPackage: String? = null,
-            allowFallback: Boolean = true,
-            forceEmbeddedBrowser: Boolean = false,
-        ) {
-            val shouldForceEmbeddedBrowser =
-                forceEmbeddedBrowser || OttCatalog.forceEmbeddedBrowserFor(sourceAppPackage)
-            val browser = if (shouldForceEmbeddedBrowser) {
-                null
-            } else {
-                BrowserResolver.resolve(this@MirrorForegroundService, url)
-            }
-            val targetComponent = browser?.componentFlat ?: internalComponentName("com.castla.mirror.ui.WebBrowserActivity")
-            if (displayId >= 0 && currentWebUrl == url && currentApp == targetComponent) {
-                restartActiveStreamGeneration()
-                adaptiveBitrateManager.rebalanceBitrates()
-                return
-            }
-            if (displayId < 0) {
-                currentApp = targetComponent; currentWebUrl = url; isVideoApp = (browser != null)
-                serviceScope.launch(Dispatchers.IO) {
-                    try {
-                        // Dynamically fallback to the last valid system screen resolution to prevent layout squishing (720x720) during early startup.
-                        val fallbackW = if (lastValidWidth > 0) lastValidWidth else 720
-                        val fallbackH = if (lastValidHeight > 0) lastValidHeight else 720
-                        requestRebuild(
-                            reason = "browser_launch_missing_display",
-                            priority = RebuildPriority.HIGH,
-                            newWidth = if (requestedWidth > 0) requestedWidth else fallbackW,
-                            newHeight = if (requestedHeight > 0) requestedHeight else fallbackH
-                        )
-                        if (displayId >= 0) {
-                            if (browser != null) controller.getPrivilegedService()?.execCommand(buildExternalBrowserCommand(displayId, url, browser.componentFlat))
-                            else launchOwnActivity("com.castla.mirror.ui.WebBrowserActivity", url)
-                        }
-                    } catch (_: Exception) {}
-                }
-                return
-            }
-            if (browser != null) {
-                try {
-                    controller.getPrivilegedService()?.execCommand(buildExternalBrowserCommand(displayId, url, browser.componentFlat))
-                    // Bypassed: Do not force stop the previous app to support warm start
-                    currentApp = browser.componentFlat; currentWebUrl = url; isVideoApp = true
-                    restartActiveStreamGeneration()
-                    adaptiveBitrateManager.rebalanceBitrates(); return
-                } catch (_: Exception) {}
-            }
-            if (allowFallback) {
-                launchOwnActivity("com.castla.mirror.ui.WebBrowserActivity", url)
-                currentApp = internalComponentName("com.castla.mirror.ui.WebBrowserActivity"); currentWebUrl = url; isVideoApp = false
-                restartActiveStreamGeneration()
-                adaptiveBitrateManager.rebalanceBitrates()
-            }
-        }
-
-        suspend fun launchStandard(launchTarget: String, forceDisplayId: Boolean = false) {
-            val resolvedTarget = normalizeLaunchTarget(launchTarget)
-            // Force task realignment on standard launching requests from web to bypass the Command Equivalence Guard
-            val launched = if (displayId >= 0) launchComponent(resolvedTarget, forceDisplayId = forceDisplayId, forceTaskRealign = true) else false
-            if (!launched) {
-                logLaunchRecoveryInfo(
-                    "launch_standard_defer pkg=$resolvedTarget displayId=$displayId requested=${requestedWidth}x${requestedHeight} " +
-                        "lastValid=${lastValidWidth}x${lastValidHeight}"
-                )
-                currentApp = resolvedTarget; currentWebUrl = null; isVideoApp = false
-                serviceScope.launch(Dispatchers.IO) {
-                    try {
-                        // Dynamically fallback to the last valid system screen resolution to prevent layout squishing (720x720) during early startup.
-                        val fallbackW = if (lastValidWidth > 0) lastValidWidth else 720
-                        val fallbackH = if (lastValidHeight > 0) lastValidHeight else 720
-                        requestRebuild(
-                            reason = "standard_launch_missing_display",
-                            priority = RebuildPriority.HIGH,
-                            newWidth = if (requestedWidth > 0) requestedWidth else fallbackW,
-                            newHeight = if (requestedHeight > 0) requestedHeight else fallbackH
-                        )
-                        logLaunchRecoveryInfo(
-                            "launch_standard_rebuild_requested pkg=$resolvedTarget displayId=$displayId target=${if (requestedWidth > 0) requestedWidth else fallbackW}x${if (requestedHeight > 0) requestedHeight else fallbackH}"
-                        )
-                        if (displayId >= 0) launchComponent(resolvedTarget, forceDisplayId = forceDisplayId, forceTaskRealign = true)
-                    } catch (_: Exception) {}
-                }
-            } else {
-                currentApp = resolvedTarget; currentWebUrl = null; isVideoApp = false
-                adaptiveBitrateManager.rebalanceBitrates()
-            }
-        }
-
-        suspend fun launchWeb(activityClassName: String, url: String) {
-            val targetComponent = internalComponentName(activityClassName)
-            if (displayId < 0) {
-                currentApp = targetComponent; currentWebUrl = url; isVideoApp = false
-                serviceScope.launch(Dispatchers.IO) {
-                    try {
-                        // Dynamically fallback to the last valid system screen resolution to prevent layout squishing (720x720) during early startup.
-                        val fallbackW = if (lastValidWidth > 0) lastValidWidth else 720
-                        val fallbackH = if (lastValidHeight > 0) lastValidHeight else 720
-                        requestRebuild(
-                            reason = "web_launch_missing_display",
-                            priority = RebuildPriority.HIGH,
-                            newWidth = if (requestedWidth > 0) requestedWidth else fallbackW,
-                            newHeight = if (requestedHeight > 0) requestedHeight else fallbackH
-                        )
-                        if (displayId >= 0) launchOwnActivity(activityClassName, url)
-                    } catch (_: Exception) {}
-                }
-                return
-            }
-            // Bypassed: Do not force stop the previous app to support warm start
-            launchOwnActivity(activityClassName, url)
-            currentApp = targetComponent; currentWebUrl = url; isVideoApp = false
-            adaptiveBitrateManager.rebalanceBitrates()
-        }
-
-        suspend fun launchAppFromWebLauncher(pkgName: String, componentName: String? = null, forceDisplayId: Boolean = true) {
-            if (pkgName.isBlank()) return
-            val isAppInstalled = try {
-                val pm = packageManager
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) pm.getApplicationInfo(pkgName, PackageManager.ApplicationInfoFlags.of(0)).enabled
-                else @Suppress("DEPRECATION") pm.getApplicationInfo(pkgName, 0).enabled
-            } catch (_: PackageManager.NameNotFoundException) { false }
-
-            if (isAppInstalled) launchStandard(componentName ?: pkgName, forceDisplayId = forceDisplayId)
-            else OttCatalog.webUrlFor(pkgName)?.let { launchBrowser(it, pkgName) }
-
-            if (currentCodecMode == "mjpeg") {
-                wakeDisplayForRecovery(controller.getPrivilegedService(), displayId, "ime_focus_sync")
-            }
-        }
-
-        suspend fun restoreContentLocked(expectedGeneration: Long, expectedDisplayId: Int) {
-            if (!isCurrentVd(expectedGeneration, expectedDisplayId)) return
-            val activeId = if (displayId >= 0) displayId else controller.getDisplayId()
-            markServiceMutation("restore_content_begin(activeId=$activeId)")
-
-            when (currentApp) {
-                "HOME", "", "com.android.settings" -> {
-                    currentApp = "HOME"
-                    markServiceMutation("restore_content_home")
-                    controller.launchHomeOnDisplay()
-                }
-                else -> {
-                    if (currentWebUrl != null && !currentApp.contains("WebBrowserActivity")) {
-                        val browser = BrowserResolver.resolve(this@MirrorForegroundService, currentWebUrl!!)
-                        val cmd = browser?.let { buildExternalBrowserCommand(activeId, currentWebUrl!!, it.componentFlat) }
-                        val launched = try { if (cmd != null && isCurrentVd(vdGeneration.get(), activeId)) { controller.getPrivilegedService()?.execCommand(cmd); true } else false } catch (_: Exception) { false }
-                        if (!launched) launchOwnActivity("com.castla.mirror.ui.WebBrowserActivity", currentWebUrl!!)
-                    } else if (currentApp.contains("WebBrowserActivity")) {
-                        markServiceMutation("restore_content_browser_activity")
-                        launchOwnActivity(currentApp.substringAfter('/'), currentWebUrl ?: "https://m.youtube.com")
-                    } else {
-                        markServiceMutation("restore_content_launch_component")
-                        launchComponent(currentApp, forceColdStart = false, forceTaskRealign = true)
-                    }
-                }
-            }
-        }
-
-        fun restoreContent() {
-            val token = currentVdToken() ?: return
-            serviceScope.launch(Dispatchers.IO) { restoreContentLocked(token.first, token.second) }
-        }
-
-        suspend fun release(forcePhysical: Boolean = false) {
-            if (forcePhysical) executeReleaseInternal(forcePhysical = true)
-            else {
-                withContext(vdDispatcher) {
-                    val locked = withTimeoutOrNull(4000L) { pipelineMutex.withLock { executeReleaseInternal(forcePhysical = false) }; true }
-                    if (locked == null) executeReleaseInternal(forcePhysical = true)
-                }
-            }
-        }
-
-        private suspend fun executeReleaseInternal(forcePhysical: Boolean) {
-            if (released.get()) return
-            if (!released.compareAndSet(false, true)) return
-
-            try {
-                withContext(Dispatchers.IO) {
-                    Log.i(TAG, "[CLEANUP_START] [$name Pipeline] Initiating hardware display shutdown. ForcePhysical=$forcePhysical")
-                    logInputDebugSnapshot("pipeline_release_begin:$name")
-
-                    Log.i(TAG, "[CLEANUP_STOP_LOOPS]")
-                    videoEncoder?.stop()
-                    jpegEncoder?.stop()
-
-                    Log.i(TAG, "[CLEANUP_CALLBACKS_UNREGISTERED]")
-                    videoEncoder?.unregisterCallbacks()
-                    jpegEncoder?.unregisterCallbacks()
-
-                    Log.i(TAG, "[CLEANUP_VD_RELEASED]")
-                    if (displayId >= 0) {
-                        cleanupDisplay(displayId)
-                        if (forcePhysical) { runBinderSafe { controller.releaseVirtualDisplay() }; displayId = -1 }
-                        else { try { runBinderSafe { controller.resizeDisplay(1, 1, 160) }; width = 1; height = 1 } catch (_: Exception) {} }
-                    }
-
-
-                    Log.i(TAG, "[CLEANUP_CODEC_STOPPED]")
-                    videoEncoder?.stopCodecOnly()
-
-                    Log.i(TAG, "[CLEANUP_CODEC_RELEASED]")
-                    videoEncoder?.releaseCodecOnly()
-                    jpegEncoder?.releaseReaderOnly()
-
-                    Log.i(TAG, "[CLEANUP_JOIN_ENCODERS]")
-                    videoEncoder?.join()
-                    jpegEncoder?.join()
-
-                    Log.i(TAG, "[CLEANUP_SURFACE_RELEASED]")
-                     currentEncoderSurface?.let { surf ->
-                        com.castla.mirror.diagnostics.ResourceTracker.trackSurfaceRelease(surf.hashCode(), "VideoEncoderInputSurface@${surf.hashCode()}")
-                        try { surf.release() } catch (_: Exception) {}
-                    }
-                    currentEncoderSurface = null
-
-                    try {
-                        videoEncoder?.release()
-                        jpegEncoder?.release()
-                    } catch (_: Exception) {}
-                    videoEncoder = null
-                    jpegEncoder = null
-
-                    try {
-                        resizeJob?.cancel()
-                        resizeJob?.join()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Failed to join resizeJob", e)
-                    }
-                    resizeJob = null
-
-                    try { touchInjector?.detachController("pipeline_release") } catch (_: Exception) {}
-                    touchInjector?.release()
-                    isVideoApp = false
-                    mirrorServer?.setKeyframeRequester(name) { _ -> }
-                    width = 0; height = 0; requestedWidth = 0; requestedHeight = 0
-                    currentApp = ""; currentWebUrl = null
-                    adaptiveBitrateManager.rebalanceBitrates()
-
-                    released.set(true)
-                    logInputDebugSnapshot("pipeline_release_end:$name")
-                    Log.i(TAG, "[CLEANUP_DONE] [$name Pipeline] Display shutdown completed.")
-                }
-            } finally {
-                releasing.set(false)
-            }
-        }
-    }
 }

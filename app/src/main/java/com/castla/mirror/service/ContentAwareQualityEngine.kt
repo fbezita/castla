@@ -64,7 +64,7 @@ class ContentAwareQualityEngine(
      * according to the physical lower limit (Floor) and the remaining budget ratio.
      */
     fun rebalanceMultiDisplayBitrates(
-        activePipelines: List<MirrorForegroundService.MirroringPipeline>
+        activePipelines: List<MirroringPipeline>
     ) {
         val validPipelines = activePipelines.filter { it.width > 0 && it.height > 0 }
         if (validPipelines.isEmpty()) return
@@ -87,7 +87,7 @@ class ContentAwareQualityEngine(
         val requiredTotalFloor = floorMap.values.sum()
         val totalBudget = getGlobalBudget().coerceAtLeast(requiredTotalFloor).coerceAtLeast(3_000_000)
 
-        val allocations = mutableMapOf<MirrorForegroundService.MirroringPipeline, Int>()
+        val allocations = mutableMapOf<MirroringPipeline, Int>()
 
         // ─────────────────────────────────────────────────────────────────
         // Step 1: [Branch Control] Calculate bitrate distribution for single or multi-screen
@@ -160,7 +160,7 @@ class ContentAwareQualityEngine(
      */
     fun executeSelfTuningFeedback(
         pipelineName: String,
-        pipeline: MirrorForegroundService.MirroringPipeline,
+        pipeline: MirroringPipeline,
         droppedFrames: Int,
         avgDelayMs: Double
     ) {
@@ -218,7 +218,7 @@ class ContentAwareQualityEngine(
     }
 
     private fun applyEncoderParams(
-        pipeline: MirrorForegroundService.MirroringPipeline,
+        pipeline: MirroringPipeline,
         bitrate: Int,
         profile: ContentProfile,
         qpOffset: Int

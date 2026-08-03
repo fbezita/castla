@@ -13,7 +13,7 @@ import com.castla.mirror.server.MirrorServer
 class ThermalThrottleManager(
     private val context: Context,
     private val mainExecutor: java.util.concurrent.Executor,
-    private val getPipelines: () -> Map<String, MirrorForegroundService.MirroringPipeline>,
+    private val getPipelines: () -> Map<String, MirroringPipeline>,
     private val getAudioOrchestrator: () -> AudioCaptureOrchestrator?,
     private val getMirrorServer: () -> MirrorServer?,
     private val onThermalThrottled: () -> Unit

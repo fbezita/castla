@@ -15,7 +15,7 @@ import com.castla.mirror.policy.AutoScalePolicy
 class AdaptiveBitrateManager(
     private val context: Context,
     private val serviceScope: CoroutineScope,
-    private val getPipelines: () -> Map<String, MirrorForegroundService.MirroringPipeline>,
+    private val getPipelines: () -> Map<String, MirroringPipeline>,
     private val getBrowserConnected: () -> Boolean,
     private val getIsServiceRunning: () -> Boolean,
     private val getThermalActive: () -> Boolean,
@@ -107,7 +107,7 @@ class AdaptiveBitrateManager(
         }
     }
 
-    fun getSharedBitrateForPipeline(pipeline: MirrorForegroundService.MirroringPipeline): Int {
+    fun getSharedBitrateForPipeline(pipeline: MirroringPipeline): Int {
         val allActivePipelines = getPipelines().values.filter { it.displayId >= 0 && it.width > 0 }
         val activeCount = allActivePipelines.size.coerceAtLeast(1)
 
@@ -129,7 +129,7 @@ class AdaptiveBitrateManager(
         )
     }
 
-    fun evaluateSinglePipelineScale(pipeline: MirrorForegroundService.MirroringPipeline) {
+    fun evaluateSinglePipelineScale(pipeline: MirroringPipeline) {
         val now = android.os.SystemClock.elapsedRealtime()
         val lastEval = lastScaleEvaluationTimeMs[pipeline.name] ?: 0L
         
@@ -179,7 +179,7 @@ class AdaptiveBitrateManager(
         }
     }
 
-    private fun applyPipelineScale(pipeline: MirrorForegroundService.MirroringPipeline) {
+    private fun applyPipelineScale(pipeline: MirroringPipeline) {
         val activeTiers = AUTO_TIERS.filter { it.maxHeight == pipeline.currentMaxHeight }
         if (activeTiers.isEmpty()) return
         val tierIdx = pipelineScaleTiers[pipeline.name] ?: 0
@@ -207,7 +207,7 @@ class AdaptiveBitrateManager(
         }
     }
 
-    private fun notifyAutoTierChange(pipeline: MirrorForegroundService.MirroringPipeline, activeTiers: List<AutoTier>, reason: String) {
+    private fun notifyAutoTierChange(pipeline: MirroringPipeline, activeTiers: List<AutoTier>, reason: String) {
         val tierIdx = pipelineScaleTiers[pipeline.name] ?: 0
         val label = activeTiers[tierIdx.coerceIn(0, activeTiers.size - 1)].label
         getMirrorServer()?.broadcastControlMessage(JSONObject().apply {

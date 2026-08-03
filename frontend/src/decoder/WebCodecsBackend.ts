@@ -33,15 +33,11 @@ export class WebCodecsBackend implements DecoderBackend {
   private onStatus?: (event: string, detail?: string) => void;
   private isScreenOff?: () => boolean;
   private isVideoFrozen?: () => boolean;
-  private probeCanvas?: HTMLCanvasElement;
-  private probeCtx?: CanvasRenderingContext2D;
-  private lastGoodCanvas?: HTMLCanvasElement;
-  private lastGoodCtx?: CanvasRenderingContext2D;
-  private normalBrightnessSamples: number[] = [];
-  private normalBrightnessReference = 0;
-  private dimFrameStreak = 0;
-  private pendingBlackFrame?: VideoFrame;
-  private pendingBlackTimer?: number;
+
+  private lastLatencyRecoveryAt = 0;
+
+  private static readonly MAX_DECODE_QUEUE_SIZE = 4;
+  private static readonly LATENCY_RECOVERY_COOLDOWN_MS = 1000;
 
   constructor(
     onFrame?: () => void,
@@ -71,15 +67,6 @@ export class WebCodecsBackend implements DecoderBackend {
     this.canvas = target;
     this.ctx = target.getContext("2d") ?? undefined;
     if (!this.ctx) throw new Error("2D canvas context unavailable");
-    this.probeCanvas = document.createElement("canvas");
-    this.probeCanvas.width = 8;
-    this.probeCanvas.height = 8;
-    this.probeCtx = this.probeCanvas.getContext("2d") ?? undefined;
-    this.normalBrightnessSamples = [];
-    this.normalBrightnessReference = 0;
-    this.dimFrameStreak = 0;
-    this.lastGoodCanvas = document.createElement("canvas");
-    this.lastGoodCtx = this.lastGoodCanvas.getContext("2d") ?? undefined;
 
     this.createDecoder();
     this.onStatus?.("webcodecsReady", `secure=${window.isSecureContext}`);
@@ -121,6 +108,18 @@ export class WebCodecsBackend implements DecoderBackend {
 
     const decoder = this.decoder;
     if (!decoder || decoder.state === "closed") return;
+
+    // WebCodecs does not apply backpressure. Some Android encoders publish at
+    // the display refresh rate even when configured for a lower FPS, so the
+    // decoder queue can grow indefinitely and make touch feedback appear
+    // increasingly late. Prefer the live edge over decoding stale frames.
+    if (
+      !frame.keyFrame &&
+      decoder.decodeQueueSize > WebCodecsBackend.MAX_DECODE_QUEUE_SIZE
+    ) {
+      this.recoverFromDecodeBacklog(decoder.decodeQueueSize);
+      return;
+    }
 
     // If no config has arrived yet, wait for a keyframe/config sequence instead
     // of trying to decode and triggering an exception loop.
@@ -187,12 +186,7 @@ export class WebCodecsBackend implements DecoderBackend {
     this.ctx = undefined;
     this.configPayload = undefined;
     this.configuredCodec = "";
-    this.normalBrightnessSamples = [];
-    this.normalBrightnessReference = 0;
-    this.dimFrameStreak = 0;
-    this.lastGoodCanvas = undefined;
-    this.lastGoodCtx = undefined;
-    this.cancelPendingBlackFrame();
+
     this.hasDecodedKeyframe = false;
   }
 
@@ -260,41 +254,13 @@ export class WebCodecsBackend implements DecoderBackend {
       const ctx = this.ctx;
       if (!canvas || !ctx) return;
 
-      const frameBrightness = this.sampleFrameBrightness(frame);
-      const hasLastGoodFrame = !!this.lastGoodCanvas && this.lastGoodCanvas.width > 0 && this.lastGoodCanvas.height > 0;
-      const baseline = this.getNormalBrightnessBaseline();
-      const spread = this.getNormalBrightnessSpread(baseline);
-      const suddenDim =
-        this.normalBrightnessSamples.length >= 3 &&
-        frameBrightness < Math.max(4, baseline * 0.95);
-      const hardBlack = hasLastGoodFrame && this.isNearBlackFrame(frame);
-      const protectionActive = this.isScreenOff?.() || this.isVideoFrozen?.();
-      if (protectionActive && suddenDim) this.dimFrameStreak += 1; else this.dimFrameStreak = 0;
-      const nearBlack = !!protectionActive && (hardBlack || (suddenDim && this.dimFrameStreak >= 3));
-      if (protectionActive && suddenDim) {
-        this.throttledStatus(
-          "webcodecsDimFrame",
-          `brightness=${Math.round(frameBrightness)},baseline=${Math.round(baseline)},spread=${Math.round(spread)}`,
-          1000,
-        );
-      }
-      if (this.isVideoFrozen?.()) {
-        const restoreDetail = this.restoreLastGoodFrame();
-      this.throttledStatus("webcodecsFreeze", "last_frame_preserved " + restoreDetail, 3000);
+      // The server stops publishing frames before announcing freezeVideo.
+      // Keeping the existing canvas untouched is sufficient to preserve the
+      // last frame until screen-on stability and a fresh keyframe are confirmed.
+      if (this.isVideoFrozen?.() || this.isScreenOff?.()) {
+        this.throttledStatus("webcodecsFreeze", "frame_gate_active", 3000);
         return;
       }
-      if (nearBlack && !this.isScreenOff?.() && this.lastGoodCanvas && this.lastGoodCanvas.width > 0) {         this.deferBlackFrame(frame);         return;       }
-      if (this.isScreenOff?.() && nearBlack && this.lastGoodCanvas && this.lastGoodCanvas.width > 0) {
-        this.restoreLastGoodFrame();
-        this.throttledStatus(
-          "webcodecsSkipBlackFrameScreenOff",
-          "last_frame_preserved",
-          3000,
-        );
-        return;
-      }
-
-      this.cancelPendingBlackFrame();
       if (
         canvas.width !== frame.displayWidth ||
         canvas.height !== frame.displayHeight
@@ -304,22 +270,6 @@ export class WebCodecsBackend implements DecoderBackend {
       }
 
       ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
-      const lastGoodCanvas = this.lastGoodCanvas;
-      const lastGoodCtx = this.lastGoodCtx;
-      if (lastGoodCanvas && lastGoodCanvas.width !== frame.displayWidth)
-        lastGoodCanvas.width = frame.displayWidth;
-      if (lastGoodCanvas && lastGoodCanvas.height !== frame.displayHeight)
-        lastGoodCanvas.height = frame.displayHeight;
-      if (!hardBlack && (!protectionActive || !suddenDim) && lastGoodCtx && lastGoodCanvas) {
-        lastGoodCtx.drawImage(
-          frame,
-          0,
-          0,
-          lastGoodCanvas.width,
-          lastGoodCanvas.height,
-        );
-      }
-      if (!hardBlack && (!protectionActive || !suddenDim)) this.recordNormalBrightness(frameBrightness);
       this.renderedFrames += 1;
 
       if (this.renderedFrames === 1 || this.renderedFrames % 120 === 0) {
@@ -335,129 +285,33 @@ export class WebCodecsBackend implements DecoderBackend {
     }
   }
 
-  private deferBlackFrame(frame: VideoFrame): void {
-    if (this.pendingBlackFrame) return;
-    this.pendingBlackFrame = frame.clone();
-    this.pendingBlackTimer = window.setTimeout(() => {
-      const pending = this.pendingBlackFrame;
-      this.pendingBlackFrame = undefined;
-      this.pendingBlackTimer = undefined;
-      if (!pending) return;
-      if (this.isVideoFrozen?.() || this.isScreenOff?.()) {
-        this.restoreLastGoodFrame();
-        pending.close();
-        return;
-      }
-      const canvas = this.canvas;
-      const ctx = this.ctx;
-      if (canvas && ctx) {
-        if (canvas.width !== pending.displayWidth || canvas.height !== pending.displayHeight) {
-          canvas.width = pending.displayWidth;
-          canvas.height = pending.displayHeight;
-        }
-        ctx.drawImage(pending, 0, 0, canvas.width, canvas.height);
-        this.renderedFrames += 1;
-        this.onFrame?.();
-      }
-      pending.close();
-    }, 800);
-  }
-
-  private cancelPendingBlackFrame(): void {
-    if (this.pendingBlackTimer !== undefined) {
-      window.clearTimeout(this.pendingBlackTimer);
-      this.pendingBlackTimer = undefined;
-    }
-    this.pendingBlackFrame?.close();
-    this.pendingBlackFrame = undefined;
-  }
-
-
-  private restoreLastGoodFrame(): string {
-    const canvas = this.canvas;
-    const ctx = this.ctx;
-    const lastGoodCanvas = this.lastGoodCanvas;
+  private recoverFromDecodeBacklog(queueSize: number): void {
+    const now = performance.now();
     if (
-      !canvas ||
-      !ctx ||
-      !lastGoodCanvas ||
-      lastGoodCanvas.width <= 0 ||
-      lastGoodCanvas.height <= 0
-    )
-      return 'empty';
-    if (
-      canvas.width !== lastGoodCanvas.width ||
-      canvas.height !== lastGoodCanvas.height
+      now - this.lastLatencyRecoveryAt <
+      WebCodecsBackend.LATENCY_RECOVERY_COOLDOWN_MS
     ) {
-      canvas.width = lastGoodCanvas.width;
-      canvas.height = lastGoodCanvas.height;
+      return;
     }
-    ctx.drawImage(lastGoodCanvas, 0, 0, canvas.width, canvas.height);
-    return String.fromCharCode(98, 61) + this.sampleCanvas(lastGoodCanvas) + String.fromCharCode(44, 109, 61) + this.sampleCanvas(canvas);
-  }
-
-  private sampleCanvas(canvas: HTMLCanvasElement): number {
-    if (canvas.width <= 0 || canvas.height <= 0) return 0;
-    const probe = document.createElement('canvas');
-    probe.width = 8;
-    probe.height = 8;
-    const context = probe.getContext('2d');
-    if (!context) return 0;
-    context.drawImage(canvas, 0, 0, 8, 8);
-    const pixels = context.getImageData(0, 0, 8, 8).data;
-    let total = 0;
-    for (let i = 0; i < pixels.length; i += 4) total += Math.max(pixels[i], pixels[i + 1], pixels[i + 2]);
-    return Math.round(total / 64);
-  }
-
-  private recordNormalBrightness(brightness: number): void {
-    this.normalBrightnessSamples.push(brightness);
-    if (this.normalBrightnessSamples.length > 30) this.normalBrightnessSamples.shift();
-    if (this.normalBrightnessReference === 0) {
-      this.normalBrightnessReference = brightness;
-    } else if (brightness >= this.normalBrightnessReference * 0.98) {
-      this.normalBrightnessReference = this.normalBrightnessReference * 0.95 + brightness * 0.05;
+    this.lastLatencyRecoveryAt = now;
+    this.hasDecodedKeyframe = false;
+    this.configuredCodec = "";
+    try {
+      this.decoder?.reset();
+      this.configureDecoderIfNeeded("latency_recovery");
+    } catch {
+      try {
+        this.decoder?.close();
+      } catch {}
+      this.decoder = undefined;
+      this.createDecoder();
     }
-  }
-
-  private getNormalBrightnessBaseline(): number {
-    if (this.normalBrightnessSamples.length === 0) return 0;
-    return this.normalBrightnessReference || this.normalBrightnessSamples.reduce((sum, value) => sum + value, 0) / this.normalBrightnessSamples.length;
-  }
-
-  private getNormalBrightnessSpread(baseline: number): number {
-    if (this.normalBrightnessSamples.length < 2) return 0;
-    const variance = this.normalBrightnessSamples.reduce((sum, value) => sum + (value - baseline) ** 2, 0) / this.normalBrightnessSamples.length;
-    return Math.sqrt(variance);
-  }
-  private sampleFrameBrightness(frame: VideoFrame): number {
-    const ctx = this.probeCtx;
-    if (!ctx) return 0;
-    ctx.clearRect(0, 0, 8, 8);
-    ctx.drawImage(frame, 0, 0, 8, 8);
-    const pixels = ctx.getImageData(0, 0, 8, 8).data;
-    let total = 0;
-    for (let i = 0; i < pixels.length; i += 4) {
-      total += Math.max(pixels[i], pixels[i + 1], pixels[i + 2]);
-    }
-    return total / 64;
-  }
-
-
-  private isNearBlackFrame(frame: VideoFrame): boolean {
-    const ctx = this.probeCtx;
-    if (!ctx) return false;
-    ctx.clearRect(0, 0, 8, 8);
-    ctx.drawImage(frame, 0, 0, 8, 8);
-    const pixels = ctx.getImageData(0, 0, 8, 8).data;
-    let litPixels = 0;
-    let totalBrightness = 0;
-    for (let i = 0; i < pixels.length; i += 4) {
-      const brightness = Math.max(pixels[i], pixels[i + 1], pixels[i + 2]);
-      totalBrightness += brightness;
-      if (brightness > 12) litPixels += 1;
-    }
-    return litPixels <= 1 || totalBrightness / 64 <= 24;
+    this.throttledStatus(
+      "webcodecsLatencyRecovery",
+      `decodeQueueSize=${queueSize}`,
+      1000,
+    );
+    this.requestKeyframeThrottled("decode_backlog");
   }
 
   private requestKeyframeThrottled(reason: string): void {
