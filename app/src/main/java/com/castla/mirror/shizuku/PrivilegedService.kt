@@ -68,6 +68,11 @@ class PrivilegedService : IPrivilegedService.Stub() {
         // FLAG_DESTROY_CONTENT_ON_REMOVAL destroys tasks instead of reparenting to main display
         private const val DISPLAY_FLAG_DESTROY_CONTENT = 1 shl 8
         private const val DISPLAY_IME_POLICY_LOCAL = 0
+        private const val SHELL_APP_STREAMING_PROFILE =
+            "android.app.role.COMPANION_DEVICE_APP_STREAMING"
+        // Stable, locally administered identity for the synthetic shell companion association.
+        // It is not a hardware or Wi-Fi MAC address.
+        private const val SHELL_ASSOCIATION_DEVICE_ADDRESS = "02:CA:57:1A:00:01"
     }
 
     private fun describeVirtualDisplayFlags(flags: Int): String {
@@ -84,6 +89,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
     private val virtualDisplays = mutableMapOf<Int, VirtualDisplay>()
     private val virtualDisplayNames = mutableMapOf<Int, String>()
+    private val virtualDevicesByDisplayId = mutableMapOf<Int, Any>()
 
     // Cache map to throttle heavy dumpsys shell commands for each displayId
     private val lastWakeUpTimeMap = ConcurrentHashMap<Int, Long>()
@@ -284,6 +290,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
             // Wrap with "com.android.shell" package name to match Shizuku uid 2000
             shellContext = object : android.content.ContextWrapper(rawShellContext) {
+                override fun getApplicationContext(): android.content.Context = this
                 override fun getPackageName(): String = "com.android.shell"
                 override fun getOpPackageName(): String = "com.android.shell"
                 override fun getAttributionTag(): String? = null
@@ -682,112 +689,216 @@ class PrivilegedService : IPrivilegedService.Stub() {
     }
 
 
+    private fun createVirtualDeviceManager(context: android.content.Context): Any {
+        val serviceManager = Class.forName("android.os.ServiceManager")
+        val serviceBinder = serviceManager
+            .getMethod("getService", String::class.java)
+            .invoke(null, "virtualdevice") as? android.os.IBinder
+            ?: error("VirtualDeviceManager binder unavailable")
+        val serviceInterfaceClass =
+            Class.forName("android.companion.virtual.IVirtualDeviceManager")
+        val serviceStubClass =
+            Class.forName("android.companion.virtual.IVirtualDeviceManager\$Stub")
+        val service = serviceStubClass
+            .getMethod("asInterface", android.os.IBinder::class.java)
+            .invoke(null, serviceBinder)
+        val managerClass = Class.forName("android.companion.virtual.VirtualDeviceManager")
+        return managerClass.getDeclaredConstructor(
+            serviceInterfaceClass,
+            android.content.Context::class.java,
+        ).also { it.isAccessible = true }.newInstance(service, context)
+    }
+
+    private fun findShellAppStreamingAssociationId(output: String): Int? {
+        return output.lineSequence()
+            .firstOrNull { line ->
+                line.contains("mPackageName='com.android.shell'") &&
+                    line.contains("mDeviceProfile='$SHELL_APP_STREAMING_PROFILE'")
+            }
+            ?.let { line -> Regex("mId=(\\d+)").find(line)?.groupValues?.get(1)?.toIntOrNull() }
+    }
+
+    private fun ensureShellAppStreamingAssociationId(): Int {
+        val existing = findShellAppStreamingAssociationId(
+            execCommand("cmd companiondevice list 0")
+        )
+        if (existing != null) return existing
+
+        execCommand(
+            "cmd companiondevice associate 0 com.android.shell " +
+                "$SHELL_ASSOCIATION_DEVICE_ADDRESS $SHELL_APP_STREAMING_PROFILE"
+        )
+        return findShellAppStreamingAssociationId(
+            execCommand("cmd companiondevice list 0")
+        ) ?: error("Unable to create shell APP_STREAMING association")
+    }
+
+    private fun closeVirtualDevice(virtualDevice: Any?, displayId: Int) {
+        if (virtualDevice == null) return
+        try {
+            virtualDevice.javaClass.getMethod("close").invoke(virtualDevice)
+            Log.i(TAG, "VirtualDevice closed for displayId=$displayId")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to close VirtualDevice for displayId=$displayId", e)
+        }
+    }
+
+    private fun createVirtualDeviceBackedDisplay(
+        context: android.content.Context,
+        width: Int,
+        height: Int,
+        dpi: Int,
+        name: String,
+    ): Pair<VirtualDisplay, Any> {
+        val manager = createVirtualDeviceManager(context)
+        val associationId = ensureShellAppStreamingAssociationId()
+
+        val paramsClass = Class.forName("android.companion.virtual.VirtualDeviceParams")
+        val paramsBuilderClass =
+            Class.forName("android.companion.virtual.VirtualDeviceParams\$Builder")
+        val paramsBuilder = paramsBuilderClass.getConstructor().newInstance()
+        paramsBuilderClass.methods
+            .firstOrNull { it.name == "setName" && it.parameterCount == 1 }
+            ?.invoke(paramsBuilder, "Castla:$name")
+        val params = paramsBuilderClass.getMethod("build").invoke(paramsBuilder)
+        val createDevice = manager.javaClass.methods.first {
+            it.name == "createVirtualDevice" &&
+                it.parameterCount == 2 &&
+                it.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                it.parameterTypes[1] == paramsClass
+        }
+        val virtualDevice = createDevice.invoke(manager, associationId, params) ?: error("VirtualDevice creation returned null")
+
+        try {
+            val configClass = Class.forName("android.hardware.display.VirtualDisplayConfig")
+            val configBuilderClass =
+                Class.forName("android.hardware.display.VirtualDisplayConfig\$Builder")
+            val configBuilder = configBuilderClass.getConstructor(
+                String::class.java,
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+            ).newInstance(name, width, height, dpi)
+
+            var flags = DISPLAY_FLAG_PUBLIC or DISPLAY_FLAG_PRESENTATION or
+                DISPLAY_FLAG_OWN_CONTENT_ONLY or DISPLAY_FLAG_DESTROY_CONTENT or
+                DISPLAY_FLAG_TRUSTED
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                flags = flags or DISPLAY_FLAG_ALWAYS_UNLOCKED
+            }
+            configBuilderClass.getMethod("setFlags", Int::class.javaPrimitiveType)
+                .invoke(configBuilder, flags)
+            val config = configBuilderClass.getMethod("build").invoke(configBuilder)
+            val createDisplay = virtualDevice.javaClass.methods.first {
+                it.name == "createVirtualDisplay" &&
+                    it.parameterCount == 3 &&
+                    it.parameterTypes[0] == configClass
+            }
+            val display = createDisplay.invoke(virtualDevice, config, null, null) as VirtualDisplay
+            Log.i(
+                TAG,
+                "[VD_POWER_GROUP] source=virtual_device associationId=$associationId " +
+                    "displayId=${display.display.displayId} flags=$flags " +
+                    "flagNames=${describeVirtualDisplayFlags(flags)}"
+            )
+            return display to virtualDevice
+        } catch (e: Exception) {
+            closeVirtualDevice(virtualDevice, -1)
+            throw e
+        }
+    }
+    private fun createLegacyVirtualDisplay(
+        context: android.content.Context,
+        width: Int,
+        height: Int,
+        dpi: Int,
+        name: String,
+    ): VirtualDisplay {
+        val configClass = Class.forName("android.hardware.display.VirtualDisplayConfig")
+        val builderClass = Class.forName("android.hardware.display.VirtualDisplayConfig\$Builder")
+        val flags = DISPLAY_FLAG_PUBLIC or DISPLAY_FLAG_PRESENTATION or
+            DISPLAY_FLAG_OWN_CONTENT_ONLY or DISPLAY_FLAG_DESTROY_CONTENT
+        val builder = builderClass.getConstructor(
+            String::class.java,
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+        ).newInstance(name, width, height, dpi)
+        builderClass.getMethod("setFlags", Int::class.javaPrimitiveType)
+            .invoke(builder, flags)
+        val config = builderClass.getMethod("build").invoke(builder)
+        val globalClass = Class.forName("android.hardware.display.DisplayManagerGlobal")
+        val global = globalClass.getMethod("getInstance").invoke(null)
+        val createMethod = globalClass.declaredMethods.first { method ->
+            method.name == "createVirtualDisplay" &&
+                method.parameterTypes.any { it == configClass }
+        }.also { it.isAccessible = true }
+        val args = arrayOfNulls<Any>(createMethod.parameterTypes.size)
+        createMethod.parameterTypes.forEachIndexed { index, type ->
+            when {
+                type == configClass -> args[index] = config
+                type == android.content.Context::class.java -> args[index] = context
+            }
+        }
+        return createMethod.invoke(global, *args) as? VirtualDisplay
+            ?: error("Legacy virtual display creation returned null")
+    }
     override fun createVirtualDisplay(width: Int, height: Int, dpi: Int, name: String): Int {
         val existingDisplayIds = virtualDisplayNames
             .filterValues { it == name }
             .keys
             .toList()
 
-        if (existingDisplayIds.isNotEmpty()) {
-            // 요약 로그에도 대상 ID 목록을 한눈에 볼 수 있게 추가
-            Log.i(TAG, "Releasing ${existingDisplayIds.size} existing VD(s) $existingDisplayIds for name=$name before recreating")
-
-            existingDisplayIds.forEach { displayId ->
-                Log.i(TAG, "-> Releasing individual displayId=$displayId (name=$name)")
-
-                virtualDisplays.remove(displayId)?.let { vd ->
-                    try { vd.release() } catch (e: Exception) {
-                        Log.w(TAG, "Failed to release displayId=$displayId", e)
-                    }
+        existingDisplayIds.forEach { displayId ->
+            Log.i(TAG, "Releasing existing VD displayId=$displayId name=$name before recreating")
+            virtualDisplays.remove(displayId)?.let { vd ->
+                try {
+                    vd.release()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to release displayId=$displayId", e)
                 }
-                virtualDisplayNames.remove(displayId)
             }
+            virtualDisplayNames.remove(displayId)
+            closeVirtualDevice(virtualDevicesByDisplayId.remove(displayId), displayId)
         }
 
         return try {
-            val ctx = shellContext
-            if (ctx == null) {
-                Log.e(TAG, "Shell context not initialized")
-                return -1
-            }
-
-            val configClass = Class.forName("android.hardware.display.VirtualDisplayConfig")
-            val builderClass = Class.forName("android.hardware.display.VirtualDisplayConfig\$Builder")
-
-            // Critical fix for screen off issue:
-            // Added DISPLAY_FLAG_OWN_DISPLAY_GROUP to isolate virtual display power context from the default group
-            var flags = DISPLAY_FLAG_PUBLIC or DISPLAY_FLAG_PRESENTATION or DISPLAY_FLAG_OWN_CONTENT_ONLY or DISPLAY_FLAG_DESTROY_CONTENT or DISPLAY_FLAG_OWN_DISPLAY_GROUP
-            if (android.os.Build.VERSION.SDK_INT >= 33) {
-                flags = flags or DISPLAY_FLAG_ALWAYS_UNLOCKED or DISPLAY_FLAG_TRUSTED
-            }
-
-            val builderCtor = builderClass.getConstructor(
-                String::class.java, Int::class.javaPrimitiveType,
-                Int::class.javaPrimitiveType, Int::class.javaPrimitiveType
-            )
-            val builder = builderCtor.newInstance(name, width, height, dpi)
-            builderClass.getMethod("setFlags", Int::class.javaPrimitiveType).invoke(builder, flags)
-            val config = builderClass.getMethod("build").invoke(builder)
-
-            val dmgClass = Class.forName("android.hardware.display.DisplayManagerGlobal")
-            val dmg = dmgClass.getMethod("getInstance").invoke(null)
-
-            val createMethod = dmgClass.declaredMethods.first { m ->
-                m.name == "createVirtualDisplay" &&
-                m.parameterTypes.any { it == configClass }
-            }
-            createMethod.isAccessible = true
-
-            val params = createMethod.parameterTypes
-            val args = arrayOfNulls<Any>(params.size)
-            for (i in params.indices) {
-                when {
-                    params[i] == configClass -> args[i] = config
-                    params[i] == android.content.Context::class.java -> args[i] = ctx
-                }
-            }
-
-            val display = createMethod.invoke(dmg, *args) as? VirtualDisplay
-
-            if (display != null) {
-                val displayId = display.display.displayId
-                virtualDisplays[displayId] = display
-                virtualDisplayNames[displayId] = name
-                Log.i(TAG, "[FocusTrace] vd_created displayId=$displayId size=${width}x${height} flags=$flags")
-                Log.i(
-                    TAG,
-                    "$VDIME_PREFIX [VD] source=shizuku_shell name=$name displayId=$displayId ownerUid=${android.os.Process.myUid()} flags=$flags flagNames=${describeVirtualDisplayFlags(flags)}"
+            val context = shellContext ?: error("Shell context not initialized")
+            val (display, virtualDevice) = if (android.os.Build.VERSION.SDK_INT >= 33) {
+                createVirtualDeviceBackedDisplay(
+                    context = context,
+                    width = width,
+                    height = height,
+                    dpi = dpi,
+                    name = name,
                 )
-                configureImePolicyForDisplay(displayId, "createVirtualDisplay")
-                scheduleDisplayFocusRefresh(displayId, "createVirtualDisplay")
-
-                // Keep the display explicitly powered on with multiple delayed triggers to secure power state
-                val delays = longArrayOf(0L, 200L, 500L, 1000L)
-                for (delay in delays) {
-                    tetheringExecutor.execute {
-                        if (delay > 0) {
-                            try { Thread.sleep(delay) } catch (_: InterruptedException) {}
-                        }
-                        try {
-                            execCommand("dumpsys power set-display-state $displayId ON")
-                            // Log.i(TAG, "Wedge power injected for displayId=$displayId at delay=$delay ms")
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Failed to inject wedge power for displayId=$displayId at delay=$delay ms", e)
-                        }
-                    }
-                }
-
-                displayId
             } else {
-                Log.e(TAG, "createVirtualDisplay returned null")
-                -1
+                createLegacyVirtualDisplay(context, width, height, dpi, name) to null
             }
+            val displayId = display.display.displayId
+            virtualDisplays[displayId] = display
+            virtualDisplayNames[displayId] = name
+            if (virtualDevice != null) {
+                virtualDevicesByDisplayId[displayId] = virtualDevice
+            }
+            Log.i(
+                TAG,
+                "[FocusTrace] vd_created displayId=$displayId size=${width}x${height} " +
+                    "source=virtual_device"
+            )
+            Log.i(
+                TAG,
+                "$VDIME_PREFIX [VD] source=virtual_device name=$name displayId=$displayId " +
+                    "ownerUid=${android.os.Process.myUid()}"
+            )
+            configureImePolicyForDisplay(displayId, "createVirtualDisplay")
+            scheduleDisplayFocusRefresh(displayId, "createVirtualDisplay")
+            displayId
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to create virtual display", e)
+            Log.e(TAG, "Failed to create VirtualDevice-backed display", e)
             -1
         }
     }
-
     override fun setSurface(displayId: Int, surface: Surface?) {
         val display = virtualDisplays[displayId]
         if (display == null) {
@@ -811,11 +922,12 @@ class PrivilegedService : IPrivilegedService.Stub() {
     }
 
     override fun releaseVirtualDisplay(displayId: Int) {
+        val virtualDevice = virtualDevicesByDisplayId.remove(displayId)
         virtualDisplays.remove(displayId)?.let {
             virtualDisplayNames.remove(displayId)
-            cleanupVirtualDisplayResources(displayId, it)
+            cleanupVirtualDisplayResources(displayId, it, virtualDevice)
             Log.i(TAG, "Virtual display released: id=$displayId")
-        }
+        } ?: closeVirtualDevice(virtualDevice, displayId)
     }
 
     override fun injectInput(displayId: Int, action: Int, x: Float, y: Float, pointerId: Int) {
@@ -2059,9 +2171,17 @@ class PrivilegedService : IPrivilegedService.Stub() {
         }
     }
 
-    private fun cleanupVirtualDisplayResources(displayId: Int, vd: android.hardware.display.VirtualDisplay) {
+    private fun cleanupVirtualDisplayResources(
+        displayId: Int,
+        vd: android.hardware.display.VirtualDisplay,
+        virtualDevice: Any?,
+    ) {
         tetheringExecutor.execute {
-            doCleanupVirtualDisplayResourcesSync(displayId, vd)
+            try {
+                doCleanupVirtualDisplayResourcesSync(displayId, vd)
+            } finally {
+                closeVirtualDevice(virtualDevice, displayId)
+            }
         }
     }
 
@@ -2069,11 +2189,14 @@ class PrivilegedService : IPrivilegedService.Stub() {
         Log.i(TAG, "[PRIVILEGED_SERVICE] release")
         stopSystemAudioCapture()
         val displaysToCleanup = virtualDisplays.toList()
+        val virtualDevicesToCleanup = virtualDevicesByDisplayId.toMap()
         virtualDisplays.clear()
         virtualDisplayNames.clear()
+        virtualDevicesByDisplayId.clear()
         displaysToCleanup.forEach { (displayId, vd) ->
             try {
                 doCleanupVirtualDisplayResourcesSync(displayId, vd)
+                closeVirtualDevice(virtualDevicesToCleanup[displayId], displayId)
             } catch (e: Exception) {
                 Log.e(TAG, "Error in destroy() cleaning display $displayId", e)
             }
@@ -2096,51 +2219,21 @@ class PrivilegedService : IPrivilegedService.Stub() {
     }
 
     override fun wakeUpDisplay(displayId: Int) {
-        val now = System.currentTimeMillis()
-        val lastTime = lastWakeUpTimeMap[displayId] ?: 0L
-        if (now - lastTime < 3000L) {
+        if (displayId <= 0) {
+            logScreenOffWarn("[SCREEN_OFF] [VD_STATE_ON] displayId=$displayId targetPhysical=true skipped=true")
             return
         }
+        val now = System.currentTimeMillis()
+        val lastTime = lastWakeUpTimeMap[displayId] ?: 0L
+        if (now - lastTime < 3000L) return
         lastWakeUpTimeMap[displayId] = now
 
-        // Completely asynchronous execution to eliminate 1-2ms blocking latency from high frequency calls
         tetheringExecutor.execute {
             try {
-                // Try direct input manager injection using KEYCODE_WAKEUP (224) to bypass heavy shell fork
-                val uptime = SystemClock.uptimeMillis()
-                val downEvent = android.view.KeyEvent(
-                    uptime, uptime, android.view.KeyEvent.ACTION_DOWN,
-                    android.view.KeyEvent.KEYCODE_WAKEUP, 0, 0,
-                    android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0,
-                    InputDevice.SOURCE_KEYBOARD
-                )
-                val upEvent = android.view.KeyEvent(
-                    uptime, uptime, android.view.KeyEvent.ACTION_UP,
-                    android.view.KeyEvent.KEYCODE_WAKEUP, 0, 0,
-                    android.view.KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0,
-                    InputDevice.SOURCE_KEYBOARD
-                )
-
-
-                if (setKeyEventDisplayIdMethod == null) {
-                    setKeyEventDisplayIdMethod = android.view.KeyEvent::class.java.getMethod(
-                        "setDisplayId", Int::class.javaPrimitiveType
-                    )
-                }
-                setKeyEventDisplayIdMethod?.invoke(downEvent, displayId)
-                invokeInjectInputEvent(downEvent, 0)
-
-                setKeyEventDisplayIdMethod?.invoke(upEvent, displayId)
-                invokeInjectInputEvent(upEvent, 0)
-                // Log.i(TAG, "Injected KEYCODE_WAKEUP (224) natively on display $displayId")
-
+                execCommand("dumpsys power set-display-state $displayId ON")
+                logScreenOffInfo("[SCREEN_OFF] [VD_STATE_ON] displayId=$displayId targetPhysical=false wakeKey=false")
             } catch (e: Exception) {
-                Log.w(TAG, "Direct KEYCODE_WAKEUP injection failed, falling back to shell dumpsys power", e)
-                try {
-                    execCommand("dumpsys power set-display-state $displayId ON")
-                } catch (ex: Exception) {
-                    Log.e(TAG, "wakeUpDisplay shell fallback failed for display $displayId", ex)
-                }
+                Log.e(TAG, "VD display-state ON failed for display $displayId", e)
             }
         }
     }

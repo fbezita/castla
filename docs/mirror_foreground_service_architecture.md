@@ -264,15 +264,18 @@ graph TD
 
 `encoderLifecycle` 로그로 각 단계, 세션 ID, display ID, 적용 해상도를 확인할 수 있습니다. 브라우저 viewport가 드래그 중 여러 번 변하는 경우 각 최종 안정 해상도에 맞춰 rebuild가 발생할 수 있으며, 이는 Task 재실행과는 별개의 동작입니다.
 
-## 2026-08-02 Screen-Off Video Gate and Wake Recovery
+## 2026-08-04 VirtualDevice Power Isolation
 
-화면 OFF 복구는 VirtualDisplay/MediaCodec lifecycle과 별도의 video gate 및 power-state recovery 계층으로 처리합니다.
+Android 13 이상에서는 화면 OFF를 video gate와 wake recovery로 숨기지 않습니다. Shizuku shell context에서 `VirtualDeviceManager`를 사용해 `APP_STREAMING` VirtualDevice를 만들고, encoder surface용 VirtualDisplay를 그 VirtualDevice에 소속시킵니다.
 
-1. physicalScreenStateMonitor가 기본 Display의 PowerManager.isInteractive와 Display.STATE를 조기 감시합니다.
-2. non-interactive 전환 시 MirrorServer.setVideoFrozen(true, reason)을 호출하고 freezeVideo control message를 전송합니다.
-3. freeze 동안 MirrorServer.broadcastFrame()은 프레임을 WebSocket으로 전달하지 않습니다.
-4. 실제 기본 Display가 STATE_ON이 된 뒤 resumeVideo와 keyframe 요청으로 스트림을 재개합니다.
-5. keep-alive/revive 직후의 WAKE_PULSE_RELATED SCREEN_ON은 BLACKOUT_ACTIVE와 VD keep-alive를 유지하며 panel-off를 재호출하지 않습니다.
-6. 사용자 복귀 이벤트에서만 ACTIVE 전환과 keep-alive 정리가 수행됩니다.
+`TRUSTED`이면서 자체 콘텐츠를 표시하는 VirtualDevice display에는 DisplayManagerService가 device display-group flag를 추가합니다. 그 결과 물리 Display 0과 VD가 서로 다른 power group에 배치되며, 물리 group만 sleep 상태가 되어도 VD는 `STATE_ON`인 채 프레임을 계속 생산합니다.
 
-프론트엔드는 연결 장애와 화면 OFF freeze를 구분합니다. 연결 장애일 때만 재연결 오버레이를 표시하고, 화면 OFF 중에는 마지막 정상 프레임을 유지합니다.
+Android 13 이상 screen-off 경로의 원칙은 다음과 같습니다.
+
+1. `SCREEN_OFF`, `SCREEN_ON`, `USER_PRESENT`는 boolean 기반 물리 상태 추적과 연결 종료 유예에만 사용합니다.
+2. legacy `ScreenOffPolicy`는 `ACTIVE` 상태를 유지하고 복구 FSM을 전이시키지 않습니다.
+3. H.264 frame broadcast와 WebCodecs 렌더링을 freeze하지 않습니다.
+4. `KEYCODE_WAKEUP`, physical display wake pulse, blackout activity, delayed resume, revive 및 VD rebuild를 실행하지 않습니다.
+5. VirtualDevice 생성 실패 시 group 0 legacy VD로 fallback하지 않습니다.
+
+Android 8–12L은 VirtualDevice API가 없으므로 기존 DisplayManagerGlobal VD 및 legacy screen-off recovery 상태 머신을 유지합니다. 연결 종료 유예는 두 경로 모두 실제 물리 화면 상태를 사용하지만, 프론트엔드 frame gate는 legacy recovery 중에만 활성화됩니다.

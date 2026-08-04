@@ -34,13 +34,18 @@ class ScreenOffCoordinator(
 ) {
     companion object {
         private const val TAG = "MirrorService"
+        // VirtualDevice-backed displays run in a power group independent from display 0.
+        // Android 33+ therefore needs state tracking only, not VD wake/blackout recovery.
+        private val SUPPORTS_VIRTUAL_DEVICE_POWER_ISOLATION = Build.VERSION.SDK_INT >= 33
     }
 
     val policy = ScreenOffPolicy()
     val reviveStrategy = ScreenOffReviveStrategy.select(Build.MANUFACTURER, Build.BRAND)
     val isPanelOffSupported: Boolean get() = policy.isPanelOffSupported
     val isPhysicalScreenOnForVideo: Boolean get() = physicalScreenOnForVideo
-
+    val isPhysicalScreenOff: Boolean get() = physicalScreenOff
+    val isLegacyRecoveryActive: Boolean
+        get() = !SUPPORTS_VIRTUAL_DEVICE_POWER_ISOLATION && policy.isScreenOff
     private val loopGuard = ScreenOffLoopGuard()
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val keyguardManager by lazy {
@@ -59,6 +64,7 @@ class ScreenOffCoordinator(
 
     @Volatile private var earlyFreezeSent = false
     @Volatile private var physicalScreenOnForVideo = false
+    @Volatile private var physicalScreenOff = false
     @Volatile private var blackoutActivityRunning = false
     @Volatile private var blackoutActivityReady = false
     @Volatile private var reviveBurstInFlight = false
@@ -68,6 +74,14 @@ class ScreenOffCoordinator(
         if (receiver != null) return
         receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent?) {
+                if (SUPPORTS_VIRTUAL_DEVICE_POWER_ISOLATION) {
+                    when (intent?.action) {
+                        Intent.ACTION_SCREEN_OFF -> onIsolatedPowerGroupScreenOff()
+                        Intent.ACTION_SCREEN_ON -> onIsolatedPowerGroupScreenOn()
+                        Intent.ACTION_USER_PRESENT -> onIsolatedPowerGroupUserPresent()
+                    }
+                    return
+                }
                 when (intent?.action) {
                     Intent.ACTION_SCREEN_OFF -> {
                         onPhoneScreenOff()
@@ -87,7 +101,15 @@ class ScreenOffCoordinator(
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_USER_PRESENT)
         })
-        startPhysicalScreenStateMonitor()
+        if (!SUPPORTS_VIRTUAL_DEVICE_POWER_ISOLATION) {
+            startPhysicalScreenStateMonitor()
+        } else {
+            physicalScreenOnForVideo = isPhysicalScreenReallyOn()
+            physicalScreenOff = !physicalScreenOnForVideo
+            host.logScreenOffInfo(
+                "[SCREEN_OFF] [ISOLATED_POWER_GROUP] recoveryBypassed=true monitorBypassed=true"
+            )
+        }
     }
 
     fun stop() {
@@ -96,6 +118,13 @@ class ScreenOffCoordinator(
     }
 
     fun cleanup() {
+        if (SUPPORTS_VIRTUAL_DEVICE_POWER_ISOLATION) {
+            physicalScreenOff = false
+            physicalScreenOnForVideo = false
+            host.updatePanelOffState(ScreenOffState.ACTIVE)
+            unregisterReceiver()
+            return
+        }
         if (policy.isScreenOff && reviveStrategy == ScreenOffReviveStrategy.PANEL_OFF) {
             try {
                 host.pipelines.values.firstOrNull()?.controller?.setPhysicalDisplayPower(true)
@@ -147,6 +176,15 @@ class ScreenOffCoordinator(
             Log.w(TAG, "turnPanelOffForMirroring: no active virtual display")
             return false
         }
+        if (SUPPORTS_VIRTUAL_DEVICE_POWER_ISOLATION) {
+            if (physicalScreenOff) return true
+            host.logScreenOffInfo("turnPanelOffForMirroring() requested via web/user button isolated=true")
+            val success = host.pipelines.values.firstOrNull()
+                ?.controller
+                ?.setPhysicalDisplayPower(false) == true
+            if (success) onIsolatedPowerGroupScreenOff()
+            return success
+        }
         if (policy.isScreenOff) return true
         host.logScreenOffInfo("turnPanelOffForMirroring() requested via web/user button")
         onPhoneScreenOff()
@@ -154,15 +192,25 @@ class ScreenOffCoordinator(
     }
 
     fun restorePhysicalPanel() {
+        if (SUPPORTS_VIRTUAL_DEVICE_POWER_ISOLATION) {
+            if (!physicalScreenOff) return
+            host.logScreenOffInfo("restorePhysicalPanel() requested via web/user button isolated=true")
+            val success = host.pipelines.values.firstOrNull()
+                ?.controller
+                ?.setPhysicalDisplayPower(true) == true
+            if (success) onIsolatedPowerGroupScreenOn()
+            return
+        }
         if (!policy.isScreenOff) return
         host.logScreenOffInfo("restorePhysicalPanel() requested via web/user button")
         onUserRequestRestoreFromBlackout()
     }
 
     fun markKeepAlive() {
-        loopGuard.markKeepAlive(android.os.SystemClock.elapsedRealtime())
+        if (!SUPPORTS_VIRTUAL_DEVICE_POWER_ISOLATION) {
+            loopGuard.markKeepAlive(android.os.SystemClock.elapsedRealtime())
+        }
     }
-
     private fun logScreenState(event: String) {
         val keyguardLocked = keyguardManager.isKeyguardLocked
         val deviceLocked = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
@@ -179,12 +227,47 @@ class ScreenOffCoordinator(
         )
     }
 
+    private fun onIsolatedPowerGroupScreenOff() {
+        screenOnResumeJob?.cancel()
+        screenOnResumeJob = null
+        physicalScreenOnForVideo = false
+        physicalScreenOff = true
+        MirrorDiagnostics.log(DiagnosticEvent.SCREEN_OFF)
+        host.updatePanelOffState(ScreenOffState.BLACKOUT_ACTIVE)
+        host.cancelPendingBrowserDisconnect("isolated_power_group_screen_off")
+        host.broadcastWebDiagnostics("isolated_power_group_screen_off")
+        host.logScreenOffInfo(
+            "[SCREEN_OFF] [ISOLATED_POWER_GROUP] event=SCREEN_OFF tracked=true " +
+                "legacyState=${policy.state} videoFrozen=false recovery=false"
+        )
+    }
+
+    private fun onIsolatedPowerGroupScreenOn() {
+        physicalScreenOnForVideo = true
+        physicalScreenOff = false
+        MirrorDiagnostics.log(DiagnosticEvent.SCREEN_ON)
+        host.updatePanelOffState(ScreenOffState.ACTIVE)
+        host.cancelPendingBrowserDisconnect("isolated_power_group_screen_on")
+        host.broadcastWebDiagnostics("isolated_power_group_screen_on")
+        host.logScreenOffInfo(
+            "[SCREEN_OFF] [ISOLATED_POWER_GROUP] event=SCREEN_ON tracked=true " +
+                "legacyState=${policy.state} videoFrozen=false recovery=false"
+        )
+    }
+
+    private fun onIsolatedPowerGroupUserPresent() {
+        MirrorDiagnostics.log(DiagnosticEvent.KEYGUARD_UNLOCKED)
+        if (isPhysicalScreenReallyOn() && physicalScreenOff) {
+            onIsolatedPowerGroupScreenOn()
+        }
+    }
     private fun onPhoneScreenOff() {
         screenOnResumeJob?.cancel()
         screenOnResumeJob = null
         MirrorDiagnostics.log(DiagnosticEvent.SCREEN_OFF)
         logScreenState("onPhoneScreenOff() called")
         physicalScreenOnForVideo = false
+        physicalScreenOff = true
         host.broadcastVideoFreeze("freezeVideo", "screen_off_event")
         host.broadcastWebDiagnostics("screen_off_event")
 
@@ -354,6 +437,7 @@ class ScreenOffCoordinator(
 
 
         physicalScreenOnForVideo = true
+        physicalScreenOff = false
         val source = loopGuard.classifyScreenOn(android.os.SystemClock.elapsedRealtime())
         logScreenOffLoop("SCREEN_ON", source)
         if (source == ScreenOffLoopGuard.EventSource.WAKE_PULSE_RELATED) {
@@ -571,6 +655,7 @@ class ScreenOffCoordinator(
     }
 
     fun onBlackoutActivityReady() {
+        if (SUPPORTS_VIRTUAL_DEVICE_POWER_ISOLATION) return
         mainHandler.post {
             blackoutActivityReady = true
             host.logScreenOffInfo("[SCREEN_OFF] [BLACKOUT] blackout_activity_ready")
@@ -580,6 +665,10 @@ class ScreenOffCoordinator(
     }
 
     fun onUserRequestRestoreFromBlackout() {
+        if (SUPPORTS_VIRTUAL_DEVICE_POWER_ISOLATION) {
+            restorePhysicalPanel()
+            return
+        }
         mainHandler.post {
             host.logScreenOffInfo("[SCREEN_OFF] [USER_RESTORE] reason=blackout_activity_double_tap")
             handleFsmTransition(ScreenOffEvent.RESTORE_REQUEST)

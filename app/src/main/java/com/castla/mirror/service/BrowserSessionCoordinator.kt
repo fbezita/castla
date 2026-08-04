@@ -181,7 +181,7 @@ internal class BrowserSessionCoordinator(private val host: MirrorForegroundServi
 
     fun scheduleDisconnect() {
         if (pendingDisconnectJob != null) return
-        val screenOff = host.screenOffPolicy.isScreenOff
+        val screenOff = host.isPhysicalScreenOff
         host.broadcastWebDiagnostics("schedule_disconnect")
         pendingDisconnectJob = host.serviceScope.launch {
             delay(DisconnectPolicy.graceMs(screenOff))

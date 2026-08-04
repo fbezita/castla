@@ -721,19 +721,26 @@ A size change rebuilds the encoder surface and starts a new stream generation. T
 
 The task query and privileged ActivityTaskManager calls remain reflection-based to tolerate signature differences between Android/One UI versions. The current One UI 9 verification covers new-task launch, same-VD task reuse, multi-app switching, resolution changes, and encoder reconnection. One UI 8.5 remains a pending device regression check.
 
-## 2026-08-02 Screen-Off Mirroring Recovery
+## 2026-08-04 Isolated VirtualDevice Power Group
 
-### Native service
+### Android 13 이상
 
-MirrorForegroundService는 기본 Display의 interactive/state 변화를 조기 감시하고, 화면 OFF 직전에 freezeVideo를 서버에 전달합니다. SCREEN_ON이 빠르게 도착하는 One UI 환경에서는 실제 Display.STATE_ON을 확인할 때까지 최대 2초간 재시도합니다.
+Shizuku 서비스는 shell의 `APP_STREAMING` companion association으로 `VirtualDevice`를 생성하고, 그 장치에서 encoder surface를 받는 `VirtualDisplay`를 생성합니다. Display는 `TRUSTED`, `PUBLIC`, `OWN_CONTENT_ONLY` 조건을 사용하며, Android DisplayManagerService가 `DEVICE_DISPLAY_GROUP`을 부여합니다. 따라서 물리 Display 0의 power group과 Castla VD의 power group이 실제로 분리됩니다.
 
-WAKE_PULSE_RELATED 이벤트는 자동 keep-alive/revive pulse 직후의 SCREEN_ON으로 추정되는 이벤트입니다. 이 경우 상태를 BLACKOUT_ACTIVE로 유지하고 panel-off 재시도는 하지 않으며, 영상만 안정화 후 재개합니다. 사용자 복귀는 USER_PRESENT 또는 사용자 분류 SCREEN_ON에서 ACTIVE로 전환됩니다.
+물리 전원 버튼으로 group 0이 sleep에 들어가도 VD group은 awake와 `Display.STATE_ON`을 유지합니다. 이 경로에서는 `KEYCODE_WAKEUP`, physical-display wake pulse, blackout activity, server video freeze, delayed resume 및 VD rebuild를 사용하지 않습니다. `SCREEN_OFF`/`SCREEN_ON` 브로드캐스트는 단순 물리 상태 추적과 연결 종료 유예에만 사용합니다.
 
-### Server and frontend
+웹 진단의 `physicalScreenOff`는 상태 표시 및 연결 유예용입니다. WebCodecs 렌더링을 멈추는 기존 `screenOff` 값은 legacy recovery가 활성화된 경우에만 true이므로 Android 13+에서는 VD가 생산하는 프레임을 계속 그립니다.
 
-MirrorServer.videoFrozen gate는 freeze 상태 동안 인코더 프레임의 WebSocket broadcast를 차단합니다. 복귀 시 keyframe을 요청해 디코더가 정상 프레임부터 재개하도록 합니다.
+VirtualDevice 생성에 실패하면 동일 power group의 legacy VD로 조용히 fallback하지 않고 생성 실패로 처리합니다.
 
-WebCodecsBackend는 마지막 정상 canvas 프레임을 보존하고, 감광/근검 프레임을 즉시 화면에 반영하지 않습니다. ViewportPane의 재연결 오버레이는 isConnected == false인 실제 연결 장애에만 표시됩니다.
+### Android 8–12L
+
+Android 26–32는 VirtualDevice API를 사용할 수 없으므로 기존 DisplayManagerGlobal 기반 VD와 screen-off 복구 상태 머신을 유지합니다. freeze/resume, VD keep-alive, blackout 및 revive/rebuild 판단도 이 legacy 경로에서만 실행됩니다.
+
+### 실기기 검증
+
+Samsung SDK 37에서 Castla display 135가 group 7에 배치되고, 물리 group 0이 asleep인 동안 display 135는 ON을 유지했습니다. 물리 전원 버튼으로 화면을 끈 뒤에도 encoder frame counter가 10000에서 12000까지 증가했고 웹 미러링도 계속 표시됐습니다. 이 과정에서 wake key, blackout 및 freeze/revive는 실행되지 않았습니다.
+
 ### 2026-08-04 Coordinator and Build Determinism Update
 
 - browser lifecycle, remote input, display diagnostics, VD rebuild scheduling, TLS, stream metadata, and HTTP content now have explicit runtime boundaries

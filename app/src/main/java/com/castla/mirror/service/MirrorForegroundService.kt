@@ -54,9 +54,7 @@ import com.castla.mirror.policy.AutoScalePolicy
 import com.castla.mirror.policy.CodecModeTransition
 import com.castla.mirror.policy.DisconnectPolicy
 import com.castla.mirror.policy.ScreenOffLoopGuard
-import com.castla.mirror.policy.ScreenOffPolicy
 import com.castla.mirror.policy.ScreenOffRecoveryPlanner
-import com.castla.mirror.policy.ScreenOffReviveStrategy
 import com.castla.mirror.policy.ScreenOffState
 import com.castla.mirror.policy.ScreenOffEvent
 import com.castla.mirror.ui.ScreenOffBlackoutActivity
@@ -307,9 +305,9 @@ class MirrorForegroundService : Service() {
     private val paneLastLaunchTimes = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val paneLastLaunchPackages = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val screenOffCoordinator = ScreenOffCoordinator(this)
-    internal val screenOffPolicy: ScreenOffPolicy get() = screenOffCoordinator.policy
+    internal val isPhysicalScreenOff: Boolean get() = screenOffCoordinator.isPhysicalScreenOff
+    internal val isLegacyScreenOffRecoveryActive: Boolean get() = screenOffCoordinator.isLegacyRecoveryActive
     internal fun updatePanelOffState(state: ScreenOffState) { _panelOffStateFlow.value = state }
-    private val screenOffReviveStrategy: ScreenOffReviveStrategy get() = screenOffCoordinator.reviveStrategy
 
     val isRunning: Boolean get() = mirrorServer != null
     val isPanelOffSupported: Boolean get() = screenOffCoordinator.isPanelOffSupported
@@ -400,8 +398,9 @@ class MirrorForegroundService : Service() {
                             put("browserConnected", browserConnected)
                             put("serverBrowserConnected", server.isBrowserConnected())
                             put("pendingDisconnect", browserSessionCoordinator.pendingDisconnectJob != null)
-                            put("disconnectGraceMs", DisconnectPolicy.graceMs(screenOffPolicy.isScreenOff))
-                            put("screenOff", screenOffPolicy.isScreenOff && !screenOffCoordinator.isPhysicalScreenOnForVideo)
+                            put("disconnectGraceMs", DisconnectPolicy.graceMs(isPhysicalScreenOff))
+                            put("screenOff", isLegacyScreenOffRecoveryActive)
+                            put("physicalScreenOff", isPhysicalScreenOff)
                             put("teardownPhase", browserTeardownPhase)
                             put("socketSummary", server.socketDebugSummary())
                             put("pipelineSnapshot", pipelineTouchSnapshot())
@@ -866,7 +865,7 @@ class MirrorForegroundService : Service() {
             return
         }
         logLaunchRecoveryInfo(
-            "recovery_wake_begin displayId=$displayId reason=$reason screenOff=${screenOffPolicy.isScreenOff}"
+            "recovery_wake_begin displayId=$displayId reason=$reason physicalScreenOff=$isPhysicalScreenOff legacyRecovery=$isLegacyScreenOffRecoveryActive"
         )
         if (shouldThrottleRecoveryAction(displayId, reason)) {
             logLaunchRecoveryInfo(
@@ -875,12 +874,16 @@ class MirrorForegroundService : Service() {
             return
         }
         try {
-            if (screenOffPolicy.isScreenOff) {
+            if (isLegacyScreenOffRecoveryActive) {
                 screenOffCoordinator.markKeepAlive()
                 service.keepVirtualDisplayAlive(displayId)
                 logScreenOffInfo("[SCREEN_OFF] [VD_KEEPALIVE] reason=$reason displayId=$displayId source=recovery")
                 logLaunchRecoveryInfo(
                     "recovery_wake_done displayId=$displayId reason=$reason action=keepVirtualDisplayAlive"
+                )
+            } else if (isPhysicalScreenOff) {
+                logLaunchRecoveryInfo(
+                    "recovery_wake_done displayId=$displayId reason=$reason action=isolated_display_already_awake"
                 )
             } else {
                 service.wakeUpDisplay(displayId)
@@ -936,7 +939,7 @@ class MirrorForegroundService : Service() {
         reason: String,
     ) {
         if (service == null) return
-        if (screenOffPolicy.isScreenOff) {
+        if (isPhysicalScreenOff) {
             logScreenOffInfo("[SCREEN_OFF] [PHYSICAL_WAKE_BLOCKED] command=dismiss-keyguard reason=$reason")
             return
         }
@@ -1714,10 +1717,10 @@ class MirrorForegroundService : Service() {
 
         pipeline.debugFallbackStarts += 1
         val scheduledAtMs = android.os.SystemClock.elapsedRealtime()
-        val watchdogDelayMs = LaunchRecoveryPolicy.fallbackWatchdogDelayMs(screenOffPolicy.isScreenOff)
+        val watchdogDelayMs = LaunchRecoveryPolicy.fallbackWatchdogDelayMs(isLegacyScreenOffRecoveryActive)
         logLaunchRecoveryInfo(
             "watchdog_scheduled pane=${pipeline.name} pkg=$pkg displayId=$displayId delayMs=$watchdogDelayMs " +
-                "screenOff=${screenOffPolicy.isScreenOff} taskIds=${taskIds.joinToString(prefix = "[", postfix = "]")}"
+                "physicalScreenOff=$isPhysicalScreenOff legacyRecovery=$isLegacyScreenOffRecoveryActive taskIds=${taskIds.joinToString(prefix = "[", postfix = "]")}"
         )
         pipeline.activeFallbackJob = serviceScope.launch(Dispatchers.IO) {
             // Wait for activity manager to settle down task placement and allow the first graphic frame to render.
@@ -1753,7 +1756,7 @@ class MirrorForegroundService : Service() {
                 )
 
                 if (isStagnated && !isAbsent) {
-                    if (screenOffPolicy.isScreenOff) {
+                    if (isLegacyScreenOffRecoveryActive) {
                         logLaunchRecoveryInfo(
                             "watchdog_action pane=${pipeline.name} pkg=$pkg displayId=$displayId action=screenoff_rebuild_and_keyframe reason=first_frame_delayed"
                         )
@@ -1776,7 +1779,7 @@ class MirrorForegroundService : Service() {
                     )
                     Log.w(TAG, "[Fallback] Watchdog detected missing task ($pkg) on Display $displayId; soft recovery only. Skipping force-stop / am start.")
                     try {
-                        if (screenOffPolicy.isScreenOff) {
+                        if (isLegacyScreenOffRecoveryActive) {
                             logScreenOffWarn("[SCREEN_OFF] [REVIVE_REBUILD] watchdog pane=${pipeline.name} pkg=$pkg displayId=$displayId taskAbsent=true")
                             requestScreenOffRebuild(pipeline, "fallback_absent")
                         }

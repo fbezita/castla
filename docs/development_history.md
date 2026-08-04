@@ -1179,3 +1179,20 @@ WAKE_PULSE_RELATED SCREEN_ON에서는 물리 패널을 다시 OFF시키지 않�
 - Moved rebuild coalescing and native-IME proxy gating into pure policies covered by unit tests.
 - Made frontend asset hashes reproducible by using the latest commit SHA that changed `frontend/` unless release automation supplies `CASTLA_BUILD_TIMESTAMP`.
 - Added regression coverage for stream generation and metadata replay, rebuild coalescing/capacity, native IME fallback gating, browser layout, and disconnect behavior.
+
+## 2026-08-04 VirtualDevice Power-Group Isolation
+
+기존 screen-off video gate와 wake/blackout 복구 방식은 Android 13 이상에서 실제 power-group 격리 방식으로 대체했습니다.
+
+- Shizuku shell의 `APP_STREAMING` companion association으로 `VirtualDevice`를 생성합니다.
+- encoder surface용 VirtualDisplay를 VirtualDevice에 생성하고 `TRUSTED`, `PUBLIC`, `OWN_CONTENT_ONLY` 조건으로 별도 device display group을 부여받습니다.
+- Android 13 이상은 boolean으로 물리 화면 상태만 추적하며 legacy `ScreenOffPolicy`를 전이시키지 않습니다.
+- 연결 종료 유예는 `physicalScreenOff`를 사용하지만 WebCodecs frame gate인 `screenOff`는 legacy recovery 중에만 활성화됩니다.
+- Android 13 이상에서는 `KEYCODE_WAKEUP`, video freeze, blackout activity, delayed resume, revive 및 VD rebuild를 수행하지 않습니다.
+- VirtualDevice 생성 실패를 group 0 legacy VD로 fallback하지 않습니다.
+- Android 26–32에는 기존 DisplayManagerGlobal 및 screen-off recovery 상태 머신을 호환 경로로 유지합니다.
+- VirtualDisplay release/destroy 시 대응하는 VirtualDevice도 함께 닫습니다.
+
+Samsung SDK 37 실기기에서 Castla display 135는 group 7, 물리 display는 group 0으로 분리됐습니다. 물리 전원 버튼으로 group 0을 OFF한 뒤에도 Castla VD는 ON을 유지했고 encoder frame counter는 10000에서 12000까지 증가했습니다. 웹 화면도 계속 재생됐으며 wake key, blackout, freeze/revive는 실행되지 않았습니다.
+
+따라서 2026-08-02의 video gate 및 wake pulse 방식은 Android 13 이상에 대해 superseded 상태이며, 해당 기록은 개발 과정의 이력으로만 취급합니다.

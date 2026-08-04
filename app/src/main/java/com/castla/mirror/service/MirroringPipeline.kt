@@ -55,9 +55,7 @@ import com.castla.mirror.policy.AutoScalePolicy
 import com.castla.mirror.policy.CodecModeTransition
 import com.castla.mirror.policy.DisconnectPolicy
 import com.castla.mirror.policy.ScreenOffLoopGuard
-import com.castla.mirror.policy.ScreenOffPolicy
 import com.castla.mirror.policy.ScreenOffRecoveryPlanner
-import com.castla.mirror.policy.ScreenOffReviveStrategy
 import com.castla.mirror.policy.ScreenOffState
 import com.castla.mirror.policy.ScreenOffEvent
 import com.castla.mirror.ui.ScreenOffBlackoutActivity
@@ -1106,7 +1104,7 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
                         "[FocusTrace] inject_realign pane=$name displayId=$activeId action=$action app=$currentApp target=$relaunchTarget consecutive=$consecutiveInjectionRejects"
                     )
                     Log.i(TAG, "[$name Pipeline] Injection recovery will not relaunch app automatically. Applying soft recovery only.")
-                    if (host.screenOffPolicy.isScreenOff) {
+                    if (host.isLegacyScreenOffRecoveryActive) {
                         host.logScreenOffWarn("[SCREEN_OFF] [REVIVE_REBUILD] pane=$name reason=inject_reject displayId=$activeId")
                         host.requestScreenOffRebuild(this@MirroringPipeline, "inject_reject")
                     }
