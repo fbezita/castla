@@ -67,6 +67,7 @@ export interface NotificationMessage {
   title: string;
   text: string;
   postedAtMs: number;
+  hasImage: boolean;
 }
 
 export interface AckMessage extends Record<string, unknown> {

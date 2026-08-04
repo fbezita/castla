@@ -1,3 +1,5 @@
+import { t, type Language } from "./i18n";
+
 export interface OverlayNotification {
   id: string;
   packageName: string;
@@ -5,6 +7,7 @@ export interface OverlayNotification {
   title: string;
   text: string;
   postedAtMs: number;
+  hasImage?: boolean;
 }
 
 export const DEFAULT_NOTIFICATION_ALLOWED_PACKAGES = [
@@ -33,14 +36,23 @@ export function normalizeNotificationAllowedPackages(
   }
 }
 
+export function isNotificationAllowed(
+  notification: OverlayNotification,
+  allowedPackages: readonly string[],
+): boolean {
+  return allowedPackages.includes(notification.packageName);
+}
+
 export function shouldDisplayOverlayNotification(
   notification: OverlayNotification,
   enabled: boolean,
   allowedPackages: readonly string[],
 ): boolean {
-  return enabled && allowedPackages.includes(notification.packageName);
+  return enabled && isNotificationAllowed(notification, allowedPackages);
 }
+
 const MAX_OVERLAY_NOTIFICATIONS = 3;
+const MAX_NOTIFICATION_HISTORY = 100;
 export const NOTIFICATION_OVERLAY_ENABLED_KEY =
   "castla_notification_overlay_enabled";
 
@@ -74,4 +86,50 @@ export function pruneOverlayNotifications(
   ttlMs: number,
 ): OverlayNotification[] {
   return queue.filter((item) => nowMs - item.postedAtMs < ttlMs);
+}
+
+export function formatNotificationText(
+  notification: OverlayNotification,
+  language: Language,
+): string {
+  if (!notification.hasImage) return notification.text;
+
+  const imageLabel = t(language, "notificationContainsImage");
+  return notification.text ? `${imageLabel} · ${notification.text}` : imageLabel;
+}
+
+export interface NotificationHistoryGroup {
+  packageName: string;
+  appLabel: string;
+  items: OverlayNotification[];
+}
+
+export function groupNotificationHistory(
+  history: OverlayNotification[],
+): NotificationHistoryGroup[] {
+  const groups = new Map<string, NotificationHistoryGroup>();
+  const newestFirst = [...history].sort((left, right) => right.postedAtMs - left.postedAtMs);
+
+  for (const item of newestFirst) {
+    const existing = groups.get(item.packageName);
+    if (existing) {
+      existing.items.push(item);
+      continue;
+    }
+    groups.set(item.packageName, {
+      packageName: item.packageName,
+      appLabel: item.appLabel,
+      items: [item],
+    });
+  }
+
+  return [...groups.values()];
+}
+
+export function upsertNotificationHistory(
+  history: OverlayNotification[],
+  next: OverlayNotification,
+): OverlayNotification[] {
+  const deduped = history.filter((item) => item.id !== next.id);
+  return [next, ...deduped].slice(0, MAX_NOTIFICATION_HISTORY);
 }

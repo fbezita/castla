@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from "svelte";
-  import type { ViewportModel } from "../stores/compositorStore";
+  import { compositorStore, type ViewportModel } from "../stores/compositorStore";
+  import { t } from "../lib/i18n";
   import type { StreamRuntime } from "../runtime/StreamRuntime";
   import type { DecoderBackend } from "../decoder/DecoderBackend";
   import { WebCodecsBackend } from "../decoder/WebCodecsBackend";
@@ -219,7 +220,7 @@
   {#if !isConnected && viewport.visible}
     <div class="reconnect-overlay">
       <div class="spinner"></div>
-      <p class="reconnect-text">연결이 일시적으로 중단되었습니다. 복구 중...</p>
+      <p class="reconnect-text">{t($compositorStore.language, "reconnecting")}</p>
     </div>
   {/if}
 

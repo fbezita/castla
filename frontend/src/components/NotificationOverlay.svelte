@@ -1,9 +1,12 @@
 <script lang="ts">
-  import type { OverlayNotification } from "../lib/notificationOverlay";
+  import { formatNotificationText, groupNotificationHistory, type OverlayNotification } from "../lib/notificationOverlay";
+  import { t } from "../lib/i18n";
+  import { compositorStore } from "../stores/compositorStore";
 
-  let { items = [] } = $props<{ items: OverlayNotification[] }>();
+  let { items = [], history = [] } = $props<{ items: OverlayNotification[]; history?: OverlayNotification[] }>();
 
   let expanded = $state(new Set<string>());
+  let historyOpen = $state(false);
   const AUTO_COLLAPSE_MS = 10_000;
 
   function toggle(id: string) {
@@ -28,8 +31,31 @@
   }
 </script>
 
-{#if items.length > 0}
+{#if items.length > 0 || history.length > 0}
   <section class="notification-overlay" aria-live="polite">
+    {#if history.length > 0}
+      <button class="history-toggle" onclick={() => (historyOpen = !historyOpen)}>
+        {historyOpen ? t($compositorStore.language, "notificationHistoryClose") : `${t($compositorStore.language, "notificationHistory")} (${history.length})`}
+      </button>
+    {/if}
+    {#if historyOpen}
+      <div class="notification-history">
+        {#each groupNotificationHistory(history) as group (group.packageName)}
+          <section class="history-group">
+            <header class="history-group-header">
+              <span>{group.appLabel}</span>
+              <span>{group.items.length}</span>
+            </header>
+            {#each group.items as item (item.id)}
+              <article class="history-item">
+                <div class="notification-title">{item.title}</div>
+                <div class="notification-text">{formatNotificationText(item, $compositorStore.language)}</div>
+              </article>
+            {/each}
+          </section>
+        {/each}
+      </div>
+    {/if}
     {#each items as item (item.id)}
       <article class="notification-card">
         <div class="notification-header">
@@ -43,16 +69,16 @@
             onclick={() => toggle(item.id)}
             aria-expanded={expanded.has(item.id)}
           >
-            {expanded.has(item.id) ? "접기 ▲" : "펴기 ▼"}
+            {t($compositorStore.language, expanded.has(item.id) ? "notificationCollapse" : "notificationExpand")}
           </button>
         </div>
 
         {#if expanded.has(item.id)}
           <div class="notification-text">
-            {item.text}
+            {formatNotificationText(item, $compositorStore.language)}
           </div>
         {:else}
-          <div class="notification-placeholder">🔒 내용을 숨겼습니다.</div>
+          <div class="notification-placeholder">{t($compositorStore.language, "notificationContentHidden")}</div>
         {/if}
       </article>
     {/each}
@@ -69,6 +95,52 @@
     width: min(360px, calc(100vw - 40px));
     z-index: 120;
     pointer-events: none;
+  }
+
+  .history-toggle {
+    pointer-events: auto;
+    justify-self: start;
+    border: 1px solid rgba(139, 233, 255, 0.35);
+    border-radius: 999px;
+    padding: 7px 12px;
+    background: rgba(8, 12, 20, 0.9);
+    color: #8be9ff;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .notification-history {
+    display: grid;
+    gap: 8px;
+    max-height: min(60vh, 520px);
+    overflow: auto;
+    pointer-events: auto;
+  }
+
+  .history-group {
+    display: grid;
+    gap: 8px;
+  }
+
+  .history-group-header {
+    position: sticky;
+    top: 0;
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border-radius: 10px;
+    background: rgba(21, 31, 46, 0.98);
+    color: #8be9ff;
+    font-size: 12px;
+    font-weight: 800;
+  }
+
+  .history-item {
+    padding: 12px 14px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 14px;
+    background: rgba(8, 12, 20, 0.92);
   }
 
   .notification-card {

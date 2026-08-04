@@ -1,6 +1,9 @@
 package com.castla.mirror.notifications
 
 import android.app.Notification
+import android.os.Build
+import android.os.Bundle
+import android.os.Parcelable
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import com.castla.mirror.service.MirrorForegroundService
@@ -36,6 +39,7 @@ class CastlaNotificationListenerService : NotificationListenerService() {
             isGroupSummary = notification.flags and Notification.FLAG_GROUP_SUMMARY != 0,
             postedAtMs = sbn.postTime,
             notificationKey = sbn.key ?: sbn.packageName,
+            hasImage = hasImage(extras),
         ) ?: return
 
         server.broadcastControlMessage(
@@ -47,7 +51,30 @@ class CastlaNotificationListenerService : NotificationListenerService() {
                 put("title", payload.title)
                 put("text", payload.text)
                 put("postedAtMs", payload.postedAtMs)
+                put("hasImage", payload.hasImage)
             }.toString()
         )
+    }
+
+    @Suppress("DEPRECATION")
+    private fun messagingBundles(extras: Bundle): Array<out Parcelable>? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            extras.getParcelableArray(Notification.EXTRA_MESSAGES, Parcelable::class.java)
+        } else {
+            extras.getParcelableArray(Notification.EXTRA_MESSAGES)
+        }
+
+    private fun hasImage(extras: Bundle): Boolean {
+        if (extras.containsKey(Notification.EXTRA_PICTURE)) return true
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            extras.containsKey(Notification.EXTRA_PICTURE_ICON)
+        ) {
+            return true
+        }
+
+        val messageBundles = messagingBundles(extras) ?: return false
+        return Notification.MessagingStyle.Message
+            .getMessagesFromBundleArray(messageBundles)
+            .any { message -> message.dataMimeType?.startsWith("image/", ignoreCase = true) == true }
     }
 }

@@ -26,10 +26,12 @@
   import {
     DEFAULT_NOTIFICATION_ALLOWED_PACKAGES,
     normalizeNotificationAllowedPackages,
+    isNotificationAllowed,
     pruneOverlayNotifications,
     readNotificationOverlayEnabled,
     shouldDisplayOverlayNotification,
     upsertOverlayNotification,
+    upsertNotificationHistory,
     writeNotificationOverlayEnabled,
     type OverlayNotification,
   } from "./lib/notificationOverlay";
@@ -49,6 +51,7 @@
   const DEFAULT_NOTIFICATION_APPS = DEFAULT_NOTIFICATION_ALLOWED_PACKAGES;
 
   let overlayNotifications: OverlayNotification[] = [];
+  let notificationHistory: OverlayNotification[] = [];
   let notificationOverlayEnabled = readNotificationOverlayEnabled();
   let notificationApps = normalizeNotificationAllowedPackages(localStorage.getItem("castla_notification_apps"));
   let notificationPruneTimer = 0;
@@ -467,6 +470,9 @@
           ...(msg as OverlayNotification),
           postedAtMs: Date.now(),
         };
+        if (isNotificationAllowed(notificationItem, notificationApps)) {
+          notificationHistory = upsertNotificationHistory(notificationHistory, notificationItem);
+        }
         if (shouldDisplayOverlayNotification(notificationItem, notificationOverlayEnabled, notificationApps)) {
           overlayNotifications = upsertOverlayNotification(
             overlayNotifications,
@@ -621,6 +627,7 @@
     lifecycleCleanup = undefined;
     window.clearInterval(notificationPruneTimer);
     overlayNotifications = [];
+    notificationHistory = [];
     touchRouter.dispose();
     compositor.dispose();
     runtime.dispose();
@@ -781,7 +788,7 @@
       <DiagnosticsOverlay />
     {/if}
     {#if notificationOverlayEnabled}
-      <NotificationOverlay items={overlayNotifications} />
+      <NotificationOverlay items={overlayNotifications} history={notificationHistory} />
     {/if}
   </div>
   <textarea

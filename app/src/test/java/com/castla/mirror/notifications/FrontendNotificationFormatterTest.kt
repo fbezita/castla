@@ -26,7 +26,7 @@ class FrontendNotificationFormatterTest {
     }
 
     @Test
-    fun `build drops unsupported packages`() {
+    fun `build returns payload for packages selected by the frontend`() {
         val payload = FrontendNotificationFormatter.build(
             packageName = "com.example.random",
             appLabel = "Random",
@@ -36,7 +36,8 @@ class FrontendNotificationFormatterTest {
             isGroupSummary = false,
         )
 
-        assertNull(payload)
+        requireNotNull(payload)
+        assertEquals("com.example.random", payload.packageName)
     }
 
     @Test
@@ -61,6 +62,46 @@ class FrontendNotificationFormatterTest {
                 isGroupSummary = true,
             )
         )
+    }
+
+
+    @Test
+    fun `build replaces image content with photo placeholder`() {
+        val photoPayload = FrontendNotificationFormatter.build(
+            packageName = "com.example.photos",
+            appLabel = "Photos",
+            title = "Alice",
+            text = "private image caption",
+            isOngoing = false,
+            isGroupSummary = false,
+            hasImage = true,
+        )
+        val photoOnlyPayload = FrontendNotificationFormatter.build(
+            packageName = "com.example.photos",
+            appLabel = "Photos",
+            title = "Alice",
+            text = "",
+            isOngoing = false,
+            isGroupSummary = false,
+            hasImage = true,
+        )
+        val emptyPayload = FrontendNotificationFormatter.build(
+            packageName = "com.example.photos",
+            appLabel = "Photos",
+            title = "Alice",
+            text = "",
+            isOngoing = false,
+            isGroupSummary = false,
+            hasImage = false,
+        )
+
+        requireNotNull(photoPayload)
+        assertEquals("private image caption", photoPayload.text)
+        assertTrue(photoPayload.hasImage)
+        requireNotNull(photoOnlyPayload)
+        assertEquals("", photoOnlyPayload.text)
+        assertTrue(photoOnlyPayload.hasImage)
+        assertNull(emptyPayload)
     }
 
     @Test

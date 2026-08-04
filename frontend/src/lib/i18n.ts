@@ -80,6 +80,13 @@ export const TRANSLATIONS = {
     close: "닫기",
     subWindow: "보조 화면",
     appPair: "앱 페어",
+    notificationHistory: "알림 기록",
+    notificationHistoryClose: "알림 기록 닫기",
+    notificationExpand: "펴기 ▼",
+    notificationCollapse: "접기 ▲",
+    notificationContentHidden: "🔒 내용을 숨겼습니다.",
+    notificationContainsImage: "사진이 포함된 알림",
+    reconnecting: "연결이 일시적으로 중단되었습니다. 복구 중...",
   },
   en: {
     // App Drawer Header & Controls
@@ -159,6 +166,13 @@ export const TRANSLATIONS = {
     close: "Close",
     subWindow: "Sub Window",
     appPair: "App Pair",
+    notificationHistory: "Notification history",
+    notificationHistoryClose: "Close notification history",
+    notificationExpand: "Expand ▼",
+    notificationCollapse: "Collapse ▲",
+    notificationContentHidden: "🔒 Content hidden.",
+    notificationContainsImage: "Notification contains an image",
+    reconnecting: "Connection was temporarily interrupted. Recovering...",
   },
 };
 
