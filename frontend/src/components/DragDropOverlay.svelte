@@ -20,6 +20,7 @@
   type DropZone =
     | "favorite"
     | "autorun"
+    | "notifications"
     | "primary"
     | "secondary"
     | ExternalAppDropZone;

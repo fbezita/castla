@@ -24,8 +24,11 @@
     type OverlayUiScalePreference,
   } from "./utils/overlayUiScalePreference";
   import {
+    DEFAULT_NOTIFICATION_ALLOWED_PACKAGES,
+    normalizeNotificationAllowedPackages,
     pruneOverlayNotifications,
     readNotificationOverlayEnabled,
+    shouldDisplayOverlayNotification,
     upsertOverlayNotification,
     writeNotificationOverlayEnabled,
     type OverlayNotification,
@@ -43,22 +46,11 @@
   let showDiagnostics = false;
   let overlayUiScalePreference: OverlayUiScalePreference = readOverlayUiScalePreference();
   let overlayUiScale = 1;
-  const DEFAULT_NOTIFICATION_APPS = [
-    "com.android.phone",
-    "com.android.dialer",
-    "com.samsung.android.dialer",
-    "com.google.android.dialer",
-    "com.android.mms",
-    "com.android.messaging",
-    "com.samsung.android.messaging",
-    "com.google.android.apps.messaging",
-    "com.kakao.talk",
-    "org.telegram.messenger"
-  ];
+  const DEFAULT_NOTIFICATION_APPS = DEFAULT_NOTIFICATION_ALLOWED_PACKAGES;
 
   let overlayNotifications: OverlayNotification[] = [];
   let notificationOverlayEnabled = readNotificationOverlayEnabled();
-  let notificationApps = JSON.parse(localStorage.getItem("castla_notification_apps") ?? JSON.stringify(DEFAULT_NOTIFICATION_APPS)) as string[];
+  let notificationApps = normalizeNotificationAllowedPackages(localStorage.getItem("castla_notification_apps"));
   let notificationPruneTimer = 0;
 
   function updateNotificationApps(appsList: string[]): void {
@@ -470,12 +462,12 @@
       if (msg.type === "requestFrontendDebugDump") {
         triggerDump(runtime, String((msg as any).reason ?? "native_share_logs"));
       }
-      if (msg.type === "notification" && notificationOverlayEnabled) {
-        if (notificationApps.includes(msg.packageName)) {
-          const notificationItem: OverlayNotification = {
-            ...(msg as OverlayNotification),
-            postedAtMs: Date.now(),
-          };
+      if (msg.type === "notification") {
+        const notificationItem: OverlayNotification = {
+          ...(msg as OverlayNotification),
+          postedAtMs: Date.now(),
+        };
+        if (shouldDisplayOverlayNotification(notificationItem, notificationOverlayEnabled, notificationApps)) {
           overlayNotifications = upsertOverlayNotification(
             overlayNotifications,
             notificationItem,

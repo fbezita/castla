@@ -1172,3 +1172,10 @@ WAKE_PULSE_RELATED SCREEN_ON에서는 물리 패널을 다시 OFF시키지 않�
 - 화면 OFF에 따른 video freeze는 연결 끊김이 아니므로 재연결 오버레이를 표시하지 않습니다.
 
 단위 테스트는 실행하지 않았고, debug APK assemble 및 실기기 설치로 검증했습니다.
+## 2026-08-04 Coordinator Hardening and Reproducible Frontend Builds
+
+- Added explicit browser-session, VD-rebuild, fallback-input, diagnostics, encoder, stream-session, TLS, and HTTP-content boundaries.
+- Replaced the unbounded VD rebuild channel with a bounded 16-entry FIFO using coroutine backpressure.
+- Moved rebuild coalescing and native-IME proxy gating into pure policies covered by unit tests.
+- Made frontend asset hashes reproducible by using the latest commit SHA that changed `frontend/` unless release automation supplies `CASTLA_BUILD_TIMESTAMP`.
+- Added regression coverage for stream generation and metadata replay, rebuild coalescing/capacity, native IME fallback gating, browser layout, and disconnect behavior.

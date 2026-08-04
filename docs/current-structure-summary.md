@@ -34,7 +34,7 @@ The current production path reflects a broader input/control migration, not just
 
 ## Live Runtime Entry Points
 
-The production path is still centered on the service monolith plus the Svelte frontend runtime.
+The production path is centered on `MirrorForegroundService` as a thin orchestration host, extracted lifecycle coordinators, `MirrorServer`, and the Svelte frontend runtime.
 
 Android:
 
@@ -44,6 +44,13 @@ Android:
 - `app/src/main/java/com/castla/mirror/capture/VirtualDisplayController.kt`
 - `app/src/main/java/com/castla/mirror/input/TouchInjector.kt`
 - `app/src/main/java/com/castla/mirror/service/AdaptiveBitrateManager.kt`
+- `app/src/main/java/com/castla/mirror/service/BrowserSessionCoordinator.kt`
+- `app/src/main/java/com/castla/mirror/service/VirtualDisplayRebuildCoordinator.kt`
+- `app/src/main/java/com/castla/mirror/service/RemoteInputCoordinator.kt`
+- `app/src/main/java/com/castla/mirror/service/DisplayRoutingDiagnostics.kt`
+- `app/src/main/java/com/castla/mirror/server/StreamSessionCoordinator.kt`
+- `app/src/main/java/com/castla/mirror/server/ServerTlsConfigurator.kt`
+- `app/src/main/java/com/castla/mirror/server/ServerHttpContent.kt`
 
 Frontend:
 
@@ -61,6 +68,22 @@ Built frontend assets are copied to:
 
 The `app/src/main/java/com/castla/mirror/compositor/` tree still exists, but the live orchestration path is still `MirrorForegroundService.MirroringPipeline`.
 
+## Extracted Runtime Boundaries
+
+`MirrorForegroundService` remains the Android lifecycle owner, but these responsibilities are no longer implemented in the service body:
+
+| Component | Responsibility |
+| --- | --- |
+| `BrowserSessionCoordinator` | browser connect/disconnect grace, layout visibility, and teardown |
+| `VirtualDisplayRebuildCoordinator` | rebuild coalescing, touch deferral, stale filtering, and serialized hardware execution |
+| `RemoteInputCoordinator` | fallback Castla IME focus, composition, and key injection |
+| `DisplayRoutingDiagnostics` | IME/display routing dumps and diagnostics |
+| `EncoderLifecycleCoordinator` | encoder release, recreation, stream generation, and keyframe wakeup |
+| `StreamSessionCoordinator` | per-channel generation, first-frame readiness, and metadata replay |
+| `ServerTlsConfigurator` | certificate refresh, PKCS12 verification, and TLS context creation |
+| `ServerHttpContent` | app list/icon API and embedded frontend assets |
+
+The preferred text-input path remains the native Android IME inside the trusted VD. `RemoteInputCoordinator` is retained as a fallback boundary and is gated by `RemoteInputPolicy`.
 ## Current Android Structure
 
 `MirrorForegroundService.MirroringPipeline` currently owns too many responsibilities at once:
@@ -93,7 +116,7 @@ The current live policy is intentionally conservative:
 
 Important service-wide pieces:
 
-- `vdRequestChannel` + `startVdHardwareWorker()` serialize hardware rebuild work
+- `VirtualDisplayRebuildCoordinator` serializes hardware rebuild work through a bounded 16-entry FIFO channel; producers suspend when the queue is full instead of growing memory without limit
 - `MirrorServer` exposes control/video channels and callbacks
 - `ControlSocket` routes browser messages into service listeners
 - `AdaptiveBitrateManager` and other policy managers can still trigger rebuilds
@@ -260,7 +283,7 @@ Rebuilds can still be triggered from multiple places:
 - `AdaptiveBitrateManager.applyPipelineScale(...)`
 - fallback/recovery/self-healing branches inside `MirrorForegroundService`
 
-Even though hardware execution is serialized through `vdRequestChannel`, **the requests themselves are still generated from many layers**.
+Hardware execution is serialized through the bounded queue in `VirtualDisplayRebuildCoordinator`, while rebuild requests can still originate from multiple policy layers. Equivalent same-pane requests are coalesced within a short window before enqueue.
 
 ### Recent Mitigation Applied
 
@@ -407,7 +430,7 @@ If the next session starts from one sentence, it should be this:
 
 The first rebuild boundary has now been introduced on Android:
 
-- `MirrorForegroundService.requestRebuild(RebuildRequest)` is the central coordinator before requests enter `vdRequestChannel`
+- `MirrorForegroundService.requestRebuild(RebuildRequest)` delegates to `VirtualDisplayRebuildCoordinator` before requests enter its bounded hardware queue
 - direct rebuild callers in viewport, density, launch self-heal, adaptive bitrate, and thermal paths now route through `MirroringPipeline.requestRebuild(...)`
 - rebuild requests now carry `reason` and `priority`
 - the existing active-touch defer behavior has moved into the coordinator
@@ -711,3 +734,11 @@ WAKE_PULSE_RELATED 이벤트는 자동 keep-alive/revive pulse 직후의 SCREEN_
 MirrorServer.videoFrozen gate는 freeze 상태 동안 인코더 프레임의 WebSocket broadcast를 차단합니다. 복귀 시 keyframe을 요청해 디코더가 정상 프레임부터 재개하도록 합니다.
 
 WebCodecsBackend는 마지막 정상 canvas 프레임을 보존하고, 감광/근검 프레임을 즉시 화면에 반영하지 않습니다. ViewportPane의 재연결 오버레이는 isConnected == false인 실제 연결 장애에만 표시됩니다.
+### 2026-08-04 Coordinator and Build Determinism Update
+
+- browser lifecycle, remote input, display diagnostics, VD rebuild scheduling, TLS, stream metadata, and HTTP content now have explicit runtime boundaries
+- the VD rebuild queue is bounded to 16 pending requests and applies coroutine backpressure instead of using `Channel.UNLIMITED`
+- equivalent rebuild requests are evaluated by the pure `RebuildRequestPolicy`
+- native VD IME remains primary; proxy handling is explicitly gated by `RemoteInputPolicy`
+- frontend builds use the latest commit SHA that changed `frontend/` unless `CASTLA_BUILD_TIMESTAMP` is explicitly provided, so identical sources produce identical asset hashes
+- regression tests cover stream generation/metadata replay, rebuild queue/coalescing policy, native IME proxy gating, browser layout, and disconnect policy

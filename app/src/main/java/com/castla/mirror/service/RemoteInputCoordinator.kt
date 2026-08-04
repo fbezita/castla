@@ -15,7 +15,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+@OptIn(
+    kotlinx.coroutines.ExperimentalCoroutinesApi::class,
+    kotlinx.coroutines.DelicateCoroutinesApi::class,
+)
 internal class RemoteInputCoordinator(
     private val host: MirrorForegroundService,
     private val proxyEnabled: () -> Boolean,
@@ -29,7 +32,7 @@ internal class RemoteInputCoordinator(
     var lastTouchPane = "primary"
 
     private val timeoutRunnable = Runnable {
-        if (!proxyEnabled()) {
+        if (!RemoteInputPolicy.shouldHandleProxyInput(proxyEnabled())) {
             FileLogger.i("IME_ROUTING", "timeout_ignored reason=system_ime_mode")
             return@Runnable
         }
@@ -45,7 +48,7 @@ internal class RemoteInputCoordinator(
 
     fun resetTimeout() {
         mainHandler.removeCallbacks(timeoutRunnable)
-        if (!proxyEnabled()) {
+        if (!RemoteInputPolicy.shouldHandleProxyInput(proxyEnabled())) {
             FileLogger.i("IME_ROUTING", "resetImeTimeoutTimer skipped reason=system_ime_mode")
             return
         }
@@ -54,7 +57,7 @@ internal class RemoteInputCoordinator(
     }
 
     fun ensureActive() {
-        if (!proxyEnabled()) {
+        if (!RemoteInputPolicy.shouldHandleProxyInput(proxyEnabled())) {
             FileLogger.i("IME_ROUTING", "ensureCastlaImeActiveDynamically skipped reason=system_ime_mode")
             return
         }
@@ -62,7 +65,7 @@ internal class RemoteInputCoordinator(
     }
 
     fun restoreKeyboard() {
-        if (!proxyEnabled()) {
+        if (!RemoteInputPolicy.shouldHandleProxyInput(proxyEnabled())) {
             FileLogger.i("IME_ROUTING", "restoreUserKeyboardSilently skipped reason=system_ime_mode")
             return
         }
@@ -71,7 +74,7 @@ internal class RemoteInputCoordinator(
 
     fun onFocusLost() {
         mainHandler.removeCallbacks(timeoutRunnable)
-        if (!proxyEnabled()) {
+        if (!RemoteInputPolicy.shouldHandleProxyInput(proxyEnabled())) {
             FileLogger.i("IME_ROUTING", "onRemoteFocusLost ignored reason=system_ime_mode")
             return
         }
@@ -79,7 +82,7 @@ internal class RemoteInputCoordinator(
     }
 
     fun handleFocusHint(packageName: String?, inputType: Int, imeOptions: Int, privateImeOptions: String?) {
-        if (!proxyEnabled()) {
+        if (!RemoteInputPolicy.shouldHandleProxyInput(proxyEnabled())) {
             FileLogger.i("IME_ROUTING", "remoteFocusHint ignored reason=system_ime_mode pkg=${packageName ?: ""} inputType=$inputType imeOptions=$imeOptions")
             return
         }
@@ -101,7 +104,7 @@ internal class RemoteInputCoordinator(
     }
 
     fun handleBlurHint() {
-        if (!proxyEnabled()) {
+        if (!RemoteInputPolicy.shouldHandleProxyInput(proxyEnabled())) {
             FileLogger.i("IME_ROUTING", "remoteBlurHint ignored reason=system_ime_mode")
             return
         }

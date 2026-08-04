@@ -25,6 +25,7 @@ build.log
 /frontend/dist
 /tmp
 *.mjs
+*.tsbuildinfo
 /.kotlin
 implementation_plan.md
 /log

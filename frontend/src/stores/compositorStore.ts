@@ -8,15 +8,30 @@ export type SecondaryPlacement = 'left' | 'right' | 'top' | 'bottom' | 'popup';
 export type LaunchState =
   | 'IDLE'
   | 'LAYOUT_ALIGNING'
+  | 'LAYOUT_SENT'
+  | 'LAYOUT_ACKED'
   | 'LAYOUT_ALIGNED'
   | 'LAUNCHING_PRIMARY'
+  | 'PRIMARY_LAUNCH_SENT'
+  | 'PRIMARY_LAUNCH_ACKED'
+  | 'PRIMARY_SESSION_READY'
   | 'PRIMARY_LAUNCHED'
   | 'LAUNCHING_SECONDARY'
+  | 'SECONDARY_LAUNCH_SENT'
+  | 'SECONDARY_LAUNCH_ACKED'
+  | 'SECONDARY_SESSION_READY'
   | 'SECONDARY_LAUNCHED'
   | 'STREAM_COMMITTING'
   | 'RUNNING'
+  | 'DEGRADED'
   | 'FAILED';
 
+export type LaunchDegradedReason =
+  | 'launch_failure'
+  | 'session_timeout'
+  | 'stream_timeout'
+  | 'layout_timeout'
+  | '';
 export interface LaunchMetrics {
   layoutAlignMs: number;
   layoutAckMs: number;
@@ -34,7 +49,7 @@ export interface LaunchSequence {
   state: LaunchState;
   startedAt: number;
   error?: string;
-  degradedReason?: 'launch_failure' | 'session_timeout' | 'stream_timeout' | 'layout_timeout' | '';
+  degradedReason?: LaunchDegradedReason;
   metrics?: LaunchMetrics;
   primaryStartGen: number;
   secondaryStartGen: number;

@@ -6,6 +6,7 @@
     compositorStore,
     setLanguage,
     type LayoutMode as CompositorLayoutMode,
+    type LaunchDegradedReason,
     type LaunchMetrics,
   } from "../stores/compositorStore";
   import { t } from "../lib/i18n";
@@ -26,7 +27,7 @@
   import { resolveSplitRatioForPlacement } from "../lib/splitRatioByPlacement";
   import { isJmuxerFrontendPath } from "../lib/decoderPath";
   import { isFreshCommittedViewport } from "../lib/streamCommitPolicy";
-  import type { PaneId } from "../protocol";
+  import type { AckMessage, ControlMessage, PaneId, StreamMetadata } from "../protocol";
   import { debugLog } from "../utils/debugLogger";
   import {
     OVERLAY_UI_SCALE_MAX,
@@ -563,7 +564,7 @@
         unsub();
         cb();
       };
-      const unsub = runtime.onAckMessage((msg) => {
+      const unsub = runtime.onAckMessage((msg: AckMessage) => {
         if (isStale(seqId)) { finish(() => reject(new StaleLaunchSequenceError())); return; }
         if (msg.type === "layout_ack" && msg.seqId === seqId) {
           finish(() => {
@@ -595,7 +596,7 @@
         unsub();
         cb();
       };
-      const unsub = runtime.onAckMessage((msg) => {
+      const unsub = runtime.onAckMessage((msg: AckMessage) => {
         if (isStale(seqId)) { finish(() => reject(new StaleLaunchSequenceError())); return; }
         if (msg.type === "launch_ack" && msg.seqId === seqId && msg.pane === pane) {
           finish(() => {
@@ -662,7 +663,7 @@
         finish(() => resolve());
         return;
       }
-      unsub = runtime.onAckMessage((msg) => {
+      unsub = runtime.onAckMessage((msg: AckMessage) => {
         if (isStale(seqId)) { finish(() => reject(new StaleLaunchSequenceError())); return; }
         if (msg.type === "session_ready" && msg.seqId === seqId && msg.pane === pane) {
           emitVerboseLaunchDiag("session_wait_ack", {
@@ -789,27 +790,28 @@
       const unsub = compositorStore.subscribe(() => {
         tryResolve();
       });
-      const controlUnsub = runtime.control.onMessage((message) => {
+      const controlUnsub = runtime.control.onMessage((message: ControlMessage) => {
         if (isStale(seqId)) {
           cleanup();
           reject(new StaleLaunchSequenceError());
           return;
         }
         if (message.type !== "streamMetadata") return;
+        const metadata = message as StreamMetadata;
         if (
-          message.sessionId === "primary" &&
-          message.firstFrameReady &&
-          message.generation > primaryStartGen &&
-          metadataMatchesExpectedWidth(message, expectedPrimaryWidth)
+          metadata.sessionId === "primary" &&
+          metadata.firstFrameReady &&
+          metadata.generation > primaryStartGen &&
+          metadataMatchesExpectedWidth(metadata, expectedPrimaryWidth)
         ) {
           primaryMetadataReady = true;
         }
         if (
           hasSecondary &&
-          message.sessionId === "secondary" &&
-          message.firstFrameReady &&
-          message.generation > secondaryStartGen &&
-          metadataMatchesExpectedWidth(message, expectedSecondaryWidth)
+          metadata.sessionId === "secondary" &&
+          metadata.firstFrameReady &&
+          metadata.generation > secondaryStartGen &&
+          metadataMatchesExpectedWidth(metadata, expectedSecondaryWidth)
         ) {
           secondaryMetadataReady = true;
         }
@@ -1081,7 +1083,7 @@
       secondaryStartGen,
     });
     
-    let degradedReasonVal: 'launch_failure' | 'session_timeout' | 'stream_timeout' | '' = '';
+    let degradedReasonVal: LaunchDegradedReason = '';
     const startedAt = Date.now();
     let layoutAlignMs = 0;
     let layoutAckMs = 0;
@@ -1302,7 +1304,7 @@
             error: err instanceof Error ? err.message : String(err),
           });
           secondaryLaunchFailed = true;
-          degradedReasonVal = err.message.includes("session_timeout") ? "session_timeout" : "launch_failure";
+          degradedReasonVal = err instanceof Error && err.message.includes("session_timeout") ? "session_timeout" : "launch_failure";
         }
       }
 
@@ -1632,7 +1634,7 @@
 
   function toggleNotification(packageName: string) {
     const updated = notificationApps.includes(packageName)
-      ? notificationApps.filter((pkg) => pkg !== packageName)
+      ? notificationApps.filter((pkg: string) => pkg !== packageName)
       : [...notificationApps, packageName];
     onNotificationAppsChange(updated);
     touchDrawer();

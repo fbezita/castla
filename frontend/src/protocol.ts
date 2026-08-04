@@ -69,11 +69,18 @@ export interface NotificationMessage {
   postedAtMs: number;
 }
 
+export interface AckMessage extends Record<string, unknown> {
+  type: 'layout_ack' | 'launch_ack' | 'session_ready' | 'launch_failed';
+  seqId: number;
+  pane?: PaneId;
+  success?: boolean;
+}
 export type ControlMessage =
   | StreamMetadata
   | DiagnosticsMessage
   | NotificationMessage
   | ServerInitMessage
+  | AckMessage
   | Record<string, unknown>;
 
 export interface EncodedFrame {
@@ -85,4 +92,3 @@ export interface EncodedFrame {
   keyFrame: boolean;
   config: boolean;
 }
-

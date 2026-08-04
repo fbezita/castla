@@ -535,3 +535,10 @@ VD와 encoder가 서로 다른 크기를 사용하는 문제를 막기 위해 `D
 `release -> create -> attach surface -> begin stream generation -> start encoder -> request keyframe`
 
 실기기 로그에서 One UI 9의 앱 전환, 같은 VD Task 재사용, 해상도 변경, encoder 재연결을 확인했습니다. One UI 8.5는 호환성 fallback을 유지하지만 실기기 회귀 테스트는 별도 환경이 필요합니다.
+## 16. 2026-08-04 Runtime Boundary and Build Reproducibility Update
+
+The foreground service remains the Android lifecycle owner, while browser sessions, VD rebuild scheduling, encoder lifecycle, fallback remote input, and display-routing diagnostics are delegated to dedicated coordinators. `MirrorServer` delegates stream generation metadata, TLS setup, and HTTP/static content to dedicated server components.
+
+VD rebuild execution now uses a bounded 16-entry FIFO channel. Equivalent requests are coalesced by `RebuildRequestPolicy`; when the queue reaches capacity, coroutine producers suspend rather than allowing unbounded memory growth. Completion-bearing and immediate requests are never coalesced.
+
+The embedded frontend no longer injects the current wall-clock time on every build. Identical source builds use the latest commit SHA that changed `frontend/` by default and may receive an explicit `CASTLA_BUILD_TIMESTAMP` from release automation. This keeps generated asset hashes reproducible while retaining optional release diagnostics.

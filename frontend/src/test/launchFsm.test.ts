@@ -181,6 +181,7 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
       activePrimaryApp: '',
       activeSecondaryApp: '',
       popup: { visible: false, minimized: false, x: 0, y: 0, width: 0, height: 0 },
+      language: 'ko',
       launchSequence: {
         id: 0,
         primaryPkg: '',
@@ -300,7 +301,7 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
       } catch (err) {
         compositorStore.update(state => ({
           ...state,
-          launchSequence: { ...state.launchSequence, state: 'FAILED', error: err.message }
+          launchSequence: { ...state.launchSequence, state: 'FAILED', error: err instanceof Error ? err.message : String(err) }
         }));
       }
     })();
@@ -334,6 +335,7 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
       activePrimaryApp: 'com.android.settings',
       activeSecondaryApp: '',
       popup: { visible: false, minimized: false, x: 0, y: 0, width: 0, height: 0 },
+      language: 'ko',
       launchSequence: {
         id: seqId,
         primaryPkg: 'com.android.settings',
@@ -381,6 +383,7 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
       activePrimaryApp: 'com.android.settings',
       activeSecondaryApp: '',
       popup: { visible: false, minimized: false, x: 0, y: 0, width: 0, height: 0 },
+      language: 'ko',
       launchSequence: {
         id: seqId,
         primaryPkg: 'com.android.settings',
@@ -493,6 +496,7 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
       activePrimaryApp: 'com.android.settings',
       activeSecondaryApp: '',
       popup: { visible: false, minimized: false, x: 0, y: 0, width: 0, height: 0 },
+      language: 'ko',
       launchSequence: {
         id: seqId,
         primaryPkg: 'com.android.settings',
@@ -537,6 +541,7 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
       activePrimaryApp: 'com.example.app',
       activeSecondaryApp: '',
       popup: { visible: false, minimized: false, x: 0, y: 0, width: 0, height: 0 },
+      language: 'ko',
       launchSequence: {
         id: seqId,
         primaryPkg: 'com.example.app',
@@ -578,6 +583,7 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
       activePrimaryApp: 'com.google.android.youtube',
       activeSecondaryApp: 'com.disney.disneyplus',
       popup: { visible: false, minimized: false, x: 0, y: 0, width: 0, height: 0 },
+      language: 'ko',
       launchSequence: {
         id: seqId,
         primaryPkg: 'com.google.android.youtube',
@@ -675,7 +681,7 @@ describe('Castla E2E ACK Driven Launch State Machine Unit Tests', () => {
       } catch (err) {
         compositorStore.update(state => ({
           ...state,
-          launchSequence: { ...state.launchSequence, state: 'FAILED', error: err.message, degradedReason: degradedReasonVal }
+          launchSequence: { ...state.launchSequence, state: 'FAILED', error: err instanceof Error ? err.message : String(err), degradedReason: degradedReasonVal }
         }));
       }
     })();

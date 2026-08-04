@@ -20,6 +20,10 @@ graph TD
         TTM["ThermalThrottleManager"]
         ABM["AdaptiveBitrateManager"]
         PLM["PowerLockManager"]
+        BSC["BrowserSessionCoordinator"]
+        VRC["VirtualDisplayRebuildCoordinator"]
+        RIC["RemoteInputCoordinator (fallback)"]
+        ELC["EncoderLifecycleCoordinator"]
     end
 
     %% double independent pipelines
@@ -45,6 +49,9 @@ graph TD
         CS["ControlSocket (Control Protocol)"]
         VSP["VideoStreamSocket (Primary Video)"]
         VSS["VideoStreamSocket (Secondary Video)"]
+        SSC["StreamSessionCoordinator"]
+        TLS["ServerTlsConfigurator"]
+        HTTP["ServerHttpContent"]
     end
 
     %% client layer
@@ -58,6 +65,10 @@ graph TD
     MFS --> TTM
     MFS --> ABM
     MFS --> PLM
+    MFS --> BSC
+    MFS --> VRC
+    MFS --> RIC
+    MFS --> ELC
     MFS --> MS
     
     MFS --> PP
@@ -74,6 +85,9 @@ graph TD
     MS --> CS
     MS --> VSP
     MS --> VSS
+    MS --> SSC
+    MS --> TLS
+    MS --> HTTP
 
     CL -.->|Touch/Viewport/AppLaunch| CS
     VSP -.->|Primary H.264/MJPEG| CL
@@ -98,6 +112,14 @@ graph TD
   - `mirrorServer`: 브라우저와 통신하기 위한 내장 웹서버입니다.
   - `onBrowserConnected()` / `onBrowserDisconnected()`: 브라우저 연결/해제에 맞춰 fresh launch preparation, stream generation reset, encoder rebuild 흐름을 조율합니다.
 
+### 1.a) Extracted Coordinators
+- `BrowserSessionCoordinator`: browser connection, disconnect grace, pane visibility, and asynchronous teardown.
+- `VirtualDisplayRebuildCoordinator`: same-pane request coalescing, active-touch deferral, stale viewport filtering, and bounded sequential hardware execution. The queue capacity is 16; producers suspend when full.
+- `EncoderLifecycleCoordinator`: encoder replacement and stream-generation wakeup sequencing.
+- `RemoteInputCoordinator`: fallback Castla IME bridge only. Native Android IME inside the trusted VD remains the preferred path.
+- `DisplayRoutingDiagnostics`: display/IME routing diagnostics outside the orchestration body.
+
+`MirrorServer` likewise delegates stream metadata, TLS setup, and HTTP content to `StreamSessionCoordinator`, `ServerTlsConfigurator`, and `ServerHttpContent`.
 ### 2) `VirtualDisplayPipeline` (Symmetric Display Pipeline)
 - **역할**: 단일 가상 디스플레이가 필요로 하는 모든 상태(해상도, 인코더, 터치 주입기, 현재 앱 정보)를 캡슐화한 **독립 실행 단위**입니다. Primary와 Secondary 디스플레이가 동일한 클래스 인스턴스 2개로 완전히 대칭적으로 구동됩니다.
   - **핵심 캡슐화 내역**:

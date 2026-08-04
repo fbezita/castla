@@ -212,7 +212,7 @@ describe("canKeepCurrentLaunch", () => {
       isSecureContext: true,
       location: new URL("https://example.com"),
       VideoDecoder: function VideoDecoder() {},
-    } as Window & { VideoDecoder?: unknown };
+    } as unknown as Window & { VideoDecoder?: unknown };
 
     const state = createState();
     state.viewports.set("primary", {
@@ -327,7 +327,7 @@ describe("canReusePrimaryLaunchForRequest", () => {
       isSecureContext: true,
       location: new URL("https://example.com"),
       VideoDecoder: function VideoDecoder() {},
-    } as Window & { VideoDecoder?: unknown };
+    } as unknown as Window & { VideoDecoder?: unknown };
 
     const state = createState();
     state.layoutMode = "single";

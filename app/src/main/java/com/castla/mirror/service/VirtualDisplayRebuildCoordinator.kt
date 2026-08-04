@@ -10,20 +10,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 internal class VirtualDisplayRebuildCoordinator(private val host: MirrorForegroundService) {
     companion object { private const val TAG = "MirrorForegroundService" }
 
-    private data class Snapshot(
-        val width: Int,
-        val height: Int,
-        val force: Boolean,
-        val forceSingle: Boolean,
-        val requestedAt: Long,
-    )
-
-    private val channel = Channel<MirrorForegroundService.VdHardwareRequest>(Channel.UNLIMITED)
+    private val channel = Channel<MirrorForegroundService.VdHardwareRequest>(RebuildRequestPolicy.MAX_PENDING_REQUESTS)
     private val requestMutex = Mutex()
-    private val lastRequestByPane = java.util.concurrent.ConcurrentHashMap<String, Snapshot>()
+    private val lastRequestByPane = java.util.concurrent.ConcurrentHashMap<String, RebuildRequestPolicy.RequestSnapshot>()
     private var workerJob: Job? = null
 
     suspend fun request(request: MirrorForegroundService.RebuildRequest) {
@@ -42,12 +35,24 @@ internal class VirtualDisplayRebuildCoordinator(private val host: MirrorForegrou
         var coalesced = false
         requestMutex.withLock {
             val last = lastRequestByPane[request.pipelineName]
-            val duplicate = last != null && last.width == request.width && last.height == request.height &&
-                last.force == request.force && last.forceSingle == request.forceSingle && now - last.requestedAt <= 120L
-            if (duplicate && request.onComplete == null && request.priority != MirrorForegroundService.RebuildPriority.IMMEDIATE) {
-                coalesced = true
-            } else {
-                lastRequestByPane[request.pipelineName] = Snapshot(request.width, request.height, request.force, request.forceSingle, now)
+            coalesced = RebuildRequestPolicy.shouldCoalesce(
+                previous = last,
+                width = request.width,
+                height = request.height,
+                force = request.force,
+                forceSingle = request.forceSingle,
+                requestedAt = now,
+                hasCompletion = request.onComplete != null,
+                immediate = request.priority == MirrorForegroundService.RebuildPriority.IMMEDIATE,
+            )
+            if (!coalesced) {
+                lastRequestByPane[request.pipelineName] = RebuildRequestPolicy.RequestSnapshot(
+                    request.width,
+                    request.height,
+                    request.force,
+                    request.forceSingle,
+                    now,
+                )
             }
         }
         if (coalesced) {
@@ -81,19 +86,16 @@ internal class VirtualDisplayRebuildCoordinator(private val host: MirrorForegrou
         }
 
         pipeline.debugRebuildRequests += 1
-        val result = channel.trySend(
-            MirrorForegroundService.VdHardwareRequest.Rebuild(
-                request.requestId, request.reason, request.pipelineName, request.width, request.height,
-                request.force, request.forceSingle, request.onComplete,
+        try {
+            channel.send(
+                MirrorForegroundService.VdHardwareRequest.Rebuild(
+                    request.requestId, request.reason, request.pipelineName, request.width, request.height,
+                    request.force, request.forceSingle, request.onComplete,
+                )
             )
-        )
-        if (result.isFailure) {
-            val error = result.exceptionOrNull()
-            if (error != null) {
-                request.onComplete?.completeExceptionally(error)
-                throw error
-            }
-            request.onComplete?.complete(Unit)
+        } catch (t: Throwable) {
+            request.onComplete?.completeExceptionally(t)
+            throw t
         }
     }
 

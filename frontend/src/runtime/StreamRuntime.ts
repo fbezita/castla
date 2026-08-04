@@ -1,4 +1,4 @@
-import type { EncodedFrame, PaneId, StreamMetadata } from "../protocol";
+import type { AckMessage, EncodedFrame, PaneId, StreamMetadata } from "../protocol";
 import { ControlTransport } from "../transport/ControlTransport";
 import { VideoTransport } from "../transport/VideoTransport";
 import { AudioPlayer } from "../transport/AudioPlayer";
@@ -52,11 +52,11 @@ export class StreamRuntime {
    get isVideoFrozen(): boolean {     return this.videoFrozen;   }
   
   // E2E ACK and handshake capabilities indicators
-  private ackListeners = new Set<(message: any) => void>();
+  private ackListeners = new Set<(message: AckMessage) => void>();
   private supportsAckFeatures = false;
   private protocolVersion = "1.0.0";
 
-  onAckMessage(listener: (message: any) => void): () => void {
+  onAckMessage(listener: (message: AckMessage) => void): () => void {
     this.ackListeners.add(listener);
     return () => this.ackListeners.delete(listener);
   }
@@ -176,7 +176,7 @@ export class StreamRuntime {
         type === "session_ready" ||
         type === "launch_failed"
       ) {
-        this.ackListeners.forEach((listener) => listener(message));
+        this.ackListeners.forEach((listener) => listener(message as AckMessage));
       }
 
       // Handle remote touchReset commands sent from the server watchdog to break client-side pointer locks

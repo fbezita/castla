@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_NOTIFICATION_ALLOWED_PACKAGES,
+  normalizeNotificationAllowedPackages,
   normalizeNotificationOverlayEnabled,
   pruneOverlayNotifications,
+  shouldDisplayOverlayNotification,
   upsertOverlayNotification,
   type OverlayNotification,
 } from "../lib/notificationOverlay";

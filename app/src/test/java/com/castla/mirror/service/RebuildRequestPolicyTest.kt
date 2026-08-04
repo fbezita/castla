@@ -6,6 +6,43 @@ import org.junit.Test
 
 class RebuildRequestPolicyTest {
     @Test
+    fun queueCapacityIsBounded() {
+        assertTrue(RebuildRequestPolicy.MAX_PENDING_REQUESTS > 0)
+        assertTrue(RebuildRequestPolicy.MAX_PENDING_REQUESTS <= 64)
+    }
+
+    @Test
+    fun coalescesEquivalentRecentRequestWithoutCompletion() {
+        assertTrue(
+            RebuildRequestPolicy.shouldCoalesce(
+                previous = RebuildRequestPolicy.RequestSnapshot(720, 1280, force = false, forceSingle = false, requestedAt = 1_000L),
+                width = 720,
+                height = 1280,
+                force = false,
+                forceSingle = false,
+                requestedAt = 1_100L,
+                hasCompletion = false,
+                immediate = false,
+            )
+        )
+    }
+
+    @Test
+    fun keepsEquivalentRequestWhenCompletionMustBeSignalled() {
+        assertFalse(
+            RebuildRequestPolicy.shouldCoalesce(
+                previous = RebuildRequestPolicy.RequestSnapshot(720, 1280, force = false, forceSingle = false, requestedAt = 1_000L),
+                width = 720,
+                height = 1280,
+                force = false,
+                forceSingle = false,
+                requestedAt = 1_100L,
+                hasCompletion = true,
+                immediate = false,
+            )
+        )
+    }
+    @Test
     fun keepsRequestWhenBrowserLayoutNotReceived() {
         val skip = RebuildRequestPolicy.shouldSkipStaleRequest(
             requestWidth = 464,
