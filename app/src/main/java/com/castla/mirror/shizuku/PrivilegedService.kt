@@ -930,6 +930,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
         } ?: closeVirtualDevice(virtualDevice, displayId)
     }
 
+    @Suppress("OVERRIDE_DEPRECATION")
     override fun injectInput(displayId: Int, action: Int, x: Float, y: Float, pointerId: Int) {
         val now = SystemClock.uptimeMillis()
 

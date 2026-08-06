@@ -122,6 +122,23 @@ class FrontendNotificationFormatterTest {
     }
 
     @Test
+    fun `build preserves sender separately from conversation title`() {
+        val payload = FrontendNotificationFormatter.build(
+            packageName = "org.telegram.messenger",
+            appLabel = "Telegram",
+            title = "Family chat",
+            text = "Hello",
+            sender = " Alice ",
+            isOngoing = false,
+            isGroupSummary = false,
+        )
+
+        requireNotNull(payload)
+        assertEquals("Family chat", payload.title)
+        assertEquals("Alice", payload.sender)
+    }
+
+    @Test
     fun `build falls back title to app label when title missing`() {
         val payload = FrontendNotificationFormatter.build(
             packageName = "com.facebook.orca",

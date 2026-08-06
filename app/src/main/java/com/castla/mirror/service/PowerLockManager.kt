@@ -25,7 +25,9 @@ class PowerLockManager(private val context: Context) {
                 acquire(10 * 60 * 1000L) // 10 minutes timeout safeguard
             }
             val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "Castla::StreamingWifiLock").apply {
+            @Suppress("DEPRECATION")
+            val wifiMode = WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            wifiLock = wm.createWifiLock(wifiMode, "Castla::StreamingWifiLock").apply {
                 setReferenceCounted(false)
                 acquire()
             }

@@ -69,6 +69,8 @@
     }
   }
 
+  $: decoder?.setVideoLatencyMs(viewport.videoLatencyMs ?? 0);
+
   $: if (!viewport.committed) {
     hasCommittedOnce = false;
     hideSurface();
@@ -108,6 +110,7 @@
           () => runtime.isScreenOff,
           () => runtime.isVideoFrozen,
         );
+        nextDecoder.setVideoLatencyMs(viewport.videoLatencyMs ?? 0);
         await nextDecoder.initialize(canvas);
         runtime.setCodec(viewport.pane, "h264", "High");
       } else {
@@ -117,6 +120,7 @@
           (event, detail) =>
             runtime.reportDecoderStatus(viewport.pane, event, detail),
         );
+        nextDecoder.setVideoLatencyMs(viewport.videoLatencyMs ?? 0);
         await nextDecoder.initialize(video);
         runtime.setCodec(viewport.pane, "h264", "Baseline");
       }

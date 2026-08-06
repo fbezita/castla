@@ -2,6 +2,7 @@ package com.castla.mirror.server
 
 import android.util.Log
 import com.castla.mirror.diagnostics.FileLogger
+import com.castla.mirror.policy.VideoLatencyPolicy
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -13,6 +14,21 @@ internal class StreamSessionCoordinator(
     private val generations = ConcurrentHashMap<String, AtomicInteger>()
     private val firstFrameReady = ConcurrentHashMap<String, Boolean>()
     private val latestMetadata = ConcurrentHashMap<String, String>()
+    private val videoLatencyMs = ConcurrentHashMap<String, Int>()
+
+    fun setVideoLatency(channel: String, latencyMs: Int) {
+        val normalized = normalize(channel)
+        val clamped = latencyMs.coerceIn(VideoLatencyPolicy.MIN_LATENCY_MS, VideoLatencyPolicy.MAX_LATENCY_MS)
+        videoLatencyMs[normalized] = clamped
+        latestMetadata[normalized]?.let { cached ->
+            latestMetadata[normalized] = JSONObject(cached).put("videoLatencyMs", clamped).toString()
+        }
+        broadcastControl(JSONObject().apply {
+            put("type", "videoLatency")
+            put("pane", normalized)
+            put("videoLatencyMs", clamped)
+        }.toString())
+    }
 
     fun begin(channel: String, vdId: Int, width: Int, height: Int): Int {
         val normalized = normalize(channel)
@@ -65,6 +81,7 @@ internal class StreamSessionCoordinator(
             put("height", height)
             put("streamReady", streamReady)
             put("firstFrameReady", firstFrame)
+            put("videoLatencyMs", videoLatencyMs[channel] ?: 0)
         }.toString()
         latestMetadata[channel] = payload
         Log.i(TAG, "Stream metadata: channel=$channel vdId=$vdId generation=$generation ${width}x$height streamReady=$streamReady firstFrame=$firstFrame")

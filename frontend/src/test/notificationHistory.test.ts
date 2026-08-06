@@ -61,13 +61,14 @@ describe("notification history", () => {
     expect(history.map((item) => item.id)).toEqual(["old"]);
   });
 
-  it("replaces an updated notification with the same Android key", () => {
+  it("keeps each notification event with the same Android key", () => {
     const history = upsertNotificationHistory(
       [notification("same", 1)],
       { ...notification("same", 2), title: "Updated" },
     );
 
-    expect(history).toHaveLength(1);
+    expect(history).toHaveLength(2);
     expect(history[0].title).toBe("Updated");
+    expect(history[1].title).toBe("same");
   });
 });

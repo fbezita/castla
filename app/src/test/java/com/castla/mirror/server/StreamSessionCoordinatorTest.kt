@@ -51,4 +51,16 @@ class StreamSessionCoordinatorTest {
         assertFalse(metadata.getBoolean("firstFrameReady"))
         assertEquals(1, metadata.getInt("generation"))
     }
+    @Test
+    fun `latency update is included in replayed metadata`() {
+        val coordinator = StreamSessionCoordinator({}, { _, _, _, _, _ -> })
+        coordinator.begin("primary", 10, 1280, 720)
+        coordinator.setVideoLatency("primary", 1500)
+        val replayed = mutableListOf<String>()
+
+        coordinator.replayMetadata(replayed::add)
+
+        assertEquals(1000, JSONObject(replayed.single()).getInt("videoLatencyMs"))
+    }
+
 }

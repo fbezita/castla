@@ -32,7 +32,7 @@ class MirrorServerAuthTest {
     private fun mockSession(uri: String, params: Map<String, String> = emptyMap()): NanoHTTPD.IHTTPSession {
         val session = mockk<NanoHTTPD.IHTTPSession>(relaxed = true)
         every { session.uri } returns uri
-        every { session.parms } returns params
+        every { session.parameters } returns params.mapValues { (_, value) -> listOf(value) }
         every { session.remoteIpAddress } returns "192.168.1.100"
         return session
     }

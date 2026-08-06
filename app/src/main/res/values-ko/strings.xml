@@ -136,6 +136,10 @@
     <string name="settings_check_update_desc">GitHub에서 더 새로운 버전이 있는지 수동으로 확인합니다.</string>
     <string name="settings_checking_update">업데이트 확인 중...</string>
     <string name="toast_no_update_available">이미 최신 버전을 사용하고 있습니다.</string>
+    <string name="settings_video_sync_latency">영상 동기화</string>
+    <string name="settings_tesla_bt_latency">Tesla Bluetooth 출력: %1$d ms</string>
+    <string name="settings_streamed_audio_latency">스트리밍 오디오 출력: %1$d ms</string>
+    <string name="settings_video_sync_latency_description">VD별로 적용됩니다. 다이렉트 출력은 추가 지연 없이 렌더링하고 스트리밍 오디오는 별도 동기화 값을 사용합니다.</string>
 </resources>
 
 

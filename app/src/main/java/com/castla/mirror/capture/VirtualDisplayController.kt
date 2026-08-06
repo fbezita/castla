@@ -199,6 +199,7 @@ class VirtualDisplayController(private val displayName: String) {
                 svc.wakeUpDisplay(id)
             }
             
+            @Suppress("DEPRECATION")
             svc.injectInput(id, action, x, y, pointerId)
         } catch (e: Exception) {
             Log.e(TAG, "[$displayName] Failed to inject input on display $id", e)

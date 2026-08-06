@@ -22,6 +22,7 @@ class VirtualDisplayHomeActivity : Activity() {
         setContentView(view)
     }
 
+    @Suppress("OVERRIDE_DEPRECATION")
     override fun onBackPressed() {
         // Disable back button on the home screen
     }

@@ -1,3 +1,5 @@
+@file:Suppress("DEPRECATION")
+
 import java.util.Properties
 import java.util.concurrent.TimeUnit
 import java.text.SimpleDateFormat
@@ -91,7 +93,7 @@ android {
         minSdk = 26
         targetSdk = 37
         versionCode = 12
-        versionName = "2.7.2"
+        versionName = "2.7.3"
         buildConfigField("String", "BUILD_TIMESTAMP", "\"$buildTimestamp\"")
         buildConfigField("String", "CASTLA_CERT_PASSWORD", "\"${readSecret("CASTLA_CERT_PASSWORD")}\"")
         buildConfigField("String", "CASTLA_CERT_TOKEN", "\"${readSecret("CASTLA_CERT_TOKEN")}\"")

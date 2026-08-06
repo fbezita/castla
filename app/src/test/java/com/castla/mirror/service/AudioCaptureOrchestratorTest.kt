@@ -93,6 +93,20 @@ class AudioCaptureOrchestratorTest {
     }
 
     @Test
+    fun `audio socket first connection starts capture when audio and browser are enabled`() {
+        val result = orch.onAudioSocketConnected(
+            audioEnabled = true,
+            browserConnected = true,
+        )
+
+        assertEquals(AudioCaptureOrchestrator.EnsureResult.STARTED, result)
+        assertTrue(orch.audioSocketConnected)
+        assertTrue(orch.captureActive)
+        assertTrue(log.contains("start:default"))
+        assertFalse(deferScheduled)
+    }
+
+    @Test
     fun `deferred timer expiry starts with default codec`() {
         orch.audioEnabled = true
         orch.browserConnected = true

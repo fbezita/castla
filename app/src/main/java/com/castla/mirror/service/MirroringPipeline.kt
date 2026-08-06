@@ -158,6 +158,7 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
         @Volatile var consecutiveInjectionRejects = 0
         private val gatedPointerIds = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
         var isVideoApp = false
+        @Volatile var videoLatencyMs = 0
         var autoResolution: Boolean = false
         var autoFps: Boolean = false
         var currentMaxHeight: Int = 720

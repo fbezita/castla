@@ -220,7 +220,7 @@ class WebBrowserActivity : Activity() {
         Log.i(TAG, "WebBrowserActivity resumed")
     }
 
-    @Suppress("DEPRECATION")
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
     override fun onBackPressed() {
         if (customView != null) {
             webView.webChromeClient?.onHideCustomView()

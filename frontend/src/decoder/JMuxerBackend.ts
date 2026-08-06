@@ -3,6 +3,7 @@ import type { DecoderBackend } from './DecoderBackend';
 import { debugLog, triggerDump } from '../utils/debugLogger';
 import { compositorStore } from '../stores/compositorStore';
 import { get } from 'svelte/store';
+import { clampVideoLatencyMs, liveEdgeTargetSeconds } from './videoLatency';
 
 type JMuxerCtor = new (options: Record<string, unknown>) => { feed(data: Record<string, Uint8Array>): void; destroy(): void };
 const isVerboseJmuxerDiagnostics = (): boolean =>
@@ -77,6 +78,7 @@ export class JMuxerBackend implements DecoderBackend {
   private firstKeyframeSeen = false;
   private lastVideoStateAt = 0;
   private lastVideoStateSnapshot?: VideoStateSnapshot;
+  private videoLatencyMs = 0;
 
   private emitMirrorDiag(message: string, data: Record<string, unknown>): void {
     window.castlaRuntime?.control?.sendFrontendDiag?.("VIDEO_DEBUG", message, data);
@@ -108,6 +110,10 @@ export class JMuxerBackend implements DecoderBackend {
   constructor(onFrame?: () => void, onStatus?: (event: string, detail?: string) => void) {
     this.onFrame = onFrame;
     this.onStatus = onStatus;
+  }
+
+  setVideoLatencyMs(latencyMs: number): void {
+    this.videoLatencyMs = clampVideoLatencyMs(latencyMs);
   }
 
   async initialize(target: HTMLCanvasElement | HTMLVideoElement): Promise<void> {
@@ -414,6 +420,18 @@ export class JMuxerBackend implements DecoderBackend {
     try {
       const bufferedEnd = video.buffered.end(video.buffered.length - 1);
       const diff = bufferedEnd - video.currentTime;
+      if (this.videoLatencyMs > 0) {
+        const targetTime = liveEdgeTargetSeconds(bufferedEnd, video.buffered.start(0), this.videoLatencyMs);
+        if (Math.abs(video.currentTime - targetTime) > 0.08) {
+          const now = Date.now();
+          if (now - this.lastSyncTime >= 250) {
+            this.lastSyncTime = now;
+            video.currentTime = targetTime;
+            this.onStatus?.('videoLatencySync', `latencyMs=${this.videoLatencyMs} target=${targetTime.toFixed(2)}`);
+          }
+        }
+        return;
+      }
 
       // Relax threshold to 1.5s to prevent constant seek loops during normal decode variance.
       if (diff > 1.5) {

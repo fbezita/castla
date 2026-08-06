@@ -10,6 +10,7 @@ export interface StreamMetadata {
   height: number;
   streamReady: boolean;
   firstFrameReady: boolean;
+  videoLatencyMs?: number;
 }
 
 export interface DiagnosticsDisplay {
@@ -66,6 +67,7 @@ export interface NotificationMessage {
   appLabel: string;
   title: string;
   text: string;
+  sender?: string;
   postedAtMs: number;
   hasImage: boolean;
 }

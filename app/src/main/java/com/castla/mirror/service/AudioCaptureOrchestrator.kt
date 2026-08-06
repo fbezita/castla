@@ -83,13 +83,20 @@ class AudioCaptureOrchestrator(private val actions: Actions) {
      * Called when an audio WebSocket connects. If we were deferring, start
      * a short grace period for codec negotiation, then start.
      */
-    fun onAudioSocketConnected() {
+    fun onAudioSocketConnected(
+        audioEnabled: Boolean = this.audioEnabled,
+        browserConnected: Boolean = this.browserConnected,
+    ): EnsureResult {
+        this.audioEnabled = audioEnabled
+        this.browserConnected = browserConnected
         audioSocketConnected = true
         if (deferPending) {
             // Replace fallback timer with a short grace for codec negotiation
             actions.cancelDeferredStart(deferHandle)
             deferHandle = actions.scheduleDeferredStart(NEGOTIATION_GRACE_MS)
+            return EnsureResult.DEFERRED
         }
+        return ensure()
     }
 
     /**

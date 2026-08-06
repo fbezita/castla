@@ -48,6 +48,7 @@ class ScreenOffBlackoutActivity : Activity() {
         notifyBlackoutReadyOnce()
     }
 
+    @Suppress("DEPRECATION")
     private fun handleIntent(intent: Intent?) {
         if (intent?.action == ACTION_STOP) {
             finish()
@@ -67,6 +68,7 @@ class ScreenOffBlackoutActivity : Activity() {
         setContentView(content)
     }
 
+    @Suppress("DEPRECATION")
     private fun applyBlackoutWindow() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)

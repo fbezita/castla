@@ -338,6 +338,10 @@ class MainActivity : AppCompatActivity() {
                         onSettingsChanged = { newSettings ->
                             streamSettings = newSettings
                             StreamSettings.save(this@MainActivity, newSettings)
+                            mirrorService?.updateVideoLatencySettings(
+                                newSettings.teslaBluetoothVideoLatencyMs,
+                                newSettings.streamedAudioVideoLatencyMs,
+                            )
                         },
                         onBackClick = { showSettings = false },
                         onCheckUpdate = {
@@ -1263,6 +1267,8 @@ private fun resolveReachableMirrorIp(): String {
             )
             putExtra(MirrorForegroundService.EXTRA_FPS, streamSettings.fps) // FPS_AUTO is already 0
             putExtra(MirrorForegroundService.EXTRA_AUDIO, streamSettings.audioEnabled)
+            putExtra(MirrorForegroundService.EXTRA_TESLA_BT_VIDEO_LATENCY_MS, streamSettings.teslaBluetoothVideoLatencyMs)
+            putExtra(MirrorForegroundService.EXTRA_STREAMED_AUDIO_VIDEO_LATENCY_MS, streamSettings.streamedAudioVideoLatencyMs)
             putExtra(MirrorForegroundService.EXTRA_MIRRORING_MODE, streamSettings.mirroringMode.name)
             putExtra(MirrorForegroundService.EXTRA_TARGET_PACKAGE, streamSettings.targetAppPackage)
 

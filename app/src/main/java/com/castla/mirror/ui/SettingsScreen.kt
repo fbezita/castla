@@ -283,6 +283,51 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(20.dp))
 
+            SettingSection(title = stringResource(R.string.settings_video_sync_latency)) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = stringResource(R.string.settings_tesla_bt_latency, settings.teslaBluetoothVideoLatencyMs),
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Slider(
+                        value = settings.teslaBluetoothVideoLatencyMs.toFloat(),
+                        onValueChange = { value ->
+                            if (!settings.audioEnabled) {
+                                onSettingsChanged(settings.copy(teslaBluetoothVideoLatencyMs = (value / 10f).toInt() * 10))
+                            }
+                        },
+                        valueRange = 0f..com.castla.mirror.policy.VideoLatencyPolicy.MAX_LATENCY_MS.toFloat(),
+                        steps = (com.castla.mirror.policy.VideoLatencyPolicy.MAX_LATENCY_MS / 10) - 1,
+                        enabled = !settings.audioEnabled
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = stringResource(R.string.settings_streamed_audio_latency, settings.streamedAudioVideoLatencyMs),
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Slider(
+                        value = settings.streamedAudioVideoLatencyMs.toFloat(),
+                        onValueChange = { value ->
+                            onSettingsChanged(settings.copy(streamedAudioVideoLatencyMs = (value / 10f).toInt() * 10))
+                        },
+                        valueRange = 0f..com.castla.mirror.policy.VideoLatencyPolicy.MAX_LATENCY_MS.toFloat(),
+                        steps = (com.castla.mirror.policy.VideoLatencyPolicy.MAX_LATENCY_MS / 10) - 1,
+                        enabled = true
+                    )
+                    Text(
+                        text = stringResource(R.string.settings_video_sync_latency_description),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.6f)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
             // Auto Hotspot
             SettingSection(title = stringResource(R.string.settings_auto_hotspot)) {
                 Row(

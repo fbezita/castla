@@ -138,6 +138,8 @@ class MirrorForegroundService : Service() {
         const val EXTRA_MAX_RESOLUTION = "max_resolution"
         const val EXTRA_FPS = "fps"
         const val EXTRA_AUDIO = "audio_enabled"
+        const val EXTRA_TESLA_BT_VIDEO_LATENCY_MS = "tesla_bt_video_latency_ms"
+        const val EXTRA_STREAMED_AUDIO_VIDEO_LATENCY_MS = "streamed_audio_video_latency_ms"
         const val EXTRA_MIRRORING_MODE = "mirroring_mode"
         const val EXTRA_TARGET_PACKAGE = "target_package"
         const val EXTRA_RELAY_PUBLISH_IP = "relay_publish_ip"
@@ -285,6 +287,10 @@ class MirrorForegroundService : Service() {
 
     private var reconnectJob: Job? = null
     private var pendingAudioEnabled = false
+    private var teslaBluetoothVideoLatencyMs = 0
+    private var streamedAudioVideoLatencyMs = com.castla.mirror.policy.VideoLatencyPolicy.DEFAULT_STREAMED_AUDIO_LATENCY_MS
+    private var bluetoothAudioConnected = false
+    private lateinit var bluetoothAudioRouteMonitor: BluetoothAudioRouteMonitor
     private var deferredAudioStartJob: Job? = null
 
     private val browserSessionCoordinator = BrowserSessionCoordinator(this)
@@ -515,6 +521,11 @@ class MirrorForegroundService : Service() {
 
         pipelines["primary"] = MirroringPipeline(this, "primary", "Castla")
         pipelines["secondary"] = MirroringPipeline(this, "secondary", "Castla_Sec")
+        bluetoothAudioRouteMonitor = BluetoothAudioRouteMonitor(this) { connected ->
+            bluetoothAudioConnected = connected
+            refreshVideoLatencies()
+        }
+        bluetoothAudioRouteMonitor.start()
 
         instance = this
         isServiceRunning = true
@@ -559,6 +570,9 @@ class MirrorForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        if (::bluetoothAudioRouteMonitor.isInitialized) {
+            try { bluetoothAudioRouteMonitor.stop() } catch (_: Exception) {}
+        }
         screenOffCoordinator.stop()
 
         Log.i(TAG, "onDestroy() - Service is being destroyed by stopService() or system.")
@@ -652,6 +666,7 @@ class MirrorForegroundService : Service() {
 
                 // 1-2. Reflected the new guideline (isVideoApp) written in the ticket immediately to the pipeline context.
                 targetPipeline.isVideoApp = request.isVideoApp
+                refreshVideoLatencies()
 
                 // 1-3. Calculate the target profile based on the identification info of the app scheduled to start.
                 val newProfile = contentAwareQualityEngine.resolveContentProfile(
@@ -749,6 +764,8 @@ class MirrorForegroundService : Service() {
         val rawMaxHeight = intent?.getIntExtra(EXTRA_MAX_RESOLUTION, 0) ?: 0
         val rawFps = intent?.getIntExtra(EXTRA_FPS, 0) ?: 0
         pendingAudioEnabled = intent?.getBooleanExtra(EXTRA_AUDIO, false) ?: false
+        teslaBluetoothVideoLatencyMs = intent?.getIntExtra(EXTRA_TESLA_BT_VIDEO_LATENCY_MS, 0)?.coerceIn(com.castla.mirror.policy.VideoLatencyPolicy.MIN_LATENCY_MS, com.castla.mirror.policy.VideoLatencyPolicy.MAX_LATENCY_MS) ?: 0
+        streamedAudioVideoLatencyMs = intent?.getIntExtra(EXTRA_STREAMED_AUDIO_VIDEO_LATENCY_MS, com.castla.mirror.policy.VideoLatencyPolicy.DEFAULT_STREAMED_AUDIO_LATENCY_MS)?.coerceIn(com.castla.mirror.policy.VideoLatencyPolicy.MIN_LATENCY_MS, com.castla.mirror.policy.VideoLatencyPolicy.MAX_LATENCY_MS) ?: com.castla.mirror.policy.VideoLatencyPolicy.DEFAULT_STREAMED_AUDIO_LATENCY_MS
         mirroringMode = intent?.getStringExtra(EXTRA_MIRRORING_MODE) ?: "FULL_SCREEN"
         targetPackage = intent?.getStringExtra(EXTRA_TARGET_PACKAGE) ?: ""
         val runtimeSettings = com.castla.mirror.ui.StreamSettings.load(this)
@@ -778,6 +795,7 @@ class MirrorForegroundService : Service() {
             pipeline.autoFps = (rawFps == 0)
             pipeline.targetFps = if (pipeline.autoFps) 30 else rawFps
         }
+        refreshVideoLatencies()
 
         serviceScope.launch(Dispatchers.IO) {
             startPipeline(
@@ -786,6 +804,26 @@ class MirrorForegroundService : Service() {
         )
         }
         return START_NOT_STICKY
+    }
+
+    fun updateVideoLatencySettings(teslaBluetoothMs: Int, streamedAudioMs: Int) {
+        teslaBluetoothVideoLatencyMs = teslaBluetoothMs.coerceIn(com.castla.mirror.policy.VideoLatencyPolicy.MIN_LATENCY_MS, com.castla.mirror.policy.VideoLatencyPolicy.MAX_LATENCY_MS)
+        streamedAudioVideoLatencyMs = streamedAudioMs.coerceIn(com.castla.mirror.policy.VideoLatencyPolicy.MIN_LATENCY_MS, com.castla.mirror.policy.VideoLatencyPolicy.MAX_LATENCY_MS)
+        refreshVideoLatencies()
+    }
+
+    private fun refreshVideoLatencies() {
+        pipelines.forEach { (pane, pipeline) ->
+            val latencyMs = com.castla.mirror.policy.VideoLatencyPolicy.resolve(
+                audioEnabled = pendingAudioEnabled,
+                bluetoothAudioConnected = bluetoothAudioConnected,
+                bluetoothRoutedApp = pipeline.isVideoApp,
+                bluetoothLatencyMs = teslaBluetoothVideoLatencyMs,
+                streamedAudioLatencyMs = streamedAudioVideoLatencyMs,
+            )
+            pipeline.videoLatencyMs = latencyMs
+            mirrorServer?.setVideoLatency(pane, latencyMs)
+        }
     }
 
     private fun logImeSelectionState(event: String) {
@@ -1126,7 +1164,15 @@ class MirrorForegroundService : Service() {
                 server.setKeyEventListener { injectKeyEvent(it) }
                 server.setCompositionUpdateListener { bs, text -> injectCompositionUpdate(bs, text) }
                 server.setAudioCodecListener { codec -> serviceScope.launch(Dispatchers.IO) { ensureAudioCaptureState(codec) } }
-                server.setAudioSocketConnectedListener { audioOrchestrator?.onAudioSocketConnected() }
+                server.setAudioSocketConnectedListener {
+                    serviceScope.launch(Dispatchers.IO) {
+                        val result = audioOrchestrator?.onAudioSocketConnected(
+                            audioEnabled = pendingAudioEnabled && AudioCapture.isSupported(),
+                            browserConnected = true,
+                        )
+                        Log.i(TAG, "Audio socket connected; captureResult=$result audioEnabled=$pendingAudioEnabled")
+                    }
+                }
                 server.setBrowserRearmListener {
                     serviceScope.launch {
                         onBrowserConnected()
@@ -1223,6 +1269,7 @@ class MirrorForegroundService : Service() {
                 }
                 server.start(0)
             }
+            refreshVideoLatencies()
             MirrorWidgetProvider.updateAllWidgets(this)
         } catch (e: Exception) { Log.e(TAG, "Fatal error on startPipeline", e); stopSelf() }
     }

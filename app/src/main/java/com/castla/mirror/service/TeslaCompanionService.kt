@@ -47,12 +47,14 @@ class TeslaCompanionService : CompanionDeviceService() {
     // android.companion.AssociationInfo on older devices.
 
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    @Suppress("OVERRIDE_DEPRECATION")
     override fun onDeviceAppeared(associationInfo: android.companion.AssociationInfo) {
         Log.i(TAG, "Tesla device appeared: id=${associationInfo.id}")
         handleDeviceAppeared()
     }
 
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    @Suppress("OVERRIDE_DEPRECATION")
     override fun onDeviceDisappeared(associationInfo: android.companion.AssociationInfo) {
         Log.i(TAG, "Tesla device disappeared: id=${associationInfo.id}")
         TeslaDetectNotifier.dismiss(this)

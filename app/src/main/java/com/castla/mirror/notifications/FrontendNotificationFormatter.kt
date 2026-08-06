@@ -6,6 +6,7 @@ data class FrontendNotificationPayload(
     val appLabel: String,
     val title: String,
     val text: String,
+    val sender: String?,
     val postedAtMs: Long,
     val hasImage: Boolean,
 )
@@ -19,6 +20,7 @@ object FrontendNotificationFormatter {
         appLabel: String?,
         title: CharSequence?,
         text: CharSequence?,
+        sender: CharSequence? = null,
         isOngoing: Boolean,
         isGroupSummary: Boolean,
         postedAtMs: Long = System.currentTimeMillis(),
@@ -30,6 +32,7 @@ object FrontendNotificationFormatter {
         val sanitizedAppLabel = sanitize(appLabel, MAX_TITLE_LENGTH).ifBlank { packageName }
         val sanitizedTitle = sanitize(title, MAX_TITLE_LENGTH).ifBlank { sanitizedAppLabel }
         val sanitizedText = sanitize(text, MAX_TEXT_LENGTH)
+        val sanitizedSender = sanitize(sender, MAX_TITLE_LENGTH).ifBlank { null }
         if (sanitizedText.isBlank() && !hasImage) return null
 
         return FrontendNotificationPayload(
@@ -38,6 +41,7 @@ object FrontendNotificationFormatter {
             appLabel = sanitizedAppLabel,
             title = sanitizedTitle,
             text = sanitizedText,
+            sender = sanitizedSender,
             postedAtMs = postedAtMs,
             hasImage = hasImage,
         )

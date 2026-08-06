@@ -2,6 +2,7 @@ package com.castla.mirror.ui
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.castla.mirror.policy.VideoLatencyPolicy
 
 enum class MirroringMode { FULL_SCREEN, APP }
 
@@ -21,7 +22,9 @@ data class StreamSettings(
     // Prefer native Android IME rendered inside the trusted VirtualDisplay.
     // The Castla IME proxy remains available as a fallback path.
     val useNativeVirtualDisplayIme: Boolean = true,
-    val verboseDiagnosticsEnabled: Boolean = false
+    val verboseDiagnosticsEnabled: Boolean = false,
+    val teslaBluetoothVideoLatencyMs: Int = 0,
+    val streamedAudioVideoLatencyMs: Int = VideoLatencyPolicy.DEFAULT_STREAMED_AUDIO_LATENCY_MS
 
 ) {
     enum class Resolution(val maxHeight: Int, val label: String) {
@@ -48,6 +51,8 @@ data class StreamSettings(
         private const val KEY_WEBCODECS = "webcodecs"
         private const val KEY_NATIVE_VD_IME = "native_vd_ime"
         private const val KEY_VERBOSE_DIAGNOSTICS = "verbose_diagnostics"
+        private const val KEY_TESLA_BT_VIDEO_LATENCY_MS = "tesla_bt_video_latency_ms"
+        private const val KEY_STREAMED_AUDIO_VIDEO_LATENCY_MS = "streamed_audio_video_latency_ms"
 
         /** Sentinel value indicating auto FPS mode. Must not collide with real FPS values. */
         const val FPS_AUTO = 0
@@ -75,7 +80,9 @@ data class StreamSettings(
                 autoHotspot = prefs.getBoolean(KEY_AUTO_HOTSPOT, true),
                 webCodecsEnabled = prefs.getBoolean(KEY_WEBCODECS, true),
                 useNativeVirtualDisplayIme = prefs.getBoolean(KEY_NATIVE_VD_IME, true),
-                verboseDiagnosticsEnabled = prefs.getBoolean(KEY_VERBOSE_DIAGNOSTICS, false)
+                verboseDiagnosticsEnabled = prefs.getBoolean(KEY_VERBOSE_DIAGNOSTICS, false),
+                teslaBluetoothVideoLatencyMs = prefs.getInt(KEY_TESLA_BT_VIDEO_LATENCY_MS, 0).coerceIn(VideoLatencyPolicy.MIN_LATENCY_MS, VideoLatencyPolicy.MAX_LATENCY_MS),
+                streamedAudioVideoLatencyMs = prefs.getInt(KEY_STREAMED_AUDIO_VIDEO_LATENCY_MS, VideoLatencyPolicy.DEFAULT_STREAMED_AUDIO_LATENCY_MS).coerceIn(VideoLatencyPolicy.MIN_LATENCY_MS, VideoLatencyPolicy.MAX_LATENCY_MS)
             )
         }
 
@@ -91,6 +98,8 @@ data class StreamSettings(
                 .putBoolean(KEY_WEBCODECS, settings.webCodecsEnabled)
                 .putBoolean(KEY_NATIVE_VD_IME, settings.useNativeVirtualDisplayIme)
                 .putBoolean(KEY_VERBOSE_DIAGNOSTICS, settings.verboseDiagnosticsEnabled)
+                .putInt(KEY_TESLA_BT_VIDEO_LATENCY_MS, settings.teslaBluetoothVideoLatencyMs.coerceIn(VideoLatencyPolicy.MIN_LATENCY_MS, VideoLatencyPolicy.MAX_LATENCY_MS))
+                .putInt(KEY_STREAMED_AUDIO_VIDEO_LATENCY_MS, settings.streamedAudioVideoLatencyMs.coerceIn(VideoLatencyPolicy.MIN_LATENCY_MS, VideoLatencyPolicy.MAX_LATENCY_MS))
                 .apply()
         }
     }

@@ -5,6 +5,11 @@
     <string name="tesla_detect_channel">Tesla Auto-Detect</string>
     <string name="tesla_detected_title">Tesla detected</string>
     <string name="tesla_detected_text">Tap to start Castla mirroring</string>
+    <string name="title_ble_fallback">BLE fallback scanner</string>
+    <string name="desc_ble_fallback">Scan for Tesla BLE signals as a fallback detection method</string>
+    <string name="toast_ble_scan_enabled">BLE fallback scanner enabled</string>
+    <string name="toast_ble_scan_disabled">BLE fallback scanner disabled</string>
+    <string name="toast_ble_permission_denied">BLE scan permission required</string>
 
     <string name="toast_screen_capture_granted">Screen capture granted!</string>
     <string name="toast_screen_capture_denied">Screen capture denied (code=%d)</string>
@@ -141,6 +146,10 @@
     <string name="settings_check_update_desc">Manually check if a newer version is available on GitHub.</string>
     <string name="settings_checking_update">Checking for updates...</string>
     <string name="toast_no_update_available">You are already on the latest version.</string>
+    <string name="settings_video_sync_latency">Video synchronization</string>
+    <string name="settings_tesla_bt_latency">Tesla Bluetooth output: %1$d ms</string>
+    <string name="settings_streamed_audio_latency">Streamed audio output: %1$d ms</string>
+    <string name="settings_video_sync_latency_description">Applied per virtual display. Direct output has no additional delay. Streamed audio uses its own synchronization value.</string>
 </resources>
 
 

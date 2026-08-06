@@ -37,6 +37,16 @@ export class BrowserCompositor {
     if (message.type === 'streamMetadata') {
       this.applyStreamMetadata(message as StreamMetadata);
     }
+    if (message.type === 'videoLatency') {
+      const pane = String(message.pane ?? 'primary');
+      const videoLatencyMs = Number(message.videoLatencyMs ?? 0);
+      this.store.update((state) => {
+        const viewports = new Map(state.viewports);
+        const previous = viewports.get(pane);
+        if (previous) viewports.set(pane, { ...previous, videoLatencyMs });
+        return { ...state, viewports };
+      });
+    }
     if (message.type === 'diagnostics') {
       const diagnostics = message as DiagnosticsMessage;
       this.store.update((state) => ({
@@ -59,7 +69,8 @@ export class BrowserCompositor {
         streamHeight: metadata.height,
         committed: metadata.firstFrameReady,
         generation: metadata.generation,
-        visible: previous?.visible ?? metadata.sessionId === 'primary'
+        visible: previous?.visible ?? metadata.sessionId === 'primary',
+        videoLatencyMs: metadata.videoLatencyMs ?? previous?.videoLatencyMs ?? 0
       });
       return { ...state, viewports };
     });

@@ -46,9 +46,10 @@
               <span>{group.appLabel}</span>
               <span>{group.items.length}</span>
             </header>
-            {#each group.items as item (item.id)}
+            {#each group.items as item}
               <article class="history-item">
                 <div class="notification-title">{item.title}</div>
+                {#if item.sender}<div class="notification-sender">{item.sender}</div>{/if}
                 <div class="notification-text">{formatNotificationText(item, $compositorStore.language)}</div>
               </article>
             {/each}
@@ -62,6 +63,7 @@
           <div class="notification-info">
             <div class="notification-app">{item.appLabel}</div>
             <div class="notification-title">{item.title}</div>
+            {#if item.sender}<div class="notification-sender">{item.sender}</div>{/if}
           </div>
 
           <button
@@ -182,6 +184,14 @@
   .notification-title {
     font-size: 16px;
     font-weight: 800;
+    word-break: break-word;
+  }
+
+  .notification-sender {
+    margin-top: 4px;
+    color: rgba(248, 251, 255, 0.68);
+    font-size: 13px;
+    font-weight: 700;
     word-break: break-word;
   }
 

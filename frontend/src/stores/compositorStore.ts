@@ -76,6 +76,7 @@ export interface ViewportModel {
   committed: boolean;
   generation: number;
   visible: boolean;
+  videoLatencyMs?: number;
 }
 
 export interface CompositorState {

@@ -24,17 +24,26 @@ class CastlaNotificationListenerService : NotificationListenerService() {
             sbn.packageName
         }
 
-        val title = extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)
-            ?: extras.getCharSequence(Notification.EXTRA_TITLE)
+        val conversationTitle = extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)
+        val fallbackTitle = extras.getCharSequence(Notification.EXTRA_TITLE)
             ?: extras.getCharSequence(Notification.EXTRA_TITLE_BIG)
+        val title = conversationTitle ?: fallbackTitle
         val text = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)
             ?: extras.getCharSequence(Notification.EXTRA_TEXT)
+        val latestMessage = messagingBundles(extras)
+            ?.let { bundles -> Notification.MessagingStyle.Message.getMessagesFromBundleArray(bundles) }
+            ?.lastOrNull()
+        val sender = senderName(latestMessage)
+            ?: fallbackTitle?.takeIf { fallback ->
+                conversationTitle != null && fallback.toString() != conversationTitle.toString()
+            }
 
         val payload = FrontendNotificationFormatter.build(
             packageName = sbn.packageName,
             appLabel = appLabel,
             title = title,
             text = text,
+            sender = sender,
             isOngoing = sbn.isOngoing,
             isGroupSummary = notification.flags and Notification.FLAG_GROUP_SUMMARY != 0,
             postedAtMs = sbn.postTime,
@@ -50,6 +59,7 @@ class CastlaNotificationListenerService : NotificationListenerService() {
                 put("appLabel", payload.appLabel)
                 put("title", payload.title)
                 put("text", payload.text)
+                payload.sender?.let { put("sender", it) }
                 put("postedAtMs", payload.postedAtMs)
                 put("hasImage", payload.hasImage)
             }.toString()
@@ -63,6 +73,16 @@ class CastlaNotificationListenerService : NotificationListenerService() {
         } else {
             extras.getParcelableArray(Notification.EXTRA_MESSAGES)
         }
+
+    @Suppress("DEPRECATION")
+    private fun senderName(message: Notification.MessagingStyle.Message?): CharSequence? {
+        if (message == null) return null
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            message.senderPerson?.name ?: message.sender
+        } else {
+            message.sender
+        }
+    }
 
     private fun hasImage(extras: Bundle): Boolean {
         if (extras.containsKey(Notification.EXTRA_PICTURE)) return true

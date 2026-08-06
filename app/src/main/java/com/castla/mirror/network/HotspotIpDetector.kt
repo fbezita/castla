@@ -41,7 +41,7 @@ object HotspotIpDetector {
                 .flatMap { nif ->
                     nif.inetAddresses.toList()
                         .filterIsInstance<Inet4Address>()
-                        .map { addr -> nif.name to addr.hostAddress }
+                        .mapNotNull { addr -> addr.hostAddress?.let { ip -> nif.name to ip } }
                 }
                 .filter { (_, ip) -> isUsablePrivateIpv4(ip) }
                 .sortedWith(

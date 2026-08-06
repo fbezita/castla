@@ -1,5 +1,6 @@
 import type { EncodedFrame } from "../protocol";
 import type { DecoderBackend } from "./DecoderBackend";
+import { clampVideoLatencyMs } from "./videoLatency";
 
 /**
  * WebCodecs backend.
@@ -33,6 +34,9 @@ export class WebCodecsBackend implements DecoderBackend {
   private onStatus?: (event: string, detail?: string) => void;
   private isScreenOff?: () => boolean;
   private isVideoFrozen?: () => boolean;
+  private videoLatencyMs = 0;
+  private pendingRenderTimers = new Set<number>();
+  private pendingFrames = new Set<VideoFrame>();
 
   private lastLatencyRecoveryAt = 0;
 
@@ -70,6 +74,13 @@ export class WebCodecsBackend implements DecoderBackend {
 
     this.createDecoder();
     this.onStatus?.("webcodecsReady", `secure=${window.isSecureContext}`);
+  }
+
+  setVideoLatencyMs(latencyMs: number): void {
+    const next = clampVideoLatencyMs(latencyMs);
+    if (next === this.videoLatencyMs) return;
+    this.clearPendingFrames();
+    this.videoLatencyMs = next;
   }
 
   decode(frame: EncodedFrame): void {
@@ -176,6 +187,7 @@ export class WebCodecsBackend implements DecoderBackend {
 
   destroy(): void {
     this.destroyed = true;
+    this.clearPendingFrames();
     try {
       this.decoder?.close();
     } catch {
@@ -194,7 +206,7 @@ export class WebCodecsBackend implements DecoderBackend {
     if (this.decoder && this.decoder.state !== "closed") return;
 
     this.decoder = new VideoDecoder({
-      output: (frame) => this.renderFrame(frame),
+      output: (frame) => this.scheduleRenderFrame(frame),
       error: (error) => {
         console.error(`[WebCodecs] VideoDecoder error: ${error.message}`);
         this.hasDecodedKeyframe = false;
@@ -246,6 +258,27 @@ export class WebCodecsBackend implements DecoderBackend {
     } finally {
       this.pendingConfigure = false;
     }
+  }
+
+  private scheduleRenderFrame(frame: VideoFrame): void {
+    if (this.videoLatencyMs <= 0) {
+      this.renderFrame(frame);
+      return;
+    }
+    this.pendingFrames.add(frame);
+    const timer = window.setTimeout(() => {
+      this.pendingRenderTimers.delete(timer);
+      this.pendingFrames.delete(frame);
+      if (this.destroyed) frame.close(); else this.renderFrame(frame);
+    }, this.videoLatencyMs);
+    this.pendingRenderTimers.add(timer);
+  }
+
+  private clearPendingFrames(): void {
+    this.pendingRenderTimers.forEach((timer) => window.clearTimeout(timer));
+    this.pendingRenderTimers.clear();
+    this.pendingFrames.forEach((frame) => frame.close());
+    this.pendingFrames.clear();
   }
 
   private renderFrame(frame: VideoFrame): void {

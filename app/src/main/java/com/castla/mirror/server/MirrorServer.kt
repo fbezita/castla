@@ -528,6 +528,10 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     fun beginStreamGeneration(channel: String = "primary", vdId: Int, width: Int, height: Int): Int =
         streamSessions.begin(channel, vdId, width, height)
 
+    fun setVideoLatency(channel: String = "primary", latencyMs: Int) {
+        streamSessions.setVideoLatency(channel, latencyMs)
+    }
+
     fun markFirstFrameReady(channel: String = "primary", vdId: Int, width: Int, height: Int) {
         streamSessions.markFirstFrameReady(channel, vdId, width, height)
     }

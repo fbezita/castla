@@ -6,6 +6,7 @@ export interface OverlayNotification {
   appLabel: string;
   title: string;
   text: string;
+  sender?: string;
   postedAtMs: number;
   hasImage?: boolean;
 }
@@ -130,6 +131,5 @@ export function upsertNotificationHistory(
   history: OverlayNotification[],
   next: OverlayNotification,
 ): OverlayNotification[] {
-  const deduped = history.filter((item) => item.id !== next.id);
-  return [next, ...deduped].slice(0, MAX_NOTIFICATION_HISTORY);
+  return [next, ...history].slice(0, MAX_NOTIFICATION_HISTORY);
 }
