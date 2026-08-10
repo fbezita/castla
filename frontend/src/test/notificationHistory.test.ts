@@ -37,11 +37,12 @@ describe("notification history", () => {
     expect(formatNotificationText(notification("plain", 3), "en")).toBe("Hello");
   });
 
-  it("groups notifications by app in latest-app order", () => {
+  it("groups notifications by app and conversation in latest order", () => {
     const history = [
-      { ...notification("kakao-new", 4), packageName: "com.kakao.talk", appLabel: "KakaoTalk" },
-      { ...notification("telegram", 3), packageName: "org.telegram.messenger", appLabel: "Telegram" },
-      { ...notification("kakao-old", 2), packageName: "com.kakao.talk", appLabel: "KakaoTalk" },
+      { ...notification("kakao-new", 5), packageName: "com.kakao.talk", appLabel: "KakaoTalk", title: "Family" },
+      { ...notification("telegram", 4), packageName: "org.telegram.messenger", appLabel: "Telegram", title: "Team" },
+      { ...notification("kakao-other", 3), packageName: "com.kakao.talk", appLabel: "KakaoTalk", title: "Work" },
+      { ...notification("kakao-old", 2), packageName: "com.kakao.talk", appLabel: "KakaoTalk", title: "Family" },
     ];
 
     const groups = groupNotificationHistory(history);
@@ -50,7 +51,9 @@ describe("notification history", () => {
       "com.kakao.talk",
       "org.telegram.messenger",
     ]);
-    expect(groups[0].items.map((item) => item.id)).toEqual(["kakao-new", "kakao-old"]);
+    expect(groups[0].count).toBe(3);
+    expect(groups[0].conversations.map((conversation) => conversation.title)).toEqual(["Family", "Work"]);
+    expect(groups[0].conversations[0].items.map((item) => item.id)).toEqual(["kakao-new", "kakao-old"]);
     expect(groups[0].appLabel).toBe("KakaoTalk");
   });
 

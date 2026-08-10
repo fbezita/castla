@@ -24,15 +24,22 @@ class CastlaNotificationListenerService : NotificationListenerService() {
             sbn.packageName
         }
 
-        val conversationTitle = extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)
+        val messages = messagingBundles(extras)
+            ?.let { bundles -> Notification.MessagingStyle.Message.getMessagesFromBundleArray(bundles) }
+            .orEmpty()
+        val explicitConversationTitle = extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)
+        val subText = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)
         val fallbackTitle = extras.getCharSequence(Notification.EXTRA_TITLE)
             ?: extras.getCharSequence(Notification.EXTRA_TITLE_BIG)
-        val title = conversationTitle ?: fallbackTitle
+        val conversationTitle = FrontendNotificationFormatter.resolveConversationTitle(
+            explicitConversationTitle = explicitConversationTitle,
+            subText = subText,
+            fallbackTitle = fallbackTitle,
+            hasMessagingMessages = messages.isNotEmpty(),
+        )
         val text = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)
             ?: extras.getCharSequence(Notification.EXTRA_TEXT)
-        val latestMessage = messagingBundles(extras)
-            ?.let { bundles -> Notification.MessagingStyle.Message.getMessagesFromBundleArray(bundles) }
-            ?.lastOrNull()
+        val latestMessage = messages.lastOrNull()
         val sender = senderName(latestMessage)
             ?: fallbackTitle?.takeIf { fallback ->
                 conversationTitle != null && fallback.toString() != conversationTitle.toString()
@@ -41,7 +48,7 @@ class CastlaNotificationListenerService : NotificationListenerService() {
         val payload = FrontendNotificationFormatter.build(
             packageName = sbn.packageName,
             appLabel = appLabel,
-            title = title,
+            title = conversationTitle,
             text = text,
             sender = sender,
             isOngoing = sbn.isOngoing,

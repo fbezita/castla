@@ -64,6 +64,8 @@
     overlayUiScalePreference,
     notificationOverlayEnabled,
     notificationApps = [],
+    notificationHistoryCount = 0,
+    onOpenNotificationHistory,
     onOverlayUiScalePreferenceChange,
     onNotificationOverlayEnabledChange,
     onNotificationAppsChange,
@@ -74,6 +76,8 @@
     overlayUiScalePreference: OverlayUiScalePreference;
     notificationOverlayEnabled: boolean;
     notificationApps: string[];
+    notificationHistoryCount: number;
+    onOpenNotificationHistory: () => void;
     onOverlayUiScalePreferenceChange: (preference: OverlayUiScalePreference) => void;
     onNotificationOverlayEnabledChange: (enabled: boolean) => void;
     onNotificationAppsChange: (apps: string[]) => void;
@@ -2536,6 +2540,13 @@
     );
   }
 
+  function openNotificationHistoryFromSettings() {
+    if (notificationHistoryCount === 0) return;
+    settingsOpen = false;
+    drawerOpen = false;
+    onOpenNotificationHistory();
+  }
+
   function formatUiScaleOption(option: OverlayUiScalePreference): string {
     return `${Math.round(option * 100)}%`;
   }
@@ -2671,6 +2682,18 @@
               onclick={toggleNotificationOverlay}
             >
               {notificationOverlayActionLabel()}
+            </button>
+          </div>
+        </div>
+        <div class="settings-inline-row notification-history-settings-row">
+          <div class="settings-inline-group">
+            <strong>{t($compositorStore.language, "notificationHistory")}</strong>
+            <button
+              class="diag-toggle-btn"
+              disabled={notificationHistoryCount === 0}
+              onclick={openNotificationHistoryFromSettings}
+            >
+              {t($compositorStore.language, "notificationHistoryOpen")} ({notificationHistoryCount})
             </button>
           </div>
         </div>
@@ -3155,6 +3178,15 @@
   .diag-toggle-btn:hover {
     background: rgba(255, 255, 255, 0.08);
     color: #ffffff;
+  }
+
+  .diag-toggle-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .notification-history-settings-row {
+    margin-top: 8px;
   }
 
   .drawer-settings {

@@ -1,13 +1,99 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { formatNotificationText, groupNotificationHistory, type OverlayNotification } from "../lib/notificationOverlay";
   import { t } from "../lib/i18n";
   import { compositorStore } from "../stores/compositorStore";
 
-  let { items = [], history = [] } = $props<{ items: OverlayNotification[]; history?: OverlayNotification[] }>();
+  let {
+    items = [],
+    history = [],
+    openRequest = 0,
+    autoReveal = true,
+  } = $props<{
+    items: OverlayNotification[];
+    history?: OverlayNotification[];
+    openRequest?: number;
+    autoReveal?: boolean;
+  }>();
+
+  type HistoryButtonVisibility = "visible" | "faded" | "hidden";
 
   let expanded = $state(new Set<string>());
   let historyOpen = $state(false);
+  let historyButtonVisibility = $state<HistoryButtonVisibility>("hidden");
+  let latestHistoryItem = $state<OverlayNotification | undefined>(undefined);
+  let handledOpenRequest = $state(0);
+  let historyFadeTimer: number | undefined;
+  let historyHideTimer: number | undefined;
+
   const AUTO_COLLAPSE_MS = 10_000;
+  const HISTORY_FADE_DELAY_MS = 5_000;
+  const HISTORY_HIDE_DELAY_MS = 8_000;
+
+  function clearHistoryButtonTimers() {
+    if (historyFadeTimer !== undefined) window.clearTimeout(historyFadeTimer);
+    if (historyHideTimer !== undefined) window.clearTimeout(historyHideTimer);
+    historyFadeTimer = undefined;
+    historyHideTimer = undefined;
+  }
+
+  function scheduleHistoryButtonFade() {
+    clearHistoryButtonTimers();
+    historyFadeTimer = window.setTimeout(() => {
+      if (!historyOpen) historyButtonVisibility = "faded";
+    }, HISTORY_FADE_DELAY_MS);
+    historyHideTimer = window.setTimeout(() => {
+      if (!historyOpen) historyButtonVisibility = "hidden";
+    }, HISTORY_HIDE_DELAY_MS);
+  }
+
+  function revealHistoryButton() {
+    historyButtonVisibility = "visible";
+    scheduleHistoryButtonFade();
+  }
+
+  function openHistory() {
+    if (history.length === 0) return;
+    clearHistoryButtonTimers();
+    historyButtonVisibility = "visible";
+    historyOpen = true;
+  }
+
+  function closeHistory() {
+    historyOpen = false;
+    revealHistoryButton();
+  }
+
+  function toggleHistory() {
+    if (historyOpen) closeHistory();
+    else openHistory();
+  }
+
+  $effect(() => {
+    const newest = history[0];
+    if (!newest) {
+      latestHistoryItem = undefined;
+      historyOpen = false;
+      historyButtonVisibility = "hidden";
+      clearHistoryButtonTimers();
+    } else if (newest !== latestHistoryItem) {
+      latestHistoryItem = newest;
+      if (autoReveal) revealHistoryButton();
+    }
+  });
+
+  $effect(() => {
+    if (openRequest === handledOpenRequest) return;
+    handledOpenRequest = openRequest;
+    openHistory();
+  });
+
+  $effect(() => {
+    if (!autoReveal && !historyOpen) {
+      historyButtonVisibility = "hidden";
+      clearHistoryButtonTimers();
+    }
+  });
 
   function toggle(id: string) {
     const next = new Set(expanded);
@@ -17,7 +103,6 @@
     } else {
       next.add(id);
 
-      // 10초 후 자동 접기
       setTimeout(() => {
         if (!expanded.has(id)) return;
 
@@ -29,14 +114,18 @@
 
     expanded = next;
   }
+
+  onDestroy(clearHistoryButtonTimers);
 </script>
 
-{#if items.length > 0 || history.length > 0}
+{#if items.length > 0 || historyOpen || historyButtonVisibility !== "hidden"}
   <section class="notification-overlay" aria-live="polite">
-    {#if history.length > 0}
-      <button class="history-toggle" onclick={() => (historyOpen = !historyOpen)}>
-        {historyOpen ? t($compositorStore.language, "notificationHistoryClose") : `${t($compositorStore.language, "notificationHistory")} (${history.length})`}
-      </button>
+    {#if history.length > 0 && historyButtonVisibility !== "hidden"}
+      <div class:faded={historyButtonVisibility === "faded"} class="history-actions">
+        <button class="history-toggle" onclick={toggleHistory}>
+          {historyOpen ? t($compositorStore.language, "notificationHistoryClose") : `${t($compositorStore.language, "notificationHistory")} (${history.length})`}
+        </button>
+      </div>
     {/if}
     {#if historyOpen}
       <div class="notification-history">
@@ -44,14 +133,21 @@
           <section class="history-group">
             <header class="history-group-header">
               <span>{group.appLabel}</span>
-              <span>{group.items.length}</span>
+              <span>{group.count}</span>
             </header>
-            {#each group.items as item}
-              <article class="history-item">
-                <div class="notification-title">{item.title}</div>
-                {#if item.sender}<div class="notification-sender">{item.sender}</div>{/if}
-                <div class="notification-text">{formatNotificationText(item, $compositorStore.language)}</div>
-              </article>
+            {#each group.conversations as conversation}
+              <section class="history-conversation">
+                <header class="history-conversation-header">
+                  <span>{conversation.title}</span>
+                  <span>{conversation.items.length}</span>
+                </header>
+                {#each conversation.items as item}
+                  <article class="history-item">
+                    {#if item.sender}<div class="notification-sender">{item.sender}</div>{/if}
+                    <div class="notification-text">{formatNotificationText(item, $compositorStore.language)}</div>
+                  </article>
+                {/each}
+              </section>
             {/each}
           </section>
         {/each}
@@ -99,6 +195,17 @@
     pointer-events: none;
   }
 
+  .history-actions {
+    display: flex;
+    justify-self: start;
+    opacity: 0.9;
+    transition: opacity 300ms ease;
+  }
+
+  .history-actions.faded {
+    opacity: 0.2;
+  }
+
   .history-toggle {
     pointer-events: auto;
     justify-self: start;
@@ -138,11 +245,29 @@
     font-weight: 800;
   }
 
-  .history-item {
-    padding: 12px 14px;
+  .history-conversation {
+    display: grid;
+    gap: 6px;
+    padding: 8px;
     border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 14px;
     background: rgba(8, 12, 20, 0.92);
+  }
+
+  .history-conversation-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 2px 4px 6px;
+    color: #f8fbff;
+    font-size: 15px;
+    font-weight: 800;
+  }
+
+  .history-item {
+    padding: 10px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.05);
   }
 
   .notification-card {

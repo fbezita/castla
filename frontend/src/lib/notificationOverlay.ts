@@ -99,10 +99,16 @@ export function formatNotificationText(
   return notification.text ? `${imageLabel} · ${notification.text}` : imageLabel;
 }
 
+export interface NotificationConversationGroup {
+  title: string;
+  items: OverlayNotification[];
+}
+
 export interface NotificationHistoryGroup {
   packageName: string;
   appLabel: string;
-  items: OverlayNotification[];
+  count: number;
+  conversations: NotificationConversationGroup[];
 }
 
 export function groupNotificationHistory(
@@ -112,16 +118,24 @@ export function groupNotificationHistory(
   const newestFirst = [...history].sort((left, right) => right.postedAtMs - left.postedAtMs);
 
   for (const item of newestFirst) {
-    const existing = groups.get(item.packageName);
-    if (existing) {
-      existing.items.push(item);
-      continue;
+    let appGroup = groups.get(item.packageName);
+    if (!appGroup) {
+      appGroup = {
+        packageName: item.packageName,
+        appLabel: item.appLabel,
+        count: 0,
+        conversations: [],
+      };
+      groups.set(item.packageName, appGroup);
     }
-    groups.set(item.packageName, {
-      packageName: item.packageName,
-      appLabel: item.appLabel,
-      items: [item],
-    });
+
+    appGroup.count += 1;
+    let conversation = appGroup.conversations.find((entry) => entry.title === item.title);
+    if (!conversation) {
+      conversation = { title: item.title, items: [] };
+      appGroup.conversations.push(conversation);
+    }
+    conversation.items.push(item);
   }
 
   return [...groups.values()];

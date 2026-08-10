@@ -15,6 +15,17 @@ object FrontendNotificationFormatter {
     const val MAX_TITLE_LENGTH = 48
     const val MAX_TEXT_LENGTH = 140
 
+    fun resolveConversationTitle(
+        explicitConversationTitle: CharSequence?,
+        subText: CharSequence?,
+        fallbackTitle: CharSequence?,
+        hasMessagingMessages: Boolean,
+    ): CharSequence? {
+        if (!explicitConversationTitle.isNullOrBlank()) return explicitConversationTitle
+        if (hasMessagingMessages && !subText.isNullOrBlank()) return subText
+        return fallbackTitle
+    }
+
     fun build(
         packageName: String,
         appLabel: String?,

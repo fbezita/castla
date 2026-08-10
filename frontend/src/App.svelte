@@ -52,6 +52,7 @@
 
   let overlayNotifications: OverlayNotification[] = [];
   let notificationHistory: OverlayNotification[] = [];
+  let notificationHistoryOpenRequest = 0;
   let notificationOverlayEnabled = readNotificationOverlayEnabled();
   let notificationApps = normalizeNotificationAllowedPackages(localStorage.getItem("castla_notification_apps"));
   let notificationPruneTimer = 0;
@@ -99,6 +100,11 @@
     if (!enabled) {
       overlayNotifications = [];
     }
+  }
+
+  function openNotificationHistory(): void {
+    if (notificationHistory.length === 0) return;
+    notificationHistoryOpenRequest += 1;
   }
 
   function verboseWarn(message: string, payload?: unknown) {
@@ -779,6 +785,8 @@
         overlayUiScalePreference={overlayUiScalePreference}
         notificationOverlayEnabled={notificationOverlayEnabled}
         notificationApps={notificationApps}
+        notificationHistoryCount={notificationHistory.length}
+        onOpenNotificationHistory={openNotificationHistory}
         onOverlayUiScalePreferenceChange={updateOverlayUiScalePreference}
         onNotificationOverlayEnabledChange={updateNotificationOverlayEnabled}
         onNotificationAppsChange={updateNotificationApps}
@@ -787,9 +795,12 @@
     {#if showDiagnostics}
       <DiagnosticsOverlay />
     {/if}
-    {#if notificationOverlayEnabled}
-      <NotificationOverlay items={overlayNotifications} history={notificationHistory} />
-    {/if}
+    <NotificationOverlay
+      items={notificationOverlayEnabled ? overlayNotifications : []}
+      history={notificationHistory}
+      openRequest={notificationHistoryOpenRequest}
+      autoReveal={notificationOverlayEnabled}
+    />
   </div>
   <textarea
     class="ime-proxy"

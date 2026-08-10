@@ -122,6 +122,18 @@ class FrontendNotificationFormatterTest {
     }
 
     @Test
+    fun `resolveConversationTitle uses messaging sub text before sender title`() {
+        val title = FrontendNotificationFormatter.resolveConversationTitle(
+            explicitConversationTitle = null,
+            subText = "Family room",
+            fallbackTitle = "Alice",
+            hasMessagingMessages = true,
+        )
+
+        assertEquals("Family room", title)
+    }
+
+    @Test
     fun `build preserves sender separately from conversation title`() {
         val payload = FrontendNotificationFormatter.build(
             packageName = "org.telegram.messenger",
