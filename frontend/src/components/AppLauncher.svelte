@@ -65,6 +65,8 @@
     notificationOverlayEnabled,
     notificationApps = [],
     notificationHistoryCount = 0,
+    serverConnected = false,
+    serverWasConnected = false,
     onOpenNotificationHistory,
     onOverlayUiScalePreferenceChange,
     onNotificationOverlayEnabledChange,
@@ -77,6 +79,8 @@
     notificationOverlayEnabled: boolean;
     notificationApps: string[];
     notificationHistoryCount: number;
+    serverConnected?: boolean;
+    serverWasConnected?: boolean;
     onOpenNotificationHistory: () => void;
     onOverlayUiScalePreferenceChange: (preference: OverlayUiScalePreference) => void;
     onNotificationOverlayEnabledChange: (enabled: boolean) => void;
@@ -2582,7 +2586,16 @@
   {:else}
     <p>{t($compositorStore.language, "standbyReady")}</p>
   {/if}
-  <div class="server-pill"><span></span>{t($compositorStore.language, "serverActive")}</div>
+  <div class:reconnecting={!serverConnected} class="server-pill">
+    <span></span>{t(
+      $compositorStore.language,
+      serverConnected
+        ? "serverActive"
+        : serverWasConnected
+          ? "serverDisconnectedShort"
+          : "serverUnavailableShort",
+    )}
+  </div>
 </div>
 
 {#if drawerOpen}
@@ -2979,6 +2992,11 @@
     border-radius: 50%;
     background: #12d8ff;
     box-shadow: 0 0 10px #12d8ff;
+  }
+
+  .server-pill.reconnecting span {
+    background: #ffb74d;
+    box-shadow: 0 0 10px rgb(255 183 77 / 0.8);
   }
 
   .drawer-scrim {

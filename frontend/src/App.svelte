@@ -56,12 +56,15 @@
   let notificationOverlayEnabled = readNotificationOverlayEnabled();
   let notificationApps = normalizeNotificationAllowedPackages(localStorage.getItem("castla_notification_apps"));
   let notificationPruneTimer = 0;
+  let controlConnected = false;
+  let controlWasConnected = false;
 
   function updateNotificationApps(appsList: string[]): void {
     notificationApps = appsList;
     localStorage.setItem("castla_notification_apps", JSON.stringify(appsList));
   }
   let frontendResetCleanup: (() => void) | undefined;
+  let controlConnectionCleanup: (() => void) | undefined;
   const JMUXER_SCRIPT_SRC = "/js/jmuxer.min.js";
   const FRONTEND_BUILD_MARKER = "frontend_ime_guard_v4_20260601";
 
@@ -264,6 +267,8 @@
   }
 
   function createRuntimeGraph(): void {
+    controlConnectionCleanup?.();
+    controlConnected = false;
     runtime = new StreamRuntime(location.host);
     (window as any).castlaRuntime = runtime;
     const frontendBuildPayload = {
@@ -275,7 +280,9 @@
     };
     console.warn("[BUILD_MARKER] frontend boot", frontendBuildPayload);
     runtime.control.sendFrontendDiag("BUILD_MARKER", "frontend boot", frontendBuildPayload);
-    runtime.control.onConnectionChange((connected) => {
+    controlConnectionCleanup = runtime.control.onConnectionChange((connected) => {
+      controlConnected = connected;
+      if (connected) controlWasConnected = true;
       if (!connected) return;
       runtime.control.sendFrontendDiag("BUILD_MARKER", "frontend control connected", {
         ...frontendBuildPayload,
@@ -638,6 +645,8 @@
     imeActiveCleanup = undefined;
     lifecycleCleanup?.();
     lifecycleCleanup = undefined;
+    controlConnectionCleanup?.();
+    controlConnectionCleanup = undefined;
     window.clearInterval(notificationPruneTimer);
     overlayNotifications = [];
     notificationHistory = [];
@@ -661,6 +670,7 @@
   onDestroy(() => {
     window.removeEventListener("resize", refreshOverlayUiScale);
     window.clearInterval(notificationPruneTimer);
+    controlConnectionCleanup?.();
   });
 
   console.info("[CastlaSession] page_boot", {
@@ -793,6 +803,8 @@
         notificationOverlayEnabled={notificationOverlayEnabled}
         notificationApps={notificationApps}
         notificationHistoryCount={notificationHistory.length}
+        serverConnected={controlConnected}
+        serverWasConnected={controlWasConnected}
         onOpenNotificationHistory={openNotificationHistory}
         onOverlayUiScalePreferenceChange={updateOverlayUiScalePreference}
         onNotificationOverlayEnabledChange={updateNotificationOverlayEnabled}

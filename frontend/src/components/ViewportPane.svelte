@@ -31,12 +31,14 @@
   let lastDecoderRecoveryAt = 0;
 
   // Reconnection tracking state
-  let isConnected = true;
+  let isConnected = false;
+  let hasConnected = false;
 
   onMount(async () => {
     await tick();
     detachConnection = runtime.onConnectionChange(async (connected) => {
       isConnected = connected;
+      if (connected) hasConnected = true;
       if (!connected) {
         return;
       }
@@ -224,7 +226,9 @@
   {#if !isConnected && viewport.visible}
     <div class="reconnect-overlay">
       <div class="spinner"></div>
-      <p class="reconnect-text">{t($compositorStore.language, "reconnecting")}</p>
+      <p class="reconnect-text">
+        {t($compositorStore.language, hasConnected ? "reconnecting" : "serverUnavailable")}
+      </p>
     </div>
   {/if}
 

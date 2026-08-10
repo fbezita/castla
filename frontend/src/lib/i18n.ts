@@ -73,6 +73,9 @@ export const TRANSLATIONS = {
     standbyLaunching:
       "애플리케이션 실행 중... 고해상도 스트림 링크 설정 중입니다.",
     serverActive: "서버 활성",
+    serverUnavailableShort: "서버 연결 안 됨 · 휴대폰 앱 확인",
+    serverDisconnectedShort: "서버 연결 끊김 · 재연결 중",
+    serverUnavailable: "미러링 서버에 연결할 수 없습니다. 휴대폰에서 Castla를 실행해 주세요.",
 
     // Viewport Host & Popups
     barrierText: "화면 레이아웃 최적화 중...",
@@ -160,6 +163,9 @@ export const TRANSLATIONS = {
     standbyLaunching:
       "Launching application... Establishing high-fidelity stream link.",
     serverActive: "SERVER ACTIVE",
+    serverUnavailableShort: "SERVER UNAVAILABLE · CHECK PHONE APP",
+    serverDisconnectedShort: "SERVER DISCONNECTED · RECONNECTING",
+    serverUnavailable: "Unable to reach the mirroring server. Start Castla on your phone.",
 
     // Viewport Host & Popups
     barrierText: "Optimizing screen layout...",

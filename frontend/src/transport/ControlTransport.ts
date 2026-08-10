@@ -26,7 +26,7 @@ export class ControlTransport {
     this.manuallyClosed = false;
     this.connectAttempt += 1;
     this.socketId = ControlTransport.nextSocketId++;
-    this.readyForControl = false;
+    this.setConnectionReady(false);
     this.controlSessionId = 0;
     // Enforce plain ws:// connection to bypass redundant secure handshake overheads
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
@@ -59,7 +59,7 @@ export class ControlTransport {
         }
         this.listeners.forEach((listener) => listener(message));
         if ((message as { type?: string }).type === "serverInit") {
-          this.connectionListeners.forEach((listener) => listener(true));
+          this.setConnectionReady(true, true);
           this.flushPending();
         }
       } catch {
@@ -68,7 +68,7 @@ export class ControlTransport {
     };
     this.socket.onclose = () => {
       window.clearInterval(this.heartbeatTimer);
-      this.readyForControl = false;
+      this.setConnectionReady(false);
       // console.warn('[CastlaControl] close', {
       //   socketId: this.socketId,
       //   connectAttempt: this.connectAttempt,
@@ -86,7 +86,7 @@ export class ControlTransport {
     this.manuallyClosed = true;
     window.clearTimeout(this.reconnectTimer);
     window.clearInterval(this.heartbeatTimer);
-    this.readyForControl = false;
+    this.setConnectionReady(false);
     this.controlSessionId = 0;
     const socket = this.socket;
     this.socket = undefined;
@@ -108,6 +108,7 @@ export class ControlTransport {
 
   onConnectionChange(listener: (connected: boolean) => void): () => void {
     this.connectionListeners.add(listener);
+    listener(this.readyForControl);
     return () => this.connectionListeners.delete(listener);
   }
 
@@ -175,6 +176,12 @@ export class ControlTransport {
       return;
     const pending = this.pendingMessages.splice(0, this.pendingMessages.length);
     pending.forEach((payload) => socket.send(payload));
+  }
+
+  private setConnectionReady(connected: boolean, forceNotify = false): void {
+    if (!forceNotify && this.readyForControl === connected) return;
+    this.readyForControl = connected;
+    this.connectionListeners.forEach((listener) => listener(connected));
   }
 
   debugSnapshot(): {

@@ -769,6 +769,8 @@ Personal chats suppress a sender label when it duplicates the conversation title
 
 The floating history control fades after 5 seconds and hides after 8 seconds so it does not permanently cover or intercept the mirrored viewport. A new notification reveals it again. History remains accessible from launcher settings even while the floating control is hidden. A frontend hard reset clears the in-memory history.
 
+ControlSocket status is replayed immediately to newly mounted frontend listeners. The standby UI reports active only after `serverInit`, distinguishes an initial unavailable server from a previously connected server that is reconnecting, and uses the same distinction for the viewport connection overlay.
+
 ### VirtualDisplay task teardown
 
 Browser disconnect cleanup now keeps each display token and privileged Binder alive until task cleanup finishes. The privileged service queries task IDs belonging to the target VirtualDisplay and removes those task instances before opening Home and releasing the display. Cleanup is scoped by display and no longer force-stops an entire application package, so a task running on the physical display is not terminated merely because its mirrored task is being removed.
