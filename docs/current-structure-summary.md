@@ -749,3 +749,39 @@ Samsung SDK 37에서 Castla display 135가 group 7에 배치되고, 물리 group
 - native VD IME remains primary; proxy handling is explicitly gated by `RemoteInputPolicy`
 - frontend builds use the latest commit SHA that changed `frontend/` unless `CASTLA_BUILD_TIMESTAMP` is explicitly provided, so identical sources produce identical asset hashes
 - regression tests cover stream generation/metadata replay, rebuild queue/coalescing policy, native IME proxy gating, browser layout, and disconnect policy
+
+## 2026-08-10 Notification History and Session Teardown Update
+
+### Notification collection and delivery
+
+`CastlaNotificationListenerService` receives Android notifications only while the mirror service is available. Ongoing notifications, group summaries, and payloads without text or image content are discarded. MessagingStyle notifications prefer the latest message text and extract the conversation title and sender separately. Image data itself is not transferred; only `hasImage` metadata is sent.
+
+Accepted payloads are broadcast as `notification` messages through the MirrorServer control socket. Android no longer owns the user-selected package allowlist. The frontend applies the existing browser-side app selection before adding an event to history or showing the transient overlay. Listener connection, filtering, forwarding, control-client count, and frontend allow decisions are available in notification diagnostics. When a mirror service starts with notification access already granted, it requests a listener rebind to recover from APK replacement or a disconnected listener process.
+
+### Frontend notification history
+
+The frontend keeps up to 100 accepted notification events in current-session memory. Events are ordered newest first and grouped in two levels:
+
+1. application package;
+2. conversation title.
+
+Personal chats suppress a sender label when it duplicates the conversation title. Group chats retain a separate sender and timestamp for each message. Image-only and image-with-text events use localized placeholder text. App and conversation headers independently control their collapsed state, while the transient overlay continues to appear for every new accepted notification independently of whether history is open or already populated.
+
+The floating history control fades after 5 seconds and hides after 8 seconds so it does not permanently cover or intercept the mirrored viewport. A new notification reveals it again. History remains accessible from launcher settings even while the floating control is hidden. A frontend hard reset clears the in-memory history.
+
+### VirtualDisplay task teardown
+
+Browser disconnect cleanup now keeps each display token and privileged Binder alive until task cleanup finishes. The privileged service queries task IDs belonging to the target VirtualDisplay and removes those task instances before opening Home and releasing the display. Cleanup is scoped by display and no longer force-stops an entire application package, so a task running on the physical display is not terminated merely because its mirrored task is being removed.
+
+## 2026-08-10 UID-Scoped Audio Streaming and A/V Sync Update
+
+- `audio_enabled=false`에서는 Android의 기존 오디오 출력을 유지하고, Tesla Bluetooth 비디오 앱에만 별도 화면 지연을 적용합니다.
+- `audio_enabled=true`에서는 Shizuku shell의 UID-scoped AudioPolicy loopback으로 48kHz stereo PCM을 캡처해 Opus 또는 PCM으로 브라우저에 전송합니다.
+- 기본 앱 정책은 일반 앱 browser-only, 내비게이션 phone-direct입니다. Samsung Separate App Sound 값을 읽을 수 있으면 우선하고, 그렇지 않으면 Castla 내비게이션 분류로 fallback합니다.
+- `AudioTargetRegistry`가 실행 앱을 package/user 단위로 유지해 YouTube → TMAP → YouTube 전환에서도 YouTube가 계속 브라우저로 출력됩니다.
+- 실효 캡처 키가 같으면 AudioPolicy를 재시작하지 않아 전환 순간의 폰 출력 누출과 팝음을 제거합니다.
+- Opus-first/PCM-first 설정, encoder/browser capability 협상, Opus 무출력·decode 오류의 PCM fallback을 지원합니다.
+- Bluetooth 지연(0–1000ms)과 스트리밍 A/V 오프셋(-1000–1000ms)을 별도로 저장합니다. 스트리밍 기본값은 `-30ms`이며 음수는 비디오, 양수는 오디오 지연입니다.
+- 스트리밍 지연 변경은 control WebSocket과 Web Audio `DelayNode`를 사용해 오디오 스트림을 재시작하지 않고 반영합니다.
+
+자세한 내용은 [audio-streaming-architecture.md](audio-streaming-architecture.md)를 참조하십시오.

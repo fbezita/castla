@@ -8,6 +8,26 @@ import org.junit.Test
 class FrontendNotificationFormatterTest {
 
     @Test
+    fun `selectText prefers latest messaging text and skips blank fallbacks`() {
+        assertEquals(
+            "Latest message",
+            FrontendNotificationFormatter.selectText(
+                messagingText = "Latest message",
+                bigText = "Expanded text",
+                text = "Fallback text",
+            )
+        )
+        assertEquals(
+            "Fallback text",
+            FrontendNotificationFormatter.selectText(
+                messagingText = "  ",
+                bigText = "",
+                text = "Fallback text",
+            )
+        )
+    }
+
+    @Test
     fun `build returns payload for kakao notification`() {
         val payload = FrontendNotificationFormatter.build(
             packageName = "com.kakao.talk",

@@ -1196,3 +1196,17 @@ WAKE_PULSE_RELATED SCREEN_ON에서는 물리 패널을 다시 OFF시키지 않�
 Samsung SDK 37 실기기에서 Castla display 135는 group 7, 물리 display는 group 0으로 분리됐습니다. 물리 전원 버튼으로 group 0을 OFF한 뒤에도 Castla VD는 ON을 유지했고 encoder frame counter는 10000에서 12000까지 증가했습니다. 웹 화면도 계속 재생됐으며 wake key, blackout, freeze/revive는 실행되지 않았습니다.
 
 따라서 2026-08-02의 video gate 및 wake pulse 방식은 Android 13 이상에 대해 superseded 상태이며, 해당 기록은 개발 과정의 이력으로만 취급합니다.
+
+## 2026-08-10 Audio Streaming, App Routing, and Synchronization
+
+- Shizuku shell UID 권한으로 UID-scoped AudioPolicy loopback 캡처를 추가했습니다.
+- 일반 앱은 브라우저로, 내비게이션 앱은 선택적으로 휴대폰으로 보내는 phone-direct 정책을 도입했습니다.
+- VD의 현재 앱이 교체되어도 이전 미디어 앱 UID를 유지하는 `AudioTargetRegistry`를 추가해 YouTube → TMAP 전환 시 YouTube 소리가 폰으로 되돌아가는 문제를 해결했습니다.
+- phone-direct 앱 추가처럼 실효 포함 UID가 바뀌지 않는 전환에서는 캡처를 재시작하지 않아 순간적인 출력 누출과 팝음을 제거했습니다.
+- Opus-first와 PCM-first 선택, Android encoder 및 브라우저 decoder capability 협상, runtime PCM fallback을 구현했습니다.
+- generation-aware audio packet protocol과 브라우저의 stale packet 차단, 20ms 기본 스케줄링 버퍼 및 Web Audio 출력 진단을 추가했습니다.
+- Tesla Bluetooth 지연과 스트리밍 A/V 오프셋을 분리 저장하고, 스트리밍 오프셋은 음수일 때 비디오, 양수일 때 오디오를 지연하도록 변경했습니다.
+- 지연 슬라이더 변경을 control WebSocket으로 분리하고 `DelayNode` 값을 갱신해 조절 시 오디오가 멈추는 문제를 해결했습니다.
+- 스트리밍 A/V 오프셋 기본값을 `-30ms`로 조정했습니다.
+
+현재 상세 설계는 [audio-streaming-architecture.md](audio-streaming-architecture.md)에 정리되어 있습니다.

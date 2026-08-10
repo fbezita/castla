@@ -121,6 +121,16 @@ Shizuku 시스템 셸 UID(2000) 권한을 활용하여 기기의 하드웨어 �
 - **메인 UI 스레드 오프로딩**: 서비스 소멸(`onDestroy`) 및 리소스 클린업(`performCleanup`) 시 메인 UI 스레드가 단 1ms도 교착되거나 블록되지 않도록, 즉석에서 백그라운드 스레드(`cleanupThread`)를 분리 생성하여 모든 웹소켓 셧다운 및 가상 디스플레이 반납을 완전히 격리 수행합니다.
 - **Shizuku Binder Safe 가딩**: 윈도우 매니저나 액티비티 서비스와 바인더 통신 시 AIDL 트랜잭션이 비정상 크래시되어도 메인 서비스가 데드락에 빠지지 않도록 모든 결합부를 백그라운드 위임과 최대 3초 타임아웃을 탑재한 `runBinderSafe` 가드로 밀봉 보호합니다.
 
+### 3.4. UID-scoped 오디오 스트리밍
+
+- Shizuku shell의 AudioPolicy loopback으로 실행 앱 UID만 캡처하고, 일반 앱은 브라우저로 전송하며 내비게이션은 선택적으로 휴대폰 직접 출력으로 분리합니다.
+- 실행된 앱의 package/user/UID를 세션 동안 유지해 VD 앱 전환 후에도 백그라운드 미디어 오디오 라우팅이 보존됩니다.
+- Opus-first와 PCM-first codec 정책, capability 협상 및 PCM fallback을 지원합니다.
+- Tesla Bluetooth 비디오 지연과 스트리밍 A/V 오프셋을 별도로 저장하며 스트리밍 기본 오프셋은 `-30ms`입니다.
+- 실효 UID 구성이 같은 앱 전환에서는 AudioPolicy를 재시작하지 않아 출력 누출과 팝음을 방지합니다.
+
+상세 설계와 wire protocol은 [audio-streaming-architecture.md](audio-streaming-architecture.md)를 참조하십시오.
+
 ---
 
 ## 4. 🌐 네트워크 & 세션 아키텍처 (Network & Signal Connection)

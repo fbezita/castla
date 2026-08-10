@@ -217,6 +217,9 @@ interface IPrivilegedService {
      */
     String getTopActivityForDisplay(int displayId) = 35;
     int getProcessPid() = 36;
+
+    /** Return task IDs whose task instances currently belong to the specified display. */
+    int[] getTaskIdsOnDisplay(int displayId) = 41;
 }
 
 

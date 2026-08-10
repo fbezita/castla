@@ -1,9 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   formatNotificationText,
+  formatNotificationTime,
   groupNotificationHistory,
   isNotificationAllowed,
+  notificationConversationKey,
+  notificationMetaLayout,
+  notificationEventKey,
   pruneOverlayNotifications,
+  shouldShowConversationMessageCount,
+  stopNotificationPointerPropagation,
+  shouldShowNotificationSender,
   upsertNotificationHistory,
   type OverlayNotification,
 } from "../lib/notificationOverlay";
@@ -20,6 +27,50 @@ function notification(id: string, postedAtMs: number): OverlayNotification {
 }
 
 describe("notification history", () => {
+  it("hides a sender that duplicates the personal conversation title", () => {
+    expect(shouldShowNotificationSender("이상미", "이상미")).toBe(false);
+    expect(shouldShowNotificationSender("이상미", "가족방")).toBe(true);
+    expect(shouldShowNotificationSender(undefined, "가족방")).toBe(false);
+  });
+
+  it("keeps personal-chat time inline while group-chat metadata uses its own row", () => {
+    expect(notificationMetaLayout("이상미", "이상미")).toBe("inline-time");
+    expect(notificationMetaLayout("드림/615", "청라센텀대광로제비앙")).toBe("sender-row");
+  });
+
+  it("shows conversation counts only when an app contains multiple conversations", () => {
+    expect(shouldShowConversationMessageCount(1)).toBe(false);
+    expect(shouldShowConversationMessageCount(2)).toBe(true);
+  });
+
+  it("builds a stable conversation key without merging rooms from different apps", () => {
+    expect(notificationConversationKey("com.kakao.talk", "가족방"))
+      .not.toBe(notificationConversationKey("org.telegram.messenger", "가족방"));
+    expect(notificationConversationKey("com.kakao.talk", "가족방"))
+      .toBe(notificationConversationKey("com.kakao.talk", "가족방"));
+  });
+
+  it("formats each notification time using the selected language", () => {
+    const postedAtMs = new Date(2026, 7, 10, 12, 14).getTime();
+
+    expect(formatNotificationTime(postedAtMs, "ko")).toMatch(/오전|오후/);
+    expect(formatNotificationTime(postedAtMs, "ko")).toContain("12:14");
+    expect(formatNotificationTime(postedAtMs, "en")).toMatch(/AM|PM/);
+  });
+
+  it("uses a stable event key while distinguishing repeated Android notification keys", () => {
+    expect(notificationEventKey(notification("same", 1))).toBe("same:1");
+    expect(notificationEventKey(notification("same", 2))).toBe("same:2");
+  });
+
+  it("keeps notification controls from reaching the mirrored viewport", () => {
+    const stopPropagation = vi.fn();
+
+    stopNotificationPointerPropagation({ stopPropagation });
+
+    expect(stopPropagation).toHaveBeenCalledOnce();
+  });
+
   it("uses the frontend-selected package list", () => {
     const item = notification("selected", 1);
 

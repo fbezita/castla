@@ -854,7 +854,9 @@ class PrivilegedService : IPrivilegedService.Stub() {
             Log.i(TAG, "Releasing existing VD displayId=$displayId name=$name before recreating")
             virtualDisplays.remove(displayId)?.let { vd ->
                 try {
-                    vd.release()
+                    // A client process can disappear during APK reinstall without getting an
+                    // onDestroy callback. Remove the old VD's tasks before replacing its display.
+                    doCleanupVirtualDisplayResourcesSync(displayId, vd)
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to release displayId=$displayId", e)
                 }
@@ -2184,15 +2186,13 @@ class PrivilegedService : IPrivilegedService.Stub() {
         try {
             Log.i(TAG, "Cleaning up resources for virtual display: id=$displayId")
 
-            val apps = getRunningTasksOnDisplay(displayId)
-            apps.forEach { app ->
-                if (app.isNotEmpty() && !app.contains("/") && app != "com.castla.mirror" && app != "com.castla.mirror.debug") {
-                    try {
-                        nativeForceStop(app)
-                        Log.i(TAG, "Successfully force-stopped app $app on display $displayId")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Failed to force-stop app $app on display $displayId", e)
-                    }
+            val taskIds = getTaskIdsOnDisplay(displayId)
+            taskIds.forEach { taskId ->
+                try {
+                    removeTask(taskId)
+                    Log.i(TAG, "Removed VD task $taskId from display $displayId")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to remove VD task $taskId from display $displayId", e)
                 }
             }
 
@@ -2616,6 +2616,46 @@ class PrivilegedService : IPrivilegedService.Stub() {
             Log.w(TAG, "Failed to get running tasks on display $displayId via reflection", e)
         }
         return packages.distinct()
+    }
+
+    override fun getTaskIdsOnDisplay(displayId: Int): IntArray {
+        if (displayId < 0) return intArrayOf()
+        val taskIds = mutableListOf<Int>()
+        try {
+            val atmClass = Class.forName("android.app.ActivityTaskManager")
+            val service = atmClass.getMethod("getService").invoke(null)
+            val tasks = invokeGetTasks(service, displayId)
+
+            for (task in tasks) {
+                if (task == null) continue
+                val taskClass = task.javaClass
+                val displayIdField = try {
+                    taskClass.getField("displayId")
+                } catch (_: Exception) {
+                    try { taskClass.getSuperclass()?.getField("displayId") } catch (_: Exception) { null }
+                }
+                if ((displayIdField?.getInt(task) ?: -1) != displayId) continue
+
+                val taskIdField = try {
+                    taskClass.getField("taskId")
+                } catch (_: Exception) {
+                    try {
+                        taskClass.getField("id")
+                    } catch (_: Exception) {
+                        try {
+                            taskClass.getSuperclass()?.getField("taskId")
+                        } catch (_: Exception) {
+                            try { taskClass.getSuperclass()?.getField("id") } catch (_: Exception) { null }
+                        }
+                    }
+                }
+                val taskId = taskIdField?.getInt(task) ?: -1
+                if (taskId >= 0) taskIds.add(taskId)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to get task IDs on display $displayId via reflection", e)
+        }
+        return taskIds.distinct().toIntArray()
     }
 
     override fun getTaskIdsForPackage(packageName: String): IntArray {

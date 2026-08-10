@@ -149,8 +149,6 @@ internal class BrowserSessionCoordinator(private val host: MirrorForegroundServi
         host.pipelines.values.forEach { pipeline ->
             try { pipeline.touchInjector?.detachController("browser_disconnected") } catch (_: Exception) {}
             pipeline.markFreshLaunchPreparation("browser_disconnected")
-            pipeline.invalidateVd("browser_disconnected")
-            try { pipeline.controller.release() } catch (_: Exception) {}
         }
 
         host.audioOrchestrator?.stop()
@@ -164,8 +162,10 @@ internal class BrowserSessionCoordinator(private val host: MirrorForegroundServi
                 try { video?.release() } catch (_: Exception) {}
                 try { jpeg?.release() } catch (_: Exception) {}
             }
-            host.pipelines.values.forEach { try { it.release() } catch (_: Exception) {} }
-            try { host.removeAllVdTasks() } catch (_: Exception) {}
+            // Keep the display token and privileged binder alive until release() has removed
+            // the tasks belonging to that VD. Releasing/invalidation first makes task cleanup
+            // impossible and can leave the mirrored app in the system task stack.
+            host.pipelines.values.forEach { try { it.release(forcePhysical = true) } catch (_: Exception) {} }
             host.browserTeardownPhase = "released"
             host.broadcastWebDiagnostics("browser_disconnected_async_done")
         }

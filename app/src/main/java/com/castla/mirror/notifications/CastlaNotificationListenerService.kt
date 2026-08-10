@@ -6,13 +6,32 @@ import android.os.Bundle
 import android.os.Parcelable
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import android.util.Log
 import com.castla.mirror.service.MirrorForegroundService
 import org.json.JSONObject
 
 class CastlaNotificationListenerService : NotificationListenerService() {
 
+    companion object {
+        private const val TAG = "CastlaNotification"
+    }
+
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        Log.i(TAG, "listener_connected package=$packageName")
+    }
+
+    override fun onListenerDisconnected() {
+        Log.w(TAG, "listener_disconnected package=$packageName")
+        super.onListenerDisconnected()
+    }
+
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        val server = MirrorForegroundService.instance?.getMirrorServer() ?: return
+        val server = MirrorForegroundService.instance?.getMirrorServer()
+        if (server == null) {
+            Log.w(TAG, "notification_dropped reason=mirror_server_unavailable pkg=${sbn.packageName} key=${sbn.key}")
+            return
+        }
         val notification = sbn.notification ?: return
         val extras = notification.extras ?: return
 
@@ -37,9 +56,12 @@ class CastlaNotificationListenerService : NotificationListenerService() {
             fallbackTitle = fallbackTitle,
             hasMessagingMessages = messages.isNotEmpty(),
         )
-        val text = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)
-            ?: extras.getCharSequence(Notification.EXTRA_TEXT)
         val latestMessage = messages.lastOrNull()
+        val text = FrontendNotificationFormatter.selectText(
+            messagingText = latestMessage?.text,
+            bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT),
+            text = extras.getCharSequence(Notification.EXTRA_TEXT),
+        )
         val sender = senderName(latestMessage)
             ?: fallbackTitle?.takeIf { fallback ->
                 conversationTitle != null && fallback.toString() != conversationTitle.toString()
@@ -56,8 +78,18 @@ class CastlaNotificationListenerService : NotificationListenerService() {
             postedAtMs = sbn.postTime,
             notificationKey = sbn.key ?: sbn.packageName,
             hasImage = hasImage(extras),
-        ) ?: return
+        )
+        if (payload == null) {
+            Log.i(
+                TAG,
+                "notification_filtered pkg=${sbn.packageName} key=${sbn.key} " +
+                    "ongoing=${sbn.isOngoing} summary=${notification.flags and Notification.FLAG_GROUP_SUMMARY != 0} " +
+                    "hasText=${!text.isNullOrBlank()} hasImage=${hasImage(extras)}",
+            )
+            return
+        }
 
+        val controlClients = server.controlSocketCount()
         server.broadcastControlMessage(
             JSONObject().apply {
                 put("type", "notification")
@@ -70,6 +102,10 @@ class CastlaNotificationListenerService : NotificationListenerService() {
                 put("postedAtMs", payload.postedAtMs)
                 put("hasImage", payload.hasImage)
             }.toString()
+        )
+        Log.i(
+            TAG,
+            "notification_forwarded pkg=${payload.packageName} key=${payload.id} controlClients=$controlClients",
         )
     }
 

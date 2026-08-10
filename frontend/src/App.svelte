@@ -476,7 +476,14 @@
           ...(msg as OverlayNotification),
           postedAtMs: Date.now(),
         };
-        if (isNotificationAllowed(notificationItem, notificationApps)) {
+        const notificationAllowed = isNotificationAllowed(notificationItem, notificationApps);
+        runtime.control.sendFrontendDiag("NOTIFICATION", "frontend notification decision", {
+          packageName: notificationItem.packageName,
+          allowed: notificationAllowed,
+          overlayEnabled: notificationOverlayEnabled,
+          selectedAppCount: notificationApps.length,
+        });
+        if (notificationAllowed) {
           notificationHistory = upsertNotificationHistory(notificationHistory, notificationItem);
         }
         if (shouldDisplayOverlayNotification(notificationItem, notificationOverlayEnabled, notificationApps)) {

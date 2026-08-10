@@ -1,6 +1,16 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
-  import { formatNotificationText, groupNotificationHistory, type OverlayNotification } from "../lib/notificationOverlay";
+  import {
+    formatNotificationText,
+    formatNotificationTime,
+    groupNotificationHistory,
+    notificationConversationKey,
+    notificationEventKey,
+    notificationMetaLayout,
+    shouldShowConversationMessageCount,
+    stopNotificationPointerPropagation,
+    type OverlayNotification,
+  } from "../lib/notificationOverlay";
   import { t } from "../lib/i18n";
   import { compositorStore } from "../stores/compositorStore";
 
@@ -20,8 +30,10 @@
 
   let expanded = $state(new Set<string>());
   let historyOpen = $state(false);
+  let collapsedApps = $state(new Set<string>());
+  let collapsedConversations = $state(new Set<string>());
   let historyButtonVisibility = $state<HistoryButtonVisibility>("hidden");
-  let latestHistoryItem = $state<OverlayNotification | undefined>(undefined);
+  let latestHistoryEventKey = $state<string | undefined>(undefined);
   let handledOpenRequest = $state(0);
   let historyFadeTimer: number | undefined;
   let historyHideTimer: number | undefined;
@@ -69,15 +81,31 @@
     else openHistory();
   }
 
+  function toggleCollapsedApp(packageName: string) {
+    const next = new Set(collapsedApps);
+    if (next.has(packageName)) next.delete(packageName);
+    else next.add(packageName);
+    collapsedApps = next;
+  }
+
+  function toggleCollapsedConversation(conversationKey: string) {
+    const next = new Set(collapsedConversations);
+    if (next.has(conversationKey)) next.delete(conversationKey);
+    else next.add(conversationKey);
+    collapsedConversations = next;
+  }
+
   $effect(() => {
     const newest = history[0];
     if (!newest) {
-      latestHistoryItem = undefined;
+      latestHistoryEventKey = undefined;
       historyOpen = false;
+      collapsedApps = new Set();
+      collapsedConversations = new Set();
       historyButtonVisibility = "hidden";
       clearHistoryButtonTimers();
-    } else if (newest !== latestHistoryItem) {
-      latestHistoryItem = newest;
+    } else if (notificationEventKey(newest) !== latestHistoryEventKey) {
+      latestHistoryEventKey = notificationEventKey(newest);
       if (autoReveal) revealHistoryButton();
     }
   });
@@ -122,7 +150,14 @@
   <section class="notification-overlay" aria-live="polite">
     {#if history.length > 0 && historyButtonVisibility !== "hidden"}
       <div class:faded={historyButtonVisibility === "faded"} class="history-actions">
-        <button class="history-toggle" onclick={toggleHistory}>
+        <button
+          class="history-toggle"
+          onpointerdown={stopNotificationPointerPropagation}
+          onclick={(event) => {
+            stopNotificationPointerPropagation(event);
+            toggleHistory();
+          }}
+        >
           {historyOpen ? t($compositorStore.language, "notificationHistoryClose") : `${t($compositorStore.language, "notificationHistory")} (${history.length})`}
         </button>
       </div>
@@ -130,41 +165,112 @@
     {#if historyOpen}
       <div class="notification-history">
         {#each groupNotificationHistory(history) as group (group.packageName)}
+          {@const appCollapsed = collapsedApps.has(group.packageName)}
           <section class="history-group">
             <header class="history-group-header">
-              <span>{group.appLabel}</span>
-              <span>{group.count}</span>
+              <button
+                class="history-section-toggle"
+                onpointerdown={stopNotificationPointerPropagation}
+                onclick={(event) => {
+                  stopNotificationPointerPropagation(event);
+                  toggleCollapsedApp(group.packageName);
+                }}
+                aria-expanded={!appCollapsed}
+                aria-label={`${t($compositorStore.language, appCollapsed ? "notificationExpand" : "notificationCollapse")} ${group.appLabel}`}
+              >
+                <span>{group.appLabel}</span>
+                <span class="history-section-meta">
+                  <span>{group.count}</span>
+                  <span class="history-chevron" aria-hidden="true">{appCollapsed ? "▸" : "▾"}</span>
+                </span>
+              </button>
             </header>
-            {#each group.conversations as conversation}
-              <section class="history-conversation">
-                <header class="history-conversation-header">
-                  <span>{conversation.title}</span>
-                  <span>{conversation.items.length}</span>
-                </header>
-                {#each conversation.items as item}
-                  <article class="history-item">
-                    {#if item.sender}<div class="notification-sender">{item.sender}</div>{/if}
-                    <div class="notification-text">{formatNotificationText(item, $compositorStore.language)}</div>
-                  </article>
-                {/each}
-              </section>
-            {/each}
+            {#if !appCollapsed}
+              {#each group.conversations as conversation (conversation.title)}
+                {@const conversationKey = notificationConversationKey(group.packageName, conversation.title)}
+                {@const conversationCollapsed = collapsedConversations.has(conversationKey)}
+                <section class="history-conversation">
+                  <header class="history-conversation-header">
+                    <button
+                      class="history-section-toggle"
+                      onpointerdown={stopNotificationPointerPropagation}
+                      onclick={(event) => {
+                        stopNotificationPointerPropagation(event);
+                        toggleCollapsedConversation(conversationKey);
+                      }}
+                      aria-expanded={!conversationCollapsed}
+                      aria-label={`${t($compositorStore.language, conversationCollapsed ? "notificationExpand" : "notificationCollapse")} ${conversation.title}`}
+                    >
+                      <span>{conversation.title}</span>
+                      <span class="history-section-meta">
+                        {#if shouldShowConversationMessageCount(group.conversations.length)}
+                          <span class="history-count">{conversation.items.length}</span>
+                        {/if}
+                        <span class="history-chevron" aria-hidden="true">{conversationCollapsed ? "▸" : "▾"}</span>
+                      </span>
+                    </button>
+                  </header>
+                  {#if !conversationCollapsed}
+                    {#each conversation.items as item}
+                      {@const metaLayout = notificationMetaLayout(item.sender, conversation.title)}
+                      <article class:inline-time={metaLayout === "inline-time"} class="history-item">
+                        {#if metaLayout === "sender-row"}
+                          <div class="notification-meta">
+                            <span class="notification-sender">{item.sender}</span>
+                            <time class="notification-time" datetime={new Date(item.postedAtMs).toISOString()}>
+                              {formatNotificationTime(item.postedAtMs, $compositorStore.language)}
+                            </time>
+                          </div>
+                        {/if}
+                        {#if metaLayout === "inline-time"}
+                          <div class="notification-personal-time-row">
+                            <time class="notification-time" datetime={new Date(item.postedAtMs).toISOString()}>
+                              {formatNotificationTime(item.postedAtMs, $compositorStore.language)}
+                            </time>
+                          </div>
+                        {/if}
+                        <div class="notification-text">{formatNotificationText(item, $compositorStore.language)}</div>
+                      </article>
+                    {/each}
+                  {/if}
+                </section>
+              {/each}
+            {/if}
           </section>
         {/each}
       </div>
     {/if}
     {#each items as item (item.id)}
+      {@const metaLayout = notificationMetaLayout(item.sender, item.title)}
       <article class="notification-card">
         <div class="notification-header">
           <div class="notification-info">
             <div class="notification-app">{item.appLabel}</div>
-            <div class="notification-title">{item.title}</div>
-            {#if item.sender}<div class="notification-sender">{item.sender}</div>{/if}
+            <div class="notification-title-row">
+              <div class="notification-title">{item.title}</div>
+              {#if metaLayout === "inline-time"}
+                <time class="notification-time" datetime={new Date(item.postedAtMs).toISOString()}>
+                  {formatNotificationTime(item.postedAtMs, $compositorStore.language)}
+                </time>
+              {/if}
+            </div>
+            {#if metaLayout === "sender-row"}
+              <div class="notification-meta">
+                <span class="notification-sender">{item.sender}</span>
+                <time class="notification-time" datetime={new Date(item.postedAtMs).toISOString()}>
+                  {formatNotificationTime(item.postedAtMs, $compositorStore.language)}
+                </time>
+              </div>
+            {/if}
           </div>
 
           <button
             class="notification-toggle"
-            onclick={() => toggle(item.id)}
+            onpointerdown={stopNotificationPointerPropagation}
+            onclick={(event) => {
+              stopNotificationPointerPropagation(event);
+              toggle(item.id);
+            }}
             aria-expanded={expanded.has(item.id)}
           >
             {t($compositorStore.language, expanded.has(item.id) ? "notificationCollapse" : "notificationExpand")}
@@ -229,7 +335,11 @@
 
   .history-group {
     display: grid;
-    gap: 8px;
+    gap: 0;
+    overflow: clip;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 14px;
+    background: rgba(8, 12, 20, 0.84);
   }
 
   .history-group-header {
@@ -237,9 +347,9 @@
     top: 0;
     display: flex;
     justify-content: space-between;
-    padding: 8px 10px;
-    border-radius: 10px;
-    background: rgba(21, 31, 46, 0.98);
+    padding: 9px 12px;
+    border-bottom: 1px solid rgba(139, 233, 255, 0.14);
+    background: rgba(21, 31, 46, 0.94);
     color: #8be9ff;
     font-size: 12px;
     font-weight: 800;
@@ -248,26 +358,76 @@
   .history-conversation {
     display: grid;
     gap: 6px;
-    padding: 8px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 14px;
-    background: rgba(8, 12, 20, 0.92);
+    padding: 10px 12px 12px;
+    background: transparent;
+  }
+
+  .history-conversation + .history-conversation {
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
   }
 
   .history-conversation-header {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 2px 4px 6px;
+    padding: 2px 2px 6px;
     color: #f8fbff;
     font-size: 15px;
     font-weight: 800;
+  }
+
+  .history-section-toggle {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-weight: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .history-section-meta {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .history-chevron {
+    width: 1em;
+    color: rgba(248, 251, 255, 0.62);
+    text-align: center;
+  }
+
+  .history-count {
+    color: rgba(248, 251, 255, 0.6);
+    font-size: 12px;
   }
 
   .history-item {
     padding: 10px;
     border-radius: 10px;
     background: rgba(255, 255, 255, 0.05);
+  }
+
+  .history-item.inline-time {
+    display: block;
+  }
+
+  .history-item.inline-time .notification-text {
+    margin-top: 3px;
+  }
+
+  .history-item.inline-time .notification-time {
+    margin-left: auto;
+  }
+
+  .notification-personal-time-row {
+    display: flex;
+    min-height: 1em;
   }
 
   .notification-card {
@@ -312,12 +472,38 @@
     word-break: break-word;
   }
 
+  .notification-title-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+
   .notification-sender {
-    margin-top: 4px;
     color: rgba(248, 251, 255, 0.68);
     font-size: 13px;
     font-weight: 700;
     word-break: break-word;
+  }
+
+  .notification-meta {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-top: 4px;
+    min-width: 0;
+  }
+
+  .notification-time {
+    margin-left: auto;
+    flex-shrink: 0;
+    color: rgba(248, 251, 255, 0.52);
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .notification-card .notification-time {
+    margin-left: 0;
   }
 
   .notification-placeholder,

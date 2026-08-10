@@ -25,12 +25,15 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
+import android.service.notification.NotificationListenerService
 import android.util.Log
 import android.view.Surface
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.castla.mirror.BuildConfig
 import com.castla.mirror.R
+import com.castla.mirror.notifications.CastlaNotificationListenerService
+import com.castla.mirror.notifications.NotificationAccessSettingsHelper
 import com.castla.mirror.widget.MirrorWidgetProvider
 import com.castla.mirror.capture.AudioCapture
 import com.castla.mirror.capture.JpegEncoder
@@ -540,6 +543,16 @@ class MirrorForegroundService : Service() {
 
         instance = this
         isServiceRunning = true
+        val hasNotificationAccess = NotificationAccessSettingsHelper.isNotificationAccessEnabled(
+            this,
+            CastlaNotificationListenerService::class.java,
+        )
+        if (NotificationAccessSettingsHelper.shouldRequestRebind(hasNotificationAccess)) {
+            NotificationListenerService.requestRebind(
+                ComponentName(this, CastlaNotificationListenerService::class.java),
+            )
+            Log.i(TAG, "Requested notification listener rebind for active mirror session")
+        }
         remoteInputCoordinator.initialize()
         isCleanupInProgress = false
         createNotificationChannel()
@@ -1852,21 +1865,18 @@ class MirrorForegroundService : Service() {
     }
 
     internal fun computeVirtualDisplayDpi(width: Int, height: Int): Int = StreamMath.applyDensityScale(StreamMath.calculateDpi(minOf(width, height)), dpiScale)
-    internal suspend fun removeAllVdTasks() = withContext(Dispatchers.IO) { pipelines.values.forEach { cleanupDisplay(it.displayId) } }
-
     internal suspend fun cleanupDisplay(displayId: Int) = withContext(Dispatchers.IO) {
         if (displayId < 0) return@withContext
-        val service = pipelines.values.firstOrNull()?.controller?.getPrivilegedService() ?: return@withContext
-        try {
-            runBinderSafe { service.launchHomeOnDisplay(displayId) }
-            val runningTasks = runBinderSafe { service.getRunningTasksOnDisplay(displayId) } ?: emptyList()
-            val packagesToStop = mutableSetOf<String>()
-            for (task in runningTasks) {
-                val pkg = task.substringBefore('/').takeIf { it.contains('.') }
-                if (pkg != null && pkg != packageName && !pkg.contains("com.castla.mirror") && !pkg.startsWith("com.android.launcher") && pkg != "com.android.settings") packagesToStop.add(pkg)
-            }
-            packagesToStop.forEach { pkg -> runBinderSafe { service.execCommand("am force-stop $pkg") } }
-        } catch (_: Exception) {}
+        val service = pipelines.values.firstNotNullOfOrNull { it.controller.getPrivilegedService() } ?: return@withContext
+        val removedTaskIds = VirtualDisplayTaskCleaner.cleanup(
+            displayId = displayId,
+            getTaskIdsOnDisplay = { targetDisplayId ->
+                runBinderSafe { service.getTaskIdsOnDisplay(targetDisplayId) } ?: intArrayOf()
+            },
+            removeTask = { taskId -> runBinderSafe { service.removeTask(taskId) }; Unit },
+            launchHome = { targetDisplayId -> runBinderSafe { service.launchHomeOnDisplay(targetDisplayId) }; Unit },
+        )
+        Log.i(TAG, "VD task cleanup completed displayId=$displayId taskIds=$removedTaskIds")
     }
 
     private val BROWSER_PACKAGES = setOf("com.android.chrome", "com.sec.android.app.sbrowser", "org.mozilla.firefox", "com.microsoft.emmx")

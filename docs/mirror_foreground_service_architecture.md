@@ -120,6 +120,18 @@ graph TD
 - `DisplayRoutingDiagnostics`: display/IME routing diagnostics outside the orchestration body.
 
 `MirrorServer` likewise delegates stream metadata, TLS setup, and HTTP content to `StreamSessionCoordinator`, `ServerTlsConfigurator`, and `ServerHttpContent`.
+
+### 1.b) Audio Streaming and App Routing
+
+- `AudioCaptureOrchestrator`는 브라우저 오디오 소켓과 codec 협상 상태에 맞춰 캡처 시작·중지·fallback을 직렬화합니다.
+- `AudioTargetRegistry`는 실행 앱을 package/user 단위로 세션 동안 유지하므로 같은 VD에서 TMAP을 실행해도 백그라운드 YouTube UID가 브라우저 캡처 대상에서 빠지지 않습니다.
+- 기본 정책은 일반 앱을 브라우저로 전송하고 내비게이션 앱만 phone-direct로 분리하는 것입니다.
+- 실효 AudioPolicy 키(`includedUids + routeMode`)가 같으면 앱 전환 시 캡처를 재시작하지 않아 폰 출력 누출과 팝음을 방지합니다.
+- codec은 Opus-first 또는 PCM-first를 선택할 수 있으며 encoder/browser capability 또는 runtime watchdog 실패 시 PCM으로 fallback합니다.
+- Bluetooth 화면 지연과 스트리밍 A/V 오프셋은 별도 설정입니다. 스트리밍 기본값은 `-30ms`이며 음수는 비디오, 양수는 브라우저 오디오를 지연합니다.
+
+세부 프로토콜과 라우팅 규칙은 [audio-streaming-architecture.md](audio-streaming-architecture.md)를 참조하십시오.
+
 ### 2) `VirtualDisplayPipeline` (Symmetric Display Pipeline)
 - **역할**: 단일 가상 디스플레이가 필요로 하는 모든 상태(해상도, 인코더, 터치 주입기, 현재 앱 정보)를 캡슐화한 **독립 실행 단위**입니다. Primary와 Secondary 디스플레이가 동일한 클래스 인스턴스 2개로 완전히 대칭적으로 구동됩니다.
   - **핵심 캡슐화 내역**:
@@ -220,6 +232,14 @@ graph TD
 2. 각 파이프라인은 fresh launch preparation 상태로 전환됩니다.
 3. 다음 앱 런칭 시 stale display affinity, stale `currentApp`, stale `lastFrameRenderedTime`, stale SPS/PPS 캐시를 그대로 믿지 않습니다.
 4. 첫 generation의 첫 프레임이 오기 전까지 브라우저는 pending 상태를 유지하며 black-screen commit을 피합니다.
+
+### 2.b) 브라우저 연결 종료 시 VD Task 정리
+
+1. 브라우저 연결이 끊기면 입력 컨트롤러와 인코더를 먼저 정리하되, VD display token과 Shizuku Binder는 Task 정리가 끝날 때까지 유지합니다.
+2. privileged service의 `getTaskIdsOnDisplay(displayId)`로 종료 대상 VD에 실제로 속한 Task ID만 조회합니다.
+3. 조회된 Task를 `removeTask(taskId)`로 제거한 다음 해당 display에 Home을 실행하고 VD를 release합니다.
+4. 패키지 단위 `force-stop`은 사용하지 않습니다. 따라서 같은 앱이 물리 Display 0이나 다른 VD에도 떠 있더라도 종료 대상 display의 Task만 제거됩니다.
+5. APK 교체처럼 클라이언트 프로세스가 정상적인 `onDestroy` 없이 사라진 경우에도, 같은 이름의 VD를 재생성하기 전에 남아 있는 VD Task를 동일한 순서로 정리합니다.
 
 ---
 

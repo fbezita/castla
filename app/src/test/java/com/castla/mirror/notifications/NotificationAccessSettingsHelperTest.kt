@@ -6,6 +6,12 @@ import org.junit.Test
 
 class NotificationAccessSettingsHelperTest {
     @Test
+    fun rebindPolicyRequiresNotificationAccess() {
+        assertTrue(NotificationAccessSettingsHelper.shouldRequestRebind(hasAccess = true))
+        assertFalse(NotificationAccessSettingsHelper.shouldRequestRebind(hasAccess = false))
+    }
+
+    @Test
     fun matchesFullComponentNameFromSecureSetting() {
         val enabled = "com.example/.OtherListener:com.castla.mirror/com.castla.mirror.notifications.CastlaNotificationListenerService"
 

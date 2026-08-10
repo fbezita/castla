@@ -52,6 +52,18 @@ export function shouldDisplayOverlayNotification(
   return enabled && isNotificationAllowed(notification, allowedPackages);
 }
 
+export function stopNotificationPointerPropagation(
+  event: Pick<Event, "stopPropagation">,
+): void {
+  event.stopPropagation();
+}
+
+export function notificationEventKey(
+  notification: OverlayNotification,
+): string {
+  return `${notification.id}:${notification.postedAtMs}`;
+}
+
 const MAX_OVERLAY_NOTIFICATIONS = 3;
 const MAX_NOTIFICATION_HISTORY = 100;
 export const NOTIFICATION_OVERLAY_ENABLED_KEY =
@@ -97,6 +109,48 @@ export function formatNotificationText(
 
   const imageLabel = t(language, "notificationContainsImage");
   return notification.text ? `${imageLabel} · ${notification.text}` : imageLabel;
+}
+
+export function formatNotificationTime(
+  postedAtMs: number,
+  language: Language,
+): string {
+  return new Intl.DateTimeFormat(language === "ko" ? "ko-KR" : "en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(postedAtMs);
+}
+
+export function shouldShowNotificationSender(
+  sender: string | undefined,
+  conversationTitle: string,
+): boolean {
+  const normalizedSender = sender?.trim();
+  return Boolean(normalizedSender) && normalizedSender !== conversationTitle.trim();
+}
+
+export type NotificationMetaLayout = "inline-time" | "sender-row";
+
+export function notificationMetaLayout(
+  sender: string | undefined,
+  conversationTitle: string,
+): NotificationMetaLayout {
+  return shouldShowNotificationSender(sender, conversationTitle)
+    ? "sender-row"
+    : "inline-time";
+}
+
+export function shouldShowConversationMessageCount(
+  appConversationCount: number,
+): boolean {
+  return appConversationCount > 1;
+}
+
+export function notificationConversationKey(
+  packageName: string,
+  conversationTitle: string,
+): string {
+  return JSON.stringify([packageName, conversationTitle]);
 }
 
 export interface NotificationConversationGroup {

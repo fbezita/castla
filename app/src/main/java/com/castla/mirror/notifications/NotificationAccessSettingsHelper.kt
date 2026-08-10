@@ -51,4 +51,6 @@ object NotificationAccessSettingsHelper {
         hasAccess: Boolean,
         hasPromptedBefore: Boolean,
     ): Boolean = !hasAccess && !hasPromptedBefore
+
+    fun shouldRequestRebind(hasAccess: Boolean): Boolean = hasAccess
 }
