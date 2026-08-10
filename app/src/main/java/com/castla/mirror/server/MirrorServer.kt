@@ -43,7 +43,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     private val primaryVideoSockets = mutableSetOf<VideoStreamSocket>()
     private val secondaryVideoSockets = mutableSetOf<VideoStreamSocket>()
     private val controlSockets = mutableSetOf<ControlSocket>()
-    private val audioSockets = mutableSetOf<AudioStreamSocket>()
+    private val audioSockets = ConcurrentHashMap.newKeySet<AudioStreamSocket>()
     private val controlSocketLock = Any()
     private val activeControlSessionId = AtomicInteger(0)
     private val browserConnectionEpoch = AtomicInteger(0)
@@ -278,7 +278,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     
     // Web Launcher specific listeners
     private var onGoHomeListener: (() -> Unit)? = null
-    private var onAppLaunchListener: ((String, String?, String, Boolean) -> Unit)? = null
+    private var onAppLaunchListener: ((String, String?, String, Boolean, Int) -> Unit)? = null
     private var onDisplayDensityListener: ((Float) -> Unit)? = null
     private var onQualityReportListener: ((Int, Double, Int) -> Unit)? = null
     private var onBubbleClosedListener: (() -> Unit)? = null
@@ -370,7 +370,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         onGoHomeListener = listener
     }
     
-    fun setAppLaunchListener(listener: (String, String?, String, Boolean) -> Unit) {
+    fun setAppLaunchListener(listener: (String, String?, String, Boolean, Int) -> Unit) {
         onAppLaunchListener = listener
     }
 
@@ -511,11 +511,11 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
 
     fun registerAudioSocket(socket: AudioStreamSocket) {
         audioSockets.add(socket)
-        onAudioSocketConnectedListener?.invoke()
         cachedAudioConfig?.let {
             socket.sendBinary(it)
             Log.i(TAG, "Replayed audio config to new client (${it.size} bytes)")
         }
+        onAudioSocketConnectedListener?.invoke()
     }
 
     fun unregisterAudioSocket(socket: AudioStreamSocket) {
@@ -683,6 +683,15 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             }
         }
         deadSockets.forEach { unregisterAudioSocket(it) }
+    }
+
+    fun broadcastAudioDelay(outputDelayMs: Int) {
+        val message = JSONObject().apply {
+            put("type", "audioDelay")
+            put("outputDelayMs", outputDelayMs.coerceIn(0, 1000))
+        }.toString()
+        Log.i(TAG, "Broadcasting audio delay=${outputDelayMs.coerceIn(0, 1000)}ms over control websocket")
+        broadcastControlMessage(message)
     }
 
     @Volatile private var preferredPrimaryProfile: String = "High"
@@ -988,8 +997,8 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         onAudioCodecListener?.invoke(codec)
     }
     
-    fun onAppLaunchRequest(pkg: String, componentName: String? = null, pane: String = "primary", isVideoApp: Boolean ) {
-        onAppLaunchListener?.invoke(pkg, componentName, pane, isVideoApp)
+    fun onAppLaunchRequest(pkg: String, componentName: String? = null, pane: String = "primary", isVideoApp: Boolean, userId: Int = 0) {
+        onAppLaunchListener?.invoke(pkg, componentName, pane, isVideoApp, userId)
     }
 
     fun onQualityReport(droppedFrames: Int, avgDelayMs: Double, backlogDrops: Int) {

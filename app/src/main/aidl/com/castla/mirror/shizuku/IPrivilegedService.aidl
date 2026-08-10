@@ -141,12 +141,15 @@ interface IPrivilegedService {
      * Returns a ParcelFileDescriptor that streams raw PCM Int16 LE, 48kHz stereo.
      * The caller reads from this pipe. Returns null on failure.
      */
-    ParcelFileDescriptor startSystemAudioCapture(int sampleRate, int channels) = 20;
+    ParcelFileDescriptor startSystemAudioCapture(int sampleRate, int channels, in int[] includedUids, in int[] excludedUids, int routeMode) = 20;
 
     /**
      * Stop the system audio capture started by startSystemAudioCapture().
      */
     void stopSystemAudioCapture() = 21;
+
+    /** Resolve a package UID in the requested Android user/profile. */
+    int resolvePackageUidForUser(String packageName, int userId) = 40;
 
     /**
      * Start WiFi tethering (hotspot) using ConnectivityManager/TetheringManager

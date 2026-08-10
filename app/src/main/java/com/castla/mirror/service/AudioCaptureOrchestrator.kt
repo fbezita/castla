@@ -16,7 +16,7 @@ import com.castla.mirror.policy.AudioPolicyInput
 class AudioCaptureOrchestrator(private val actions: Actions) {
 
     interface Actions {
-        fun startCapture(codec: String?)
+        fun startCapture(codec: String?): Boolean
         fun stopCapture()
         fun grantAudioPermission()
         /** Schedule a callback to [onDeferredTimerExpired] after [delayMs]. Return a cancel handle. */
@@ -96,6 +96,11 @@ class AudioCaptureOrchestrator(private val actions: Actions) {
             deferHandle = actions.scheduleDeferredStart(NEGOTIATION_GRACE_MS)
             return EnsureResult.DEFERRED
         }
+        if (!captureActive && currentCodec == null) {
+            deferPending = true
+            deferHandle = actions.scheduleDeferredStart(NEGOTIATION_GRACE_MS)
+            return EnsureResult.DEFERRED
+        }
         return ensure()
     }
 
@@ -106,7 +111,7 @@ class AudioCaptureOrchestrator(private val actions: Actions) {
         if (deferPending) {
             deferPending = false
             deferHandle = null
-            doStart(null)
+            doStart("pcm")
         }
     }
 
@@ -156,13 +161,12 @@ class AudioCaptureOrchestrator(private val actions: Actions) {
 
         if (codecOverride != null) currentCodec = codecOverride
 
-        actions.startCapture(decision.codecMode)
-        captureActive = true
-        return EnsureResult.STARTED
+        captureActive = actions.startCapture(decision.codecMode)
+        return if (captureActive) EnsureResult.STARTED else EnsureResult.START_FAILED
     }
 
     enum class EnsureResult {
-        STARTED, STOPPED, KEPT, DEFERRED
+        STARTED, START_FAILED, STOPPED, KEPT, DEFERRED
     }
 
     companion object {

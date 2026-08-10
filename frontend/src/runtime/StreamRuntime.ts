@@ -2,6 +2,7 @@ import type { AckMessage, EncodedFrame, PaneId, StreamMetadata } from "../protoc
 import { ControlTransport } from "../transport/ControlTransport";
 import { VideoTransport } from "../transport/VideoTransport";
 import { AudioPlayer } from "../transport/AudioPlayer";
+import { readAudioDelayControl } from "../transport/audioProtocol";
 import { GenerationTracker } from "./GenerationTracker";
 import { StreamHealthMonitor } from "./StreamHealthMonitor";
 
@@ -122,6 +123,10 @@ export class StreamRuntime {
     this.control.connect();
     this.controlMessageCleanup = this.control.onMessage((message) => {
       const type = (message as { type?: string }).type;
+      const audioDelayMs = readAudioDelayControl(message);
+      if (audioDelayMs !== null) {
+        this.audio.setOutputDelayMs(audioDelayMs);
+      }
 
       if (type === "serverInit") {
         this.serverInstanceId = String(

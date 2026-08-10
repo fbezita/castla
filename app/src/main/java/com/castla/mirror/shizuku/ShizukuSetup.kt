@@ -58,7 +58,9 @@ class ShizukuSetup {
     companion object {
         private const val TAG = "ShizukuSetup"
         private const val REQUEST_CODE = 1001
-        const val USER_SERVICE_VERSION = 107
+        // Bump whenever the user-service implementation or AIDL wire contract changes.
+        // v108 adds UID-scoped audio-capture arguments and per-user UID resolution.
+        const val USER_SERVICE_VERSION = 108
         /** Cooldown between foreground auto-launches of the Shizuku manager. */
         private const val AUTO_LAUNCH_COOLDOWN_MS = 60_000L
         /**

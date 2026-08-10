@@ -5,10 +5,11 @@ import org.junit.Test
 
 class VideoLatencyPolicyTest {
     @Test
-    fun `latency range supports one second with a 300ms default`() {
-        assertEquals(300, VideoLatencyPolicy.DEFAULT_STREAMED_AUDIO_LATENCY_MS)
+    fun `latency range supports one second with a negative 30ms default`() {
+        assertEquals(-30, VideoLatencyPolicy.DEFAULT_STREAMED_AUDIO_LATENCY_MS)
         assertEquals(1000, VideoLatencyPolicy.MAX_LATENCY_MS)
-        assertEquals(1000, VideoLatencyPolicy.resolve(true, false, false, 0, 1500))
+        assertEquals(-1000, VideoLatencyPolicy.clampStreamedAvOffset(-1500))
+        assertEquals(1000, VideoLatencyPolicy.clampStreamedAvOffset(1500))
     }
 
     @Test
@@ -23,7 +24,10 @@ class VideoLatencyPolicyTest {
     }
 
     @Test
-    fun `streamed audio uses its own latency`() {
-        assertEquals(120, VideoLatencyPolicy.resolve(true, true, true, 180, 120))
+    fun `streamed AV offset delays only the side that is early`() {
+        assertEquals(140, VideoLatencyPolicy.resolve(true, true, true, 180, -140))
+        assertEquals(0, VideoLatencyPolicy.resolve(true, true, true, 180, 140))
+        assertEquals(0, VideoLatencyPolicy.resolveStreamedAudioDelay(-140))
+        assertEquals(140, VideoLatencyPolicy.resolveStreamedAudioDelay(140))
     }
 }

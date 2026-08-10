@@ -64,6 +64,11 @@
     <string name="settings_audio_experimental">Audio (Experimental)</string>
     <string name="settings_stream_device_audio">Stream device audio</string>
     <string name="settings_audio_description">Requires Android 10+. Captures system output.</string>
+    <string name="settings_navigation_audio_phone">Keep navigation audio on phone</string>
+    <string name="settings_navigation_audio_phone_description">Uses Samsung Separate App Sound when available. Other apps are streamed to the browser.</string>
+    <string name="settings_audio_codec_preference">Audio codec priority</string>
+    <string name="settings_audio_codec_opus_first">Opus first</string>
+    <string name="settings_audio_codec_pcm_first">PCM first</string>
 <string name="settings_current_config">Current Configuration</string>
     <string name="settings_full_screen">Full Screen</string>
     <string name="settings_audio_on">, audio on</string>
@@ -148,9 +153,6 @@
     <string name="toast_no_update_available">You are already on the latest version.</string>
     <string name="settings_video_sync_latency">Video synchronization</string>
     <string name="settings_tesla_bt_latency">Tesla Bluetooth output: %1$d ms</string>
-    <string name="settings_streamed_audio_latency">Streamed audio output: %1$d ms</string>
-    <string name="settings_video_sync_latency_description">Applied per virtual display. Direct output has no additional delay. Streamed audio uses its own synchronization value.</string>
+    <string name="settings_streamed_audio_latency">Streaming A/V offset: %1$d ms</string>
+    <string name="settings_video_sync_latency_description">Tesla Bluetooth stores a separate video delay. A negative streaming offset delays video; a positive offset delays browser audio.</string>
 </resources>
-
-
-

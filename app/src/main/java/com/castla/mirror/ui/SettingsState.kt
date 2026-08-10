@@ -3,6 +3,7 @@ package com.castla.mirror.ui
 import android.content.Context
 import android.content.SharedPreferences
 import com.castla.mirror.policy.VideoLatencyPolicy
+import com.castla.mirror.policy.AudioCodecPreference
 
 enum class MirroringMode { FULL_SCREEN, APP }
 
@@ -11,6 +12,8 @@ data class StreamSettings(
     val maxResolution: Resolution = Resolution.RES_720,
     val fps: Int = FPS_AUTO,
     val audioEnabled: Boolean = false,
+    val separateNavigationAudioToPhone: Boolean = true,
+    val audioCodecPreference: AudioCodecPreference = AudioCodecPreference.OPUS_FIRST,
     val mirroringMode: MirroringMode = MirroringMode.FULL_SCREEN,
     val targetAppPackage: String = "",
     val targetAppLabel: String = "",
@@ -44,6 +47,8 @@ data class StreamSettings(
         private const val KEY_RESOLUTION = "max_resolution"
         private const val KEY_FPS = "fps"
         private const val KEY_AUDIO = "audio"
+        private const val KEY_SEPARATE_NAVIGATION_AUDIO = "separate_navigation_audio_to_phone"
+        private const val KEY_AUDIO_CODEC_PREFERENCE = "audio_codec_preference"
         private const val KEY_MIRRORING_MODE = "mirroring_mode"
         private const val KEY_TARGET_APP_PACKAGE = "target_app_package"
         private const val KEY_TARGET_APP_LABEL = "target_app_label"
@@ -72,6 +77,12 @@ data class StreamSettings(
                 maxResolution = resolution,
                 fps = fps,
                 audioEnabled = prefs.getBoolean(KEY_AUDIO, false),
+                separateNavigationAudioToPhone = prefs.getBoolean(KEY_SEPARATE_NAVIGATION_AUDIO, true),
+                audioCodecPreference = try {
+                    AudioCodecPreference.valueOf(
+                        prefs.getString(KEY_AUDIO_CODEC_PREFERENCE, AudioCodecPreference.OPUS_FIRST.name)!!,
+                    )
+                } catch (_: Exception) { AudioCodecPreference.OPUS_FIRST },
                 mirroringMode = try {
                     MirroringMode.valueOf(prefs.getString(KEY_MIRRORING_MODE, MirroringMode.FULL_SCREEN.name)!!)
                 } catch (_: Exception) { MirroringMode.FULL_SCREEN },
@@ -82,7 +93,9 @@ data class StreamSettings(
                 useNativeVirtualDisplayIme = prefs.getBoolean(KEY_NATIVE_VD_IME, true),
                 verboseDiagnosticsEnabled = prefs.getBoolean(KEY_VERBOSE_DIAGNOSTICS, false),
                 teslaBluetoothVideoLatencyMs = prefs.getInt(KEY_TESLA_BT_VIDEO_LATENCY_MS, 0).coerceIn(VideoLatencyPolicy.MIN_LATENCY_MS, VideoLatencyPolicy.MAX_LATENCY_MS),
-                streamedAudioVideoLatencyMs = prefs.getInt(KEY_STREAMED_AUDIO_VIDEO_LATENCY_MS, VideoLatencyPolicy.DEFAULT_STREAMED_AUDIO_LATENCY_MS).coerceIn(VideoLatencyPolicy.MIN_LATENCY_MS, VideoLatencyPolicy.MAX_LATENCY_MS)
+                streamedAudioVideoLatencyMs = VideoLatencyPolicy.clampStreamedAvOffset(
+                    prefs.getInt(KEY_STREAMED_AUDIO_VIDEO_LATENCY_MS, VideoLatencyPolicy.DEFAULT_STREAMED_AUDIO_LATENCY_MS),
+                )
             )
         }
 
@@ -91,6 +104,8 @@ data class StreamSettings(
                 .putString(KEY_RESOLUTION, settings.maxResolution.name)
                 .putInt(KEY_FPS, settings.fps)
                 .putBoolean(KEY_AUDIO, settings.audioEnabled)
+                .putBoolean(KEY_SEPARATE_NAVIGATION_AUDIO, settings.separateNavigationAudioToPhone)
+                .putString(KEY_AUDIO_CODEC_PREFERENCE, settings.audioCodecPreference.name)
                 .putString(KEY_MIRRORING_MODE, settings.mirroringMode.name)
                 .putString(KEY_TARGET_APP_PACKAGE, settings.targetAppPackage)
                 .putString(KEY_TARGET_APP_LABEL, settings.targetAppLabel)
@@ -99,7 +114,7 @@ data class StreamSettings(
                 .putBoolean(KEY_NATIVE_VD_IME, settings.useNativeVirtualDisplayIme)
                 .putBoolean(KEY_VERBOSE_DIAGNOSTICS, settings.verboseDiagnosticsEnabled)
                 .putInt(KEY_TESLA_BT_VIDEO_LATENCY_MS, settings.teslaBluetoothVideoLatencyMs.coerceIn(VideoLatencyPolicy.MIN_LATENCY_MS, VideoLatencyPolicy.MAX_LATENCY_MS))
-                .putInt(KEY_STREAMED_AUDIO_VIDEO_LATENCY_MS, settings.streamedAudioVideoLatencyMs.coerceIn(VideoLatencyPolicy.MIN_LATENCY_MS, VideoLatencyPolicy.MAX_LATENCY_MS))
+                .putInt(KEY_STREAMED_AUDIO_VIDEO_LATENCY_MS, VideoLatencyPolicy.clampStreamedAvOffset(settings.streamedAudioVideoLatencyMs))
                 .apply()
         }
     }

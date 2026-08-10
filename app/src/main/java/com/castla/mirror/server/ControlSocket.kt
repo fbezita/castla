@@ -229,6 +229,7 @@ class ControlSocket(
                     val componentName = json.optString("componentName", "")
                         .takeIf { it.isNotEmpty() }
                     val isVideoApp = json.optBoolean("isVideoApp", false)
+                    val userId = json.optInt("userId", 0)
                     if (MirrorServer.isVerboseServerAvailabilityLoggingEnabled()) {
                         FileLogger.i(
                             "LAUNCH_ACK",
@@ -262,7 +263,7 @@ class ControlSocket(
                         }
                         
                         // Execute actual launch request afterwards
-                        server.onAppLaunchRequest(pkg, componentName, pane, isVideoApp)
+                        server.onAppLaunchRequest(pkg, componentName, pane, isVideoApp, userId)
                     } else {
                         if (seqId != -1) {
                             try {

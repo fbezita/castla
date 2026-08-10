@@ -1,3 +1,5 @@
+import { AudioStreamProtocol, audioDelaySeconds, audioOutputBufferSeconds, audioSignalPeak, buildAudioCapabilities, clampAudioOutputDelayMs, shouldFallbackFromOpus } from "./audioProtocol";
+
 /**
  * Castla - Audio Player (Opus via WebCodecs + raw PCM fallback)
  *
@@ -14,13 +16,28 @@ export class AudioPlayer {
   private timestampUs = 0;
   private mode: 'opus' | 'pcm' | null = null;
   
-  private readonly JITTER_BUFFER_SEC = 0.12;
-  private readonly MAX_LATENCY = 0.4;
+  private readonly MAX_EXCESS_LATENCY_SEC = 0.4;
   private readonly OPUS_FRAME_DURATION_US = 20000; // 20ms
   
   private clockOffset: number | null = null;
+  private readonly protocol = new AudioStreamProtocol();
+  private currentStreamId: number | null = null;
+  private opusPacketsReceived = 0;
+  private decodedOpusFrames = 0;
+  private pcmFallbackRequested = false;
+  private loggedFirstOpusPacket = false;
+  private loggedFirstDecodedFrame = false;
+  private outputDelayMs = 0;
+  private audioDelayNode: DelayNode | null = null;
+  private audioAnalyser: AnalyserNode | null = null;
+  private readonly diagnosticTimers = new Set<number>();
+  private readonly scheduledSources = new Set<AudioBufferSourceNode>();
 
   constructor() {}
+
+  setOutputDelayMs(value: number): void {
+    this._setOutputDelayMs(value);
+  }
 
   async startFromUserGesture(wsUrl: string): Promise<boolean> {
     try {
@@ -37,6 +54,7 @@ export class AudioPlayer {
       if (this.audioCtx.state === 'suspended') {
         await this.audioCtx.resume();
       }
+      this._connectAudioOutput();
 
       console.log('[Audio] AudioContext ready, state:', this.audioCtx.state);
       this.nextPlayTime = 0;
@@ -57,11 +75,15 @@ export class AudioPlayer {
       return false;
     }
     try {
+      if (this.decoder && this.decoder.state !== 'closed') {
+        this.decoder.close();
+      }
       this.decoder = new (window as any).AudioDecoder({
         output: (audioData: any) => this._handleDecodedAudio(audioData),
         error: (e: any) => {
           console.error('[Audio] Opus decoder error:', e);
           this.decoder = null;
+          this._requestPcmFallback('decoder-runtime-error');
         }
       });
       this.decoder.configure({
@@ -85,20 +107,40 @@ export class AudioPlayer {
       return;
     }
     try {
+      this.decodedOpusFrames += 1;
+      if (!this.loggedFirstDecodedFrame) {
+        this.loggedFirstDecodedFrame = true;
+        console.log('[Audio] First Opus frame decoded', {
+          format: audioData.format,
+          frames: audioData.numberOfFrames,
+          channels: audioData.numberOfChannels,
+          sampleRate: audioData.sampleRate,
+        });
+      }
       const ch = audioData.numberOfChannels;
       const frames = audioData.numberOfFrames;
       const sr = audioData.sampleRate;
       const buf = this.audioCtx.createBuffer(ch, frames, sr);
       for (let c = 0; c < ch; c++) {
         const cd = new Float32Array(frames);
-        audioData.copyTo(cd, { planeIndex: c });
+        audioData.copyTo(cd, { planeIndex: c, format: 'f32-planar' });
         buf.copyToChannel(cd, c);
       }
       this._scheduleBuffer(buf);
     } catch (e) {
-      // skip
+      console.error('[Audio] Failed to copy decoded Opus audio:', e);
+      this._requestPcmFallback('decoded-audio-copy-error');
     } finally {
       audioData.close();
+    }
+  }
+
+  private _requestPcmFallback(reason: string) {
+    if (this.pcmFallbackRequested) return;
+    this.pcmFallbackRequested = true;
+    console.warn(`[Audio] Requesting PCM fallback: ${reason}`);
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify({ type: 'requestPcm', streamId: this.currentStreamId, reason }));
     }
   }
 
@@ -121,15 +163,89 @@ export class AudioPlayer {
     if (!this.audioCtx) return;
     const source = this.audioCtx.createBufferSource();
     source.buffer = audioBuffer;
-    source.connect(this.audioCtx.destination);
+    source.connect(this.audioDelayNode ?? this.audioCtx.destination);
     const now = this.audioCtx.currentTime;
+    const targetBufferSeconds = audioOutputBufferSeconds(0);
     if (this.nextPlayTime < now) {
-      this.nextPlayTime = now + this.JITTER_BUFFER_SEC;
-    } else if (this.nextPlayTime > now + this.MAX_LATENCY) {
-      this.nextPlayTime = now + this.JITTER_BUFFER_SEC;
+      this.nextPlayTime = now + targetBufferSeconds;
+    } else if (this.nextPlayTime > now + targetBufferSeconds + this.MAX_EXCESS_LATENCY_SEC) {
+      this.nextPlayTime = now + targetBufferSeconds;
     }
+    this.scheduledSources.add(source);
+    source.onended = () => this.scheduledSources.delete(source);
     source.start(this.nextPlayTime);
     this.nextPlayTime += audioBuffer.duration;
+  }
+
+  private _connectAudioOutput() {
+    if (!this.audioCtx) return;
+    this.audioDelayNode?.disconnect();
+    this.audioAnalyser?.disconnect();
+    const node = this.audioCtx.createDelay(1.1);
+    const analyser = this.audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    node.delayTime.value = audioDelaySeconds(this.outputDelayMs);
+    node.connect(analyser);
+    analyser.connect(this.audioCtx.destination);
+    this.audioDelayNode = node;
+    this.audioAnalyser = analyser;
+  }
+
+  private _setOutputDelayMs(value: number) {
+    const next = clampAudioOutputDelayMs(value);
+    if (next === this.outputDelayMs) return;
+    this.outputDelayMs = next;
+    if (this.audioCtx && this.audioDelayNode) {
+      try {
+        const now = this.audioCtx.currentTime;
+        const delayTime = this.audioDelayNode.delayTime;
+        delayTime.cancelScheduledValues(now);
+        delayTime.value = audioDelaySeconds(next);
+      } catch (error) {
+        console.error('[Audio] Failed to update DelayNode:', error);
+        if (this.socket?.readyState === WebSocket.OPEN) {
+          this.socket.send(JSON.stringify({
+            type: 'audioDiagnostics',
+            event: 'delay-update-error',
+            outputDelayMs: next,
+            error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+          }));
+        }
+      }
+    }
+    console.log(`[Audio] Output delay updated: ${next}ms`);
+    this._scheduleDiagnosticsAfterDelayChange();
+  }
+
+  private _scheduleDiagnosticsAfterDelayChange() {
+    this.diagnosticTimers.forEach((timer) => window.clearTimeout(timer));
+    this.diagnosticTimers.clear();
+    for (const elapsedMs of [0, 250, 1200, 2500]) {
+      const timer = window.setTimeout(() => {
+        this.diagnosticTimers.delete(timer);
+        this._sendDiagnostics(`delay+${elapsedMs}ms`);
+      }, elapsedMs);
+      this.diagnosticTimers.add(timer);
+    }
+  }
+
+  private _sendDiagnostics(event: string) {
+    if (!this.audioCtx || !this.audioAnalyser || this.socket?.readyState !== WebSocket.OPEN) return;
+    const samples = new Float32Array(this.audioAnalyser.fftSize);
+    this.audioAnalyser.getFloatTimeDomainData(samples);
+    this.socket.send(JSON.stringify({
+      type: 'audioDiagnostics',
+      event,
+      contextState: this.audioCtx.state,
+      codec: this.mode,
+      outputDelayMs: this.outputDelayMs,
+      delayNodeSeconds: this.audioDelayNode?.delayTime.value ?? -1,
+      packets: this.opusPacketsReceived,
+      decodedFrames: this.decodedOpusFrames,
+      scheduledSources: this.scheduledSources.size,
+      scheduleLeadMs: Math.round((this.nextPlayTime - this.audioCtx.currentTime) * 1000),
+      outputPeak: audioSignalPeak(samples),
+    }));
   }
 
   private _connectSocket(wsUrl: string) {
@@ -140,9 +256,28 @@ export class AudioPlayer {
     this.socket = new WebSocket(wsUrl);
     this.socket.binaryType = 'arraybuffer';
 
-    this.socket.onopen = () => console.log('[Audio] WebSocket connected');
+    this.socket.onopen = async () => {
+      console.log('[Audio] WebSocket connected');
+      const capabilities = await buildAudioCapabilities(async () => {
+        if (!window.isSecureContext || typeof (window as any).AudioDecoder === 'undefined') return { supported: false };
+        return (window as any).AudioDecoder.isConfigSupported({
+          codec: 'opus', sampleRate: 48000, numberOfChannels: 2,
+        });
+      });
+      if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(capabilities));
+      console.log('[Audio] Capabilities:', capabilities);
+    };
 
     this.socket.onmessage = (event: MessageEvent) => {
+      if (typeof event.data === 'string') {
+        try {
+          const control = JSON.parse(event.data);
+          if (control.type === 'audioDelay') this._setOutputDelayMs(control.outputDelayMs);
+        } catch (e) {
+          console.warn('[Audio] Bad audio control message:', e);
+        }
+        return;
+      }
       if (!(event.data instanceof ArrayBuffer) || event.data.byteLength < 2) return;
       const view = new Uint8Array(event.data);
       const type = view[0];
@@ -154,6 +289,14 @@ export class AudioPlayer {
           const config = JSON.parse(json);
           this.sampleRate = config.sampleRate || 48000;
           this.channels = config.channels || 2;
+          this.currentStreamId = Number(config.streamId);
+          this._setOutputDelayMs(config.outputDelayMs ?? 0);
+          this.protocol.acceptConfig(this.currentStreamId);
+          this.opusPacketsReceived = 0;
+          this.decodedOpusFrames = 0;
+          this.pcmFallbackRequested = false;
+          this.loggedFirstOpusPacket = false;
+          this.loggedFirstDecodedFrame = false;
           console.log('[Audio] Config:', json);
 
           // Recreate AudioContext if sample rate changed
@@ -166,6 +309,7 @@ export class AudioPlayer {
             });
             this.audioCtx.resume().catch(() => {});
             this.nextPlayTime = 0;
+            this._connectAudioOutput();
           }
 
           if (config.codec === 'opus') {
@@ -178,7 +322,11 @@ export class AudioPlayer {
               // mode stays null until server sends new PCM config
               return;
             }
-          } else {
+          } else if (config.codec === 'pcm' || config.codec === 'pcm_s16le') {
+            if (this.decoder && this.decoder.state !== 'closed') {
+              this.decoder.close();
+            }
+            this.decoder = null;
             this.mode = 'pcm';
             console.log('[Audio] PCM mode');
           }
@@ -188,11 +336,14 @@ export class AudioPlayer {
         return;
       }
 
-      // type === 0x01: audio data with 5-byte header [0x01][tsMs u32 LE] + audio
-      if (event.data.byteLength < 6) return;
+      // type === 0x01: [type][streamId i64][sequence i32][timestampUs i64] + payload
+      if (event.data.byteLength < 22) return;
       const dv = new DataView(event.data);
-      const serverTsMs = dv.getUint32(1, true); // LE timestamp
-      const audioPayload = event.data.slice(5);
+      const streamId = Number(dv.getBigInt64(1, true));
+      if (!this.protocol.acceptPacket(streamId)) return;
+      const timestampUs = Number(dv.getBigInt64(13, true));
+      const serverTsMs = timestampUs / 1000;
+      const audioPayload = event.data.slice(21);
 
       // EMA clock offset for A/V sync
       const clientNow = performance.now();
@@ -207,18 +358,32 @@ export class AudioPlayer {
         try {
           const chunk = new (window as any).EncodedAudioChunk({
             type: 'key',
-            timestamp: this.timestampUs,
+            timestamp: timestampUs,
             data: audioPayload
           });
-          this.timestampUs += this.OPUS_FRAME_DURATION_US;
           this.decoder.decode(chunk);
-        } catch (e) { /* skip bad frame */ }
+          this.opusPacketsReceived += 1;
+          if (!this.loggedFirstOpusPacket) {
+            this.loggedFirstOpusPacket = true;
+            console.log('[Audio] First Opus packet received', { bytes: audioPayload.byteLength, timestampUs });
+          }
+          if (shouldFallbackFromOpus(this.opusPacketsReceived, this.decodedOpusFrames)) {
+            this._requestPcmFallback('opus-packets-without-decoded-output');
+          }
+        } catch (e) {
+          console.error('[Audio] Opus packet decode failed:', e);
+          this._requestPcmFallback('opus-packet-decode-error');
+        }
       } else if (this.mode === 'pcm') {
         this._playPCM(audioPayload);
       }
     };
 
-    this.socket.onclose = () => console.log('[Audio] WebSocket disconnected');
+    this.socket.onclose = () => {
+      this.protocol.reset();
+      this.currentStreamId = null;
+      console.log('[Audio] WebSocket disconnected');
+    };
   }
 
   stop() {
@@ -237,9 +402,27 @@ export class AudioPlayer {
       this.audioCtx.close().catch(() => {});
     }
     this.audioCtx = null;
+    this.audioDelayNode?.disconnect();
+    this.audioDelayNode = null;
+    this.audioAnalyser?.disconnect();
+    this.audioAnalyser = null;
+    this.diagnosticTimers.forEach((timer) => window.clearTimeout(timer));
+    this.diagnosticTimers.clear();
     this.nextPlayTime = 0;
     this.timestampUs = 0;
     this.mode = null;
+    this.protocol.reset();
+    this.currentStreamId = null;
+    this.opusPacketsReceived = 0;
+    this.decodedOpusFrames = 0;
+    this.pcmFallbackRequested = false;
+    this.loggedFirstOpusPacket = false;
+    this.loggedFirstDecodedFrame = false;
+    this.outputDelayMs = 0;
+    this.scheduledSources.forEach((source) => {
+      try { source.stop(); } catch (_) {}
+    });
+    this.scheduledSources.clear();
     console.log('[Audio] Stopped');
   }
 

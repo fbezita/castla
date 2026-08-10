@@ -1,5 +1,6 @@
 import type { EncodedFrame } from "../protocol";
 import type { DecoderBackend } from "./DecoderBackend";
+import { PreDecodeDelayQueue } from "./PreDecodeDelayQueue";
 import { clampVideoLatencyMs } from "./videoLatency";
 
 /**
@@ -35,8 +36,9 @@ export class WebCodecsBackend implements DecoderBackend {
   private isScreenOff?: () => boolean;
   private isVideoFrozen?: () => boolean;
   private videoLatencyMs = 0;
-  private pendingRenderTimers = new Set<number>();
-  private pendingFrames = new Set<VideoFrame>();
+  private readonly delayedDecodeQueue = new PreDecodeDelayQueue<EncodedFrame>(
+    (frame) => this.decodeNow(frame),
+  );
 
   private lastLatencyRecoveryAt = 0;
 
@@ -79,8 +81,12 @@ export class WebCodecsBackend implements DecoderBackend {
   setVideoLatencyMs(latencyMs: number): void {
     const next = clampVideoLatencyMs(latencyMs);
     if (next === this.videoLatencyMs) return;
-    this.clearPendingFrames();
+    const cleared = this.delayedDecodeQueue.clear();
     this.videoLatencyMs = next;
+    if (cleared > 0) {
+      this.hasDecodedKeyframe = false;
+      this.requestKeyframeThrottled("latency_changed");
+    }
   }
 
   decode(frame: EncodedFrame): void {
@@ -94,6 +100,12 @@ export class WebCodecsBackend implements DecoderBackend {
       this.onStatus?.("webcodecsConfig", `bytes=${frame.payload.byteLength}`);
       return;
     }
+
+    this.delayedDecodeQueue.enqueue(frame, this.videoLatencyMs);
+  }
+
+  private decodeNow(frame: EncodedFrame): void {
+    if (this.destroyed) return;
 
     if (!this.decoder) {
       this.createDecoder();
@@ -182,12 +194,13 @@ export class WebCodecsBackend implements DecoderBackend {
     // caused generation/config-frame recovery loops.
     this.hasDecodedKeyframe = false;
     this.droppedDeltaBeforeKeyframe = 0;
+    this.delayedDecodeQueue.clear();
     this.requestKeyframeThrottled("soft_reset");
   }
 
   destroy(): void {
     this.destroyed = true;
-    this.clearPendingFrames();
+    this.delayedDecodeQueue.clear();
     try {
       this.decoder?.close();
     } catch {
@@ -206,7 +219,7 @@ export class WebCodecsBackend implements DecoderBackend {
     if (this.decoder && this.decoder.state !== "closed") return;
 
     this.decoder = new VideoDecoder({
-      output: (frame) => this.scheduleRenderFrame(frame),
+      output: (frame) => this.renderFrame(frame),
       error: (error) => {
         console.error(`[WebCodecs] VideoDecoder error: ${error.message}`);
         this.hasDecodedKeyframe = false;
@@ -260,27 +273,6 @@ export class WebCodecsBackend implements DecoderBackend {
     }
   }
 
-  private scheduleRenderFrame(frame: VideoFrame): void {
-    if (this.videoLatencyMs <= 0) {
-      this.renderFrame(frame);
-      return;
-    }
-    this.pendingFrames.add(frame);
-    const timer = window.setTimeout(() => {
-      this.pendingRenderTimers.delete(timer);
-      this.pendingFrames.delete(frame);
-      if (this.destroyed) frame.close(); else this.renderFrame(frame);
-    }, this.videoLatencyMs);
-    this.pendingRenderTimers.add(timer);
-  }
-
-  private clearPendingFrames(): void {
-    this.pendingRenderTimers.forEach((timer) => window.clearTimeout(timer));
-    this.pendingRenderTimers.clear();
-    this.pendingFrames.forEach((frame) => frame.close());
-    this.pendingFrames.clear();
-  }
-
   private renderFrame(frame: VideoFrame): void {
     try {
       const canvas = this.canvas;
@@ -305,12 +297,12 @@ export class WebCodecsBackend implements DecoderBackend {
       ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
       this.renderedFrames += 1;
 
-      if (this.renderedFrames === 1 || this.renderedFrames % 120 === 0) {
-        this.onStatus?.(
-          "webcodecsFrame",
-          `rendered=${this.renderedFrames} ${canvas.width}x${canvas.height}`,
-        );
-      }
+      // if (this.renderedFrames === 1 || this.renderedFrames % 120 === 0) {
+      //   this.onStatus?.(
+      //     "webcodecsFrame",
+      //     `rendered=${this.renderedFrames} ${canvas.width}x${canvas.height}`,
+      //   );
+      // }
 
       this.onFrame?.();
     } finally {

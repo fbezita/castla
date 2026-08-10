@@ -10,14 +10,19 @@ class AudioCaptureOrchestratorTest {
     private lateinit var log: MutableList<String>
     private var deferScheduled: Boolean = false
     private var deferCancelled: Boolean = false
+    private var captureStartSucceeds: Boolean = true
 
     @Before
     fun setup() {
         log = mutableListOf()
         deferScheduled = false
         deferCancelled = false
+        captureStartSucceeds = true
         orch = AudioCaptureOrchestrator(object : AudioCaptureOrchestrator.Actions {
-            override fun startCapture(codec: String?) { log.add("start:${codec ?: "default"}") }
+            override fun startCapture(codec: String?): Boolean {
+                log.add("start:${codec ?: "default"}")
+                return captureStartSucceeds
+            }
             override fun stopCapture() { log.add("stop") }
             override fun grantAudioPermission() { log.add("grant") }
             override fun scheduleDeferredStart(delayMs: Long): Any? {
@@ -93,27 +98,45 @@ class AudioCaptureOrchestratorTest {
     }
 
     @Test
-    fun `audio socket first connection starts capture when audio and browser are enabled`() {
+    fun `audio socket first connection waits for codec negotiation`() {
         val result = orch.onAudioSocketConnected(
             audioEnabled = true,
             browserConnected = true,
         )
 
-        assertEquals(AudioCaptureOrchestrator.EnsureResult.STARTED, result)
+        assertEquals(AudioCaptureOrchestrator.EnsureResult.DEFERRED, result)
         assertTrue(orch.audioSocketConnected)
-        assertTrue(orch.captureActive)
-        assertTrue(log.contains("start:default"))
-        assertFalse(deferScheduled)
+        assertFalse(orch.captureActive)
+        assertTrue(deferScheduled)
+
+        assertEquals(AudioCaptureOrchestrator.EnsureResult.STARTED, orch.ensure("opus"))
+        assertTrue(log.contains("start:opus"))
     }
 
     @Test
-    fun `deferred timer expiry starts with default codec`() {
+    fun `negotiation timeout falls back to pcm`() {
         orch.audioEnabled = true
         orch.browserConnected = true
         orch.ensure() // deferred
         orch.onDeferredTimerExpired()
         assertTrue(orch.captureActive)
-        assertTrue(log.contains("start:default"))
+        assertTrue(log.contains("start:pcm"))
+    }
+
+    @Test
+    fun `failed capture start remains inactive so a later ensure can retry`() {
+        orch.audioEnabled = true
+        orch.browserConnected = true
+        orch.currentCodec = "pcm"
+        captureStartSucceeds = false
+
+        assertEquals(AudioCaptureOrchestrator.EnsureResult.START_FAILED, orch.ensure("pcm"))
+        assertFalse(orch.captureActive)
+
+        captureStartSucceeds = true
+        assertEquals(AudioCaptureOrchestrator.EnsureResult.STARTED, orch.ensure("pcm"))
+        assertTrue(orch.captureActive)
+        assertEquals(2, log.count { it == "start:pcm" })
     }
 
     @Test

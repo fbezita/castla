@@ -111,6 +111,9 @@ fun SettingsScreen(
     onBackClick: () -> Unit,
     onCheckUpdate: () -> Unit
 ) {
+    var streamedAudioLatencySliderValue by remember(settings.streamedAudioVideoLatencyMs) {
+        mutableFloatStateOf(settings.streamedAudioVideoLatencyMs.toFloat())
+    }
     MeshGradientBackground {
         Column(
             modifier = Modifier
@@ -279,6 +282,65 @@ fun SettingsScreen(
                         )
                     )
                 }
+
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 14.dp),
+                    color = Color.White.copy(alpha = 0.1f),
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.settings_navigation_audio_phone),
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Color.White,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = stringResource(R.string.settings_navigation_audio_phone_description),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.6f),
+                        )
+                    }
+                    Switch(
+                        checked = settings.separateNavigationAudioToPhone,
+                        onCheckedChange = { enabled ->
+                            if (!isStreaming) onSettingsChanged(settings.copy(separateNavigationAudioToPhone = enabled))
+                        },
+                        enabled = !isStreaming,
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+                Text(
+                    text = stringResource(R.string.settings_audio_codec_preference),
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = settings.audioCodecPreference == com.castla.mirror.policy.AudioCodecPreference.OPUS_FIRST,
+                        onClick = {
+                            if (!isStreaming) onSettingsChanged(settings.copy(audioCodecPreference = com.castla.mirror.policy.AudioCodecPreference.OPUS_FIRST))
+                        },
+                        label = { Text(stringResource(R.string.settings_audio_codec_opus_first)) },
+                        enabled = !isStreaming,
+                    )
+                    FilterChip(
+                        selected = settings.audioCodecPreference == com.castla.mirror.policy.AudioCodecPreference.PCM_FIRST,
+                        onClick = {
+                            if (!isStreaming) onSettingsChanged(settings.copy(audioCodecPreference = com.castla.mirror.policy.AudioCodecPreference.PCM_FIRST))
+                        },
+                        label = { Text(stringResource(R.string.settings_audio_codec_pcm_first)) },
+                        enabled = !isStreaming,
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(20.dp))
@@ -304,18 +366,29 @@ fun SettingsScreen(
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
-                        text = stringResource(R.string.settings_streamed_audio_latency, settings.streamedAudioVideoLatencyMs),
+                        text = stringResource(
+                            R.string.settings_streamed_audio_latency,
+                            (streamedAudioLatencySliderValue / 10f).toInt() * 10,
+                        ),
                         style = MaterialTheme.typography.bodyLarge,
                         color = Color.White,
                         fontWeight = FontWeight.SemiBold
                     )
                     Slider(
-                        value = settings.streamedAudioVideoLatencyMs.toFloat(),
+                        value = streamedAudioLatencySliderValue,
                         onValueChange = { value ->
-                            onSettingsChanged(settings.copy(streamedAudioVideoLatencyMs = (value / 10f).toInt() * 10))
+                            streamedAudioLatencySliderValue = value
                         },
-                        valueRange = 0f..com.castla.mirror.policy.VideoLatencyPolicy.MAX_LATENCY_MS.toFloat(),
-                        steps = (com.castla.mirror.policy.VideoLatencyPolicy.MAX_LATENCY_MS / 10) - 1,
+                        onValueChangeFinished = {
+                            onSettingsChanged(
+                                settings.copy(
+                                    streamedAudioVideoLatencyMs =
+                                        (streamedAudioLatencySliderValue / 10f).toInt() * 10,
+                                ),
+                            )
+                        },
+                        valueRange = com.castla.mirror.policy.VideoLatencyPolicy.MIN_STREAMED_AV_OFFSET_MS.toFloat()..com.castla.mirror.policy.VideoLatencyPolicy.MAX_LATENCY_MS.toFloat(),
+                        steps = ((com.castla.mirror.policy.VideoLatencyPolicy.MAX_LATENCY_MS - com.castla.mirror.policy.VideoLatencyPolicy.MIN_STREAMED_AV_OFFSET_MS) / 10) - 1,
                         enabled = true
                     )
                     Text(

@@ -2,6 +2,7 @@ package com.castla.mirror.ui
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.castla.mirror.policy.AudioCodecPreference
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
@@ -29,6 +30,8 @@ class StreamSettingsTest {
         assertFalse(settings.isAutoResolution)
         assertTrue(settings.isAutoFps)
         assertFalse(settings.audioEnabled)
+        assertTrue(settings.separateNavigationAudioToPhone)
+        assertEquals(AudioCodecPreference.OPUS_FIRST, settings.audioCodecPreference)
     }
 
     @Test
@@ -46,7 +49,9 @@ class StreamSettingsTest {
         val original = StreamSettings(
             maxResolution = StreamSettings.Resolution.RES_1080,
             fps = 60,
-            audioEnabled = true
+            audioEnabled = true,
+            separateNavigationAudioToPhone = false,
+            audioCodecPreference = AudioCodecPreference.PCM_FIRST,
         )
         StreamSettings.save(context, original)
         val loaded = StreamSettings.load(context)

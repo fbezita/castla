@@ -51,6 +51,9 @@ import com.castla.mirror.utils.LaunchMode
 import com.castla.mirror.policy.AutoScaleDecision
 import com.castla.mirror.policy.AutoScaleInput
 import com.castla.mirror.policy.AutoScalePolicy
+import com.castla.mirror.policy.AppAudioTarget
+import com.castla.mirror.policy.AudioCaptureRouteKey
+import com.castla.mirror.policy.AudioTargetRegistry
 import com.castla.mirror.policy.CodecModeTransition
 import com.castla.mirror.policy.DisconnectPolicy
 import com.castla.mirror.policy.ScreenOffLoopGuard
@@ -227,6 +230,8 @@ class MirrorForegroundService : Service() {
 
     private var audioCapture: AudioCapture? = null
     internal var audioOrchestrator: AudioCaptureOrchestrator? = null
+    private val audioTargetRegistry = AudioTargetRegistry()
+    @Volatile private var activeAudioCaptureRouteKey: AudioCaptureRouteKey? = null
     private var shizukuSetup: ShizukuSetup? = null
     private var mirroringMode: String = "FULL_SCREEN"
     private var targetPackage: String = ""
@@ -287,6 +292,12 @@ class MirrorForegroundService : Service() {
 
     private var reconnectJob: Job? = null
     private var pendingAudioEnabled = false
+    private var audioSocketReady = false
+    private var negotiatedAudioCodec: String? = null
+    private var separateNavigationAudioToPhone = true
+    private var audioCodecPreference = com.castla.mirror.policy.AudioCodecPreference.OPUS_FIRST
+    private var systemSeparatedAudioPackages: Set<String>? = null
+    private val audioStreamGeneration = java.util.concurrent.atomic.AtomicLong(0)
     private var teslaBluetoothVideoLatencyMs = 0
     private var streamedAudioVideoLatencyMs = com.castla.mirror.policy.VideoLatencyPolicy.DEFAULT_STREAMED_AUDIO_LATENCY_MS
     private var bluetoothAudioConnected = false
@@ -666,7 +677,25 @@ class MirrorForegroundService : Service() {
 
                 // 1-2. Reflected the new guideline (isVideoApp) written in the ticket immediately to the pipeline context.
                 targetPipeline.isVideoApp = request.isVideoApp
+                targetPipeline.audioTargetPackage = request.packageName.substringBefore('/')
+                targetPipeline.currentAppUserId = request.userId
+                targetPipeline.currentAppUid = try {
+                    shizukuSetup?.privilegedService?.resolvePackageUidForUser(targetPipeline.audioTargetPackage, request.userId) ?: -1
+                } catch (e: Exception) {
+                    Log.w(TAG, "UID resolve failed package=${targetPipeline.audioTargetPackage} userId=${request.userId}", e)
+                    -1
+                }
+                if (targetPipeline.currentAppUid >= 0) {
+                    audioTargetRegistry.remember(
+                        AppAudioTarget(
+                            targetPipeline.audioTargetPackage,
+                            targetPipeline.currentAppUserId,
+                            targetPipeline.currentAppUid,
+                        )
+                    )
+                }
                 refreshVideoLatencies()
+                refreshAudioCaptureRouting()
 
                 // 1-3. Calculate the target profile based on the identification info of the app scheduled to start.
                 val newProfile = contentAwareQualityEngine.resolveContentProfile(
@@ -765,14 +794,20 @@ class MirrorForegroundService : Service() {
         val rawFps = intent?.getIntExtra(EXTRA_FPS, 0) ?: 0
         pendingAudioEnabled = intent?.getBooleanExtra(EXTRA_AUDIO, false) ?: false
         teslaBluetoothVideoLatencyMs = intent?.getIntExtra(EXTRA_TESLA_BT_VIDEO_LATENCY_MS, 0)?.coerceIn(com.castla.mirror.policy.VideoLatencyPolicy.MIN_LATENCY_MS, com.castla.mirror.policy.VideoLatencyPolicy.MAX_LATENCY_MS) ?: 0
-        streamedAudioVideoLatencyMs = intent?.getIntExtra(EXTRA_STREAMED_AUDIO_VIDEO_LATENCY_MS, com.castla.mirror.policy.VideoLatencyPolicy.DEFAULT_STREAMED_AUDIO_LATENCY_MS)?.coerceIn(com.castla.mirror.policy.VideoLatencyPolicy.MIN_LATENCY_MS, com.castla.mirror.policy.VideoLatencyPolicy.MAX_LATENCY_MS) ?: com.castla.mirror.policy.VideoLatencyPolicy.DEFAULT_STREAMED_AUDIO_LATENCY_MS
+        streamedAudioVideoLatencyMs = com.castla.mirror.policy.VideoLatencyPolicy.clampStreamedAvOffset(
+            intent?.getIntExtra(EXTRA_STREAMED_AUDIO_VIDEO_LATENCY_MS, com.castla.mirror.policy.VideoLatencyPolicy.DEFAULT_STREAMED_AUDIO_LATENCY_MS)
+                ?: com.castla.mirror.policy.VideoLatencyPolicy.DEFAULT_STREAMED_AUDIO_LATENCY_MS,
+        )
         mirroringMode = intent?.getStringExtra(EXTRA_MIRRORING_MODE) ?: "FULL_SCREEN"
         targetPackage = intent?.getStringExtra(EXTRA_TARGET_PACKAGE) ?: ""
         val runtimeSettings = com.castla.mirror.ui.StreamSettings.load(this)
         useNativeVirtualDisplayIme = runtimeSettings.useNativeVirtualDisplayIme
         verboseDiagnosticsEnabled = runtimeSettings.verboseDiagnosticsEnabled
+        separateNavigationAudioToPhone = runtimeSettings.separateNavigationAudioToPhone
+        audioCodecPreference = runtimeSettings.audioCodecPreference
+        systemSeparatedAudioPackages = readSamsungSeparateSoundPackages()
 
-        Log.i(TAG, "onStartCommand() - Frame profiling parameters input. HeightHint=$rawMaxHeight, FpsHint=$rawFps, Audio=$pendingAudioEnabled, hostIp=$hostIp, relayPublishIp=$relayPublishIp")
+        Log.i(TAG, "onStartCommand() - Frame profiling parameters input. HeightHint=$rawMaxHeight, FpsHint=$rawFps, Audio=$pendingAudioEnabled, audioCodecPreference=$audioCodecPreference, separateNavigationAudioToPhone=$separateNavigationAudioToPhone, systemSeparatedAudioPackages=$systemSeparatedAudioPackages, hostIp=$hostIp, relayPublishIp=$relayPublishIp")
         Log.i(
             TAG,
             "$vdImeLogPrefix [IME_ROUTING] mode=${if (useNativeVirtualDisplayIme) "native_vd_ime" else "castla_proxy_fallback"} " +
@@ -808,8 +843,12 @@ class MirrorForegroundService : Service() {
 
     fun updateVideoLatencySettings(teslaBluetoothMs: Int, streamedAudioMs: Int) {
         teslaBluetoothVideoLatencyMs = teslaBluetoothMs.coerceIn(com.castla.mirror.policy.VideoLatencyPolicy.MIN_LATENCY_MS, com.castla.mirror.policy.VideoLatencyPolicy.MAX_LATENCY_MS)
-        streamedAudioVideoLatencyMs = streamedAudioMs.coerceIn(com.castla.mirror.policy.VideoLatencyPolicy.MIN_LATENCY_MS, com.castla.mirror.policy.VideoLatencyPolicy.MAX_LATENCY_MS)
+        streamedAudioVideoLatencyMs = com.castla.mirror.policy.VideoLatencyPolicy.clampStreamedAvOffset(streamedAudioMs)
+        Log.i(TAG, "updateVideoLatencySettings bt=${teslaBluetoothVideoLatencyMs}ms streamedAudio=${streamedAudioVideoLatencyMs}ms audioEnabled=$pendingAudioEnabled")
         refreshVideoLatencies()
+        mirrorServer?.broadcastAudioDelay(
+            com.castla.mirror.policy.VideoLatencyPolicy.resolveStreamedAudioDelay(streamedAudioVideoLatencyMs),
+        )
     }
 
     private fun refreshVideoLatencies() {
@@ -1002,6 +1041,7 @@ class MirrorForegroundService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) { try { thermalThrottleManager.unregister() } catch (_: Exception) {} }
         powerLockManager.releaseWakeLocks()
         audioOrchestrator?.stop()
+        audioTargetRegistry.clear()
 
         pipelines.values.forEach { try { it.resizeJob?.cancel() } catch (_: Exception) {} }
         adaptiveBitrateManager.stopAllLoops()
@@ -1092,13 +1132,48 @@ class MirrorForegroundService : Service() {
 
             pendingAudioEnabled = audioEnabled
             audioOrchestrator = AudioCaptureOrchestrator(object : AudioCaptureOrchestrator.Actions {
-                override fun startCapture(codec: String?) {
-                    audioCapture = AudioCapture(null, shizukuSetup?.privilegedService).also { audio ->
-                        if (codec == "pcm") audio.startPcmOnly { mirrorServer?.broadcastAudio(it) }
-                        else audio.start { mirrorServer?.broadcastAudio(it) }
+                override fun startCapture(codec: String?): Boolean {
+                    val selection = currentAudioCaptureSelection()
+                    if (selection.includedUids.isEmpty()) {
+                        Log.i(TAG, "Audio capture start deferred: no browser-routed VD app")
+                        return false
                     }
+                    val requested = com.castla.mirror.policy.AudioCodec.fromWireName(codec)
+                    val decision = com.castla.mirror.policy.AudioCodecPolicy.select(
+                        audioEnabled = pendingAudioEnabled,
+                        requestedCodec = requested,
+                        capabilities = com.castla.mirror.policy.AudioCodecCapabilities(
+                            androidOpusEncoderSupported = com.castla.mirror.capture.RemoteSubmixOpusTranscoder.isSupported(),
+                            browserOpusDecoderSupported = requested == com.castla.mirror.policy.AudioCodec.OPUS,
+                        ),
+                    )
+                    val selectedCodec = (decision as? com.castla.mirror.policy.AudioCaptureDecision.Enabled)?.codec ?: return false
+                    val nextStreamId = audioStreamGeneration.incrementAndGet()
+                    val capture = AudioCapture(
+                        null,
+                        shizukuSetup?.privilegedService,
+                        selection,
+                        selectedCodec,
+                        nextStreamId,
+                        com.castla.mirror.policy.VideoLatencyPolicy.resolveStreamedAudioDelay(streamedAudioVideoLatencyMs),
+                    ) { reason ->
+                        serviceScope.launch(Dispatchers.IO) {
+                            Log.w(TAG, "Audio codec fallback requested streamId=$nextStreamId reason=$reason")
+                            negotiatedAudioCodec = "pcm"
+                            ensureAudioCaptureState("pcm")
+                        }
+                    }
+                    val started = capture.start { mirrorServer?.broadcastAudio(it) }
+                    audioCapture = capture.takeIf { started }
+                    activeAudioCaptureRouteKey = AudioCaptureRouteKey.from(selection).takeIf { started }
+                    if (!started) Log.e(TAG, "Audio capture failed to start codec=$selectedCodec selection=$selection")
+                    return started
                 }
-                override fun stopCapture() { try { audioCapture?.stop() } catch (_: Exception) {}; audioCapture = null }
+                override fun stopCapture() {
+                    try { audioCapture?.stop() } catch (_: Exception) {}
+                    audioCapture = null
+                    activeAudioCaptureRouteKey = null
+                }
                 override fun grantAudioPermission() { tryGrantAudioCapturePermission() }
                 override fun scheduleDeferredStart(delayMs: Long): Any = serviceScope.launch(Dispatchers.IO) { kotlinx.coroutines.delay(delayMs); audioOrchestrator?.onDeferredTimerExpired() }
                 override fun cancelDeferredStart(handle: Any?) { (handle as? Job)?.cancel(); if (deferredAudioStartJob == handle) deferredAudioStartJob = null }
@@ -1163,14 +1238,22 @@ class MirrorForegroundService : Service() {
                 }
                 server.setKeyEventListener { injectKeyEvent(it) }
                 server.setCompositionUpdateListener { bs, text -> injectCompositionUpdate(bs, text) }
-                server.setAudioCodecListener { codec -> serviceScope.launch(Dispatchers.IO) { ensureAudioCaptureState(codec) } }
+                server.setAudioCodecListener { codec ->
+                    serviceScope.launch(Dispatchers.IO) {
+                        val effectiveCodec = resolvePreferredAudioCodec(codec)
+                        negotiatedAudioCodec = effectiveCodec
+                        ensureAudioCaptureState(effectiveCodec)
+                    }
+                }
                 server.setAudioSocketConnectedListener {
                     serviceScope.launch(Dispatchers.IO) {
+                        audioSocketReady = true
+                        val hasTarget = currentAudioCaptureSelection().includedUids.isNotEmpty()
                         val result = audioOrchestrator?.onAudioSocketConnected(
-                            audioEnabled = pendingAudioEnabled && AudioCapture.isSupported(),
+                            audioEnabled = pendingAudioEnabled && hasTarget && AudioCapture.isSupported(),
                             browserConnected = true,
                         )
-                        Log.i(TAG, "Audio socket connected; captureResult=$result audioEnabled=$pendingAudioEnabled")
+                        Log.i(TAG, "Audio socket connected; captureResult=$result audioEnabled=$pendingAudioEnabled hasBrowserTarget=$hasTarget")
                     }
                 }
                 server.setBrowserRearmListener {
@@ -1199,7 +1282,7 @@ class MirrorForegroundService : Service() {
                         }
                     }
                 }
-                server.setAppLaunchListener { pkg, cmp, pane, isVideoApp ->
+                server.setAppLaunchListener { pkg, cmp, pane, isVideoApp, userId ->
                     serviceScope.launch {
                         try {
                             beginInputDebugLaunch(pane, pkg)
@@ -1218,7 +1301,8 @@ class MirrorForegroundService : Service() {
                                className = cmp,
                                pane = pane,
                                launchMode = mode, // Inject resolved launch mode
-                               isVideoApp = isVideoApp
+                               isVideoApp = isVideoApp,
+                               userId = userId,
                            )
 
                            Log.i(TAG, "[Server Bridge] Routing request packed directly: pkg=$pkg, cmp=$cmp")
@@ -1278,7 +1362,11 @@ class MirrorForegroundService : Service() {
 
     private fun applyBrowserLayoutUpdate(panes: JSONArray) = browserSessionCoordinator.applyLayout(panes)
 
-    private fun onBrowserDisconnected() = browserSessionCoordinator.onDisconnected()
+    private fun onBrowserDisconnected() {
+        audioSocketReady = false
+        negotiatedAudioCodec = null
+        browserSessionCoordinator.onDisconnected()
+    }
 
     internal fun cancelPendingBrowserDisconnect(reason: String) =
         browserSessionCoordinator.cancelPendingDisconnect(reason)
@@ -1287,8 +1375,65 @@ class MirrorForegroundService : Service() {
 
     internal fun notifyBrowserConnection(connected: Boolean) { browserConnectionListener?.invoke(connected) }
 
+    private fun currentAudioCaptureSelection(): com.castla.mirror.policy.AudioCaptureSelection {
+        val routes = audioTargetRegistry.snapshot().map { target ->
+            val packageName = target.packageName
+            val output = com.castla.mirror.policy.AudioAppRoutePreference.outputFor(
+                packageName = packageName,
+                separateNavigationToPhone = separateNavigationAudioToPhone,
+                systemSeparatedPackages = systemSeparatedAudioPackages,
+            )
+            com.castla.mirror.policy.AppAudioRoute(target, output)
+        }
+        return com.castla.mirror.policy.AudioRoutePolicy.select(routes)
+    }
+
+    private fun refreshAudioCaptureRouting() {
+        if (!pendingAudioEnabled || !audioSocketReady) return
+        val selection = currentAudioCaptureSelection()
+        if (selection.includedUids.isEmpty()) {
+            audioOrchestrator?.stop()
+            return
+        }
+        val desiredRouteKey = AudioCaptureRouteKey.from(selection)
+        if (audioOrchestrator?.captureActive == true && activeAudioCaptureRouteKey == desiredRouteKey) {
+            Log.i(TAG, "Audio route kept without restart included=${selection.includedApps} excluded=${selection.excludedApps} route=${selection.routeMode}")
+            return
+        }
+        audioOrchestrator?.stop()
+        audioOrchestrator?.onAudioSocketConnected(audioEnabled = true, browserConnected = true)
+        negotiatedAudioCodec?.let { ensureAudioCaptureState(it) }
+        Log.i(TAG, "Audio route refreshed included=${selection.includedApps} excluded=${selection.excludedApps} route=${selection.routeMode}")
+    }
+
     private fun ensureAudioCaptureState(codecOverride: String? = null) {
-        audioOrchestrator?.apply { audioEnabled = pendingAudioEnabled && AudioCapture.isSupported(); browserConnected = this@MirrorForegroundService.browserConnected; ensure(codecOverride) }
+        val selection = currentAudioCaptureSelection()
+        if (selection.includedUids.isEmpty()) return
+        audioOrchestrator?.apply {
+            audioEnabled = pendingAudioEnabled && AudioCapture.isSupported()
+            browserConnected = audioSocketReady
+            ensure(codecOverride)
+        }
+    }
+
+    private fun resolvePreferredAudioCodec(browserCodec: String): String {
+        val browserSupported = com.castla.mirror.policy.AudioCodec.fromWireName(browserCodec)
+            ?: com.castla.mirror.policy.AudioCodec.PCM_S16LE
+        return when (audioCodecPreference.resolve(browserSupported)) {
+            com.castla.mirror.policy.AudioCodec.OPUS -> "opus"
+            com.castla.mirror.policy.AudioCodec.PCM_S16LE -> "pcm"
+        }
+    }
+
+    private fun readSamsungSeparateSoundPackages(): Set<String>? = try {
+        val state = Settings.Global.getString(contentResolver, "multisound_state")
+        val packages = Settings.System.getString(contentResolver, "multisound_app")
+        com.castla.mirror.policy.SamsungSeparateSoundPolicy.parse(state, packages).also {
+            Log.i(TAG, "Samsung separate sound state=$state packages=$packages resolved=$it")
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "Samsung separate sound settings unavailable; using Castla navigation fallback", e)
+        null
     }
 
     private fun activeInputDisplayId(): Int = remoteInputCoordinator.activeInputDisplayId()

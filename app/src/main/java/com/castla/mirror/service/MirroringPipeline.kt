@@ -119,6 +119,9 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
         @Volatile var displayTier: DisplayTier = if (name == "primary") DisplayTier.ACTIVE else DisplayTier.SUSPENDED
 
         var currentBitrate = 0; var currentApp = ""; var currentWebUrl: String? = null
+        @Volatile var audioTargetPackage = ""
+        @Volatile var currentAppUserId = 0
+        @Volatile var currentAppUid = -1
         @Volatile var requiresFreshLaunchPreparation = true
         @Volatile var lastPreparedTargetPackage = ""
         @Volatile var lastTouchFocusRecoveryAt = 0L

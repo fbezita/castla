@@ -21,7 +21,8 @@ data class AppLaunchRequest(
     val preferredBrowserPackage: String? = null,
     val sourceAppPackage: String? = null,
     val allowEmbeddedFallback: Boolean = true,
-    val forceDisplayId: Boolean = true
+    val forceDisplayId: Boolean = true,
+    val userId: Int = 0,
 )
 
 /**

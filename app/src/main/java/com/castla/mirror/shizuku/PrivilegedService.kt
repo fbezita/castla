@@ -20,6 +20,7 @@ import android.view.MotionEvent
 import android.view.Surface
 import com.castla.mirror.ui.StreamSettings
 import com.castla.mirror.service.MultiDisplayLaunchPolicy
+import com.castla.mirror.policy.PackageUidParser
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 
@@ -1881,8 +1882,18 @@ class PrivilegedService : IPrivilegedService.Stub() {
     private var audioCaptureRecord: AudioRecord? = null
     private var registeredAudioPolicy: Any? = null
 
-    override fun startSystemAudioCapture(sampleRate: Int, channels: Int): ParcelFileDescriptor? {
+    override fun startSystemAudioCapture(
+        sampleRate: Int,
+        channels: Int,
+        includedUids: IntArray,
+        excludedUids: IntArray,
+        routeMode: Int,
+    ): ParcelFileDescriptor? {
         stopSystemAudioCapture()
+        if (includedUids.isEmpty()) {
+            Log.w(TAG, "System audio capture refused: UID allowlist is empty")
+            return null
+        }
 
         // IMPORTANT: this method is an AIDL binder entry point. Binder.getCallingUid()
         // returns the *app* uid (10xxx), not shell (2000). AudioPolicy/AudioRecord's
@@ -1894,7 +1905,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
         // after init — AudioRecord has already cached its attribution by then.
         val prevBase = rebaseApplicationToShellContext()
         try {
-            return doStartSystemAudioCapture(sampleRate, channels)
+            return doStartSystemAudioCapture(sampleRate, channels, includedUids, excludedUids, routeMode)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start system audio capture", e)
             unregisterAudioPolicy()
@@ -1905,15 +1916,20 @@ class PrivilegedService : IPrivilegedService.Stub() {
         }
     }
 
-    private fun doStartSystemAudioCapture(sampleRate: Int, channels: Int): ParcelFileDescriptor? {
+    private fun doStartSystemAudioCapture(
+        sampleRate: Int,
+        channels: Int,
+        includedUids: IntArray,
+        excludedUids: IntArray,
+        routeMode: Int,
+    ): ParcelFileDescriptor? {
         val channelMask = if (channels == 2) AudioFormat.CHANNEL_IN_STEREO else AudioFormat.CHANNEL_IN_MONO
         val minBuf = AudioRecord.getMinBufferSize(sampleRate, channelMask, AudioFormat.ENCODING_PCM_16BIT)
         val bufSize = maxOf(minBuf * 2, 8192)
 
-        // Try AudioPolicy-based capture first (includes navigation/assistant/alarm/etc.)
-        val policyRecord = tryCreateAudioPolicyRecord(sampleRate, channels)
-        val usingPolicy = policyRecord != null
-        val record = policyRecord ?: buildRemoteSubmixRecord(sampleRate, channelMask, bufSize)
+        // AudioPolicy is mandatory here: a broad REMOTE_SUBMIX fallback would violate UID routing.
+        val policyRecord = tryCreateAudioPolicyRecord(sampleRate, channels, includedUids, routeMode)
+        val record = policyRecord
 
         if (record == null || record.state != AudioRecord.STATE_INITIALIZED) {
             Log.e(TAG, "Audio capture AudioRecord failed to initialize (state=${record?.state})")
@@ -1950,8 +1966,8 @@ class PrivilegedService : IPrivilegedService.Stub() {
             }
         }, "SystemAudio-Capture").also { it.start() }
 
-        val mode = if (usingPolicy) "AudioPolicy loopback" else "plain REMOTE_SUBMIX"
-        Log.i(TAG, "System audio capture started via $mode: ${sampleRate}Hz, ${channels}ch")
+        val mode = if (routeMode == 1) "LOOPBACK_RENDER" else "LOOPBACK_ONLY"
+        Log.i(TAG, "System audio capture started via AudioPolicy: ${sampleRate}Hz, ${channels}ch route=$mode includedUids=${includedUids.contentToString()} excludedUids=${excludedUids.contentToString()}")
         return readEnd
     }
 
@@ -2015,9 +2031,14 @@ class PrivilegedService : IPrivilegedService.Stub() {
      * AudioRecord ourselves lets us inject shellContext so attribution reports
      * packageName=com.android.shell matching uid 2000.
      *
-     * Returns null on any failure — caller falls back to plain REMOTE_SUBMIX.
+     * Returns null on failure; capture remains stopped to preserve the UID allowlist.
      */
-    private fun tryCreateAudioPolicyRecord(sampleRate: Int, channels: Int): AudioRecord? {
+    private fun tryCreateAudioPolicyRecord(
+        sampleRate: Int,
+        channels: Int,
+        includedUids: IntArray,
+        routeMode: Int,
+    ): AudioRecord? {
         val context = shellContext ?: return null
         return try {
             val audioManager = context.getSystemService(android.media.AudioManager::class.java) ?: return null
@@ -2029,39 +2050,16 @@ class PrivilegedService : IPrivilegedService.Stub() {
             val audioMixClass = Class.forName("android.media.audiopolicy.AudioMix")
             val audioPolicyClass = Class.forName("android.media.audiopolicy.AudioPolicy")
 
-            val ruleMatchAttributeUsage = 1   // AudioMixingRule.RULE_MATCH_ATTRIBUTE_USAGE
-            val routeFlagLoopBack = 2         // AudioMix.ROUTE_FLAG_LOOP_BACK
+            val ruleMatchUid = 1 shl 2
+            val routeFlags = if (routeMode == 1) 3 else 2
 
             val ruleBuilder = mixingRuleBuilderClass.getConstructor().newInstance()
-            val addRule = mixingRuleBuilderClass.getMethod(
-                "addRule", AudioAttributes::class.java, Int::class.javaPrimitiveType
+            val addMixRule = mixingRuleBuilderClass.getMethod(
+                "addMixRule", Int::class.javaPrimitiveType, Any::class.java
             )
-
-            val usages = intArrayOf(
-                AudioAttributes.USAGE_UNKNOWN,
-                AudioAttributes.USAGE_MEDIA,
-                AudioAttributes.USAGE_GAME,
-                AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE,
-                AudioAttributes.USAGE_ASSISTANT,
-                AudioAttributes.USAGE_ASSISTANCE_SONIFICATION,
-                AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY,
-                AudioAttributes.USAGE_ALARM,
-                AudioAttributes.USAGE_NOTIFICATION,
-                AudioAttributes.USAGE_NOTIFICATION_RINGTONE,
-                AudioAttributes.USAGE_NOTIFICATION_EVENT,
-                AudioAttributes.USAGE_VOICE_COMMUNICATION
-            )
-            var matchedAny = false
-            for (usage in usages) {
-                try {
-                    val attr = AudioAttributes.Builder().setUsage(usage).build()
-                    addRule.invoke(ruleBuilder, attr, ruleMatchAttributeUsage)
-                    matchedAny = true
-                } catch (e: Exception) {
-                    Log.w(TAG, "AudioMixingRule skip usage=$usage: ${e.message}")
-                }
+            for (uid in includedUids.distinct()) {
+                addMixRule.invoke(ruleBuilder, ruleMatchUid, Integer.valueOf(uid))
             }
-            if (!matchedAny) return null
             val mixingRule = mixingRuleBuilderClass.getMethod("build").invoke(ruleBuilder)
 
             val channelMask = if (channels == 2) AudioFormat.CHANNEL_IN_STEREO else AudioFormat.CHANNEL_IN_MONO
@@ -2073,7 +2071,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
 
             val mixBuilder = mixBuilderClass.getConstructor(mixingRuleClass).newInstance(mixingRule)
             mixBuilderClass.getMethod("setFormat", AudioFormat::class.java).invoke(mixBuilder, format)
-            mixBuilderClass.getMethod("setRouteFlags", Int::class.javaPrimitiveType).invoke(mixBuilder, routeFlagLoopBack)
+            mixBuilderClass.getMethod("setRouteFlags", Int::class.javaPrimitiveType).invoke(mixBuilder, routeFlags)
             val audioMix = mixBuilderClass.getMethod("build").invoke(mixBuilder)
 
             val policyBuilder = policyBuilderClass
@@ -2101,7 +2099,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
             }
             record
         } catch (e: Exception) {
-            Log.w(TAG, "AudioPolicy capture setup failed, will fall back", e)
+            Log.w(TAG, "AudioPolicy UID capture setup failed", e)
             unregisterAudioPolicy()
             null
         }
@@ -2114,12 +2112,74 @@ class PrivilegedService : IPrivilegedService.Stub() {
             val context = shellContext ?: return
             val audioManager = context.getSystemService(android.media.AudioManager::class.java) ?: return
             val audioPolicyClass = Class.forName("android.media.audiopolicy.AudioPolicy")
-            audioManager.javaClass
+            try {
+                audioManager.javaClass
+                    .getMethod("unregisterAudioPolicyAsync", audioPolicyClass)
+                    .invoke(audioManager, policy)
+            } catch (_: NoSuchMethodException) {
+                audioManager.javaClass
+                    .getMethod("unregisterAudioPolicy", audioPolicyClass)
+                    .invoke(audioManager, policy)
+            }
+            Log.i(TAG, "AudioPolicy unregistered")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to unregister audio policy", e)
         }
     }
 
+    override fun resolvePackageUidForUser(packageName: String, userId: Int): Int {
+        if (packageName.isBlank() || userId < 0) return -1
+        val context = shellContext
+        if (context != null) {
+            try {
+                val userHandle = android.os.UserHandle::class.java
+                    .getMethod("of", Int::class.javaPrimitiveType)
+                    .invoke(null, userId)
+                val userContext = android.content.Context::class.java
+                    .getMethod("createContextAsUser", android.os.UserHandle::class.java, Int::class.javaPrimitiveType)
+                    .invoke(context, userHandle, 0) as android.content.Context
+                val uid = applicationUid(userContext, packageName)
+                Log.i(TAG, "UID resolved via user context package=$packageName userId=$userId uid=$uid")
+                return uid
+            } catch (e: Exception) {
+                Log.w(TAG, "Per-user context UID resolve failed package=$packageName userId=$userId: ${e.message}")
+            }
+
+            // Android UID layout is userId * 100000 + appId. The Shizuku process
+            // normally runs as shell for user 0, but keep this profile-safe.
+            val processUserId = android.os.Process.myUid() / 100_000
+            if (userId == processUserId) {
+                try {
+                    val uid = applicationUid(context, packageName)
+                    Log.i(TAG, "UID resolved via current context package=$packageName userId=$userId uid=$uid")
+                    return uid
+                } catch (e: Exception) {
+                    Log.w(TAG, "Current-context UID resolve failed package=$packageName userId=$userId: ${e.message}")
+                }
+            }
+        }
+
+        val commandOutput = execCommand("cmd package list packages -U --user $userId $packageName")
+        val uid = PackageUidParser.parse(commandOutput, packageName)
+        if (uid >= 0) {
+            Log.i(TAG, "UID resolved via package command package=$packageName userId=$userId uid=$uid")
+        } else {
+            Log.e(TAG, "UID resolve exhausted package=$packageName userId=$userId output=${commandOutput.take(200)}")
+        }
+        return uid
+    }
+
+    private fun applicationUid(context: android.content.Context, packageName: String): Int {
+        return if (android.os.Build.VERSION.SDK_INT >= 33) {
+            context.packageManager.getApplicationInfo(
+                packageName,
+                android.content.pm.PackageManager.ApplicationInfoFlags.of(0),
+            ).uid
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.getApplicationInfo(packageName, 0).uid
+        }
+    }
     private fun doCleanupVirtualDisplayResourcesSync(displayId: Int, vd: android.hardware.display.VirtualDisplay) {
         try {
             Log.i(TAG, "Cleaning up resources for virtual display: id=$displayId")

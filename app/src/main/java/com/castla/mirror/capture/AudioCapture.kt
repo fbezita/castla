@@ -15,6 +15,9 @@ import android.os.SystemClock
 import android.util.Log
 import com.castla.mirror.diagnostics.ResourceTracker
 import com.castla.mirror.shizuku.IPrivilegedService
+import com.castla.mirror.policy.AudioCaptureSelection
+import com.castla.mirror.policy.AudioCodec
+import com.castla.mirror.policy.AudioRouteMode
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -30,13 +33,18 @@ import java.nio.ByteOrder
  */
 class AudioCapture(
     private val mediaProjection: MediaProjection?,
-    private val privilegedService: IPrivilegedService? = null
+    private val privilegedService: IPrivilegedService? = null,
+    private val selection: AudioCaptureSelection = AudioCaptureSelection(emptySet(), emptySet(), AudioRouteMode.LOOPBACK_ONLY, emptyList(), emptyList()),
+    private val requestedCodec: AudioCodec = AudioCodec.OPUS,
+    private val streamId: Long = 1L,
+    private val outputDelayMs: Int = 0,
+    private val onRuntimeFallback: (String) -> Unit = {},
 ) {
     companion object {
         private const val TAG = "AudioCapture"
         const val SAMPLE_RATE = 48000  // Opus native sample rate
         const val CHANNEL_COUNT = 2
-        private const val OPUS_BITRATE = 96_000
+        private const val OPUS_BITRATE = 128_000
         // 20ms of audio at 48kHz stereo Int16 = 960 frames * 2ch * 2 bytes = 3840 bytes
         private const val PCM_BUFFER_SIZE = 3840
 
@@ -54,26 +62,44 @@ class AudioCapture(
     // Pipe from Shizuku REMOTE_SUBMIX capture
     private var remoteSubmixPipe: ParcelFileDescriptor? = null
     private var usingRemoteSubmix = false
+    private var remoteOpusTranscoder: RemoteSubmixOpusTranscoder? = null
+    private var activeProtocol: AudioWireProtocol? = null
+    private var submittedPcmSamples = 0L
 
-    fun start(onAudioData: (data: ByteArray) -> Unit) {
+    fun start(onAudioData: (data: ByteArray) -> Unit): Boolean {
         if (!isSupported()) {
             Log.w(TAG, "AudioPlaybackCapture requires Android 10+")
-            return
+            return false
         }
 
         try {
             setupAudioRecord()
             if (!usingRemoteSubmix && audioRecord == null) {
                 Log.w(TAG, "Audio capture unavailable")
-                return
+                return false
             }
             isRunning = true
 
             if (usingRemoteSubmix) {
-                // REMOTE_SUBMIX: read PCM from Shizuku pipe, always PCM (encode later if needed)
-                sendConfig("pcm", onAudioData)
-                startRemoteSubmixCapture(onAudioData)
-                Log.i(TAG, "Audio capture started (REMOTE_SUBMIX): ${SAMPLE_RATE}Hz, ${CHANNEL_COUNT}ch, pcm")
+                val protocol = AudioWireProtocol(streamId, SAMPLE_RATE, CHANNEL_COUNT, OPUS_BITRATE, 20_000L, outputDelayMs)
+                activeProtocol = protocol
+                val wantsOpus = requestedCodec == AudioCodec.OPUS && RemoteSubmixOpusTranscoder.isSupported()
+                if (wantsOpus) {
+                    onAudioData(protocol.config(AudioCodec.OPUS))
+                    val transcoder = RemoteSubmixOpusTranscoder(SAMPLE_RATE, CHANNEL_COUNT, OPUS_BITRATE, PCM_BUFFER_SIZE, 960)
+                    if (transcoder.start(remoteSubmixPipe!!, protocol, onAudioData, onRuntimeFallback)) {
+                        remoteOpusTranscoder = transcoder
+                        Log.i(TAG, "Audio capture started codec=opus sampleRate=$SAMPLE_RATE channels=$CHANNEL_COUNT bitrate=$OPUS_BITRATE frameDurationUs=20000 streamId=$streamId route=${selection.routeMode}")
+                    } else {
+                        onAudioData(protocol.config(AudioCodec.PCM_S16LE))
+                        startRemoteSubmixCapture(onAudioData)
+                        Log.w(TAG, "Opus initialization failed after capability probe; streaming PCM")
+                    }
+                } else {
+                    onAudioData(protocol.config(AudioCodec.PCM_S16LE))
+                    startRemoteSubmixCapture(onAudioData)
+                    Log.i(TAG, "Audio capture started codec=pcm_s16le sampleRate=$SAMPLE_RATE channels=$CHANNEL_COUNT streamId=$streamId route=${selection.routeMode}")
+                }
             } else {
                 val useOpus = trySetupOpusEncoder(onAudioData)
                 audioRecord?.startRecording()
@@ -88,9 +114,11 @@ class AudioCapture(
                 }
                 Log.i(TAG, "Audio capture started: ${SAMPLE_RATE}Hz, ${CHANNEL_COUNT}ch, $codec")
             }
+            return true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start audio capture", e)
             stop()
+            return false
         }
     }
 
@@ -268,14 +296,11 @@ class AudioCapture(
                 while (isRunning) {
                     val read = input.read(pcmBuffer)
                     if (read > 0) {
-                        val tsMs = SystemClock.elapsedRealtime().toInt()
-                        val header = ByteBuffer.allocate(5).order(ByteOrder.LITTLE_ENDIAN)
-                        header.put(0x01.toByte())
-                        header.putInt(tsMs)
-                        val msg = ByteArray(5 + read)
-                        System.arraycopy(header.array(), 0, msg, 0, 5)
-                        System.arraycopy(pcmBuffer, 0, msg, 5, read)
-                        onAudioData(msg)
+                        val timestampUs = submittedPcmSamples * 1_000_000L / SAMPLE_RATE
+                        submittedPcmSamples += read / (CHANNEL_COUNT * 2)
+                        val payload = pcmBuffer.copyOf(read)
+                        val protocol = activeProtocol
+                        if (protocol != null) onAudioData(protocol.packet(timestampUs, payload))
                     } else if (read < 0) {
                         Log.w(TAG, "REMOTE_SUBMIX pipe closed")
                         break
@@ -323,11 +348,11 @@ class AudioCapture(
         // Shell uid (2000) has CAPTURE_AUDIO_OUTPUT permission that normal apps don't have.
         if (privilegedService != null) {
             try {
-                val pipe = privilegedService.startSystemAudioCapture(SAMPLE_RATE, CHANNEL_COUNT)
+                val pipe = privilegedService.startSystemAudioCapture(SAMPLE_RATE, CHANNEL_COUNT, selection.includedUids.toIntArray(), selection.excludedUids.toIntArray(), selection.routeMode.aidlValue)
                 if (pipe != null) {
                     remoteSubmixPipe = pipe
                     usingRemoteSubmix = true
-                    Log.i(TAG, "Using REMOTE_SUBMIX via Shizuku — ALL audio will be captured")
+                    Log.i(TAG, "Using UID-scoped REMOTE_SUBMIX via Shizuku includedUids=${selection.includedUids} excludedUids=${selection.excludedUids} route=${selection.routeMode}")
                     return
                 }
             } catch (e: Exception) {
@@ -368,17 +393,22 @@ class AudioCapture(
     fun stop() {
         isRunning = false
 
-        // Stop Shizuku REMOTE_SUBMIX capture
+        // Stop the producer and close the pipe first so a transcoder blocked in read()
+        // can leave promptly before its worker thread is joined.
         if (usingRemoteSubmix) {
             try { privilegedService?.stopSystemAudioCapture() } catch (_: Exception) {}
             try { remoteSubmixPipe?.close() } catch (_: Exception) {}
-            remoteSubmixPipe = null
-            usingRemoteSubmix = false
         }
+        remoteOpusTranscoder?.stop()
+        remoteOpusTranscoder = null
+        remoteSubmixPipe = null
+        usingRemoteSubmix = false
+        activeProtocol = null
+        submittedPcmSamples = 0L
 
         // Stop audioRecord (AudioPlaybackCapture path)
         try { audioRecord?.stop() } catch (_: Exception) {}
-        captureThread?.join(2000)
+        if (captureThread !== Thread.currentThread()) captureThread?.join(2000)
         captureThread = null
         try { encoder?.stop() } catch (_: Exception) {}
         encoder?.let { codec ->
