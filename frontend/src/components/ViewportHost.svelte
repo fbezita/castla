@@ -31,6 +31,11 @@
   import type { StreamRuntime } from "../runtime/StreamRuntime";
   import type { PaneId } from "../protocol";
   import { normalizePopupForStreaming } from "../lib/popupLayout";
+  import {
+    clampPopupOpacity,
+    DEFAULT_POPUP_OPACITY,
+    readStoredPopupOpacity,
+  } from "../lib/popupOpacity";
 
   export let touchRouter: TouchRouter;
   export let runtime: StreamRuntime;
@@ -86,6 +91,7 @@
   let resizer: HTMLButtonElement;
 
   let popupBody: HTMLDivElement;
+  let popupOpacity = DEFAULT_POPUP_OPACITY;
   let resizeObserver: ResizeObserver;
   let detachMetadata: (() => void) | undefined;
   let resizingSplit = false;
@@ -128,6 +134,7 @@
   let lastDispatchedSplitTargets: SplitTargets | null = null;
 
   onMount(() => {
+    popupOpacity = readStoredPopupOpacity(localStorage.getItem("castla_popup_opacity"));
     detachMetadata = runtime.control.onMessage((message) => {
       if (message.type === "streamMetadata") {
         metadataRevision += 1;
@@ -1760,6 +1767,12 @@
     localStorage.setItem("castla_full_popup_state", JSON.stringify(popup));
   }
 
+  function setPopupOpacity(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    popupOpacity = clampPopupOpacity(Number(input.value));
+    localStorage.setItem("castla_popup_opacity", String(popupOpacity));
+  }
+
   function logPopupState(popup: PopupLayoutState) {
     // console.info(
     //   `[POPUP] x=${Math.round(popup.x)} y=${Math.round(popup.y)} width=${Math.round(popup.width)} height=${Math.round(popup.height)} minimized=${popup.minimized}`,
@@ -1993,7 +2006,7 @@
         <!-- Original expanded popup window markup with real app title -->
         <div
           class="popup-window"
-          style={`left:${currentTempPopupX}px;top:${currentTempPopupY}px;width:${currentTempPopupWidth}px;height:${currentTempPopupHeight}px;`}
+          style={`--popup-opacity:${popupOpacity};left:${currentTempPopupX}px;top:${currentTempPopupY}px;width:${currentTempPopupWidth}px;height:${currentTempPopupHeight}px;`}
         >
           <div
             class="popup-header"
@@ -2007,6 +2020,22 @@
               {getRealAppLabel($compositorStore.activeSecondaryApp)}
             </div>
             <div class="popup-actions">
+              <label
+                class="popup-opacity-control"
+                title="Popup opacity"
+                on:pointerdown|stopPropagation
+              >
+                <span aria-hidden="true">◐</span>
+                <input
+                  aria-label="Popup opacity"
+                  type="range"
+                  min="0.35"
+                  max="1"
+                  step="0.05"
+                  value={popupOpacity}
+                  on:input={setPopupOpacity}
+                />
+              </label>
               <button
                 class="popup-action"
                 title={t($compositorStore.language, "minimize")}
@@ -2272,6 +2301,7 @@
     background: rgb(4 10 18 / 0.94);
     box-shadow: 0 18px 40px rgb(0 0 0 / 0.42);
     backdrop-filter: blur(12px);
+    opacity: var(--popup-opacity);
   }
 
   .popup-header {
@@ -2281,6 +2311,7 @@
     gap: 12px;
     height: 40px;
     padding: 0 12px;
+    background: transparent;
     border-bottom: 1px solid rgb(255 255 255 / 0.08);
     cursor: grab;
     user-select: none;
@@ -2299,6 +2330,31 @@
     display: flex;
     align-items: center;
     gap: 6px;
+  }
+
+  .popup-opacity-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 28px;
+    padding: 0 6px;
+    border-radius: 999px;
+    color: rgb(143 238 255 / 0.9);
+    background: rgb(255 255 255 / 0.08);
+    cursor: ew-resize;
+    touch-action: none;
+  }
+
+  .popup-opacity-control span {
+    font-size: 14px;
+    line-height: 1;
+  }
+
+  .popup-opacity-control input {
+    width: 62px;
+    height: 14px;
+    accent-color: #8feeff;
+    cursor: ew-resize;
   }
 
   .popup-action {
