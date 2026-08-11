@@ -2,6 +2,7 @@
   import { onDestroy, onMount, tick } from "svelte";
   import { compositorStore, type ViewportModel } from "../stores/compositorStore";
   import { t } from "../lib/i18n";
+  import { connectionOverlayDelayMs } from "../lib/connectionUi";
   import type { StreamRuntime } from "../runtime/StreamRuntime";
   import type { DecoderBackend } from "../decoder/DecoderBackend";
   import { WebCodecsBackend } from "../decoder/WebCodecsBackend";
@@ -33,13 +34,22 @@
   // Reconnection tracking state
   let isConnected = false;
   let hasConnected = false;
+  let showConnectionOverlay = false;
+  let connectionOverlayTimer = 0;
 
   onMount(async () => {
     await tick();
     detachConnection = runtime.onConnectionChange(async (connected) => {
+      window.clearTimeout(connectionOverlayTimer);
       isConnected = connected;
-      if (connected) hasConnected = true;
+      if (connected) {
+        hasConnected = true;
+        showConnectionOverlay = false;
+      }
       if (!connected) {
+        connectionOverlayTimer = window.setTimeout(() => {
+          if (!isConnected) showConnectionOverlay = true;
+        }, connectionOverlayDelayMs(hasConnected));
         return;
       }
       runtime.requestKeyframe(viewport.pane);
@@ -57,6 +67,7 @@
 
   onDestroy(() => {
     window.clearInterval(stallTimer);
+    window.clearTimeout(connectionOverlayTimer);
     detachConnection?.();
     detachSession?.();
     detachVideo?.();
@@ -223,7 +234,7 @@
   {/if}
 
   <!-- Premium Glassmorphism Reconnection Overlay UI -->
-  {#if !isConnected && viewport.visible}
+  {#if showConnectionOverlay && !isConnected && viewport.visible}
     <div class="reconnect-overlay">
       <div class="spinner"></div>
       <p class="reconnect-text">

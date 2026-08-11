@@ -11,7 +11,9 @@ export class ControlTransport {
   private lastPongAt = 0;
   private socketId = 0;
   private connectAttempt = 0;
+  private socketConnected = false;
   private readyForControl = false;
+  private connectionStateKnown = false;
   private controlSessionId = 0;
   private manuallyClosed = false;
 
@@ -26,13 +28,16 @@ export class ControlTransport {
     this.manuallyClosed = false;
     this.connectAttempt += 1;
     this.socketId = ControlTransport.nextSocketId++;
-    this.setConnectionReady(false);
+    if (this.socketConnected) this.setConnectionState(false);
+    else this.socketConnected = false;
+    this.readyForControl = false;
     this.controlSessionId = 0;
     // Enforce plain ws:// connection to bypass redundant secure handshake overheads
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     this.socket = new WebSocket(`${protocol}://${this.host}/ws/control`);
     this.socket.onopen = () => {
       this.lastPongAt = performance.now();
+      this.setConnectionState(true);
       // console.info('[CastlaControl] open', {
       //   socketId: this.socketId,
       //   connectAttempt: this.connectAttempt
@@ -59,7 +64,6 @@ export class ControlTransport {
         }
         this.listeners.forEach((listener) => listener(message));
         if ((message as { type?: string }).type === "serverInit") {
-          this.setConnectionReady(true, true);
           this.flushPending();
         }
       } catch {
@@ -68,14 +72,14 @@ export class ControlTransport {
     };
     this.socket.onclose = () => {
       window.clearInterval(this.heartbeatTimer);
-      this.setConnectionReady(false);
+      this.readyForControl = false;
+      this.setConnectionState(false);
       // console.warn('[CastlaControl] close', {
       //   socketId: this.socketId,
       //   connectAttempt: this.connectAttempt,
       //   controlSessionId: this.controlSessionId,
       //   pendingMessages: this.pendingMessages.length
       // });
-      this.connectionListeners.forEach((listener) => listener(false));
       if (!this.manuallyClosed) {
         this.scheduleReconnect();
       }
@@ -86,7 +90,9 @@ export class ControlTransport {
     this.manuallyClosed = true;
     window.clearTimeout(this.reconnectTimer);
     window.clearInterval(this.heartbeatTimer);
-    this.setConnectionReady(false);
+    this.readyForControl = false;
+    if (this.socketConnected) this.setConnectionState(false);
+    else this.socketConnected = false;
     this.controlSessionId = 0;
     const socket = this.socket;
     this.socket = undefined;
@@ -108,7 +114,7 @@ export class ControlTransport {
 
   onConnectionChange(listener: (connected: boolean) => void): () => void {
     this.connectionListeners.add(listener);
-    listener(this.readyForControl);
+    if (this.connectionStateKnown) listener(this.socketConnected);
     return () => this.connectionListeners.delete(listener);
   }
 
@@ -178,9 +184,11 @@ export class ControlTransport {
     pending.forEach((payload) => socket.send(payload));
   }
 
-  private setConnectionReady(connected: boolean, forceNotify = false): void {
-    if (!forceNotify && this.readyForControl === connected) return;
-    this.readyForControl = connected;
+  private setConnectionState(connected: boolean): void {
+    const changed = !this.connectionStateKnown || this.socketConnected !== connected;
+    this.connectionStateKnown = true;
+    if (!changed) return;
+    this.socketConnected = connected;
     this.connectionListeners.forEach((listener) => listener(connected));
   }
 
@@ -188,7 +196,9 @@ export class ControlTransport {
     socketId: number;
     connectAttempt: number;
     readyState: number;
+    socketConnected: boolean;
     readyForControl: boolean;
+    connectionStateKnown: boolean;
     controlSessionId: number;
     pendingMessages: number;
     messageListeners: number;
@@ -198,7 +208,9 @@ export class ControlTransport {
       socketId: this.socketId,
       connectAttempt: this.connectAttempt,
       readyState: this.socket?.readyState ?? WebSocket.CLOSED,
+      socketConnected: this.socketConnected,
       readyForControl: this.readyForControl,
+      connectionStateKnown: this.connectionStateKnown,
       controlSessionId: this.controlSessionId,
       pendingMessages: this.pendingMessages.length,
       messageListeners: this.listeners.size,

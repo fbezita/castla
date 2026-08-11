@@ -35,6 +35,7 @@
     writeNotificationOverlayEnabled,
     type OverlayNotification,
   } from "./lib/notificationOverlay";
+  import { connectionOverlayDelayMs } from "./lib/connectionUi";
 
   // References to tie components together for launch sequence state machine
   let viewportHostRef: any = undefined;
@@ -58,6 +59,8 @@
   let notificationPruneTimer = 0;
   let controlConnected = false;
   let controlWasConnected = false;
+  let controlConnectionPending = true;
+  let controlStatusTimer = 0;
 
   function updateNotificationApps(appsList: string[]): void {
     notificationApps = appsList;
@@ -268,7 +271,9 @@
 
   function createRuntimeGraph(): void {
     controlConnectionCleanup?.();
+    window.clearTimeout(controlStatusTimer);
     controlConnected = false;
+    controlConnectionPending = true;
     runtime = new StreamRuntime(location.host);
     (window as any).castlaRuntime = runtime;
     const frontendBuildPayload = {
@@ -281,8 +286,17 @@
     console.warn("[BUILD_MARKER] frontend boot", frontendBuildPayload);
     runtime.control.sendFrontendDiag("BUILD_MARKER", "frontend boot", frontendBuildPayload);
     controlConnectionCleanup = runtime.control.onConnectionChange((connected) => {
+      window.clearTimeout(controlStatusTimer);
       controlConnected = connected;
-      if (connected) controlWasConnected = true;
+      if (connected) {
+        controlWasConnected = true;
+        controlConnectionPending = false;
+      } else {
+        controlConnectionPending = true;
+        controlStatusTimer = window.setTimeout(() => {
+          if (!controlConnected) controlConnectionPending = false;
+        }, connectionOverlayDelayMs(controlWasConnected));
+      }
       if (!connected) return;
       runtime.control.sendFrontendDiag("BUILD_MARKER", "frontend control connected", {
         ...frontendBuildPayload,
@@ -647,6 +661,7 @@
     lifecycleCleanup = undefined;
     controlConnectionCleanup?.();
     controlConnectionCleanup = undefined;
+    window.clearTimeout(controlStatusTimer);
     window.clearInterval(notificationPruneTimer);
     overlayNotifications = [];
     notificationHistory = [];
@@ -670,6 +685,7 @@
   onDestroy(() => {
     window.removeEventListener("resize", refreshOverlayUiScale);
     window.clearInterval(notificationPruneTimer);
+    window.clearTimeout(controlStatusTimer);
     controlConnectionCleanup?.();
   });
 
@@ -805,6 +821,7 @@
         notificationHistoryCount={notificationHistory.length}
         serverConnected={controlConnected}
         serverWasConnected={controlWasConnected}
+        serverConnectionPending={controlConnectionPending}
         onOpenNotificationHistory={openNotificationHistory}
         onOverlayUiScalePreferenceChange={updateOverlayUiScalePreference}
         onNotificationOverlayEnabledChange={updateNotificationOverlayEnabled}

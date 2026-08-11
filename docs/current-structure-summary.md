@@ -1,40 +1,38 @@
-# Castla Current Structure Summary
+# Castla 현재 구조 요약
 
-Last updated: 2026-06-02
+최종 갱신: 2026-08-11
 
-This document is a handoff summary for the next refactoring pass.
+이 문서는 다음 리팩터링 작업을 위한 인수인계 요약입니다. 현재 실제로 동작하는 코드 경로, 로그로 재현된 장애 패턴, 이미 적용한 완화책, 앞으로 필요한 구조 변경을 중심으로 정리합니다.
 
-It focuses on the code paths that are actually live today, the failure pattern reproduced in logs, the mitigations already applied, and the structural changes that now look necessary.
+## 프로젝트 목표
 
-## Project Intent
+Castla는 단순한 휴대폰 화면 미러링이 아니라 원격 Android 작업 공간 컴포지터입니다.
 
-Castla is a remote Android workspace compositor, not simple phone mirroring.
+책임 모델은 다음과 같습니다.
 
-The intended ownership model is still:
+- Android는 VirtualDisplay, 인코더 수명 주기, 앱/Task 배치, MotionEvent 주입을 담당합니다.
+- 브라우저는 분할 화면 합성, 런처 UX, 뷰포트별 디코더 수명 주기, 패킷 전송 전 입력 보정을 담당합니다.
+- 레이아웃은 브라우저가 결정하고 Android가 해석합니다.
+- 전체 세션 초기화보다 뷰포트 단위 스트림 복구를 우선합니다.
 
-- Android owns VirtualDisplays, encoder lifecycle, app/task placement, and MotionEvent injection.
-- The browser owns split composition, launcher UX, pane decoder lifecycle, and input shaping before packets are sent.
-- Layout is browser-authored and Android-interpreted.
-- Pane-local stream recovery is preferred over broad session resets.
+## 현재 마이그레이션 요약
 
-## Current Migration Summary
+현재 운영 경로에는 단순 버그 수정을 넘어선 입력·제어 구조 변경이 반영되어 있습니다.
 
-The current production path reflects a broader input/control migration, not just a small bug-fix pass:
+- **접근성 기반 입력 제어에서 IME 구조로 전환**: 원격 텍스트 제어는 접근성 포커스 추정 대신 IME 수명 주기 이벤트를 중심으로 동작합니다.
+- **접근성 의존 포커스 감지 제거**: 원격 편집 활성 여부를 뷰포트 탭이나 접근성 fallback으로 추정하지 않습니다.
+- **IME 세션 기반 포커스 추적**: `sessionId`를 인식하는 `onStartInput`, `onFinishInput`, `androidFocusChanged`가 편집 포커스 상태를 결정합니다.
+- **명시적 편집 상태 동기화**: 프런트엔드와 Android가 편집·포커스 상태를 직접 동기화합니다.
+- **단순화된 포커스 복구와 입력 라우팅**: 로컬 입력 우회와 stale 이벤트 방지는 유지하되 dismiss 전용 제스처 가드는 제거했습니다.
+- **지도 조작 안정화**: Google Maps 드래그/팬이 외부 탭 dismiss로 오인되지 않습니다.
+- **미러링 재시작 stale 상태 방지**: 재시작 후 첫 실행은 새 VD·스트림 연결을 준비하므로 이전 상태가 지도나 동일 앱 실행을 막지 않습니다.
+- **신뢰 VD의 네이티브 Android IME 우선**: Shizuku로 생성한 trusted VD 안에서 Samsung Keyboard/Gboard를 표시하는 경로를 Castla IME proxy보다 우선합니다.
+- **Castla IME proxy는 fallback 전용**: 네이티브 VD IME를 사용할 수 없는 경우에만 사용합니다.
+- **상세 진단은 런타임 선택 사항**: 고빈도 Android/프런트엔드 로그는 기본 비활성화이며 설정에서 켤 수 있습니다.
 
-- **Accessibility-driven input control -> IME architecture**: remote text control is now centered on IME lifecycle events instead of accessibility-side focus heuristics.
-- **Accessibility-dependent focus detection removed from the live path**: Castla no longer relies on viewport dismiss inference or accessibility fallback logic to decide whether remote editing is active.
-- **IME session-based focus tracking is active**: `sessionId`-aware `onStartInput`, `onFinishInput`, and `androidFocusChanged` signals now drive editable focus state.
-- **Remote editable state synchronization exists**: frontend and Android coordinate explicit editable/focus state rather than inferring dismiss intent from viewport taps.
-- **Focus recovery and input routing are simpler**: local input bypass remains, stale-event protection remains, but dismiss-specific gesture guards and related fallback behavior are gone.
-- **Maps interaction stability improved**: Google Maps drag/pan is no longer exposed to outside-tap misclassification.
-- **Mirroring restart stale-state protection exists**: first launch after restart performs fresh launch preparation so stale display/stream/launch state does not block Maps or same-app launch preparation.
-- **Native Android IME on trusted VirtualDisplay is now the preferred path**: Samsung Keyboard / Gboard can render inside the Shizuku-created trusted VD with local IME policy, and this path is now preferred over the Castla IME proxy.
-- **Castla IME proxy remains fallback-only**: the proxy text bridge and router remain in the codebase for fallback scenarios, but they are no longer the intended primary typing path when native VD IME is available.
-- **Verbose diagnostics are runtime-toggled**: high-frequency Android/frontend diagnostic logs are off by default and can be enabled at runtime from settings.
+## 현재 런타임 진입점
 
-## Live Runtime Entry Points
-
-The production path is centered on `MirrorForegroundService` as a thin orchestration host, extracted lifecycle coordinators, `MirrorServer`, and the Svelte frontend runtime.
+운영 경로는 얇은 오케스트레이션 호스트인 `MirrorForegroundService`, 분리된 수명 주기 코디네이터, `MirrorServer`, Svelte 프런트엔드 런타임을 중심으로 구성됩니다.
 
 Android:
 
@@ -62,71 +60,72 @@ Frontend:
 - `frontend/src/transport/ControlTransport.ts`
 - `frontend/src/transport/VideoTransport.ts`
 
-Built frontend assets are copied to:
+빌드된 프런트엔드 자산은 다음 위치로 복사됩니다.
 
 - `app/src/main/assets/web`
 
-The `app/src/main/java/com/castla/mirror/compositor/` tree still exists, but the live orchestration path is still `MirrorForegroundService.MirroringPipeline`.
+`app/src/main/java/com/castla/mirror/compositor/` 트리는 남아 있지만 실제 오케스트레이션 경로는 `MirrorForegroundService.MirroringPipeline`입니다.
 
-## Extracted Runtime Boundaries
+## 분리된 런타임 책임 경계
 
-`MirrorForegroundService` remains the Android lifecycle owner, but these responsibilities are no longer implemented in the service body:
+`MirrorForegroundService`가 Android 수명 주기의 소유자이지만 다음 책임은 서비스 본문 밖으로 분리되어 있습니다.
 
-| Component | Responsibility |
+| 구성 요소 | 책임 |
 | --- | --- |
-| `BrowserSessionCoordinator` | browser connect/disconnect grace, layout visibility, and teardown |
-| `VirtualDisplayRebuildCoordinator` | rebuild coalescing, touch deferral, stale filtering, and serialized hardware execution |
-| `RemoteInputCoordinator` | fallback Castla IME focus, composition, and key injection |
-| `DisplayRoutingDiagnostics` | IME/display routing dumps and diagnostics |
-| `EncoderLifecycleCoordinator` | encoder release, recreation, stream generation, and keyframe wakeup |
-| `StreamSessionCoordinator` | per-channel generation, first-frame readiness, and metadata replay |
-| `ServerTlsConfigurator` | certificate refresh, PKCS12 verification, and TLS context creation |
-| `ServerHttpContent` | app list/icon API and embedded frontend assets |
+| `BrowserSessionCoordinator` | 브라우저 연결/해제 유예, 레이아웃 가시성, 종료 처리 |
+| `VirtualDisplayRebuildCoordinator` | rebuild 병합, 터치 중 지연, stale 요청 필터링, 하드웨어 작업 직렬화 |
+| `RemoteInputCoordinator` | fallback Castla IME 포커스, 조합, 키 주입 |
+| `DisplayRoutingDiagnostics` | IME/display 라우팅 덤프와 진단 |
+| `EncoderLifecycleCoordinator` | 인코더 해제·재생성, 스트림 generation, keyframe 깨우기 |
+| `StreamSessionCoordinator` | 채널별 generation, 첫 프레임 준비 상태, 메타데이터 재전송 |
+| `ServerTlsConfigurator` | 인증서 갱신, PKCS12 검증, TLS context 생성 |
+| `ServerHttpContent` | 앱 목록/아이콘 API와 내장 프런트엔드 자산 |
 
-The preferred text-input path remains the native Android IME inside the trusted VD. `RemoteInputCoordinator` is retained as a fallback boundary and is gated by `RemoteInputPolicy`.
-## Current Android Structure
+선호하는 텍스트 입력 경로는 trusted VD 내부의 네이티브 Android IME입니다. `RemoteInputCoordinator`는 `RemoteInputPolicy`로 제한되는 fallback 경계로 유지합니다.
 
-`MirrorForegroundService.MirroringPipeline` currently owns too many responsibilities at once:
+## 현재 Android 구조
 
-- VirtualDisplay creation, resize, rebuild, and release
-- encoder and surface lifecycle
-- touch injector attachment
-- app launch and app restore
-- display wakeup and keyframe nudges
-- fallback and self-healing hooks
-- app-mounted verification
+`MirrorForegroundService.MirroringPipeline`은 현재 다음 책임을 함께 가지고 있습니다.
 
-### Current Launch / Restart Stability Policy
+- VirtualDisplay 생성, 크기 변경, rebuild, 해제
+- 인코더와 surface 수명 주기
+- 터치 injector 연결
+- 앱 실행과 복원
+- display 깨우기와 keyframe 요청
+- fallback 및 self-healing hook
+- 앱 mount 확인
 
-The current live policy is intentionally conservative:
+### 현재 실행·재시작 안정화 정책
 
-- **No automatic app relaunch during recovery**: watchdog, keyframe recovery, touch-focus recovery, decoder recovery, and rebuild recovery must not force-stop or relaunch apps.
-- **Fresh launch preparation exists**: after browser reconnect, mirroring restart, or pipeline restart, each pipeline marks `requiresFreshLaunchPreparation = true`.
-- **First launch after restart is special**:
-  - stale launch/display/stream state is cleared
-  - cached SPS/PPS is cleared
-  - stream metadata is reset to `streamReady=false / firstFrameReady=false` before the next generation begins
-  - same-app launch dedupe is bypassed once so the first app after restart gets a fresh VD/display/stream binding even if it matches the previous package
-- **Soft recovery only**:
-  - wake display
-  - request keyframe / IDR
-  - replay cached SPS/PPS if available
-  - focus nudge where applicable
-- **No `restoreContent()` relaunch policy**: rebuild and recovery paths no longer use app relaunch as a generic repair tool.
+현재 운영 정책은 의도적으로 보수적입니다.
 
-Important service-wide pieces:
+- **복구 중 자동 앱 재실행 금지**: watchdog, keyframe, 터치 포커스, 디코더, rebuild 복구는 앱을 force-stop하거나 재실행하지 않습니다.
+- **새 실행 준비 상태 사용**: 브라우저 재연결, 미러링 재시작, pipeline 재시작 후 `requiresFreshLaunchPreparation = true`로 표시합니다.
+- **재시작 후 첫 실행 특별 처리**:
+  - 오래된 launch/display/stream 상태 제거
+  - 캐시된 SPS/PPS 제거
+  - 다음 generation 전에 `streamReady=false / firstFrameReady=false`로 초기화
+  - 동일 앱 중복 실행 방지를 한 번 우회해 새 VD/display/stream 연결 보장
+- **soft recovery만 허용**:
+  - display 깨우기
+  - keyframe/IDR 요청
+  - 가능한 경우 SPS/PPS 재전송
+  - 필요한 경우 포커스 보정
+- **`restoreContent()` 재실행 정책 제거**: rebuild와 복구가 일반적인 수리 수단으로 앱을 재실행하지 않습니다.
 
-- `VirtualDisplayRebuildCoordinator` serializes hardware rebuild work through a bounded 16-entry FIFO channel; producers suspend when the queue is full instead of growing memory without limit
-- `MirrorServer` exposes control/video channels and callbacks
-- `ControlSocket` routes browser messages into service listeners
-- `AdaptiveBitrateManager` and other policy managers can still trigger rebuilds
+서비스 공통 핵심 요소는 다음과 같습니다.
 
-### Current Native IME Policy
+- `VirtualDisplayRebuildCoordinator`는 최대 16개 FIFO 채널로 하드웨어 rebuild를 직렬화하며, 큐가 가득 차면 생산자를 중단해 무제한 메모리 증가를 막습니다.
+- `MirrorServer`는 control/video 채널과 callback을 제공합니다.
+- `ControlSocket`은 브라우저 메시지를 서비스 listener로 전달합니다.
+- `AdaptiveBitrateManager` 등 정책 관리자는 coordinator를 통해 rebuild를 요청할 수 있습니다.
 
-The live direction has shifted from "proxy-first" to "native IME first" when the privileged VD path is available.
+### 현재 네이티브 IME 정책
+
+privileged VD를 사용할 수 있을 때는 proxy보다 네이티브 IME를 우선합니다.
 
 - `PrivilegedService.createVirtualDisplay(...)` is the working creation path for native IME-in-VD.
-- The trusted VD path applies:
+- trusted VD 경로에는 다음 flag를 적용합니다.
   - `PUBLIC`
   - `PRESENTATION`
   - `OWN_CONTENT_ONLY`
@@ -134,85 +133,85 @@ The live direction has shifted from "proxy-first" to "native IME first" when the
   - `OWN_DISPLAY_GROUP`
   - `TRUSTED`
   - `ALWAYS_UNLOCKED`
-- After VD creation and surface attachment, Castla also applies:
+- VD 생성과 surface 연결 후 다음 정책도 적용합니다.
   - `setShouldShowSystemDecors(displayId, true)`
   - `setDisplayImePolicy(displayId, DISPLAY_IME_POLICY_LOCAL)`
-- Native app launch prefers `ActivityOptions.setLaunchDisplayId(...)` through the privileged binder path and only falls back to `am start --display ...` if necessary.
-- `MirrorForegroundService` now treats native VD IME as the preferred mode and keeps the Castla IME proxy path as fallback.
-- Samsung Keyboard can appear in split/general/floating layouts depending on Samsung Keyboard's own state. This layout choice is currently treated as IME-owned behavior, not Castla-controlled policy.
+- 네이티브 앱 실행은 privileged Binder의 `ActivityOptions.setLaunchDisplayId(...)`를 우선하고 필요할 때만 `am start --display ...`로 fallback합니다.
+- `MirrorForegroundService`는 네이티브 VD IME를 기본 모드로, Castla IME proxy를 fallback으로 취급합니다.
+- Samsung Keyboard의 분할/일반/floating 배치는 Castla가 아닌 IME 자체 상태가 결정합니다.
 
-### Current Diagnostics Policy
+### 현재 진단 정책
 
-Diagnostic noise was intentionally reduced after the native IME investigation.
+네이티브 IME 조사 이후 진단 로그의 소음을 줄였습니다.
 
-- Core logs still remain on by default:
+- 기본으로 유지하는 핵심 로그:
   - VD create / release
   - app launch path
   - IME policy application
   - build markers
   - hard errors
-- Heavy diagnostic paths are now verbose-only:
+- 상세 진단 모드에서만 기록하는 로그:
   - repeated IME routing dumps
   - `dumpsys input_method` / `dumpsys window` snapshot parsing
   - frontend IME debug chatter
   - JMuxer per-frame / SourceBuffer verbose diagnostics
-- The runtime switch is `verboseDiagnosticsEnabled` in `StreamSettings`.
+- 런타임 스위치는 `StreamSettings.verboseDiagnosticsEnabled`입니다.
 
-## Current Frontend Structure
+## 현재 프런트엔드 구조
 
-Frontend runtime responsibilities are split like this:
+프런트엔드 런타임 책임은 다음처럼 분리됩니다.
 
 - `TouchRouter`
-  - normalizes coordinates
-  - coalesces and rate-limits `MOVE`
-  - tracks gesture stats
-  - sends `touch` packets over control websocket
+  - 좌표 정규화
+  - `MOVE` 병합 및 속도 제한
+  - 제스처 통계 추적
+  - control WebSocket으로 `touch` 패킷 전송
 - `ViewportHost`
-  - is now the singleton pointer listener surface
-  - maps pointer events to panes
-  - owns split layout UI and layout flush timing
+  - 단일 pointer listener surface
+  - pointer 이벤트를 pane에 매핑
+  - split layout UI와 layout flush 시점 관리
 - `ViewportPane`
-  - owns decoder lifecycle and stall watchdog
+  - 디코더 수명 주기와 stall watchdog 관리
 - `StreamRuntime`
-  - owns control/video transports
-  - tracks generations and pane health
-  - currently still emits decoder recovery signals on frame rejection/stall
+  - control/video transport 관리
+  - generation과 pane 상태 추적
+  - frame reject/stall 시 디코더 복구 신호 발생
 
-### Current Launcher Structure
+### 현재 런처 구조
 
-The launcher path is no longer treated as a single Svelte monolith.
+런처는 더 이상 하나의 거대한 Svelte 컴포넌트로 취급하지 않습니다.
 
 - `frontend/src/components/AppLauncher.svelte`
-  - owns launcher orchestration, drag session lifecycle, drawer scroll lock/unlock, and final drop resolution
+  - 런처 오케스트레이션, 드래그 세션, drawer scroll lock, 최종 drop 처리
 - `frontend/src/components/LauncherTabs.svelte`
-  - owns top tabs, active tab highlight, and drag-time tab drop hints
+  - 상단 탭, 활성 탭 표시, 드래그 중 drop 안내
 - `frontend/src/components/AppRow.svelte`
-  - owns compact card rows for `Auto Run`, `Starred`, and `Recent`
+  - `Auto Run`, `Starred`, `Recent`의 compact card row
 - `frontend/src/components/CategoryAccordion.svelte`
-  - owns `Browse` category accordions and the denser app-list presentation
+  - `Browse` 카테고리 accordion과 앱 목록 표시
 - `frontend/src/components/DragDropOverlay.svelte`
-  - owns left/right/bottom dropzone visuals, trash guidance, and drag ghost rendering
+  - left/right/bottom dropzone, 삭제 안내, drag ghost 렌더링
 - `frontend/src/components/PairDialog.svelte`
-  - owns app-pair swap/dissolve editing UI
+  - App Pair 교환/해제 편집 UI
 
-The launcher's gesture model is also stricter now:
+런처 제스처 모델은 다음 규칙을 사용합니다.
 
-- normal browsing remains native-scroll first
-- long-press enters an explicit drag session
-- only the active drag session locks global touch scroll
-- tab hover changes visuals during drag, but actual starred/autorun mutation happens only on drop
-- drawer auto-scroll runs on `requestAnimationFrame` rather than `pointermove` bursts
+- 일반 탐색에서는 네이티브 스크롤 우선
+- long-press 후 명시적 drag session 진입
+- 활성 drag session만 전역 touch scroll 잠금
+- 드래그 중 탭 hover는 시각 효과만 변경하고 즐겨찾기/자동실행 변경은 drop 시점에 수행
+- drawer 자동 스크롤은 `pointermove` burst 대신 `requestAnimationFrame` 사용
 
-This means the live launcher UX is now intentionally split into two modes:
+따라서 런처 UX는 두 모드로 구분됩니다.
 
-- **browse mode**: light, native-feeling scroll and denser app scanning
-- **drag mode**: deterministic ghost, drawer-aware auto-scroll, and explicit drop targets
+- **탐색 모드**: 가벼운 네이티브 스크롤과 밀도 높은 앱 탐색
+- **드래그 모드**: 예측 가능한 ghost, drawer-aware 자동 스크롤, 명시적 drop target
 
-## Touch Path Today
+## 현재 터치 경로
 
-Current path:
+현재 경로는 다음과 같습니다.
 
-1. browser pointer event
+1. 브라우저 pointer 이벤트
 2. `ViewportHost.handlePointer(...)`
 3. `TouchRouter.pointer(...)`
 4. `StreamRuntime.control.send({ type: 'touch', ... })`
@@ -223,176 +222,168 @@ Current path:
 9. `VirtualDisplayController.injectMotionEventWithResult(...)`
 10. privileged `InputManager.injectInputEvent()`
 
-### Frontend Touch Changes Already Applied
+### 이미 적용된 프런트엔드 터치 변경
 
-These were already done before the next refactor:
+다음 보호책은 리팩터링 전에 이미 적용했습니다.
 
-- singleton pointer listener structure in `ViewportHost`
-- hard `MOVE` rate cap in `TouchRouter`
-- frontend `MOVE` dedup/drop
-- Android `MOVE` dedup/throttle safety net in `TouchInjector`
-- reduced frontend logging so only `gesture complete` and warnings/errors remain useful
+- `ViewportHost`의 단일 pointer listener 구조
+- `TouchRouter`의 강제 `MOVE` 속도 제한
+- 프런트엔드 `MOVE` 중복 제거/drop
+- `TouchInjector`의 Android `MOVE` 중복 제거/throttle 안전장치
+- 프런트엔드 로그를 `gesture complete`, 경고, 오류 중심으로 축소
 
-### Current Touch Conclusion
+### 현재 터치 결론
 
-The original `MOVE flooding` problem was real, but it is no longer the main blocker.
+기존 `MOVE flooding` 문제는 실제로 존재했지만 더 이상 주된 장애 요인은 아닙니다.
 
-Evidence from the latest logs:
+최근 로그의 근거는 다음과 같습니다.
 
-- `movePacketsPerSecond` is now usually around `2..6`, not `15..22`
-- `gesturePackets` per swipe are relatively stable, usually around `8..13`
-- `inject_privileged durationMs` is usually small, often `0.5..1.5ms`
+- `movePacketsPerSecond`는 기존 `15..22`가 아니라 보통 `2..6`
+- swipe당 `gesturePackets`는 보통 `8..13`으로 안정적
+- `inject_privileged durationMs`는 보통 `0.5..1.5ms`
 
-So the browser/input packet density problem has been reduced significantly.
+즉 브라우저 입력 패킷 밀도 문제는 크게 완화되었습니다.
 
-## Decoder / Recovery Path Today
+## 현재 디코더·복구 경로
 
-Frontend decoder health still feeds recovery behavior:
+프런트엔드 디코더 상태는 다음과 같이 복구 동작에 영향을 줍니다.
 
-- `ViewportPane` runs a stall watchdog and can call `runtime.recoverPaneStream(pane)`
-- `StreamRuntime.dispatchFrame(...)` can emit `frameRejected`
-- `StreamRuntime.recoverRejectedStream(...)` can request a keyframe after repeated rejects
+- `ViewportPane`은 stall watchdog을 실행하고 `runtime.recoverPaneStream(pane)`을 호출할 수 있습니다.
+- `StreamRuntime.dispatchFrame(...)`은 `frameRejected`를 발생시킬 수 있습니다.
+- `StreamRuntime.recoverRejectedStream(...)`은 reject가 반복되면 keyframe을 요청할 수 있습니다.
 
-Recent mitigation applied:
+최근 적용한 완화책은 다음과 같습니다.
 
-- frame reject recovery is now less aggressive
-- a single reject no longer triggers immediate recovery
-- repeated rejects within a short window are required before `requestKeyframeAfterReject`
+- frame reject 복구의 공격성 완화
+- 한 번의 reject로 즉시 복구하지 않음
+- 짧은 시간 안에 reject가 반복될 때만 `requestKeyframeAfterReject` 실행
 
-This reduced noisy recovery, but the path is still structurally coupled to Android rebuild behavior.
+불필요한 복구는 줄었지만 여전히 Android rebuild 동작과 구조적으로 결합되어 있습니다.
 
-### Current Stream Generation Rules
+### 현재 스트림 generation 규칙
 
-The active generation model now assumes:
+- rebuild/restart마다 새 stream generation 시작
+- 해당 generation의 첫 decoded frame이 실제 전송될 때까지 `firstFrameReady=false` 유지
+- 첫 프레임 확인 전까지 브라우저 layout을 pending 상태로 유지
+- encoder rebuild 전에 SPS/PPS cache를 지우고 새 encoder 출력 또는 명시적 keyframe 요청을 통해서만 재전송
 
-- every rebuild / restart begins a fresh stream generation
-- `firstFrameReady` remains `false` until the first decoded frame of that generation is actually broadcast
-- browser layout should remain pending until the generation's first frame is confirmed
-- cached SPS/PPS is cleared before encoder rebuild and replayed again only from fresh encoder output or explicit keyframe request paths
+## 현재 Rebuild 경로
 
-## Rebuild Path Today
+현재 가장 중요한 구조적 문제입니다.
 
-This is the most important current problem.
-
-Rebuilds can still be triggered from multiple places:
+Rebuild 요청은 여전히 여러 위치에서 발생할 수 있습니다.
 
 - `MirroringPipeline.onViewportChange(...)`
-- app launch preparation / self-healing branches
+- 앱 실행 준비 및 self-healing 분기
 - display density listener
-- codec/profile change handling
+- codec/profile 변경 처리
 - `AdaptiveBitrateManager.applyPipelineScale(...)`
-- fallback/recovery/self-healing branches inside `MirrorForegroundService`
+- `MirrorForegroundService` 내부 fallback/recovery/self-healing 분기
 
-Hardware execution is serialized through the bounded queue in `VirtualDisplayRebuildCoordinator`, while rebuild requests can still originate from multiple policy layers. Equivalent same-pane requests are coalesced within a short window before enqueue.
+하드웨어 실행은 `VirtualDisplayRebuildCoordinator`의 제한된 큐에서 직렬화하지만 요청 자체는 여러 정책 계층에서 발생합니다. 같은 pane의 동등한 요청은 enqueue 전에 짧은 시간 동안 병합합니다.
 
-### Recent Mitigation Applied
+### 최근 적용한 완화책
 
-`MirroringPipeline.rebuild(...)` now checks whether any pipeline has active touch interaction and defers enqueue for up to about `1.5s`.
+`MirroringPipeline.rebuild(...)`는 활성 터치가 있는지 확인하고 enqueue를 최대 약 `1.5초` 지연합니다.
 
-This logs:
+관련 로그:
 
 - `[InputTrace] touch_guard ... reason=rebuild_defer ...`
 
-This is a guardrail, not a structural fix.
+이는 안전장치일 뿐 구조적 해결책은 아닙니다.
 
-## Failure Pattern Confirmed in Logs
+## 로그에서 확인한 장애 패턴
 
-The latest logs point to a specific sequence:
+최근 로그에서는 다음 순서가 반복됩니다.
 
-1. repeated app switching across map/navigation apps
-2. decoder/frame anomalies such as `frameRejected`
-3. `secondary` and then `primary` rebuilds occur
-4. touch in progress gets canceled or interrupted around rebuild
-5. after rebuild / post-rebuild keyframe, fresh `DOWN` eventually becomes:
+1. 지도/내비게이션 앱을 반복 전환
+2. `frameRejected` 같은 디코더·프레임 이상 발생
+3. `secondary`, 이후 `primary` rebuild 발생
+4. rebuild 전후에 진행 중인 터치가 취소되거나 중단
+5. rebuild 및 후속 keyframe 이후 새 `DOWN`이 결국 다음 결과로 바뀜
    - `inject_privileged ... result=false`
 
-Important observation:
+중요한 관찰 결과:
 
-- the eventual failure is **not** preceded by high move throughput anymore
-- the failure is strongly correlated with **rebuild/reconfigure windows**
-- `inject_false_probe` still shows the correct app and focused display, but stale task/session traces remain on the same display id
+- 최종 실패 전에 높은 MOVE 처리량이 나타나지 않음
+- 실패는 **rebuild/reconfigure 구간**과 강하게 연관됨
+- `inject_false_probe`에는 올바른 앱과 focused display가 나오지만 같은 display id에 stale task/session 흔적이 남음
 
-Current leading hypothesis:
+현재 주요 가설:
 
-- touch input is being invalidated by display/window/task state churn during or right after rebuild
-- multiple subsystems can currently request recovery/rebuild independently
-- this creates racey interaction between stream recovery, display rebuild, and active touch injection
+- rebuild 도중 또는 직후 display/window/task 상태 변동이 터치 입력을 무효화함
+- 여러 subsystem이 복구/rebuild를 독립적으로 요청할 수 있음
+- stream recovery, display rebuild, active touch injection 사이에 race가 발생함
 
-## What We Learned From the Latest Logs
+## 최근 로그에서 얻은 결론
 
-These points should be treated as established for the next refactor:
+다음 항목은 후속 리팩터링의 확정 전제로 취급합니다.
 
-1. The dominant issue is no longer raw browser `pointermove` volume.
-2. `injectInputEvent()` failure can still happen even when move volume is low and inject durations are short.
-3. The strongest correlation is:
+1. 주된 문제는 더 이상 브라우저 `pointermove` 양이 아닙니다.
+2. MOVE 양이 적고 주입 시간이 짧아도 `injectInputEvent()`가 실패할 수 있습니다.
+3. 가장 강한 상관관계는 다음과 같습니다.
    - `frameRejected` or other recovery pressure
-   - followed by `rebuild_begin(...)`
-   - followed by `injectInputEvent(...)=false`
-4. The current architecture lets too many layers ask for rebuild directly.
+   - 이후 `rebuild_begin(...)` 발생
+   - 이후 `injectInputEvent(...)=false` 발생
+4. 현재 구조에서는 너무 많은 계층이 rebuild를 직접 요청할 수 있습니다.
 
-## Why A Structural Refactor Is Now Justified
+## 구조적 리팩터링이 필요한 이유
 
-At this point, the problem is not one isolated bug.
+현재 문제는 하나의 고립된 버그가 아닙니다. 다음 경로가 부분적으로 얽혀 있습니다.
 
-The issue is that:
-
-- input path
-- decoder recovery
-- layout transitions
-- app launch/restore
+- 입력 경로
+- 디코더 복구
+- 레이아웃 전환
+- 앱 실행/복원
 - VirtualDisplay rebuild
 
-are all partially entangled.
+이미 여러 완화 패치가 있지만 근본 해결에는 더 강한 책임 분리가 필요합니다.
 
-The code already has mitigation patches, but the logs suggest the real fix needs stronger separation of concerns.
+## 다음 리팩터링 방향
 
-## Refactoring Direction For The Next Session
+단일 rebuild/recovery 제어 계층을 목표로 합니다.
 
-The next refactor should aim for a single rebuild/recovery control plane.
+### 목표 방향
 
-### Target Direction
+1. **입력 세션 상태**와 **display 복구 상태** 분리
+2. 모든 rebuild 의도를 하나의 coordinator API로 전달
+3. decoder/thermal/viewport/codec handler의 직접 rebuild 호출 금지
+4. 활성 터치를 rebuild 승인 조건의 핵심 상태로 취급
 
-1. Separate **input session state** from **display recovery state**
-2. Route all rebuild intents through one coordinator API
-3. Prevent direct rebuild calls from decoder / thermal / viewport / codec handlers
-4. Treat active touch as a first-class gate for rebuild approval
+### 권장 첫 리팩터링 단계
 
-### Recommended First Refactor Step
-
-Create a single rebuild request boundary such as:
+다음과 같은 단일 rebuild 요청 경계를 만듭니다.
 
 - `requestRebuild(reason, priority, pane, width, height, options)`
 
-and move policy into that boundary:
+다음 정책을 그 경계로 이동합니다.
 
-- reject or defer while touch is active
-- coalesce duplicate requests
-- apply cooldowns
-- choose which requests are allowed during launch / recovery / split transitions
+- 터치 중 요청 거부 또는 지연
+- 중복 요청 병합
+- cooldown 적용
+- launch/recovery/split 전환 중 허용할 요청 결정
 
-### Direct `rebuild()` Call Sites That Need To Be Collapsed
+### 통합해야 할 직접 `rebuild()` 호출 위치
 
-At minimum, inspect and route these through a central coordinator:
+최소한 다음 위치를 확인하고 중앙 coordinator로 전달해야 합니다.
 
 - `MirroringPipeline.onViewportChange(...)`
-- service display density listener
-- codec/profile switch logic
+- 서비스 display density listener
+- codec/profile 전환 로직
 - `AdaptiveBitrateManager.applyPipelineScale(...)`
-- fallback / self-healing / restore paths
-- any decoder-recovery-triggered path that can eventually lead to rebuild
+- fallback/self-healing/restore 경로
+- 최종적으로 rebuild를 일으킬 수 있는 모든 decoder recovery 경로
 
-## Suggested State Separation
+## 권장 상태 분리
 
-The next design pass should probably separate:
-
-### Input state machine
+### 입력 상태 머신
 
 - `Idle`
 - `TouchActive`
 - `Cancelling`
 - `Rejected`
 
-### Display / recovery state machine
+### Display·복구 상태 머신
 
 - `Idle`
 - `Launching`
@@ -401,172 +392,155 @@ The next design pass should probably separate:
 - `Rebuilding`
 - `Suspended`
 
-Then explicitly define allowed transitions such as:
+다음과 같은 허용 전이를 명시적으로 정의합니다.
 
-- no rebuild while `TouchActive`
-- decoder recovery may request keyframe while `TouchActive`
-- decoder recovery may request rebuild only after touch ends
+- `TouchActive` 중 rebuild 금지
+- `TouchActive` 중 decoder recovery의 keyframe 요청은 허용
+- decoder recovery의 rebuild 요청은 터치 종료 후에만 허용
 
-## Current Temporary Guards In Place
+## 현재 적용된 임시 안전장치
 
-These are important so the next session does not accidentally remove them without replacement:
+대체 구현 없이 제거해서는 안 되는 항목입니다.
 
-- frontend singleton pointer routing
-- frontend hard `MOVE` cap
-- frontend and Android `MOVE` dedup/drop
-- touch-time fallback cancellation / skip
+- 프런트엔드 단일 pointer routing
+- 프런트엔드 강제 `MOVE` 상한
+- 프런트엔드와 Android의 `MOVE` 중복 제거/drop
+- 터치 중 fallback 취소/생략
 - `frameRejected` recovery throttling
-- touch-time rebuild defer
+- 터치 중 rebuild 지연
 
-They are tactical protections, not the final architecture.
+최종 구조가 아닌 전술적 보호책입니다.
 
-## Handoff Summary
+## 인수인계 요약
 
-If the next session starts from one sentence, it should be this:
+> 긴급한 구조적 문제는 MOVE spam 자체가 아니라 decoder/layout/recovery 코드의 rebuild 압력이 활성 터치와 충돌해 대상 VirtualDisplay의 입력 경로를 손상시킬 수 있다는 점입니다.
 
-> The urgent structural problem is not raw move spam anymore; it is that decoder/layout/recovery code can still trigger rebuild pressure that collides with active touch and eventually corrupts the input path on the target VirtualDisplay.
+### 2026-05-26 리팩터링 업데이트
 
-### 2026-05-26 Refactor Pass Update
-
-The first rebuild boundary has now been introduced on Android:
+Android에 첫 rebuild 경계를 도입했습니다.
 
 - `MirrorForegroundService.requestRebuild(RebuildRequest)` delegates to `VirtualDisplayRebuildCoordinator` before requests enter its bounded hardware queue
-- direct rebuild callers in viewport, density, launch self-heal, adaptive bitrate, and thermal paths now route through `MirroringPipeline.requestRebuild(...)`
-- rebuild requests now carry `reason` and `priority`
-- the existing active-touch defer behavior has moved into the coordinator
-- duplicate same-pane rebuild requests are coalesced over a short window before hardware enqueue
+- viewport, density, launch self-heal, adaptive bitrate, thermal 경로의 직접 rebuild 호출을 `MirroringPipeline.requestRebuild(...)`로 통합
+- rebuild 요청에 `reason`과 `priority` 포함
+- 기존 active-touch 지연 동작을 coordinator로 이동
+- 같은 pane의 중복 rebuild 요청을 hardware enqueue 전 짧은 구간에서 병합
 
-Remaining follow-up work:
+남은 후속 작업:
 
-1. inventorying every `rebuild(...)` caller
-2. reducing direct cross-layer recovery triggers
-3. promoting decoder recovery into explicit keyframe-first / rebuild-later policy
-4. formalizing input and display recovery state machines
+1. 모든 `rebuild(...)` 호출 위치 목록화
+2. 계층 간 직접 복구 trigger 축소
+3. decoder recovery를 명시적인 keyframe 우선/rebuild 후순위 정책으로 전환
+4. 입력 및 display recovery 상태 머신 공식화
 
-### 2026-05-26 Touch Fix Outcome
+### 2026-05-26 터치 수정 결과
 
-The hardreset touch freeze is now resolved.
+hard reset 이후 터치가 멈추는 문제는 해결됐습니다. 실제 실패 경계를 찾기 위해 사용한 임시 추적 코드는 런타임 경로에서 제거했습니다.
 
-Temporary hardreset tracing was used to isolate the real failure boundary and has since been
-trimmed back out of the runtime path.
+#### 확인된 근본 원인
 
-#### Root Cause Confirmed
+문제는 브라우저 재연결, control transport, 앱 실행 라우팅, display 포커스 이탈이 아니었습니다.
 
-The key issue was not browser reconnect, control transport, app launch routing, or display
-focus drift.
+브라우저 `pointerId`를 Android `MotionEvent.PointerProperties.id`에 그대로 전달한 것이 원인이었습니다. reload/hard reset을 반복하면 브라우저가 `36`처럼 큰 ID를 보낼 수 있지만 Android 입력 주입은 `0`, `1`, `2` 같은 작은 로컬 ID에서 안정적으로 동작했습니다.
 
-The real problem was that browser `pointerId` values were being passed straight through into
-Android `MotionEvent.PointerProperties.id`.
+이 불일치로 다음 현상이 발생했습니다.
 
-After repeated reload/hardreset cycles, the browser could send larger ids such as `36`, while
-Android input injection remained happy with compact local ids such as `0`, `1`, `2`.
+- hard reset 후 실제 사용자 터치가 `injectInputEvent(...)`에서 거부됨
+- 작은 로컬 ID를 쓰는 내부 보정 입력은 성공함
+- 전체 reload 후 우연히 작은 pointer ID가 할당되면 다시 동작함
 
-That mismatch explained the observed behavior:
+#### 런타임에 유지할 수정
 
-- real user touches after hardreset could be rejected at `injectInputEvent(...)`
-- synthetic internal nudges using small local ids could still succeed
-- full reload often worked because the next browser pointer id happened to be small again
+`TouchInjector`는 활성 제스처 동안 브라우저 pointer ID를 Android 로컬 pointer ID로 재매핑합니다.
 
-#### Fix Kept In The Runtime
+- 브라우저 ID는 외부 프로토콜 ID로 유지
+- Android 주입에는 지원 범위 안의 작은 로컬 ID 사용
+- `UP`, `CANCEL`, injector reset/release 시 로컬 ID 해제
 
-`TouchInjector` now remaps browser pointer ids to Android-local pointer ids for the lifetime
-of the active gesture state.
+이 동작 변경은 계속 유지해야 합니다.
 
-Current behavior:
+#### 확인 후 제거한 조사 코드
 
-- browser ids remain the external protocol ids
-- Android injection uses compact local ids within the supported pointer range
-- local ids are released on `UP`, `CANCEL`, and injector reset/release paths
+다음 hard reset 조사용 임시 코드는 의도한 최종 구조에 포함하지 않습니다.
 
-This is the behavior-changing fix that should remain.
+- touch packet의 hard reset generation tag
+- 첫 packet hard reset 추적
+- hard reset 조사에 사용한 dispatcher probe 로그
+- 진단 전용 inject source tag
 
-#### Cleanup Applied After Confirmation
+일반 입력과 rebuild 로그는 유지하지만 조사 전용 로그는 다시 축소했습니다.
 
-The temporary hardreset investigation scaffolding is no longer considered part of the
-intended structure:
+#### 현재 터치 인수인계
 
-- hardreset generation tagging on touch packets
-- first-packet hardreset tracing
-- dispatcher probe logging used during the hardreset investigation
-- inject source tagging used only for diagnosis
+> hard reset 터치 멈춤은 `TouchInjector`에서 브라우저 pointer ID를 Android 로컬 ID로 재매핑해 해결했습니다. 유지할 보호책은 MOVE 중복 제거/throttle과 터치 중 rebuild 지연입니다.
 
-The normal input and rebuild logs remain, but the special-case investigation logging has been
-reduced again.
+### 2026-06-01 IME 단순화 및 tapOutside 제거
 
-#### Current Touch Handoff
+`tapOutside` 기능은 의도적으로 제거했습니다.
 
-If the next session starts from one sentence, it should be this:
+#### 1) 원격 IME 정책
+- **IME 우선 구조**: 접근성 포커스 추정 대신 IME 수명 주기 동기화를 사용합니다.
+- **뷰포트 기반 dismiss 추정 제거**: 뷰포트 탭을 검색창 닫기나 텍스트 모드 종료로 추정하지 않습니다.
+- **`tapOutside` control 메시지 제거**: 프런트엔드는 `{ type: "ime", op: "tapOutside" }`를 보내지 않습니다.
+- **단순화된 FSM**: `IDLE`, `ANDROID_FOCUSING`, `READY`, `BLUR_PENDING`, `RECOVERING`만 유지합니다.
+- **포커스 획득 전용 pointerdown**: 브라우저 user-gesture 규칙에 따라 `imeProxy` 포커스를 얻는 용도로만 사용합니다.
+- **로컬 입력 격리 유지**: 브라우저 로컬 입력은 Android 키 전달과 `imeProxy` 포커스 탈취를 우회합니다.
+- **세션 기반 편집 상태 동기화**: `androidFocusChanged`, `onStartInput`, `onFinishInput`, stale-session 방지를 사용합니다.
 
-> The hardreset touch freeze was fixed by remapping browser pointer ids to Android-local pointer ids inside `TouchInjector`; the remaining touch protections worth keeping are the existing move dedup/throttle guard and the rebuild defer guard while touch is active.
+#### 2) 안정성 근거
+- **지도 drag/pan 보호**: 외부 탭 dismiss 경로 자체가 없어 Google Maps 조작을 오인하지 않습니다.
+- **dismiss race 제거**: `requestHideSelf()` 타이밍 race, echo 억제, cooldown/gesture 상태 관리가 사라졌습니다.
+- **BACK fallback 제거**: `KEYCODE_BACK` 기반 dismiss fallback을 다시 도입하지 않습니다.
 
-### 2026-06-01 IME Simplification & tapOutside Removal
+#### 3) Android 백엔드 동작
+- `MirrorServer`, `ControlSocket`, `MirrorForegroundService`의 TapOutside listener 경로 제거
+- 뷰포트 탭에 대한 `finishComposingText()`와 `requestHideSelf()` 호출 제거
+- 원격 IME 포커스/blur는 정상 수명 주기 이벤트로만 결정
 
-The `tapOutside` feature was intentionally removed from the system.
+### 2026-06-01 재시작·Maps 첫 실행 안정화
 
-#### 1) Remote IME Policy
-- **IME-first architecture**: remote text entry now follows IME lifecycle synchronization rather than accessibility-dependent focus inference.
-- **No viewport-based dismiss inference**: Castla no longer tries to guess that a viewport tap means "dismiss the remote search box" or "exit text mode".
-- **No `tapOutside` control message**: The frontend does not emit `{ type: "ime", op: "tapOutside" }` anymore.
-- **Simplified FSM**: The frontend IME state machine now only keeps `IDLE`, `ANDROID_FOCUSING`, `READY`, `BLUR_PENDING`, and `RECOVERING`.
-- **Focus acquisition only**: Viewport `pointerdown` is used only to help `imeProxy` focus acquisition under browser user-gesture rules.
-- **Local input isolation remains**: Local browser inputs still bypass Android key forwarding and `imeProxy` focus stealing.
-- **Session-driven editable sync**: remote editable state is synchronized through `androidFocusChanged`, `onStartInput`, `onFinishInput`, and stale-session protection.
+미러링 재시작 시 다음 stale 상태 초기화 정책을 적용합니다.
 
-#### 2) Stability Rationale
-- **Maps drag/pan safety**: Google Maps drag/pan can no longer be misclassified as an outside-tap dismiss gesture because that entire path no longer exists.
-- **No dismiss-side races**: Removing `tapOutside` also removes `requestHideSelf()` timing races, dismiss echo suppression, and cooldown/gesture bookkeeping.
-- **No BACK fallback**: The old `KEYCODE_BACK`-based dismiss fallback is gone and must not be reintroduced.
+- **재연결/재시작 후 새 실행 준비**:
+  - `currentApp`에 이전 패키지가 남아 있어도 다음 실행은 새 준비가 필요한 것으로 처리
+  - stale display affinity로 인해 동일 앱 첫 실행이 생략되지 않음
+  - 캐시된 target package/last-launched 상태가 첫 준비를 막지 않음
+- **Maps 첫 실행 보호**:
+  - 미러링 재시작 후 첫 Google Maps 실행에 새 display binding, keyframe/IDR, SPS/PPS 재전송 기회, generation 초기화 제공
+  - `force-stop`, `BACK`, `am start` 재시도 루프 없이 처리
+- **warm start 허용**:
+  - 기존 Task를 현재 VD/display로 이동 가능
+  - 단 재시작 후 첫 실행은 stale 동일 앱 guard를 우회
 
-#### 3) Android Backend Behavior
-- **TapOutside listener removed**: `MirrorServer` / `ControlSocket` / `MirrorForegroundService` no longer carry a tapOutside listener path.
-- **No dismiss-side IME forcing**: Android no longer calls `finishComposingText()` or `requestHideSelf()` in response to viewport taps.
-- **Session-driven state only**: Remote IME focus/blur state is driven by normal `androidFocusChanged`, `onStartInput`, and `onFinishInput` lifecycle events.
+#### 2) 동기식 Service onDestroy 정리와 Mutex crash 방지
+- **동기식 정리**: `onDestroy()`의 비동기 dispatch를 `performCleanup("service_ondestroy")` 순차 실행으로 바꿔 프로세스 종료 전에 native 자원 해제를 완료합니다.
+- **released flag 복구**: `executeReleaseInternal()`을 `try-finally`로 감싸 종료 후 `released`를 `false`로 되돌려 hot reload/rebuild/task restart에서 pipeline이 멈추는 문제를 방지합니다.
+- **Codec/Encoder thread join**:
+  - `VideoEncoder`, `JpegEncoder`에 Atomic released 경계와 `HandlerThread.join(2000)` 적용
+  - binder loop/drain thread 종료 후 MediaCodec/ImageReader를 파괴해 `FORTIFY pthread_mutex_lock on destroyed mutex` crash 제거
 
-### 2026-06-01 Restart / Maps First-Launch Stabilization
+### 2026-05-27 Hot Restart 스트림 복구 및 SSL 정리
 
-Mirroring restart now carries an explicit stale-state reset policy:
+hot restart 스트림 복구와 내장 서버 SSL 설정을 단순화했습니다.
 
-- **Fresh launch preparation on reconnect/restart**:
-  - `currentApp` may still remember the previous target package, but the next launch is still treated as needing fresh preparation.
-  - stale display affinity must not cause same-app launch short-circuiting on the first launch after restart.
-  - cached target package / last-launched state must not suppress first-launch preparation after restart.
-- **Maps-first launch protection**:
-  - when mirroring is stopped and started again, the first Google Maps launch must receive a fresh display binding, keyframe/IDR request, SPS/PPS replay opportunity, and stream generation reset.
-  - this is fixed without `force-stop`, `BACK`, or `am start` retry loops.
-- **Warm-start path remains allowed**:
-  - existing tasks may still be moved to the current VD/display
-  - but the first post-restart launch bypasses stale same-app guards so preparation is not skipped.
+#### 1) 재연결 시 Keyframe throttle 우회
+- Android의 `setKeyframeRequester`, `onKeyframeRequest` callback에 `force: Boolean` 전달
+- 새 video socket(`video_open`)에서는 `force=true`로 1000ms throttle을 우회해 즉시 keyframe 제공
 
-#### 2) Synchronous Service onDestroy() Cleanup & Mutex Crash Prevention
-- **Synchronous Cleanup Execution**: Refactored the asynchronous thread dispatch inside `onDestroy()` into a **synchronous sequential cleanup** (`performCleanup("service_ondestroy")`). This guarantees all native resource tear-downs are completed before the Android system terminates (SIGKILL) the service process.
-- **Released Flag Recovery**: Encapsulated `executeReleaseInternal()` in a `try-finally` block ensuring that the `released` AtomicBoolean flag is reset back to `false` when release finishes. This prevents the pipeline from freezing in a stale released state upon hot reload, rebuild, or task restarts.
-- **Codec / Encoder Thread Join**: 
-  - Equipped `VideoEncoder` and `JpegEncoder` with delicate Atomic released flag boundaries and structured thread joins (`HandlerThread.join(2000)`).
-  - This ensures that native MediaCodec and ImageReader resources are only destroyed *after* the async binder loop/drain threads have fully exited, permanently eliminating the `FORTIFY pthread_mutex_lock on destroyed mutex` signal crashes.
+#### 2) 브라우저 Frame Reject 간격 완화
+- `StreamRuntime.ts`의 `consecutiveFrameRejects` 확인 구간을 500ms에서 3000ms로 확대
+- 정적/저 FPS 화면에서도 reject 누적을 유지해 초기 keyframe 누락 시 3초 안에 새 keyframe 요청
 
-### 2026-05-27 Hot Restart Stream Recovery & SSL Teardown Pass
+#### 3) 서버 재시작 시 자동 Session Hard Reset
+- `App.svelte`가 `serverInit`의 `instanceId` 변경을 추적
+- Android 서비스 재시작을 감지하면 `hardReset("server_reboot")`으로 Svelte store와 decoder session을 정리하고 수동 F5 없이 런처 홈 복원
 
-The hot restart stream recovery loop and embedded server SSL configurations have been streamlined.
+#### 4) 해상도를 보존하는 Hot Rebuild
+- 초기 layout 크기가 비어 720x720 VD를 만들던 문제 수정
+- `primary.requestedWidth/Height`를 우선해 비율 불일치와 화면 늘어짐 방지
 
-#### 1) Bypassing Keyframe Throttling on Reconnect
-- **Force Flag Propagation**: Modified `setKeyframeRequester` and `onKeyframeRequest` callbacks on Android to propagate a `force: Boolean` parameter.
-- **Instant Keyframe Guarantee**: When a new video socket opens (`video_open`), `force = true` is passed, bypassing the 1000ms keyframe request throttle (`now - lastKeyframeRequestTime < 1000L`). This ensures the newly connected browser decoder receives a keyframe instantly without being locked out by in-flight layout updates.
-
-#### 2) Relaxed Browser Frame Reject Interval
-- **Low-FPS Tolerance**: Relaxed the interval checking window (`consecutiveFrameRejects`) in `StreamRuntime.ts` from 500ms to 3000ms.
-- **Fail-Safe Pulling**: Even on static or low-fps screens, consecutive rejects now accumulate reliably without resetting, successfully pulling a fresh keyframe from Android within 3 seconds if the initial keyframe gets dropped.
-
-#### 3) Autonomic Session Hard Reset on Server Reboot
-- **Instance ID Change Tracking**: Integrated `instanceId` tracking inside `App.svelte` using the `"serverInit"` WebSocket message.
-- **Self-Healing Refocus**: When the user stops and restarts the Android service (generating a fresh UUID `instanceId`), the frontend automatically detects the reboot and triggers a clean `hardReset("server_reboot")`. This resets Svelte stores, cleans up the decoder session, and brings up the clean Logo/Launcher home screen automatically without requiring manual browser refreshes (F5).
-
-#### 4) Resolution-Preserving Hot Rebuild
-- **Requested Dimension Priority**: Fixed the hot restart resolution bug where `onBrowserConnected` would forcefully rebuild the VirtualDisplay as a 720x720 display because layout dimensions were empty during early boot.
-- **Aspect Ratio Alignment**: The early rebuild sequence now prioritizes client-requested sizes (`primary.requestedWidth/Height`) first, preventing unaligned viewports and display stretching on restart.
-
-#### 5) Streamlined SSL/HTTPS & Keystore Teardown
-- **Eliminated Keystore Overhead**: Completely removed all external cloud dynamic certificate download tasks (`triggerCertDownloadInBackground`) and static assets keystore loading (`castla.p12`).
-- **Plain WS Performance Boost**: Streamlined NanoHTTPD to run strictly as a lightweight Plain HTTP and WebSocket (WS) server on port 9090. This eliminates SSL encapsulation/decapsulation overhead, minimizes latency, and removes certificate expiration runtime crashes while benefiting from the secure context provided by the HTTPS static host.
+#### 5) SSL/HTTPS 및 Keystore 단순화
+- 외부 동적 인증서 다운로드와 `castla.p12` 로딩 제거
+- NanoHTTPD를 9090 포트의 경량 Plain HTTP/WebSocket 서버로 단순화해 지연과 인증서 만료 crash 제거
 
 
 ---
@@ -693,35 +667,35 @@ The hot restart stream recovery loop and embedded server SSL configurations have
     - **해결**: 앱 기동 분기를 100% 원천 제거하고 오직 안전한 초기화만 실행하는 **`cancelPress` 전용 취소 핸들러**를 별도 신설하고, 마크업에 `on:pointercancel={cancelPress}`로 엄격 격리 교체 매핑했습니다.
     - **반응성 10px 복원**: 캔슬 오작동이 원천 봉쇄됨에 따라 흔들림 임계치를 기분 좋고 예민한 표준 **`10px`**로 돌려놓아 완벽한 스위프 및 드래그앤드롭 감도를 이룩했습니다.
 
-## 2026-08-02 Virtual Display Task Routing and Encoder Lifecycle Update
+## 2026-08-02 VirtualDisplay Task 라우팅 및 인코더 수명 주기 업데이트
 
-### Current app launch policy
+### 현재 앱 실행 정책
 
-`MirrorForegroundService.MirroringPipeline.launchComponent()` now routes an app using the target VirtualDisplay rather than package-global task presence:
+`MirrorForegroundService.MirroringPipeline.launchComponent()`는 패키지 전체의 Task 존재 여부가 아니라 대상 VirtualDisplay를 기준으로 앱을 라우팅합니다.
 
-1. No matching task on the target VD: launch a new task on that display.
-2. A matching task exists on the target VD: move that task to the front without launching a new activity.
-3. A task exists only on another display: keep the target VD as the launch destination and create the target-display task when required.
-4. A forced cold start: use the existing force-stop/new-task path.
+1. 대상 VD에 일치하는 Task가 없으면 해당 display에 새 Task 실행
+2. 대상 VD에 일치하는 Task가 있으면 새 Activity 없이 해당 Task를 앞으로 이동
+3. 다른 display에만 Task가 있으면 대상 VD를 실행 위치로 유지하고 필요할 때 새 Task 생성
+4. 강제 cold start는 기존 force-stop/new-task 경로 사용
 
-The task decision is centralized in `LaunchPlanner`. Native `moveTaskToFront` is preferred through the privileged Binder service; the shell command fallback is retained for older Android/One UI releases.
+Task 결정은 `LaunchPlanner`에서 중앙화합니다. privileged Binder의 native `moveTaskToFront`를 우선하고 구형 Android/One UI에서는 shell fallback을 유지합니다.
 
-### Display session and encoder policy
+### Display session과 인코더 정책
 
-`DisplayLaunchSession` separates launch preparation from task routing. `DisplaySizePolicy` is the single source for the effective VD/encoder size:
+`DisplayLaunchSession`은 launch 준비와 Task 라우팅을 분리합니다. `DisplaySizePolicy`는 실제 VD/인코더 크기의 단일 기준입니다.
 
-- apply the pipeline maximum-height constraint;
-- preserve aspect ratio when the height is capped;
-- align both dimensions to the 16-pixel encoder boundary;
-- enforce the 320-pixel minimum hardware boundary.
+- pipeline 최대 높이 제한 적용
+- 높이 제한 시 화면 비율 유지
+- 가로·세로를 16픽셀 인코더 경계에 정렬
+- 최소 320픽셀 하드웨어 경계 보장
 
-A size change rebuilds the encoder surface and starts a new stream generation. The lifecycle is release -> create -> attach the surface to the VD -> begin stream generation -> start encoder -> request a keyframe. Same-size task reuse does not rebuild the encoder.
+크기가 바뀌면 encoder surface를 rebuild하고 새 stream generation을 시작합니다. 수명 주기는 `release -> create -> VD에 surface 연결 -> stream generation 시작 -> encoder 시작 -> keyframe 요청` 순서입니다. 같은 크기의 Task를 재사용할 때는 encoder를 rebuild하지 않습니다.
 
-### Compatibility and verification
+### 호환성과 검증
 
-The task query and privileged ActivityTaskManager calls remain reflection-based to tolerate signature differences between Android/One UI versions. The current One UI 9 verification covers new-task launch, same-VD task reuse, multi-app switching, resolution changes, and encoder reconnection. One UI 8.5 remains a pending device regression check.
+Android/One UI 버전별 signature 차이를 수용하기 위해 Task 조회와 privileged ActivityTaskManager 호출은 reflection 기반을 유지합니다. One UI 9에서는 새 Task 실행, 같은 VD Task 재사용, 여러 앱 전환, 해상도 변경, encoder 재연결을 검증했습니다. One UI 8.5 실기기 회귀 검증은 남아 있습니다.
 
-## 2026-08-04 Isolated VirtualDevice Power Group
+## 2026-08-04 분리된 VirtualDevice Power Group
 
 ### Android 13 이상
 
@@ -741,41 +715,41 @@ Android 26–32는 VirtualDevice API를 사용할 수 없으므로 기존 Displa
 
 Samsung SDK 37에서 Castla display 135가 group 7에 배치되고, 물리 group 0이 asleep인 동안 display 135는 ON을 유지했습니다. 물리 전원 버튼으로 화면을 끈 뒤에도 encoder frame counter가 10000에서 12000까지 증가했고 웹 미러링도 계속 표시됐습니다. 이 과정에서 wake key, blackout 및 freeze/revive는 실행되지 않았습니다.
 
-### 2026-08-04 Coordinator and Build Determinism Update
+### 2026-08-04 Coordinator 및 결정적 빌드 업데이트
 
-- browser lifecycle, remote input, display diagnostics, VD rebuild scheduling, TLS, stream metadata, and HTTP content now have explicit runtime boundaries
-- the VD rebuild queue is bounded to 16 pending requests and applies coroutine backpressure instead of using `Channel.UNLIMITED`
-- equivalent rebuild requests are evaluated by the pure `RebuildRequestPolicy`
-- native VD IME remains primary; proxy handling is explicitly gated by `RemoteInputPolicy`
-- frontend builds use the latest commit SHA that changed `frontend/` unless `CASTLA_BUILD_TIMESTAMP` is explicitly provided, so identical sources produce identical asset hashes
-- regression tests cover stream generation/metadata replay, rebuild queue/coalescing policy, native IME proxy gating, browser layout, and disconnect policy
+- browser lifecycle, remote input, display 진단, VD rebuild scheduling, TLS, stream metadata, HTTP content에 명시적 runtime 경계 적용
+- VD rebuild queue를 16개 pending request로 제한하고 `Channel.UNLIMITED` 대신 coroutine backpressure 적용
+- 동등한 rebuild 요청은 순수 함수 `RebuildRequestPolicy`로 판단
+- native VD IME를 우선하고 proxy 처리는 `RemoteInputPolicy`로 명시적 제한
+- `CASTLA_BUILD_TIMESTAMP`를 지정하지 않으면 `frontend/`를 마지막으로 변경한 commit SHA를 사용해 동일 소스의 asset hash를 결정적으로 생성
+- stream generation/metadata replay, rebuild queue/병합 정책, native IME proxy gating, browser layout, disconnect 정책 회귀 테스트 추가
 
-## 2026-08-10 Notification History and Session Teardown Update
+## 2026-08-10 알림 기록 및 세션 종료 업데이트
 
-### Notification collection and delivery
+### 알림 수집과 전달
 
-`CastlaNotificationListenerService` receives Android notifications only while the mirror service is available. Ongoing notifications, group summaries, and payloads without text or image content are discarded. MessagingStyle notifications prefer the latest message text and extract the conversation title and sender separately. Image data itself is not transferred; only `hasImage` metadata is sent.
+`CastlaNotificationListenerService`는 미러링 서비스가 사용 가능한 동안 Android 알림을 수신합니다. ongoing 알림, group summary, 텍스트와 이미지가 모두 없는 payload는 버립니다. MessagingStyle 알림은 최신 메시지 텍스트를 우선하며 대화방명과 발신자를 별도로 추출합니다. 이미지 자체는 전송하지 않고 `hasImage` metadata만 보냅니다.
 
-Accepted payloads are broadcast as `notification` messages through the MirrorServer control socket. Android no longer owns the user-selected package allowlist. The frontend applies the existing browser-side app selection before adding an event to history or showing the transient overlay. Listener connection, filtering, forwarding, control-client count, and frontend allow decisions are available in notification diagnostics. When a mirror service starts with notification access already granted, it requests a listener rebind to recover from APK replacement or a disconnected listener process.
+허용된 payload는 MirrorServer control socket을 통해 `notification` 메시지로 broadcast합니다. 사용자가 선택한 package allowlist는 Android가 아니라 프런트엔드가 소유합니다. 프런트엔드는 기존 앱 선택값을 적용한 뒤 history에 추가하거나 실시간 overlay를 표시합니다. listener 연결, 필터링, 전달, control client 수, 프런트엔드 허용 판단은 알림 진단에서 확인할 수 있습니다. 미러링 서비스 시작 시 알림 접근 권한이 이미 있으면 APK 교체나 listener process 단절에서 복구하도록 rebind를 요청합니다.
 
-### Frontend notification history
+### 프런트엔드 알림 기록
 
-The frontend keeps up to 100 accepted notification events in current-session memory. Events are ordered newest first and grouped in two levels:
+프런트엔드는 허용된 알림을 현재 세션 메모리에 최대 100개 유지합니다. 최신순으로 정렬한 뒤 다음 두 단계로 묶습니다.
 
-1. application package;
-2. conversation title.
+1. 앱 package
+2. 대화방 제목
 
-Personal chats suppress a sender label when it duplicates the conversation title. Group chats retain a separate sender and timestamp for each message. Image-only and image-with-text events use localized placeholder text. App and conversation headers independently control their collapsed state, while the transient overlay continues to appear for every new accepted notification independently of whether history is open or already populated.
+개인 대화에서 발신자와 대화 제목이 같으면 중복 발신자 표시를 숨깁니다. 단체 대화는 메시지별 발신자와 시간을 유지합니다. 이미지 전용 및 이미지+텍스트 알림은 현지화된 대체 문구를 사용합니다. 앱 헤더와 대화방 헤더는 각각 접기/펴기를 지원하며 history 상태와 관계없이 새 알림의 실시간 overlay는 계속 표시됩니다.
 
-The floating history control fades after 5 seconds and hides after 8 seconds so it does not permanently cover or intercept the mirrored viewport. A new notification reveals it again. History remains accessible from launcher settings even while the floating control is hidden. A frontend hard reset clears the in-memory history.
+floating history control은 5초 후 흐려지고 8초 후 숨겨져 미러링 화면을 계속 가리거나 터치를 가로채지 않습니다. 새 알림이 오면 다시 나타나며 숨겨진 동안에도 런처 설정에서 history를 열 수 있습니다. 프런트엔드 hard reset 시 메모리 history를 비웁니다.
 
-ControlSocket status is replayed immediately to newly mounted frontend listeners. The standby UI reports active only after `serverInit`, distinguishes an initial unavailable server from a previously connected server that is reconnecting, and uses the same distinction for the viewport connection overlay.
+ControlSocket 연결성은 WebSocket `onopen`으로 판단하고 `serverInit`은 제어 protocol 준비 완료로 별도 처리합니다. 최초 접속 결과가 정해지기 전에는 실패 overlay를 표시하지 않으며, 초기 실패는 3초, 기존 연결 단절은 600ms 유예 후 안내합니다. 그 전에 연결이 복구되면 화면을 가리지 않습니다.
 
-### VirtualDisplay task teardown
+### VirtualDisplay Task 종료 처리
 
-Browser disconnect cleanup now keeps each display token and privileged Binder alive until task cleanup finishes. The privileged service queries task IDs belonging to the target VirtualDisplay and removes those task instances before opening Home and releasing the display. Cleanup is scoped by display and no longer force-stops an entire application package, so a task running on the physical display is not terminated merely because its mirrored task is being removed.
+브라우저 연결 종료 시 Task 정리가 끝날 때까지 각 display token과 privileged Binder를 유지합니다. privileged service는 대상 VirtualDisplay의 Task ID를 조회해 해당 Task만 제거한 뒤 Home을 열고 display를 release합니다. display 단위로 정리하며 package 전체를 force-stop하지 않으므로 물리 display에서 실행 중인 같은 앱은 종료되지 않습니다.
 
-## 2026-08-10 UID-Scoped Audio Streaming and A/V Sync Update
+## 2026-08-10 UID 단위 오디오 스트리밍 및 A/V 동기화 업데이트
 
 - `audio_enabled=false`에서는 Android의 기존 오디오 출력을 유지하고, Tesla Bluetooth 비디오 앱에만 별도 화면 지연을 적용합니다.
 - `audio_enabled=true`에서는 Shizuku shell의 UID-scoped AudioPolicy loopback으로 48kHz stereo PCM을 캡처해 Opus 또는 PCM으로 브라우저에 전송합니다.

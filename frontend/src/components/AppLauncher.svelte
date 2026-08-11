@@ -67,6 +67,7 @@
     notificationHistoryCount = 0,
     serverConnected = false,
     serverWasConnected = false,
+    serverConnectionPending = true,
     onOpenNotificationHistory,
     onOverlayUiScalePreferenceChange,
     onNotificationOverlayEnabledChange,
@@ -81,6 +82,7 @@
     notificationHistoryCount: number;
     serverConnected?: boolean;
     serverWasConnected?: boolean;
+    serverConnectionPending?: boolean;
     onOpenNotificationHistory: () => void;
     onOverlayUiScalePreferenceChange: (preference: OverlayUiScalePreference) => void;
     onNotificationOverlayEnabledChange: (enabled: boolean) => void;
@@ -2591,9 +2593,11 @@
       $compositorStore.language,
       serverConnected
         ? "serverActive"
-        : serverWasConnected
-          ? "serverDisconnectedShort"
-          : "serverUnavailableShort",
+        : serverConnectionPending
+          ? "serverConnectingShort"
+          : serverWasConnected
+            ? "serverDisconnectedShort"
+            : "serverUnavailableShort",
     )}
   </div>
 </div>
