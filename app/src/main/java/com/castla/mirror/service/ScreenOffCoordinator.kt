@@ -47,6 +47,7 @@ class ScreenOffCoordinator(
     val isLegacyRecoveryActive: Boolean
         get() = !SUPPORTS_VIRTUAL_DEVICE_POWER_ISOLATION && policy.isScreenOff
     private val loopGuard = ScreenOffLoopGuard()
+    private val virtualDisplayHomeMonitor = VirtualDisplayHomeMonitor()
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val keyguardManager by lazy {
         host.getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
@@ -627,21 +628,51 @@ class ScreenOffCoordinator(
                 host.pipelines.values.forEach { pipeline ->
                     val displayId = pipeline.displayId
                     if (displayId < 0) return@forEach
-                    if (pipeline.currentApp.isBlank() ||
-                        pipeline.currentApp == "HOME" ||
-                        pipeline.currentApp == "com.android.settings") return@forEach
                     val service = pipeline.controller.getPrivilegedService() ?: return@forEach
                     try {
                         val activeTasks = service.getRunningTasksOnDisplay(displayId) ?: emptyList()
-                        if (activeTasks.firstOrNull()?.contains("VirtualDisplayHomeActivity") == true) {
-                            Log.i(TAG, "[ExitMonitor] Home activity detected at the top of pane (${pipeline.name}). BroadCasting APP_STREAM_STOPPED.")
-                            pipeline.currentApp = "HOME"
-                            host.mirrorServer?.broadcastControlMessage("{\"type\":\"APP_STREAM_STOPPED\", \"pane\":\"${pipeline.name}\"}")
+                        when (virtualDisplayHomeMonitor.evaluate(displayId, pipeline.currentApp, activeTasks)) {
+                            VirtualDisplayHomeAction.LAUNCH_HOME -> {
+                                val previousApp = pipeline.currentApp
+                                val launched = pipeline.controller.launchHomeOnDisplay()
+                                Log.i(
+                                    TAG,
+                                    "[ExitMonitor] Empty VD detected for pane=${pipeline.name}, displayId=$displayId, " +
+                                        "previousApp=$previousApp, standbyHomeLaunched=$launched",
+                                )
+                                if (launched) {
+                                    virtualDisplayHomeMonitor.markHomeReported(displayId)
+                                    reportAppStreamStopped(pipeline, displayId, "empty_display")
+                                }
+                            }
+                            VirtualDisplayHomeAction.REPORT_HOME -> {
+                                Log.i(
+                                    TAG,
+                                    "[ExitMonitor] App-to-home transition detected for pane=${pipeline.name}, " +
+                                        "displayId=$displayId tasks=${activeTasks.joinToString()}",
+                                )
+                                reportAppStreamStopped(pipeline, displayId, "standby_home_revealed")
+                            }
+                            VirtualDisplayHomeAction.NONE -> Unit
                         }
-                    } catch (_: Exception) {}
+                    } catch (e: Exception) {
+                        Log.w(TAG, "[ExitMonitor] Failed to inspect pane=${pipeline.name}, displayId=$displayId", e)
+                    }
                 }
             }
         }
+    }
+
+    private fun reportAppStreamStopped(
+        pipeline: MirroringPipeline,
+        displayId: Int,
+        reason: String,
+    ) {
+        pipeline.currentApp = "HOME"
+        pipeline.currentWebUrl = null
+        host.mirrorServer?.broadcastControlMessage(
+            "{\"type\":\"APP_STREAM_STOPPED\",\"pane\":\"${pipeline.name}\",\"reason\":\"$reason\",\"displayId\":$displayId}",
+        )
     }
 
     private fun stopAppExitMonitor() { appExitMonitorJob?.cancel(); appExitMonitorJob = null }

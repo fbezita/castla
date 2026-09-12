@@ -2,7 +2,12 @@ package com.castla.mirror.network
 
 import android.content.Context
 import android.util.Log
+import com.castla.mirror.diagnostics.FileLogger
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class DeviceRelayDnsManager(
@@ -19,6 +24,8 @@ class DeviceRelayDnsManager(
 
     @Volatile
     private var lastPublishedIp: String? = null
+
+    private var publishJob: Job? = null
 
     fun getDeviceId(ip: String? = null): String {
         return CastlaDeviceId.getDeviceId(context, ip)
@@ -45,55 +52,76 @@ class DeviceRelayDnsManager(
         preferredIp: String? = null,
         onResult: ((success: Boolean, publicUrl: String, relayUrl: String, ip: String?) -> Unit)? = null
     ) {
-        val ip = preferredIp
-            ?.takeIf { it.isNotBlank() && it != "0.0.0.0" }
-            ?: HotspotIpDetector.getReachableLocalIpv4(context)
-
-        if (ip == null) {
-            Log.e(TAG, "❌ Cannot publish relay DNS: no reachable local IPv4 found")
-            val fallbackPublicUrl = getPublicEntryUrl(null)
-            val fallbackRelayUrl = getDeviceRelayUrl(null)
-            onResult?.invoke(false, fallbackPublicUrl, fallbackRelayUrl, null)
-            return
-        }
-
-        // Generate IP-mixed configurations to isolate sessions dynamically
-        val deviceId = getDeviceId(ip)
-        val hostname = getDeviceHostname(ip)
-        val relayUrl = getDeviceRelayUrl(ip)
-        val publicUrl = getPublicEntryUrl(ip)
-
-        if (!force && ip == lastPublishedIp) {
-            Log.i(TAG, "Relay DNS already current: device=$deviceId $hostname -> $ip")
-            onResult?.invoke(true, publicUrl, relayUrl, ip)
-            return
-        }
-
         if (relayUpdateToken.isBlank()) {
             Log.e(TAG, "❌ Cannot publish relay DNS: CASTLA_RELAY_TOKEN is missing")
-            onResult?.invoke(false, publicUrl, relayUrl, ip)
+            FileLogger.e("RELAY_REGISTRATION", "registration_aborted reason=token_missing")
+            onResult?.invoke(false, getPublicEntryUrl(null), getDeviceRelayUrl(null), null)
             return
         }
 
-        scope.launch {
-            val ok = RelayRegistrationApi(
-                endpointUrl = backendEndpointUrl,
-                token = relayUpdateToken
-            ).updateRelay(
-                deviceId = deviceId,
-                hostname = hostname,
-                ip = ip,
-                relayUrl = relayUrl
-            )
+        synchronized(this) {
+            publishJob?.cancel()
+            publishJob = scope.launch {
+                var failureCount = 0
+                while (currentCoroutineContext().isActive) {
+                    val ip = preferredIp
+                        ?.takeIf { it.isNotBlank() && it != "0.0.0.0" }
+                        ?: HotspotIpDetector.getReachableLocalIpv4(context)
 
-            if (ok) lastPublishedIp = ip
+                    if (ip == null) {
+                        failureCount++
+                        val delayMs = RelayRetryPolicy.delayAfterFailure(failureCount)
+                        Log.e(TAG, "❌ Cannot publish relay DNS: no reachable local IPv4 found; retrying in ${delayMs}ms")
+                        FileLogger.w(
+                            "RELAY_REGISTRATION",
+                            "retry_scheduled attempt=$failureCount delayMs=$delayMs reason=no_reachable_ip",
+                        )
+                        delay(delayMs)
+                        continue
+                    }
 
-            Log.i(
-                TAG,
-                "Relay publish result ok=$ok public=$publicUrl relay=$relayUrl ip=$ip"
-            )
+                    val deviceId = getDeviceId(ip)
+                    val hostname = getDeviceHostname(ip)
+                    val relayUrl = getDeviceRelayUrl(ip)
+                    val publicUrl = getPublicEntryUrl(ip)
 
-            onResult?.invoke(ok, publicUrl, relayUrl, ip)
+                    if (!force && ip == lastPublishedIp) {
+                        Log.i(TAG, "Relay DNS already current: device=$deviceId $hostname -> $ip")
+                        FileLogger.i("RELAY_REGISTRATION", "registration_reused ip=$ip")
+                        onResult?.invoke(true, publicUrl, relayUrl, ip)
+                        return@launch
+                    }
+
+                    val attempt = failureCount + 1
+                    FileLogger.i("RELAY_REGISTRATION", "attempt_start attempt=$attempt ip=$ip")
+                    val ok = RelayRegistrationApi(
+                        endpointUrl = backendEndpointUrl,
+                        token = relayUpdateToken,
+                    ).updateRelay(
+                        deviceId = deviceId,
+                        hostname = hostname,
+                        ip = ip,
+                        relayUrl = relayUrl,
+                    )
+
+                    if (ok) {
+                        lastPublishedIp = ip
+                        Log.i(TAG, "Relay publish result ok=true public=$publicUrl relay=$relayUrl ip=$ip")
+                        FileLogger.i("RELAY_REGISTRATION", "registration_ready attempt=$attempt ip=$ip")
+                        onResult?.invoke(true, publicUrl, relayUrl, ip)
+                        return@launch
+                    }
+
+                    failureCount++
+                    val delayMs = RelayRetryPolicy.delayAfterFailure(failureCount)
+                    Log.w(TAG, "Relay publish failed; retrying attempt=${failureCount + 1} in ${delayMs}ms")
+                    FileLogger.w(
+                        "RELAY_REGISTRATION",
+                        "retry_scheduled attempt=${failureCount + 1} delayMs=$delayMs reason=request_failed ip=$ip",
+                    )
+                    delay(delayMs)
+                }
+            }
         }
     }
 }

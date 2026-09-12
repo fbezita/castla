@@ -70,6 +70,8 @@ export const TRANSLATIONS = {
     // Standby Logo Screen
     standbyReady:
       "스트리밍 준비 완료. 앱을 실행하려면 사이드바 드로어를 여세요.",
+    standbyAppLeft:
+      "미러링 앱이 휴대폰으로 이동했거나 종료되었습니다. 사이드바에서 실행할 앱을 선택하세요.",
     standbyLaunching:
       "애플리케이션 실행 중... 고해상도 스트림 링크 설정 중입니다.",
     serverActive: "서버 활성",
@@ -161,6 +163,8 @@ export const TRANSLATIONS = {
 
     // Standby Logo Screen
     standbyReady: "Ready to Stream. Open the sidebar drawer to launch an app.",
+    standbyAppLeft:
+      "The mirrored app moved back to your phone or closed. Choose an app from the sidebar.",
     standbyLaunching:
       "Launching application... Establishing high-fidelity stream link.",
     serverActive: "SERVER ACTIVE",

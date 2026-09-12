@@ -41,7 +41,7 @@ object LaunchPlanner {
         val taskAction = when {
             state.forceColdStart -> TaskLaunchAction.CREATE_NEW_TASK
             state.targetTaskIds.isNotEmpty() -> TaskLaunchAction.MOVE_TASK_TO_FRONT
-            state.otherDisplayTaskExists -> TaskLaunchAction.CREATE_NEW_TASK
+            state.otherDisplayTaskExists -> TaskLaunchAction.MOVE_TASK_TO_DISPLAY_AND_FRONT
             else -> TaskLaunchAction.CREATE_NEW_TASK
         }
 
@@ -51,7 +51,7 @@ object LaunchPlanner {
             encoderReconnectRequired = !state.encoderReady || state.encoderDisplayId != state.targetDisplayId,
             reason = when (taskAction) {
                 TaskLaunchAction.MOVE_TASK_TO_FRONT -> "target_display_task_reuse"
-                TaskLaunchAction.CREATE_NEW_TASK -> if (state.otherDisplayTaskExists) "task_exists_on_other_display" else "target_display_task_missing"
+                TaskLaunchAction.CREATE_NEW_TASK -> "target_display_task_missing"
                 TaskLaunchAction.MOVE_TASK_TO_DISPLAY_AND_FRONT -> "task_move_required"
                 TaskLaunchAction.WAIT_FOR_DISPLAY -> "display_not_ready"
             },

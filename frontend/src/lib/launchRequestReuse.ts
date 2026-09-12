@@ -15,6 +15,7 @@ export interface LaunchRequest {
   secondaryPkg?: string;
   layoutMode: LayoutMode;
   secondaryPlacement?: CompositorState["secondaryPlacement"];
+  forceRelaunch?: boolean;
 }
 
 export interface ExpectedLaunchLayout {
@@ -78,6 +79,7 @@ export function canReusePrimaryLaunchForRequest(
   state: CompositorState,
   primaryMetadata: StreamMetadata | undefined,
 ): boolean {
+  if (request.forceRelaunch) return false;
   const currentPrimaryViewport = state.viewports.get("primary");
   const samePrimaryApp = request.primaryPkg === state.activePrimaryApp;
   const hasHealthyPrimaryStream = canReuseHotStream(
@@ -108,6 +110,7 @@ export function canKeepCurrentLaunch(
   secondaryMetadata: StreamMetadata | undefined,
   expectedLayout: ExpectedLaunchLayout,
 ): boolean {
+  if (request.forceRelaunch) return false;
   const strictPaneSize = shouldUseStrictPaneSize();
   if (!isStableLaunchState(state.launchSequence.state)) return false;
   if (state.layoutMode !== request.layoutMode) return false;

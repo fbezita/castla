@@ -10,6 +10,8 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
+import com.castla.mirror.BuildConfig
+import com.castla.mirror.utils.AppActionNames
 
 class ScreenOffBlackoutActivity : Activity() {
 
@@ -17,8 +19,8 @@ class ScreenOffBlackoutActivity : Activity() {
     private var readyNotified = false
 
     companion object {
-        const val ACTION_START = "com.castla.mirror.action.SCREEN_OFF_BLACKOUT_START"
-        const val ACTION_STOP = "com.castla.mirror.action.SCREEN_OFF_BLACKOUT_STOP"
+        val ACTION_START = AppActionNames.screenOffBlackoutStart(BuildConfig.APPLICATION_ID)
+        val ACTION_STOP = AppActionNames.screenOffBlackoutStop(BuildConfig.APPLICATION_ID)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

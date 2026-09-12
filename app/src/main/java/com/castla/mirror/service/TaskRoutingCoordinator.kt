@@ -11,6 +11,7 @@ data class TaskRoutingRequest(
     val displaySizeMatches: Boolean,
     val encoderReady: Boolean,
     val encoderDisplayId: Int,
+    val moveTaskToDisplay: suspend (Int, Int) -> Boolean,
     val moveTaskNative: suspend (Int) -> Boolean,
     val moveTaskShell: suspend (Int) -> String,
 )
@@ -20,6 +21,7 @@ data class TaskRoutingResult(
     val isWarmStart: Boolean,
     val launchPlan: LaunchPlan,
     val moveResults: List<TaskFrontMoveResult>,
+    val borrowedTaskId: Int? = null,
 )
 
 /** Coordinates task residency and warm-task movement without launching activities. */
@@ -34,24 +36,33 @@ class TaskRoutingCoordinator {
                 targetDisplayId = request.targetDisplayId,
                 displayReady = request.targetDisplayId >= 0,
                 targetTaskIds = if (targetDisplayHasTask) request.matchingTaskIds else emptyList(),
+                // Borrow only from the phone's primary display. Moving between Castla VDs would
+                // create an ownership chain whose origin may be destroyed before cleanup.
                 otherDisplayTaskExists = isWarmStart && !targetDisplayHasTask &&
-                    request.originalDisplayId >= 0 && request.originalDisplayId != request.targetDisplayId,
+                    request.originalDisplayId == 0 && request.originalDisplayId != request.targetDisplayId,
                 forceColdStart = request.forceColdStart,
                 displaySizeMatches = request.displaySizeMatches,
                 encoderReady = request.encoderReady,
                 encoderDisplayId = request.encoderDisplayId,
             )
         )
-        val moveResults = if (launchPlan.taskAction == TaskLaunchAction.MOVE_TASK_TO_FRONT) {
-            TaskFrontMover(request.moveTaskNative, request.moveTaskShell).move(request.matchingTaskIds)
-        } else {
-            emptyList()
+        val borrowedTaskId = if (launchPlan.taskAction == TaskLaunchAction.MOVE_TASK_TO_DISPLAY_AND_FRONT) {
+            request.matchingTaskIds.firstOrNull()?.takeIf { taskId ->
+                request.moveTaskToDisplay(taskId, request.targetDisplayId)
+            }
+        } else null
+        val tasksToFront = when {
+            launchPlan.taskAction == TaskLaunchAction.MOVE_TASK_TO_FRONT -> request.matchingTaskIds
+            borrowedTaskId != null -> listOf(borrowedTaskId)
+            else -> emptyList()
         }
+        val moveResults = TaskFrontMover(request.moveTaskNative, request.moveTaskShell).move(tasksToFront)
         return TaskRoutingResult(
             targetDisplayHasTask = targetDisplayHasTask,
             isWarmStart = isWarmStart,
             launchPlan = launchPlan,
             moveResults = moveResults,
+            borrowedTaskId = borrowedTaskId,
         )
     }
 }

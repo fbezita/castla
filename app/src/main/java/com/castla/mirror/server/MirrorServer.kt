@@ -7,6 +7,7 @@ import fi.iki.elonen.NanoWSD.WebSocket
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 import com.castla.mirror.diagnostics.DiagnosticEvent
 import com.castla.mirror.diagnostics.FileLogger
 import com.castla.mirror.diagnostics.MirrorDiagnostics
@@ -55,6 +56,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     private val layoutUpdateReceivedCount = AtomicInteger(0)
     private val layoutUpdateRelayedCount = AtomicInteger(0)
     private val layoutUpdateDedupedCount = AtomicInteger(0)
+    private val firstClientRequestLogged = AtomicBoolean(false)
     @Volatile private var lastLayoutUpdateSignature: String = ""
     @Volatile private var availabilityListener: ((MirrorServerAvailability) -> Unit)? = null
     @Volatile private var availability: MirrorServerAvailability = MirrorServerAvailability.STARTING
@@ -80,15 +82,31 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     }    
 
     private fun logServerAvailability(message: String) {
+        FileLogger.i("SERVER_AVAILABILITY", message)
         if (verboseServerAvailabilityLogging) {
-            FileLogger.i("SERVER_AVAILABILITY", message)
             Log.i(TAG, message)
         }
     }
 
     private fun updateAvailability(next: MirrorServerAvailability) {
+        val previous = availability
         availability = next
+        if (previous != next) {
+            FileLogger.i(
+                "SERVER_AVAILABILITY",
+                "state_transition from=${previous.state} to=${next.state} detail=${next.detail}",
+            )
+        }
         availabilityListener?.invoke(next)
+    }
+
+    private fun logFirstClientRequest(protocol: String, uri: String, remoteIp: String?) {
+        if (firstClientRequestLogged.compareAndSet(false, true)) {
+            FileLogger.i(
+                "FIRST_CLIENT_REQUEST",
+                "protocol=$protocol uri=$uri remoteIp=${remoteIp ?: "unknown"}",
+            )
+        }
     }
 
     fun setAvailabilityListener(listener: (MirrorServerAvailability) -> Unit) {
@@ -181,6 +199,13 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
 
         publishRelayDnsIfReady("setRelayPublishIp")
     } 
+
+    fun refreshRelayRegistration(ip: String, reason: String) {
+        val nextIp = ip.takeIf { it.isNotBlank() } ?: "0.0.0.0"
+        FileLogger.i("RELAY_REGISTRATION", "refresh_requested reason=$reason ip=$nextIp")
+        relayPublishIp = nextIp
+        publishRelayDnsIfReady("refresh:$reason")
+    }
 
     private fun publishRelayDnsIfReady(reason: String) {
         val settings = com.castla.mirror.ui.StreamSettings.load(context)
@@ -1011,6 +1036,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
 
 
     override fun openWebSocket(handshake: IHTTPSession): WebSocket {
+        logFirstClientRequest("websocket", handshake.uri, handshake.remoteIpAddress)
         logServerAvailability(
             "websocket_upgrade uri=${handshake.uri} remoteIp=${handshake.remoteIpAddress} " +
                 "query=${handshake.queryParameterString ?: ""}"
@@ -1044,6 +1070,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     override fun serveHttp(session: IHTTPSession): Response {
         var uri = session.uri
         if (uri == "/") uri = "/index.html"
+        logFirstClientRequest("http", uri, session.remoteIpAddress)
         if (shouldLogHttpRequest(uri)) {
             logServerAvailability(
                 "http_request method=${session.method} uri=$uri remoteIp=${session.remoteIpAddress} " +

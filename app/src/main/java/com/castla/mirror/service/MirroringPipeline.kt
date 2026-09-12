@@ -172,6 +172,7 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
 
         private val pipelineMutex = Mutex()
         private val touchFocusRecoveryCoordinator = TouchFocusRecoveryCoordinator()
+        private val taskOwnershipTracker = TaskOwnershipTracker()
 
         private fun beginStreamGeneration(displayId: Int, width: Int, height: Int): Long =
             host.mirrorServer?.beginStreamGeneration(name, displayId, width, height)?.toLong() ?: 0L
@@ -524,6 +525,8 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
                     suspendEncoder(reason)
                     if (next == DisplayTier.PARKED && displayId >= 0) {
                         Log.i(TAG, "[$name Pipeline] Releasing parked VirtualDisplay id=$displayId ($reason)")
+                        host.cleanupDisplay(displayId, taskOwnershipTracker.borrowedTasks())
+                        taskOwnershipTracker.clear()
                         host.runBinderSafe { controller.releaseVirtualDisplay() }
                         displayId = -1
                     }
@@ -751,6 +754,10 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
                             }
                             accepted
                         }
+                    }
+                    if (VirtualDisplayHomePolicy.shouldPrimeBeforeRestore(isNewVd, currentApp)) {
+                        markServiceMutation("prime_home_before_app_restore")
+                        host.runBinderSafe { controller.launchHomeOnDisplay() }
                     }
                     val preStreamTarget = preStreamLaunchTarget()
                     val shouldLaunchBeforeStream = LaunchRecoveryPolicy.shouldLaunchTargetBeforeStreamBootstrap(
@@ -1386,6 +1393,23 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
                         displaySizeMatches = width == alignedW && height == alignedH,
                         encoderReady = isEncoderActive,
                         encoderDisplayId = if (isEncoderActive) displayId else -1,
+                        moveTaskToDisplay = { taskId, destinationDisplayId ->
+                            try {
+                                val nativeMoved = host.runBinderSafe {
+                                    service.moveTaskToDisplayNative(taskId, destinationDisplayId)
+                                } ?: false
+                                if (nativeMoved) {
+                                    true
+                                } else {
+                                    TaskDisplayShellCommand.move(taskId, destinationDisplayId) { command ->
+                                        service.execCommand(command)
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                Log.w(TAG, "[$name Pipeline] Failed to move task $taskId to display $destinationDisplayId", e)
+                                false
+                            }
+                        },
                         moveTaskNative = { taskId -> host.runBinderSafe { service.moveTaskToFrontNative(taskId) } ?: false },
                         moveTaskShell = { taskId -> service.execCommand("cmd activity task move-to-front $taskId") },
                     )
@@ -1393,7 +1417,15 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
                 val targetDisplayHasTask = taskRoutingResult.targetDisplayHasTask
                 val isWarmStart = taskRoutingResult.isWarmStart
                 val launchPlan = taskRoutingResult.launchPlan
-                val canReuseWarmTask = launchPlan.taskAction == TaskLaunchAction.MOVE_TASK_TO_FRONT
+                taskRoutingResult.borrowedTaskId?.let { taskId ->
+                    taskOwnershipTracker.recordBorrowed(taskId, originalDisplayId, targetDisplayId)
+                    FileLogger.i(
+                        "PIPELINE_DEBUG",
+                        "[$name] borrowedTask taskId=$taskId originDisplayId=$originalDisplayId targetDisplayId=$targetDisplayId pkg=$cleanPkg"
+                    )
+                }
+                val canReuseWarmTask = launchPlan.taskAction == TaskLaunchAction.MOVE_TASK_TO_FRONT ||
+                    taskRoutingResult.borrowedTaskId != null
                 Log.i(TAG, "[$name Pipeline] taskResidency pkg=$cleanPkg matching=${matchingTaskIds.size} originalDisplayId=$originalDisplayId targetDisplayId=$targetDisplayId targetDisplayHasTask=$targetDisplayHasTask targetEntries=${targetDisplayPackages.size} plan=${launchPlan.taskAction} reason=${launchPlan.reason} resize=${launchPlan.resizeRequired} encoderReconnect=${launchPlan.encoderReconnectRequired}")
                 host.scheduleDisplayRoutingDiagnostics(
                     pane = name,
@@ -1413,8 +1445,8 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
                             Log.w(TAG, "[$name Pipeline] warmTaskMove failed taskId=${moveResult.taskId} displayId=$targetDisplayId", moveResult.error)
                         }
                     }
-                } else if (isWarmStart) {
-                    FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision existingTaskOnOtherDisplay=true existingDisplayId=$originalDisplayId targetDisplayId=$targetDisplayId; creating separate task")
+                } else if (isWarmStart && taskRoutingResult.borrowedTaskId == null) {
+                    FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision taskMoveFailed=true existingDisplayId=$originalDisplayId targetDisplayId=$targetDisplayId; falling back to separate task")
                 }
                 // Prevent redundant 'am start' shell command execution immediately following async task migration command.
                 // Re-launching via 'am start' in parallel with active task displacement commands causes Android OS task stack conflict,
@@ -1462,7 +1494,7 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
                 // which locks display focus and causes a perpetual touch injection rejection loop.
                 val isAlreadyActiveApp = cleanPkg == currentApp.substringBefore('/')
                 val isEncoderActive = if (host.currentCodecMode == "mjpeg") jpegEncoder != null else videoEncoder != null
-                if (forceTaskRealign && isAlreadyActiveApp && isEncoderActive && !effectiveNeedsFreshLaunchPreparation) {
+                if (forceTaskRealign && isAlreadyActiveApp && isEncoderActive && targetDisplayHasTask && !effectiveNeedsFreshLaunchPreparation) {
                     Log.w(TAG, "[$name Pipeline] Realignment requested for active app $cleanPkg. Bypassing native cold start to prevent WMS focus transition lock.")
                     FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision realignBypass=true pkg=$cleanPkg targetDisplayId=$targetDisplayId freshPrep=$effectiveNeedsFreshLaunchPreparation")
                     host.scheduleDisplayRoutingDiagnostics(name, service, cleanPkg, targetDisplayId, "postlaunch", "realign_bypass", displayId)
@@ -1729,7 +1761,8 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
 
                     Log.i(TAG, "[CLEANUP_VD_RELEASED]")
                     if (displayId >= 0) {
-                        host.cleanupDisplay(displayId)
+                        host.cleanupDisplay(displayId, taskOwnershipTracker.borrowedTasks())
+                        taskOwnershipTracker.clear()
                         if (forcePhysical) { host.runBinderSafe { controller.releaseVirtualDisplay() }; displayId = -1 }
                         else { try { host.runBinderSafe { controller.resizeDisplay(1, 1, 160) }; width = 1; height = 1 } catch (_: Exception) {} }
                     }

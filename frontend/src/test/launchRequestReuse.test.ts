@@ -121,6 +121,29 @@ describe("canKeepCurrentLaunch", () => {
     ).toBe(true);
   });
 
+  it("does not skip an explicit user relaunch even when cached state looks healthy", () => {
+    const state = createState();
+    state.layoutMode = "single";
+    state.activeSecondaryApp = "";
+    state.viewports.set("secondary", {
+      pane: "secondary", width: 544, height: 704, committed: true, generation: 5, visible: false,
+    });
+
+    expect(
+      canKeepCurrentLaunch(
+        {
+          primaryPkg: "com.google.android.youtube",
+          layoutMode: "single",
+          forceRelaunch: true,
+        },
+        state,
+        primaryMetadata(),
+        undefined,
+        {},
+      ),
+    ).toBe(false);
+  });
+
   it("does not skip when a different single app is requested", () => {
     const state = createState();
     state.layoutMode = "single";
@@ -307,6 +330,22 @@ describe("canKeepCurrentLaunch", () => {
 });
 
 describe("canReusePrimaryLaunchForRequest", () => {
+  it("does not reuse cached primary state for an explicit user relaunch", () => {
+    const state = createState();
+
+    expect(
+      canReusePrimaryLaunchForRequest(
+        {
+          primaryPkg: "com.google.android.youtube",
+          layoutMode: "split",
+          forceRelaunch: true,
+        },
+        state,
+        primaryMetadata(),
+      ),
+    ).toBe(false);
+  });
+
   it("does not reuse a jmuxer primary stream when promoting split layout back to single", () => {
     const state = createState();
 

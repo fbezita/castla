@@ -1,5 +1,8 @@
 package com.castla.mirror.shizuku
 
+import com.castla.mirror.BuildConfig
+import com.castla.mirror.service.VirtualDisplayHomeTarget
+
 import android.content.Context
 import android.content.ComponentName
 import android.content.Intent
@@ -1511,9 +1514,10 @@ class PrivilegedService : IPrivilegedService.Stub() {
     override fun launchHomeOnDisplay(displayId: Int) {
         try {
             configureImePolicyForDisplay(displayId, "launchHomeOnDisplay")
-            Log.i(TAG, "$VDIME_PREFIX [APP_LAUNCH] package=com.castla.mirror/.ui.VirtualDisplayHomeActivity displayId=$displayId method=native_launch_home")
+            val homeTarget = VirtualDisplayHomeTarget.forApplication(BuildConfig.APPLICATION_ID)
+            Log.i(TAG, "$VDIME_PREFIX [APP_LAUNCH] package=${homeTarget.packageName}/${homeTarget.className} displayId=$displayId method=native_launch_home")
             val intent = Intent().apply {
-                component = ComponentName("com.castla.mirror", "com.castla.mirror.ui.VirtualDisplayHomeActivity")
+                component = ComponentName(homeTarget.packageName, homeTarget.className)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
             }
             val options = android.app.ActivityOptions.makeBasic()
@@ -1531,8 +1535,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                     Log.i(TAG, "Natively launched VirtualDisplayHomeActivity on display $displayId with 0ms delay")
                 } catch (e: Exception) {
                     Log.w(TAG, "Native launch home failed, falling back to shell am start", e)
-                    val cmd = "am start --display $displayId -n com.castla.mirror/.ui.VirtualDisplayHomeActivity"
-                    execCommand(cmd)
+                    execCommand(homeTarget.shellCommand(displayId))
                 }
             }
 

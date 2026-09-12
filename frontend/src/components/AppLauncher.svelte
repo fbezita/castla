@@ -27,6 +27,7 @@
   import { resolveSplitRatioForPlacement } from "../lib/splitRatioByPlacement";
   import { isJmuxerFrontendPath } from "../lib/decoderPath";
   import { isFreshCommittedViewport } from "../lib/streamCommitPolicy";
+  import { resolveAppStreamStoppedUi } from "../lib/appStreamStoppedUi";
   import type { AckMessage, ControlMessage, PaneId, StreamMetadata } from "../protocol";
   import { debugLog } from "../utils/debugLogger";
   import {
@@ -151,6 +152,8 @@
   let noticeTimer = $state<number | undefined>(undefined);
   let launchedOnce = $state(false);
   let autoClosePending = $state(false);
+  let standbyReason = $state<"ready" | "app-left">("ready");
+  let appStreamStoppedCleanup: (() => void) | undefined;
   let launchSeqCounter = $state(0);
 
   // Gesture Tracker States
@@ -190,6 +193,29 @@
 
   // Lifecycle bindings
   onMount(() => {
+    appStreamStoppedCleanup = runtime.control.onMessage((message: ControlMessage) => {
+      const action = resolveAppStreamStoppedUi(
+        message,
+        Boolean(get(compositorStore).activeSecondaryApp),
+      );
+      if (!action) return;
+
+      drawerOpen = true;
+      settingsOpen = false;
+      multiwindowOpen = false;
+      placementPickerOpen = false;
+
+      if (action.showHome) {
+        standbyReason = "app-left";
+        launchedOnce = false;
+        autoClosePending = false;
+        compositorStore.update((state) => ({
+          ...state,
+          activePrimaryApp: "",
+        }));
+      }
+    });
+
     if (apps.length > 0) {
       runAutorunOnce();
     }
@@ -200,6 +226,7 @@
     window.clearTimeout(pressTimer);
     window.clearTimeout(noticeTimer);
     window.clearTimeout(pairTargetTimer);
+    appStreamStoppedCleanup?.();
     stopAutoScrollDrawer();
     detachDragListeners();
   });
@@ -993,7 +1020,9 @@
     secondaryPkg?: string;
     layoutMode: "single" | "split" | "popup";
     secondaryPlacement?: "left" | "right" | "top" | "bottom" | "popup" | null;
+    forceRelaunch?: boolean;
   }) {
+    standbyReason = "ready";
     const currentState = get(compositorStore);
     const requestedPlacement =
       request.layoutMode === "split"
@@ -1455,6 +1484,7 @@
         secondaryPkg: undefined,
         layoutMode: "single",
         secondaryPlacement: null,
+        forceRelaunch: true,
       });
     } else {
       const activePrimary = $compositorStore.activePrimaryApp;
@@ -1469,6 +1499,7 @@
           secondaryPkg: app.packageName,
           layoutMode: placementToLayoutMode(secondaryPlacement),
           secondaryPlacement,
+          forceRelaunch: true,
         });
       } else {
         startLaunchSequence({
@@ -1476,6 +1507,7 @@
           secondaryPkg: undefined,
           layoutMode: "single",
           secondaryPlacement: null,
+          forceRelaunch: true,
         });
       }
     }
@@ -2574,7 +2606,7 @@
 
 </script>
 
-<div class:hidden={hasVisibleStream || launchedOnce} class="standby">
+<div class:hidden={standbyReason !== "app-left" && (hasVisibleStream || launchedOnce)} class="standby">
   <div class="status-mark">
     {#if autoClosePending}
       <span class="loading-spinner"></span>
@@ -2585,6 +2617,8 @@
   <div class="standby-logo">CASTLA</div>
   {#if autoClosePending}
     <p>{t($compositorStore.language, "standbyLaunching")}</p>
+  {:else if standbyReason === "app-left"}
+    <p>{t($compositorStore.language, "standbyAppLeft")}</p>
   {:else}
     <p>{t($compositorStore.language, "standbyReady")}</p>
   {/if}

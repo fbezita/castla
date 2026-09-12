@@ -17,6 +17,15 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(keystorePropertiesFile.inputStream())
 }
 
+fun readSigningValue(propertyName: String, environmentName: String): String? {
+    val environmentValue = System.getenv(environmentName)?.trim()
+    if (!environmentValue.isNullOrEmpty()) {
+        return environmentValue
+    }
+
+    return keystoreProperties.getProperty(propertyName)?.trim()?.takeIf { it.isNotEmpty() }
+}
+
 val localPropertiesFile = rootProject.file("local.properties")
 val localProperties = Properties()
 if (localPropertiesFile.exists()) {
@@ -77,23 +86,30 @@ android {
     // Raised compileSdk to 36 to satisfy requirement of androidx.core:core:1.18.0 and other dependencies
     compileSdk = 37
 
-    if (keystorePropertiesFile.exists()) {
+    val releaseStoreFile = readSigningValue("storeFile", "CASTLA_KEYSTORE_PATH")
+    val releaseKeyAlias = readSigningValue("keyAlias", "CASTLA_KEY_ALIAS")
+
+    if (releaseStoreFile != null && releaseKeyAlias != null) {
         signingConfigs {
             create("release") {
-                storeFile = rootProject.file(keystoreProperties["storeFile"] as String)
-                storePassword = keystoreProperties["storePassword"] as String
-                keyAlias = keystoreProperties["keyAlias"] as String
-                keyPassword = keystoreProperties["keyPassword"] as String
+                storeFile = rootProject.file(releaseStoreFile)
+                readSigningValue("storePassword", "CASTLA_KEYSTORE_PASSWORD")?.let {
+                    storePassword = it
+                }
+                keyAlias = releaseKeyAlias
+                readSigningValue("keyPassword", "CASTLA_KEY_PASSWORD")?.let {
+                    keyPassword = it
+                }
             }
         }
     }
 
     defaultConfig {
-        applicationId = "com.castla.mirror"
+        applicationId = "com.castla.mirror.client"
         minSdk = 26
         targetSdk = 37
         versionCode = 12
-        versionName = "2.7.6"
+        versionName = "2.8.0"
         buildConfigField("String", "BUILD_TIMESTAMP", "\"$buildTimestamp\"")
         buildConfigField("String", "CASTLA_CERT_PASSWORD", "\"${readSecret("CASTLA_CERT_PASSWORD")}\"")
         buildConfigField("String", "CASTLA_CERT_TOKEN", "\"${readSecret("CASTLA_CERT_TOKEN")}\"")
@@ -112,7 +128,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            if (keystorePropertiesFile.exists()) {
+            if (releaseStoreFile != null && releaseKeyAlias != null) {
                 signingConfig = signingConfigs.getByName("release")
             }
         }

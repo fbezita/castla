@@ -3,6 +3,9 @@ package com.castla.mirror.server
 import android.content.Context
 import android.util.Log
 import com.castla.mirror.BuildConfig
+import com.castla.mirror.diagnostics.FileLogger
+import com.castla.mirror.network.RelayRetryPolicy
+import android.os.SystemClock
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -38,19 +41,25 @@ internal class ServerTlsConfigurator(
     }
 
     fun downloadCertIfAvailableBlocking(): Boolean {
-        val password = certificatePasswordOrNull() ?: return false
+        val startedAtMs = SystemClock.elapsedRealtime()
+        FileLogger.i("CERT_SYNC", "download_start")
+        val password = certificatePasswordOrNull() ?: run {
+            FileLogger.e("CERT_SYNC", "download_result success=false reason=password_missing durationMs=${SystemClock.elapsedRealtime() - startedAtMs}")
+            return false
+        }
         val certToken = BuildConfig.CASTLA_CERT_TOKEN.trim()
         if (certToken.isEmpty()) {
             reportError("cert_token_missing")
             Log.e(TAG, "[Certificate Sync] CASTLA_CERT_TOKEN is missing. Set it via local.properties or environment variables.")
+            FileLogger.e("CERT_SYNC", "download_result success=false reason=token_missing durationMs=${SystemClock.elapsedRealtime() - startedAtMs}")
             return false
         }
         val targetFile = File(context.filesDir, DYNAMIC_CERT_FILE_NAME)
         val tempFile = File(context.filesDir, "$DYNAMIC_CERT_FILE_NAME.tmp")
         return try {
             val connection = (URL(CERT_API_URL).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 5000
-                readTimeout = 5000
+                connectTimeout = RelayRetryPolicy.CONNECT_TIMEOUT_MS
+                readTimeout = RelayRetryPolicy.READ_TIMEOUT_MS
                 requestMethod = "GET"
                 setRequestProperty("Authorization", "Bearer $certToken")
             }
@@ -63,6 +72,7 @@ internal class ServerTlsConfigurator(
                         if (!tempFile.exists() || tempFile.length() <= 0L) {
                             tempFile.delete()
                             Log.w(TAG, "[Certificate Sync] Empty p12 downloaded. Keeping existing certificate.")
+                            FileLogger.w("CERT_SYNC", "download_result success=false http=200 reason=empty_file durationMs=${SystemClock.elapsedRealtime() - startedAtMs}")
                             return false
                         }
                         val keyStore = KeyStore.getInstance("PKCS12")
@@ -73,18 +83,25 @@ internal class ServerTlsConfigurator(
                             tempFile.delete()
                         }
                         Log.i(TAG, "[Certificate Sync] Downloaded and verified castla.p12 from authenticated API.")
+                        FileLogger.i(
+                            "CERT_SYNC",
+                            "download_result success=true http=${connection.responseCode} durationMs=${SystemClock.elapsedRealtime() - startedAtMs}",
+                        )
                         true
                     }
                     HttpURLConnection.HTTP_UNAUTHORIZED, HttpURLConnection.HTTP_FORBIDDEN -> {
                         Log.e(TAG, "[Certificate Sync] Unauthorized. Check CASTLA_CERT_TOKEN.")
+                        FileLogger.e("CERT_SYNC", "download_result success=false http=${connection.responseCode} reason=unauthorized durationMs=${SystemClock.elapsedRealtime() - startedAtMs}")
                         false
                     }
                     HttpURLConnection.HTTP_NOT_FOUND -> {
                         Log.e(TAG, "[Certificate Sync] Certificate API returned 404. Check server cert path.")
+                        FileLogger.e("CERT_SYNC", "download_result success=false http=404 reason=not_found durationMs=${SystemClock.elapsedRealtime() - startedAtMs}")
                         false
                     }
                     else -> {
                         Log.w(TAG, "[Certificate Sync] Server returned HTTP ${connection.responseCode}. Keeping existing certificate.")
+                        FileLogger.w("CERT_SYNC", "download_result success=false http=${connection.responseCode} reason=server_response durationMs=${SystemClock.elapsedRealtime() - startedAtMs}")
                         false
                     }
                 }
@@ -94,6 +111,11 @@ internal class ServerTlsConfigurator(
         } catch (e: Exception) {
             tempFile.delete()
             Log.w(TAG, "[Certificate Sync] Network or validation error. Keeping existing certificate.", e)
+            FileLogger.e(
+                "CERT_SYNC",
+                "download_exception durationMs=${SystemClock.elapsedRealtime() - startedAtMs} type=${e::class.java.simpleName} message=${e.message ?: ""}",
+                e,
+            )
             false
         }
     }
@@ -110,6 +132,7 @@ internal class ServerTlsConfigurator(
         val lastRefreshCheckMs = readLastCertificateRefreshCheckMs()
         if (!TlsCertificateRefreshPolicy.shouldRefresh(nowMs, certificateNotAfterMs, lastRefreshCheckMs)) {
             Log.i(TAG, "[Certificate Sync] Reusing cached certificate. expiresAt=$certificateNotAfterMs lastCheckAt=$lastRefreshCheckMs")
+            FileLogger.i("CERT_SYNC", "cache_reused expiresAt=$certificateNotAfterMs lastCheckAt=$lastRefreshCheckMs")
             return false
         }
         if (BuildConfig.CASTLA_CERT_TOKEN.trim().isEmpty()) {

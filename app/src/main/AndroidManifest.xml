@@ -66,7 +66,7 @@
             android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|smallestScreenSize|density|screenLayout|keyboardHidden"
             android:hardwareAccelerated="true"
-            android:taskAffinity="com.castla.mirror.web"
+            android:taskAffinity="${applicationId}.web"
             android:theme="@android:style/Theme.Translucent.NoTitleBar.Fullscreen" />
 
 
@@ -144,7 +144,7 @@
             android:name=".service.MirrorForegroundService$StopReceiver"
             android:exported="false">
             <intent-filter>
-                <action android:name="com.castla.mirror.ACTION_STOP" />
+                <action android:name="${applicationId}.ACTION_STOP" />
             </intent-filter>
         </receiver>
 
@@ -179,7 +179,7 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-                <action android:name="com.castla.mirror.WIDGET_TOGGLE" />
+                <action android:name="${applicationId}.WIDGET_TOGGLE" />
             </intent-filter>
             <meta-data
                 android:name="android.appwidget.provider"
@@ -189,4 +189,3 @@
     </application>
 
 </manifest>
-

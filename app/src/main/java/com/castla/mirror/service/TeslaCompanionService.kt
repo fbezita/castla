@@ -4,6 +4,8 @@ import android.companion.CompanionDeviceService
 import android.os.Build
 import android.util.Log
 import androidx.annotation.RequiresApi
+import com.castla.mirror.BuildConfig
+import com.castla.mirror.utils.AppActionNames
 
 /**
  * Receives callbacks from the OS when a CDM-associated Tesla Bluetooth device
@@ -20,7 +22,7 @@ class TeslaCompanionService : CompanionDeviceService() {
         private const val TAG = "TeslaCompanion"
 
         /** Action used by the notification's "Start" button to launch mirroring */
-        const val ACTION_START_MIRRORING = "com.castla.mirror.ACTION_START_MIRRORING_FROM_CDM"
+        val ACTION_START_MIRRORING = AppActionNames.startMirroringFromCompanion(BuildConfig.APPLICATION_ID)
     }
 
     override fun onCreate() {

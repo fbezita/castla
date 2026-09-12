@@ -69,6 +69,7 @@ import com.castla.mirror.diagnostics.FileLogger
 import com.castla.mirror.diagnostics.MirrorDiagnostics
 import com.castla.mirror.diagnostics.TerminalReason
 import com.castla.mirror.utils.AppLaunchRequest
+import com.castla.mirror.utils.AppActionNames
 import com.castla.mirror.utils.StreamMath
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -139,8 +140,8 @@ class MirrorForegroundService : Service() {
         private const val TAG = "MirrorService"
         private const val CHANNEL_ID = "castla_mirror"
         private const val NOTIFICATION_ID = 1
-        const val ACTION_STOP = "com.castla.mirror.ACTION_STOP"
-        const val ACTION_RESTORE_IME = "com.castla.mirror.ACTION_RESTORE_IME"
+        val ACTION_STOP = AppActionNames.stop(BuildConfig.APPLICATION_ID)
+        val ACTION_RESTORE_IME = AppActionNames.restoreIme(BuildConfig.APPLICATION_ID)
         const val EXTRA_MAX_RESOLUTION = "max_resolution"
         const val EXTRA_FPS = "fps"
         const val EXTRA_AUDIO = "audio_enabled"
@@ -594,6 +595,10 @@ class MirrorForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        FileLogger.i(
+            "SERVICE_LIFECYCLE",
+            "destroy stopRequested=$stopRequested cleanupCompleted=$cleanupCompleted terminalReason=${terminalReason.get()?.name ?: "none"}",
+        )
         if (::bluetoothAudioRouteMonitor.isInitialized) {
             try { bluetoothAudioRouteMonitor.stop() } catch (_: Exception) {}
         }
@@ -864,6 +869,10 @@ class MirrorForegroundService : Service() {
         )
     }
 
+    fun refreshRelayRegistration(ip: String, reason: String = "network_changed") {
+        mirrorServer?.refreshRelayRegistration(ip, reason)
+    }
+
     private fun refreshVideoLatencies() {
         pipelines.forEach { (pane, pipeline) ->
             val latencyMs = com.castla.mirror.policy.VideoLatencyPolicy.resolve(
@@ -913,6 +922,7 @@ class MirrorForegroundService : Service() {
     private fun requestStopAsync(reason: String) {
         if (stopRequested) return
         stopRequested = true
+        FileLogger.i("SERVICE_LIFECYCLE", "stop_requested source=$reason")
         Log.i(TAG, "requestStopAsync() - Gracefully tearing down foreground service loop. Reason: $reason")
         try { ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
         serviceScope.launch(Dispatchers.IO) {
@@ -1865,18 +1875,38 @@ class MirrorForegroundService : Service() {
     }
 
     internal fun computeVirtualDisplayDpi(width: Int, height: Int): Int = StreamMath.applyDensityScale(StreamMath.calculateDpi(minOf(width, height)), dpiScale)
-    internal suspend fun cleanupDisplay(displayId: Int) = withContext(Dispatchers.IO) {
+    internal suspend fun cleanupDisplay(
+        displayId: Int,
+        borrowedTasks: Map<Int, Int> = emptyMap(),
+    ) = withContext(Dispatchers.IO) {
         if (displayId < 0) return@withContext
         val service = pipelines.values.firstNotNullOfOrNull { it.controller.getPrivilegedService() } ?: return@withContext
-        val removedTaskIds = VirtualDisplayTaskCleaner.cleanup(
+        val cleanupResult = VirtualDisplayTaskCleaner.cleanup(
             displayId = displayId,
+            borrowedTasks = borrowedTasks,
             getTaskIdsOnDisplay = { targetDisplayId ->
                 runBinderSafe { service.getTaskIdsOnDisplay(targetDisplayId) } ?: intArrayOf()
+            },
+            restoreTask = { taskId, originDisplayId ->
+                val nativeMoved = runBinderSafe {
+                    service.moveTaskToDisplayNative(taskId, originDisplayId)
+                } ?: false
+                if (nativeMoved) {
+                    true
+                } else {
+                    TaskDisplayShellCommand.move(taskId, originDisplayId) { command ->
+                        runBinderSafe { service.execCommand(command) }
+                    }
+                }
             },
             removeTask = { taskId -> runBinderSafe { service.removeTask(taskId) }; Unit },
             launchHome = { targetDisplayId -> runBinderSafe { service.launchHomeOnDisplay(targetDisplayId) }; Unit },
         )
-        Log.i(TAG, "VD task cleanup completed displayId=$displayId taskIds=$removedTaskIds")
+        Log.i(
+            TAG,
+            "VD task cleanup completed displayId=$displayId restored=${cleanupResult.restoredTaskIds} " +
+                "removed=${cleanupResult.removedTaskIds} restoreFailed=${cleanupResult.restoreFailedTaskIds}"
+        )
     }
 
     private val BROWSER_PACKAGES = setOf("com.android.chrome", "com.sec.android.app.sbrowser", "org.mozilla.firefox", "com.microsoft.emmx")

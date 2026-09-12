@@ -11,12 +11,14 @@ import android.widget.RemoteViews
 import com.castla.mirror.MainActivity
 import com.castla.mirror.R
 import com.castla.mirror.service.MirrorForegroundService
+import com.castla.mirror.BuildConfig
+import com.castla.mirror.utils.AppActionNames
 import rikka.shizuku.Shizuku
 
 class MirrorWidgetProvider : AppWidgetProvider() {
 
     companion object {
-        const val ACTION_TOGGLE = "com.castla.mirror.WIDGET_TOGGLE"
+        val ACTION_TOGGLE = AppActionNames.widgetToggle(BuildConfig.APPLICATION_ID)
         private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
 
         fun updateAllWidgets(context: Context) {

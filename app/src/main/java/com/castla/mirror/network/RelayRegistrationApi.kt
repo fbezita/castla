@@ -1,6 +1,9 @@
 package com.castla.mirror.network
 
 import android.util.Log
+import android.os.SystemClock
+import com.castla.mirror.diagnostics.FileLogger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -31,6 +34,8 @@ class RelayRegistrationApi(
         ip: String,
         relayUrl: String
     ): Boolean = withContext(Dispatchers.IO) {
+        val startedAtMs = SystemClock.elapsedRealtime()
+        FileLogger.i("RELAY_REGISTRATION", "request_start device=$deviceId host=$hostname ip=$ip")
         val body = JSONObject().apply {
             put("deviceId", deviceId)
             put("hostname", hostname)
@@ -42,8 +47,8 @@ class RelayRegistrationApi(
         try {
             conn = (URL(endpointUrl).openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
-                connectTimeout = 5000
-                readTimeout = 5000
+                connectTimeout = RelayRetryPolicy.CONNECT_TIMEOUT_MS
+                readTimeout = RelayRetryPolicy.READ_TIMEOUT_MS
                 doOutput = true
                 setRequestProperty("Authorization", "Bearer $token")
                 setRequestProperty("Content-Type", "application/json")
@@ -60,14 +65,25 @@ class RelayRegistrationApi(
             }
 
             val ok = code in 200..299 && JSONObject(text).optBoolean("success", false)
+            val elapsedMs = SystemClock.elapsedRealtime() - startedAtMs
             if (ok) {
                 Log.i(TAG, "✅ Relay registered: device=$deviceId host=$hostname ip=$ip active=$relayUrl")
+                FileLogger.i("RELAY_REGISTRATION", "request_result success=true http=$code durationMs=$elapsedMs")
             } else {
                 Log.e(TAG, "❌ Relay registration failed http=$code body=$text")
+                FileLogger.e("RELAY_REGISTRATION", "request_result success=false http=$code durationMs=$elapsedMs")
             }
             ok
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "❌ Relay registration exception", e)
+            val elapsedMs = SystemClock.elapsedRealtime() - startedAtMs
+            FileLogger.e(
+                "RELAY_REGISTRATION",
+                "request_exception durationMs=$elapsedMs type=${e::class.java.simpleName} message=${e.message ?: ""}",
+                e,
+            )
             false
         } finally {
             conn?.disconnect()

@@ -18,9 +18,9 @@ class LaunchPlannerTest {
     }
 
     @Test
-    fun `task on another display creates a separate task`() {
+    fun `task on another display is moved to the target display`() {
         val plan = LaunchPlanner.plan(LaunchState(6, true, emptyList(), true, false, true, true, 6))
-        assertEquals(TaskLaunchAction.CREATE_NEW_TASK, plan.taskAction)
+        assertEquals(TaskLaunchAction.MOVE_TASK_TO_DISPLAY_AND_FRONT, plan.taskAction)
     }
 
     @Test

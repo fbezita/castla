@@ -2,25 +2,19 @@ package com.castla.mirror
 
 import android.Manifest
 import com.castla.mirror.BuildConfig
-import android.app.DownloadManager
-import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.os.IBinder
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
-import androidx.core.content.FileProvider
-import java.io.File
 import com.castla.mirror.server.MirrorServer
 import com.castla.mirror.server.MirrorServerAvailability
 import com.castla.mirror.server.MirrorServerAvailabilityState
@@ -57,6 +51,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.castla.mirror.network.NetworkMonitor
 import com.castla.mirror.network.NetworkState
 import com.castla.mirror.network.CastlaDeviceId
+import com.castla.mirror.network.RelayRetryPolicy
 import com.castla.mirror.notifications.CastlaNotificationListenerService
 import com.castla.mirror.notifications.NotificationAccessSettingsHelper
 import com.castla.mirror.service.HotspotClientDetector
@@ -64,6 +59,7 @@ import com.castla.mirror.service.MirrorForegroundService
 import com.castla.mirror.service.TeslaBleScanner
 import com.castla.mirror.service.TeslaDetectNotifier
 import com.castla.mirror.shizuku.ShizukuSetup
+import com.castla.mirror.shizuku.ShizukuInstallLinks
 import com.castla.mirror.ui.SettingsScreen
 import com.castla.mirror.ui.MirroringMode
 import com.castla.mirror.ui.StreamSettings
@@ -78,10 +74,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val MIRROR_START_TIMEOUT_MS = 15_000L
         private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
-        private const val SHIZUKU_RELEASES_API = "https://api.github.com/repos/RikkaApps/Shizuku/releases/latest"
-        private const val SHIZUKU_APK_FILENAME = "shizuku.apk"
         private const val USB_CONFIG_PREFS = "usb_config_advisory"
         private const val KEY_SUPPRESS_USB_CONFIG_WARNING = "suppress_warning"
         private const val NOTIFICATION_ACCESS_PREFS = "notification_access_onboarding"
@@ -120,9 +113,6 @@ class MainActivity : AppCompatActivity() {
     private var isNotificationAccessEnabled by mutableStateOf(false)
 
     // Shizuku download state
-    private var shizukuDownloadId: Long = -1L
-    private var shizukuDownloadProgress by mutableFloatStateOf(-1f) // -1 = not downloading
-    private var downloadProgressJob: kotlinx.coroutines.Job? = null
 
     private lateinit var networkMonitor: NetworkMonitor
     private lateinit var shizukuSetup: ShizukuSetup
@@ -216,6 +206,10 @@ class MainActivity : AppCompatActivity() {
                         is NetworkState.Connected -> {
                             currentIp = state.ip
                             updateServerUrl()
+                            (mirrorService ?: MirrorForegroundService.instance)?.refreshRelayRegistration(
+                                resolveReachableMirrorIp(),
+                                "network_connected_or_changed",
+                            )
                             // WebCodecs now uses the public Castla entrypoint. The backend
                             // redirects to the active per-device local relay.
                         }
@@ -380,7 +374,7 @@ class MainActivity : AppCompatActivity() {
                         onStartClick = { onStartMirroring() },
                         onStopClick = { stopMirrorService() },
                         onSettingsClick = { showSettings = true },
-                        onInstallShizuku = { downloadAndInstallShizuku() },
+                        onInstallShizuku = { openShizukuDownloadPage() },
                         onOpenShizuku = { openShizukuApp() },
                         onGrantShizukuPermission = { shizukuSetup.requestPermission() },
                         onEnableIme = {
@@ -392,7 +386,6 @@ class MainActivity : AppCompatActivity() {
                         onOpenNotificationAccessSettings = {
                             openNotificationAccessSettings()
                         },
-                        shizukuDownloadProgress = shizukuDownloadProgress,
                         isHotspotActive = isHotspotActive,
                         onToggleHotspot = { toggleHotspot() },
                         isPanelOff = isPanelOff,
@@ -715,8 +708,6 @@ class MainActivity : AppCompatActivity() {
         networkMonitor.stopMonitoring()
         stopAutoDetect()
         shizukuSetup.release()
-        downloadProgressJob?.cancel()
-        try { unregisterReceiver(shizukuDownloadReceiver) } catch (_: IllegalArgumentException) {}
         super.onDestroy()
     }
 
@@ -891,146 +882,14 @@ private fun resolveReachableMirrorIp(): String {
         }
     }
 
-    private fun downloadAndInstallShizuku() {
-        if (shizukuDownloadProgress >= 0f) {
-            Toast.makeText(this, "Download already in progress…", Toast.LENGTH_SHORT).show()
-            return
+    private fun openShizukuDownloadPage() {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(ShizukuInstallLinks.OFFICIAL_RELEASE_PAGE))
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to open official Shizuku release page", e)
+            Toast.makeText(this, "Could not open the Shizuku download page.", Toast.LENGTH_LONG).show()
         }
-
-        shizukuDownloadProgress = 0f
-        Toast.makeText(this, "Fetching latest Shizuku release…", Toast.LENGTH_SHORT).show()
-
-        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                // Fetch latest release APK URL from GitHub API
-                val url = java.net.URL(SHIZUKU_RELEASES_API)
-                val conn = url.openConnection() as java.net.HttpURLConnection
-                conn.setRequestProperty("Accept", "application/vnd.github+json")
-                conn.connectTimeout = 10_000
-                conn.readTimeout = 10_000
-                val json = conn.inputStream.bufferedReader().readText()
-                conn.disconnect()
-
-                // Parse APK download URL from assets
-                val apkUrl = org.json.JSONObject(json)
-                    .getJSONArray("assets")
-                    .let { assets ->
-                        var downloadUrl: String? = null
-                        for (i in 0 until assets.length()) {
-                            val asset = assets.getJSONObject(i)
-                            val name = asset.getString("name")
-                            if (name.endsWith(".apk")) {
-                                downloadUrl = asset.getString("browser_download_url")
-                                break
-                            }
-                        }
-                        downloadUrl
-                    } ?: throw Exception("No APK found in latest release")
-
-                Log.i(TAG, "Shizuku APK URL: $apkUrl")
-
-                runOnUiThread { startShizukuDownload(apkUrl) }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to fetch Shizuku release info", e)
-                runOnUiThread {
-                    shizukuDownloadProgress = -1f
-                    Toast.makeText(this@MainActivity, "Failed to fetch release info: ${e.message}", Toast.LENGTH_LONG).show()
-                }
-            }
-        }
-    }
-
-    private fun startShizukuDownload(apkUrl: String) {
-        // Delete any previous APK
-        val apkFile = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), SHIZUKU_APK_FILENAME)
-        if (apkFile.exists()) apkFile.delete()
-
-        val request = DownloadManager.Request(Uri.parse(apkUrl))
-            .setTitle("Shizuku")
-            .setDescription("Downloading Shizuku APK…")
-            .setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, SHIZUKU_APK_FILENAME)
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
-
-        val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-        shizukuDownloadId = dm.enqueue(request)
-        Log.i(TAG, "Shizuku download started: id=$shizukuDownloadId")
-        Toast.makeText(this, "Downloading Shizuku…", Toast.LENGTH_SHORT).show()
-
-        // Register completion receiver
-        val filter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
-        registerReceiver(shizukuDownloadReceiver, filter, Context.RECEIVER_EXPORTED)
-
-        startDownloadProgressPolling()
-    }
-
-    private val shizukuDownloadReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1)
-            if (id != shizukuDownloadId) return
-
-            downloadProgressJob?.cancel()
-            shizukuDownloadProgress = -1f
-
-            try {
-                unregisterReceiver(this)
-            } catch (_: IllegalArgumentException) {}
-
-            val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-            val query = DownloadManager.Query().setFilterById(id)
-            val cursor = dm.query(query)
-            if (cursor != null && cursor.moveToFirst()) {
-                val status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
-                if (status == DownloadManager.STATUS_SUCCESSFUL) {
-                    Log.i(TAG, "Shizuku APK download complete")
-                    installShizukuApk()
-                } else {
-                    Log.e(TAG, "Shizuku download failed with status: $status")
-                    Toast.makeText(context, "Download failed. Please try again.", Toast.LENGTH_LONG).show()
-                }
-                cursor.close()
-            }
-        }
-    }
-
-    private fun startDownloadProgressPolling() {
-        downloadProgressJob?.cancel()
-        downloadProgressJob = lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-            while (shizukuDownloadProgress >= 0f) {
-                val query = DownloadManager.Query().setFilterById(shizukuDownloadId)
-                val cursor = dm.query(query)
-                if (cursor != null && cursor.moveToFirst()) {
-                    val bytesDownloaded = cursor.getLong(
-                        cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)
-                    )
-                    val bytesTotal = cursor.getLong(
-                        cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES)
-                    )
-                    if (bytesTotal > 0) {
-                        shizukuDownloadProgress = bytesDownloaded.toFloat() / bytesTotal.toFloat()
-                    }
-                    cursor.close()
-                }
-                kotlinx.coroutines.delay(300)
-            }
-        }
-    }
-
-    private fun installShizukuApk() {
-        val apkFile = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), SHIZUKU_APK_FILENAME)
-        if (!apkFile.exists()) {
-            Log.e(TAG, "Shizuku APK file not found: ${apkFile.absolutePath}")
-            Toast.makeText(this, "APK file not found.", Toast.LENGTH_LONG).show()
-            return
-        }
-
-        val apkUri = FileProvider.getUriForFile(this, "${BuildConfig.APPLICATION_ID}.fileprovider", apkFile)
-        val installIntent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(apkUri, "application/vnd.android.package-archive")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        startActivity(installIntent)
     }
 
     private fun openShizukuApp() {
@@ -1153,6 +1012,10 @@ private fun resolveReachableMirrorIp(): String {
     private fun clearPreparingState(message: String? = null, stopServiceIfNeeded: Boolean = false) {
         isPreparing = false
         if (stopServiceIfNeeded) {
+            com.castla.mirror.diagnostics.FileLogger.i(
+                "SERVICE_LIFECYCLE",
+                "stop_requested source=main_activity_start_timeout message=${message ?: ""}",
+            )
             try { stopService(Intent(this, MirrorForegroundService::class.java)) } catch (_: Exception) {}
             mirrorService = null
             isStreaming = false
@@ -1307,7 +1170,7 @@ private fun resolveReachableMirrorIp(): String {
             val startTime = System.currentTimeMillis()
             while (mirrorService?.isRunning != true && isPreparing) {
                 val elapsed = System.currentTimeMillis() - startTime
-                if (elapsed >= MIRROR_START_TIMEOUT_MS) {
+                if (elapsed >= RelayRetryPolicy.SERVICE_START_TIMEOUT_MS) {
                     Log.w(TAG, "Mirror service start timed out after ${elapsed}ms")
                     clearPreparingState(
                         message = getString(R.string.toast_error, "mirroring start timed out"),
@@ -1330,6 +1193,10 @@ private fun resolveReachableMirrorIp(): String {
     }
 
     private fun stopMirrorService(askHotspot: Boolean = true, preservePreparingState: Boolean = false) {
+        com.castla.mirror.diagnostics.FileLogger.i(
+            "SERVICE_LIFECYCLE",
+            "stop_requested source=main_activity_user_or_restart preservePreparingState=$preservePreparingState",
+        )
         val shouldAskHotspot = askHotspot && hotspotEnabledByApp
 
         if (serviceBound || bindRequested) {
@@ -1387,7 +1254,6 @@ fun CastlaScreen(
     onEnableIme: () -> Unit,
     onSelectIme: () -> Unit,
     onOpenNotificationAccessSettings: () -> Unit = {},
-    shizukuDownloadProgress: Float = -1f,
     isHotspotActive: Boolean = false,
     onToggleHotspot: () -> Unit = {},
     isPanelOff: Boolean = false,
@@ -1749,38 +1615,15 @@ fun CastlaScreen(
                             )
                             Spacer(modifier = Modifier.height(16.dp))
 
-                            if (shizukuDownloadProgress >= 0f) {
-                                // Download in progress
-                                Column(modifier = Modifier.fillMaxWidth()) {
-                                    LinearProgressIndicator(
-                                        progress = { shizukuDownloadProgress },
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .height(8.dp)
-                                            .clip(RoundedCornerShape(4.dp)),
-                                        color = Color(0xFFFFB300),
-                                        trackColor = Color.White.copy(alpha = 0.2f),
-                                    )
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    Text(
-                                        text = "Downloading… ${(shizukuDownloadProgress * 100).toInt()}%",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = Color(0xFFFFD54F),
-                                        modifier = Modifier.fillMaxWidth(),
-                                        textAlign = TextAlign.Center
-                                    )
-                                }
-                            } else {
-                                Button(
-                                    onClick = onInstallShizuku,
-                                    modifier = Modifier.fillMaxWidth(),
-                                    shape = RoundedCornerShape(12.dp),
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = Color(0xFFFFB300)
-                                    )
-                                ) {
-                                    Text(stringResource(id = R.string.btn_how_to_install_shizuku), color = Color.Black, fontWeight = FontWeight.Bold)
-                                }
+                            Button(
+                                onClick = onInstallShizuku,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFFFFB300)
+                                )
+                            ) {
+                                Text(stringResource(id = R.string.btn_how_to_install_shizuku), color = Color.Black, fontWeight = FontWeight.Bold)
                             }
                         } else if (!shizukuRunning) {
                             Text(
@@ -2111,10 +1954,6 @@ private fun UsbConfigWarningDialog(
         }
     }
 }
-
-
-
-
 
 
 

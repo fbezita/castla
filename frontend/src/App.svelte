@@ -539,7 +539,7 @@
         }
 
         // Ignore self package focus events to prevent loops/keyboard collapse
-        if (targetPkg === "com.castla.mirror" || targetPkg === "com.castla.mirror.debug") {
+        if (targetPkg.startsWith("com.castla.mirror")) {
           console.warn("[ANDROID_FOCUS] ignore self package focus event", targetPkg);
           return;
         }
