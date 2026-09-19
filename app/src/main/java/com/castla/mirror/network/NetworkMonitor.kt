@@ -6,6 +6,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.util.Log
+import com.castla.mirror.diagnostics.FileLogger
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.net.Inet4Address
@@ -29,14 +30,24 @@ class NetworkMonitor(private val context: Context) {
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
-            val ip = getDeviceIp()
-            _state.value = NetworkState.Connected(ip)
-            Log.i(TAG, "Network available: $ip")
+            refreshState("available")
         }
 
         override fun onLost(network: Network) {
+            // Another usable network (for example cellular 192.0.0.x after Wi-Fi
+            // is disabled) may still be present, so never assume full disconnect.
+            refreshState("lost")
+        }
+    }
+
+    private fun refreshState(trigger: String) {
+        val ip = getDeviceIp()
+        if (ip == "0.0.0.0") {
             _state.value = NetworkState.Disconnected
-            Log.i(TAG, "Network lost")
+            Log.i(TAG, "Network $trigger: no reachable IP")
+        } else {
+            _state.value = NetworkState.Connected(ip)
+            Log.i(TAG, "Network $trigger: $ip")
         }
     }
 
@@ -75,56 +86,30 @@ class NetworkMonitor(private val context: Context) {
                 }
             }
 
-            // Collect all candidate IPs with their priority
-            data class Candidate(val ip: String, val iface: String, val priority: Int)
-            val candidates = mutableListOf<Candidate>()
+            val candidates = mutableListOf<ReachableIpCandidate>()
 
             for (iface in allInterfaces) {
                 if (iface.isLoopback || !iface.isUp) continue
-                val name = iface.name.lowercase()
-
-                // Skip known cellular/mobile interfaces entirely to avoid picking up carrier IPs
-                if (name.startsWith("rmnet") || name.startsWith("ccmni") || name.startsWith("p2p") || name.startsWith("ppp")) {
-                    Log.d(TAG, "Skipping cellular/non-local interface: ${iface.name}")
-                    continue
-                }
-
                 val addresses = iface.inetAddresses
                 while (addresses.hasMoreElements()) {
                     val address = addresses.nextElement()
                     if (address is Inet4Address && !address.isLoopbackAddress) {
                         val ip = address.hostAddress ?: continue
-
-                        // 🚨 Thoroughly filter out cellular carrier IPs starting with "10."
-                        if (ip.startsWith("10.")) {
-                            Log.d(TAG, "Filtering out cellular carrier IP: $ip on ${iface.name}")
-                            continue
-                        }
-
-                        val priority = when {
-                            // Hotspot gateway IPs — highest priority (reachable by hotspot clients)
-                            ip.startsWith("192.168.43.") || ip.startsWith("192.168.49.") -> 30
-                            // Known hotspot / tethering / Wifi virtual interfaces with private local IP ranges
-                            (name.contains("swlan") || name.contains("ap") || name.contains("softap") || name.contains("wlan")) && 
-                            (ip.startsWith("192.168.") || ip == "192.0.0.4") -> 25
-                            // Other private IPs on known hotspot interfaces
-                            (name.startsWith("swlan") || name.startsWith("ap") || name.startsWith("softap")) -> 15
-                            // wlan with private IP (WiFi connected to router)
-                            name.startsWith("wlan") && ip.startsWith("192.168.") -> 10
-                            name.startsWith("eth") -> 3
-                            // Everything else (likely mobile data or other local) — low priority
-                            else -> 1
-                        }
-
-                        Log.d(TAG, "Candidate: $ip on ${iface.name} priority=$priority")
-                        candidates.add(Candidate(ip, iface.name, priority))
+                        candidates.add(ReachableIpCandidate(iface.name, ip))
                     }
                 }
             }
 
-            val best = candidates.maxByOrNull { it.priority }
+            val summary = candidates.joinToString(",") { candidate ->
+                "${candidate.interfaceName}=${candidate.ip}:${ReachableIpSelector.score(candidate) ?: "rejected"}"
+            }
+            val best = ReachableIpSelector.select(candidates)
+            FileLogger.i(
+                "IP_SELECTION",
+                "candidates=[$summary] selected=${best?.interfaceName ?: "none"}=${best?.ip ?: "0.0.0.0"}",
+            )
             if (best != null) {
-                Log.i(TAG, "Selected IP ${best.ip} on ${best.iface} (priority=${best.priority})")
+                Log.i(TAG, "Selected IP ${best.ip} on ${best.interfaceName}")
                 return best.ip
             }
         } catch (e: Exception) {

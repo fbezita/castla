@@ -1,8 +1,8 @@
 package com.castla.mirror.network
 
 import android.content.Context
-import android.net.ConnectivityManager
 import android.util.Log
+import com.castla.mirror.diagnostics.FileLogger
 import java.net.Inet4Address
 import java.net.NetworkInterface
 
@@ -12,63 +12,34 @@ object HotspotIpDetector {
     /**
      * Detects the IPv4 address reachable from the current Tesla/PC network.
      *
-     * This intentionally returns RFC1918 private IPv4 because the browser keeps
-     * secure context through the hostname/certificate, while transport stays local.
+     * Returns an address from a trusted hotspot/LAN interface, or Android's
+     * 192.0.0.x cellular continuity address used by tethered clients.
      */
-    fun getReachableLocalIpv4(context: Context): String? {
-        // Prefer active network IP when available.
-        try {
-            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            val active = cm.activeNetwork
-            val lp = cm.getLinkProperties(active)
-            val activeIp = lp?.linkAddresses
-                ?.mapNotNull { it.address as? Inet4Address }
-                ?.map { it.hostAddress }
-                ?.firstOrNull { isUsablePrivateIpv4(it) }
-
-            if (activeIp != null) {
-                Log.i(TAG, "Selected active network IP: $activeIp")
-                return activeIp
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Active network IP detection failed", e)
-        }
-
-        // Fallback: scan interfaces.
+    fun getReachableLocalIpv4(@Suppress("UNUSED_PARAMETER") context: Context): String? {
         return try {
             val candidates = NetworkInterface.getNetworkInterfaces().toList()
                 .filter { it.isUp && !it.isLoopback }
                 .flatMap { nif ->
                     nif.inetAddresses.toList()
                         .filterIsInstance<Inet4Address>()
-                        .mapNotNull { addr -> addr.hostAddress?.let { ip -> nif.name to ip } }
+                        .mapNotNull { addr ->
+                            addr.hostAddress?.let { ip -> ReachableIpCandidate(nif.name, ip) }
+                        }
                 }
-                .filter { (_, ip) -> isUsablePrivateIpv4(ip) }
-                .sortedWith(
-                    compareByDescending<Pair<String, String>> { (name, _) ->
-                        name.startsWith("wlan") ||
-                            name.startsWith("swlan") ||
-                            name.startsWith("ap") ||
-                            name.startsWith("bridge")
-                    }.thenByDescending { (_, ip) ->
-                        ip.startsWith("192.168.")
-                    }
-                )
 
-            Log.i(TAG, "Local IPv4 candidates: $candidates")
-            candidates.firstOrNull()?.second
+            val selected = ReachableIpSelector.select(candidates)
+            val summary = candidates.joinToString(",") { candidate ->
+                "${candidate.interfaceName}=${candidate.ip}:${ReachableIpSelector.score(candidate) ?: "rejected"}"
+            }
+            FileLogger.i(
+                "IP_SELECTION",
+                "fallback_candidates=[$summary] selected=${selected?.interfaceName ?: "none"}=${selected?.ip ?: "0.0.0.0"}",
+            )
+            Log.i(TAG, "Local IPv4 candidates: $summary; selected=$selected")
+            selected?.ip
         } catch (e: Exception) {
             Log.e(TAG, "Interface scan failed", e)
             null
         }
-    }
-
-    private fun isUsablePrivateIpv4(ip: String?): Boolean {
-        if (ip.isNullOrBlank()) return false
-        if (ip.startsWith("127.")) return false
-        if (ip.startsWith("169.254.")) return false
-        return ip.startsWith("192.168.") ||
-            ip.startsWith("10.") ||
-            ip.matches(Regex("""172\.(1[6-9]|2[0-9]|3[0-1])\..*"""))
     }
 }

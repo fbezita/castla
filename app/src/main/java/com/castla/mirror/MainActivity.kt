@@ -726,36 +726,11 @@ class MainActivity : AppCompatActivity() {
         serverUrl = "http://${ip}:${MirrorServer.DEFAULT_PORT}"
     }
 
-    private fun getCellularIpv4Address(): String? {
-        try {
-            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
-            while (interfaces.hasMoreElements()) {
-                val iface = interfaces.nextElement()
-                if (iface.isLoopback || !iface.isUp) continue
-                val name = iface.name.lowercase()
-                if (name.contains("wlan") || name.contains("swlan") || name.contains("ap")) continue
-
-                val addrs = iface.inetAddresses
-                while (addrs.hasMoreElements()) {
-                    val addr = addrs.nextElement()
-                    if (!addr.isLoopbackAddress && addr.address.size == 4) {
-                        return addr.hostAddress
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to get cellular IP", e)
-        }
-        return null
-    }
-
-private fun resolveReachableMirrorIp(): String {
-        val cellularIp = getCellularIpv4Address()
+    private fun resolveReachableMirrorIp(): String {
         val hotspotIp = currentIp
 
         return when {
             hotspotIp != "0.0.0.0" && hotspotIp.isNotEmpty() -> hotspotIp
-            cellularIp != null && !cellularIp.startsWith("10.") -> cellularIp
             else -> "0.0.0.0"
         }
     }
@@ -1954,8 +1929,6 @@ private fun UsbConfigWarningDialog(
         }
     }
 }
-
-
 
 
 
