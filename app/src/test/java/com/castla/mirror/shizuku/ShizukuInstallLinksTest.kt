@@ -7,11 +7,12 @@ import org.junit.Test
 class ShizukuInstallLinksTest {
 
     @Test
-    fun `download action opens official release page instead of an apk`() {
-        val url = ShizukuInstallLinks.OFFICIAL_RELEASE_PAGE
+    fun `install action prefers the Play Store and keeps an official web fallback`() {
+        val marketUrl = ShizukuInstallLinks.PLAY_STORE_APP
+        val fallbackUrl = ShizukuInstallLinks.OFFICIAL_DOWNLOAD_PAGE
 
-        assertTrue(url.startsWith("https://github.com/RikkaApps/Shizuku/"))
-        assertTrue(url.endsWith("/releases/latest"))
-        assertFalse(url.endsWith(".apk"))
+        assertTrue(marketUrl.startsWith("market://details?id="))
+        assertTrue(fallbackUrl.startsWith("https://shizuku.rikka.app/"))
+        assertFalse(fallbackUrl.endsWith(".apk"))
     }
 }

@@ -3,6 +3,7 @@ package com.castla.mirror.shizuku
 import com.castla.mirror.BuildConfig
 import com.castla.mirror.service.VirtualDisplayHomeTarget
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.ComponentName
 import android.content.Intent
@@ -23,6 +24,7 @@ import android.view.MotionEvent
 import android.view.Surface
 import com.castla.mirror.ui.StreamSettings
 import com.castla.mirror.service.MultiDisplayLaunchPolicy
+import com.castla.mirror.service.ShellLaunchCommandBuilder
 import com.castla.mirror.policy.PackageUidParser
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
@@ -58,37 +60,25 @@ class PrivilegedService : IPrivilegedService.Stub() {
         private const val TAG = "PrivilegedService"
         private const val VDIME_PREFIX = "[VDIME]"
         // FLAG_PUBLIC ensures the virtual display behaves like a real display and allows home/launcher to render
-        private const val DISPLAY_FLAG_PUBLIC = 1 shl 0
+        private const val DISPLAY_FLAG_PUBLIC = VirtualDisplayFlagFormatter.PUBLIC
         // FLAG_OWN_CONTENT_ONLY prevents the main display's content from leaking into the VD
-        private const val DISPLAY_FLAG_OWN_CONTENT_ONLY = 1 shl 3
+        private const val DISPLAY_FLAG_OWN_CONTENT_ONLY = VirtualDisplayFlagFormatter.OWN_CONTENT_ONLY
         // FLAG_PRESENTATION tells the system this is a presentation display, which helps keeping it alive
-        private const val DISPLAY_FLAG_PRESENTATION = 1 shl 1
+        private const val DISPLAY_FLAG_PRESENTATION = VirtualDisplayFlagFormatter.PRESENTATION
         // FLAG_ALWAYS_UNLOCKED (API 33+) prevents the VD from locking when the physical screen locks
-        private const val DISPLAY_FLAG_ALWAYS_UNLOCKED = 1 shl 12
+        private const val DISPLAY_FLAG_ALWAYS_UNLOCKED = VirtualDisplayFlagFormatter.ALWAYS_UNLOCKED
         // FLAG_TRUSTED makes the system treat this VD as a trusted display (needed for some system UI)
-        private const val DISPLAY_FLAG_TRUSTED = 1 shl 10
+        private const val DISPLAY_FLAG_TRUSTED = VirtualDisplayFlagFormatter.TRUSTED
         // FLAG_OWN_DISPLAY_GROUP puts the VD in a separate display group so Keyguard does NOT show on it
-        private const val DISPLAY_FLAG_OWN_DISPLAY_GROUP = 1 shl 11
+        private const val DISPLAY_FLAG_OWN_DISPLAY_GROUP = VirtualDisplayFlagFormatter.OWN_DISPLAY_GROUP
         // FLAG_DESTROY_CONTENT_ON_REMOVAL destroys tasks instead of reparenting to main display
-        private const val DISPLAY_FLAG_DESTROY_CONTENT = 1 shl 8
+        private const val DISPLAY_FLAG_DESTROY_CONTENT = VirtualDisplayFlagFormatter.DESTROY_CONTENT
         private const val DISPLAY_IME_POLICY_LOCAL = 0
         private const val SHELL_APP_STREAMING_PROFILE =
             "android.app.role.COMPANION_DEVICE_APP_STREAMING"
         // Stable, locally administered identity for the synthetic shell companion association.
         // It is not a hardware or Wi-Fi MAC address.
         private const val SHELL_ASSOCIATION_DEVICE_ADDRESS = "02:CA:57:1A:00:01"
-    }
-
-    private fun describeVirtualDisplayFlags(flags: Int): String {
-        val parts = mutableListOf<String>()
-        if ((flags and DISPLAY_FLAG_PUBLIC) != 0) parts += "PUBLIC"
-        if ((flags and DISPLAY_FLAG_PRESENTATION) != 0) parts += "PRESENTATION"
-        if ((flags and DISPLAY_FLAG_OWN_CONTENT_ONLY) != 0) parts += "OWN_CONTENT_ONLY"
-        if ((flags and DISPLAY_FLAG_DESTROY_CONTENT) != 0) parts += "DESTROY_CONTENT"
-        if ((flags and DISPLAY_FLAG_OWN_DISPLAY_GROUP) != 0) parts += "OWN_DISPLAY_GROUP"
-        if ((flags and DISPLAY_FLAG_TRUSTED) != 0) parts += "TRUSTED"
-        if ((flags and DISPLAY_FLAG_ALWAYS_UNLOCKED) != 0) parts += "ALWAYS_UNLOCKED"
-        return if (parts.isEmpty()) "none" else parts.joinToString("|")
     }
 
     private val virtualDisplays = mutableMapOf<Int, VirtualDisplay>()
@@ -292,17 +282,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 systemContext
             }
 
-            // Wrap with "com.android.shell" package name to match Shizuku uid 2000
-            shellContext = object : android.content.ContextWrapper(rawShellContext) {
-                override fun getApplicationContext(): android.content.Context = this
-                override fun getPackageName(): String = "com.android.shell"
-                override fun getOpPackageName(): String = "com.android.shell"
-                override fun getAttributionTag(): String? = null
-                override fun getAttributionSource(): android.content.AttributionSource {
-                    if (shellAttribution is android.content.AttributionSource) return shellAttribution
-                    return super.getAttributionSource()
-                }
-            }
+            shellContext = ShellIdentityContextFactory.create(rawShellContext, shellAttribution)
 
             Log.i(TAG, "Shell context initialized: pkg=${shellContext?.packageName}, attr=${shellAttribution != null}")
         } catch (e: Exception) {
@@ -803,7 +783,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 TAG,
                 "[VD_POWER_GROUP] source=virtual_device associationId=$associationId " +
                     "displayId=${display.display.displayId} flags=$flags " +
-                    "flagNames=${describeVirtualDisplayFlags(flags)}"
+                    "flagNames=${VirtualDisplayFlagFormatter.describe(flags)}"
             )
             return display to virtualDevice
         } catch (e: Exception) {
@@ -1321,10 +1301,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
         return "OK"
     }
 
-    private fun escapeShellArg(value: String): String {
-        return "'" + value.replace("'", "'\\''") + "'"
-    }
-
     private fun resolveLaunchComponent(packageOrComponent: String): String? {
         if (packageOrComponent.contains('/')) return packageOrComponent
 
@@ -1348,28 +1324,6 @@ class PrivilegedService : IPrivilegedService.Stub() {
             null
         }
     }
-
-    private fun buildLaunchCommand(
-        displayId: Int,
-        packageOrComponent: String,
-        extraKey: String? = null,
-        extraValue: String? = null
-    ): String {
-        val resolvedComponent = resolveLaunchComponent(packageOrComponent)
-        return buildString {
-            append("am start --display $displayId -f ${MultiDisplayLaunchPolicy.shellFlags(reorderToFront = false)} ")
-            append("-a android.intent.action.MAIN -c android.intent.category.LAUNCHER ")
-            if (resolvedComponent != null) {
-                append("-n ${escapeShellArg(resolvedComponent)} ")
-            } else {
-                append("-p ${escapeShellArg(packageOrComponent)} ")
-            }
-            if (!extraKey.isNullOrEmpty() && extraValue != null) {
-                append("--es $extraKey ${escapeShellArg(extraValue)} ")
-            }
-        }.trim()
-    }
-
 
     override fun launchAppOnDisplay(displayId: Int, packageName: String) {
         launchAppOnDisplayV2(displayId, packageName, true)
@@ -1413,7 +1367,12 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 } catch (e: Exception) {
                     Log.w(TAG, "Native launchAppOnDisplay failed, falling back to shell executor", e)
                     Log.i(TAG, "$VDIME_PREFIX [APP_LAUNCH] package=$packageName displayId=$displayId method=shell_am_start_display fallback=true")
-                    val cmd = buildLaunchCommand(displayId, packageName)
+                    val cmd = ShellLaunchCommandBuilder.buildAppLaunchCommand(
+                        displayId = displayId,
+                        packageOrComponent = packageName,
+                        resolvedComponent = resolveLaunchComponent(packageName),
+                        flags = MultiDisplayLaunchPolicy.shellFlags(reorderToFront = false),
+                    )
                     execCommand(cmd)
                 }
             }
@@ -1498,7 +1457,14 @@ class PrivilegedService : IPrivilegedService.Stub() {
                 } catch (e: Exception) {
                     Log.w(TAG, "Native launchAppWithExtraOnDisplay failed, falling back to shell executor", e)
                     Log.i(TAG, "$VDIME_PREFIX [APP_LAUNCH] package=$packageName displayId=$displayId method=shell_am_start_display fallback=true extraKey=$extraKey")
-                    val cmd = buildLaunchCommand(displayId, packageName, extraKey, extraValue)
+                    val cmd = ShellLaunchCommandBuilder.buildAppLaunchCommand(
+                        displayId = displayId,
+                        packageOrComponent = packageName,
+                        resolvedComponent = resolveLaunchComponent(packageName),
+                        flags = MultiDisplayLaunchPolicy.shellFlags(reorderToFront = false),
+                        extraKey = extraKey,
+                        extraValue = extraValue,
+                    )
                     execCommand(cmd)
                 }
             }
@@ -1982,6 +1948,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
      * inside a Shizuku-loaded privileged service, reports packageName=com.castla.mirror
      * while Process.myUid()=2000 (shell) — AudioFlinger rejects that combination.
      */
+    @SuppressLint("MissingPermission", "WrongConstant")
     private fun buildRemoteSubmixRecord(sampleRate: Int, channelMask: Int, bufSize: Int): AudioRecord? {
         return try {
             val format = AudioFormat.Builder()
@@ -2386,6 +2353,7 @@ class PrivilegedService : IPrivilegedService.Stub() {
         }
     }
 
+    @SuppressLint("BlockedPrivateApi")
     private fun getPhysicalDisplayToken(scClass: Class<*>): android.os.IBinder? {
         // Try Android 10-13: SurfaceControl.getPhysicalDisplayIds() + getPhysicalDisplayToken()
         try {

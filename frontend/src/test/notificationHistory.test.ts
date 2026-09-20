@@ -11,7 +11,9 @@ import {
   shouldShowConversationMessageCount,
   stopNotificationPointerPropagation,
   shouldShowNotificationSender,
+  notificationFromMessage,
   upsertNotificationHistory,
+  upsertOverlayNotification,
   type OverlayNotification,
 } from "../lib/notificationOverlay";
 
@@ -27,6 +29,30 @@ function notification(id: string, postedAtMs: number): OverlayNotification {
 }
 
 describe("notification history", () => {
+  it("preserves the Android post time instead of making old events look new", () => {
+    const item = notificationFromMessage({
+      type: "notification",
+      id: "android-key",
+      packageName: "com.example.custom",
+      appLabel: "Custom app",
+      title: "Room",
+      text: "Earlier message",
+      postedAtMs: 1234,
+      hasImage: false,
+    });
+
+    expect(item.postedAtMs).toBe(1234);
+  });
+
+  it("shows only the newest live popup even when conversations notify together", () => {
+    const queue = upsertOverlayNotification(
+      [notification("older-room", 1)],
+      notification("current-room", 2),
+    );
+
+    expect(queue.map((item) => item.id)).toEqual(["current-room"]);
+  });
+
   it("hides a sender that duplicates the personal conversation title", () => {
     expect(shouldShowNotificationSender("이상미", "이상미")).toBe(false);
     expect(shouldShowNotificationSender("이상미", "가족방")).toBe(true);

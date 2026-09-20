@@ -9,6 +9,7 @@
   import DiagnosticsOverlay from "./components/DiagnosticsOverlay.svelte";
   import NotificationOverlay from "./components/NotificationOverlay.svelte";
   import AppLauncher from "./components/AppLauncher.svelte";
+  import type { NotificationMessage } from "./protocol";
   import {
     compositorStore,
     resetCompositorStore,
@@ -27,6 +28,7 @@
     DEFAULT_NOTIFICATION_ALLOWED_PACKAGES,
     normalizeNotificationAllowedPackages,
     isNotificationAllowed,
+    notificationFromMessage,
     pruneOverlayNotifications,
     readNotificationOverlayEnabled,
     shouldDisplayOverlayNotification,
@@ -493,10 +495,7 @@
         triggerDump(runtime, String((msg as any).reason ?? "native_share_logs"));
       }
       if (msg.type === "notification") {
-        const notificationItem: OverlayNotification = {
-          ...(msg as OverlayNotification),
-          postedAtMs: Date.now(),
-        };
+        const notificationItem = notificationFromMessage(msg as NotificationMessage);
         const notificationAllowed = isNotificationAllowed(notificationItem, notificationApps);
         runtime.control.sendFrontendDiag("NOTIFICATION", "frontend notification decision", {
           packageName: notificationItem.packageName,

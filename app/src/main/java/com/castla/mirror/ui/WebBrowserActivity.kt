@@ -1,6 +1,5 @@
 package com.castla.mirror.ui
 
-import android.app.Activity
 import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
@@ -16,8 +15,10 @@ import android.util.Log
 import android.content.pm.ActivityInfo
 import android.view.Gravity
 import android.content.res.Configuration
+import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 
-class WebBrowserActivity : Activity() {
+class WebBrowserActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "WebBrowserActivity"
@@ -30,6 +31,19 @@ class WebBrowserActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        onBackPressedDispatcher.addCallback(
+            this,
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    when {
+                        customView != null -> webView.webChromeClient?.onHideCustomView()
+                        webView.canGoBack() -> webView.goBack()
+                        else -> finish()
+                    }
+                }
+            },
+        )
         
         Log.i(TAG, "WebBrowserActivity created")
 
@@ -218,17 +232,6 @@ class WebBrowserActivity : Activity() {
         webView.onResume()
         webView.resumeTimers()
         Log.i(TAG, "WebBrowserActivity resumed")
-    }
-
-    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
-    override fun onBackPressed() {
-        if (customView != null) {
-            webView.webChromeClient?.onHideCustomView()
-        } else if (webView.canGoBack()) {
-            webView.goBack()
-        } else {
-            super.onBackPressed()
-        }
     }
 
     override fun onDestroy() {

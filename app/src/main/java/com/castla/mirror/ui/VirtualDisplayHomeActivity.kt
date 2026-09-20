@@ -1,9 +1,10 @@
 package com.castla.mirror.ui
 
-import android.app.Activity
 import android.os.Bundle
 import android.view.View
 import android.graphics.Color
+import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 
 /**
  * A very simple, empty activity that serves as the HOME for virtual displays.
@@ -11,7 +12,7 @@ import android.graphics.Color
  * other apps on the virtual display from being reparented to the main display
  * when the HOME action is triggered.
  */
-class VirtualDisplayHomeActivity : Activity() {
+class VirtualDisplayHomeActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
@@ -20,10 +21,14 @@ class VirtualDisplayHomeActivity : Activity() {
         val view = View(this)
         view.setBackgroundColor(Color.BLACK)
         setContentView(view)
-    }
 
-    @Suppress("OVERRIDE_DEPRECATION")
-    override fun onBackPressed() {
-        // Disable back button on the home screen
+        onBackPressedDispatcher.addCallback(
+            this,
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    // The virtual-display HOME must remain the terminal back destination.
+                }
+            },
+        )
     }
 }

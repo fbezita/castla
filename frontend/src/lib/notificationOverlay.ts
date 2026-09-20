@@ -1,4 +1,5 @@
 import { t, type Language } from "./i18n";
+import type { NotificationMessage } from "../protocol";
 
 export interface OverlayNotification {
   id: string;
@@ -9,6 +10,21 @@ export interface OverlayNotification {
   sender?: string;
   postedAtMs: number;
   hasImage?: boolean;
+}
+
+export function notificationFromMessage(
+  message: NotificationMessage,
+): OverlayNotification {
+  return {
+    id: message.id,
+    packageName: message.packageName,
+    appLabel: message.appLabel,
+    title: message.title,
+    text: message.text,
+    sender: message.sender,
+    postedAtMs: message.postedAtMs,
+    hasImage: message.hasImage,
+  };
 }
 
 export const DEFAULT_NOTIFICATION_ALLOWED_PACKAGES = [
@@ -64,7 +80,7 @@ export function notificationEventKey(
   return `${notification.id}:${notification.postedAtMs}`;
 }
 
-const MAX_OVERLAY_NOTIFICATIONS = 3;
+const MAX_OVERLAY_NOTIFICATIONS = 1;
 const MAX_NOTIFICATION_HISTORY = 100;
 export const NOTIFICATION_OVERLAY_ENABLED_KEY =
   "castla_notification_overlay_enabled";

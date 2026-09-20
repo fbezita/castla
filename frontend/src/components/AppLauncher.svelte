@@ -31,9 +31,6 @@
   import type { AckMessage, ControlMessage, PaneId, StreamMetadata } from "../protocol";
   import { debugLog } from "../utils/debugLogger";
   import {
-    OVERLAY_UI_SCALE_MAX,
-    OVERLAY_UI_SCALE_MIN,
-    OVERLAY_UI_SCALE_STEP,
     type OverlayUiScalePreference,
   } from "../utils/overlayUiScalePreference";
   import {
@@ -57,6 +54,7 @@
   import DragDropOverlay from "./DragDropOverlay.svelte";
   import PairDialog from "./PairDialog.svelte";
   import PlacementPickerOverlay from "./PlacementPickerOverlay.svelte";
+  import LauncherSettingsPanel from "./LauncherSettingsPanel.svelte";
 
   let {
     runtime,
@@ -119,7 +117,6 @@
   const AUTORUN_SESSION_KEY = "castla_autorun_done";
   const RECENT_APPS_KEY = "castla_recent_apps_v1";
   const ACTIVE_TAB_KEY = "castla_launch_hub_active_tab";
-  const FRONTEND_GUIDE_URL = "https://github.com/fbezita/castla/blob/master/docs/frontend-user-guide.md";
   const MAX_RECENT_APPS = 8;
   const DRAWER_HANDLE_HOTZONE = 56;
 
@@ -2541,33 +2538,6 @@
     return $compositorStore.language === "ko" ? "설정" : "Settings";
   }
 
-  function languageLabel(): string {
-    return $compositorStore.language === "ko" ? "언어" : "Language";
-  }
-
-  function uiScaleLabel(): string {
-    return "UI Scale";
-  }
-
-  function diagnosticsLabel(): string {
-    return $compositorStore.language === "ko" ? "진단" : "Diagnostics";
-  }
-
-  function diagnosticsActionLabel(): string {
-    return $compositorStore.language === "ko" ? "열기" : "Open";
-  }
-
-  function notificationOverlayLabel(): string {
-    return $compositorStore.language === "ko" ? "알림 표시" : "Notifications";
-  }
-
-  function notificationOverlayActionLabel(): string {
-    if (notificationOverlayEnabled) {
-      return $compositorStore.language === "ko" ? "켜짐" : "On";
-    }
-    return $compositorStore.language === "ko" ? "꺼짐" : "Off";
-  }
-
   function toggleNotificationOverlay() {
     const enabled = !notificationOverlayEnabled;
     onNotificationOverlayEnabledChange(enabled);
@@ -2585,18 +2555,9 @@
     onOpenNotificationHistory();
   }
 
-  function formatUiScaleOption(option: OverlayUiScalePreference): string {
-    return `${Math.round(option * 100)}%`;
-  }
-
   function applyOverlayUiScalePreference(option: OverlayUiScalePreference) {
     onOverlayUiScalePreferenceChange(option);
-    toast(`${uiScaleLabel()} ${formatUiScaleOption(option)}`);
-  }
-
-  function handleUiScaleSliderInput(event: Event) {
-    const target = event.currentTarget as HTMLInputElement;
-    applyOverlayUiScalePreference(Number(target.value));
+    toast(`UI Scale ${Math.round(option * 100)}%`);
   }
 
   function applyLanguage(language: "ko" | "en") {
@@ -2699,94 +2660,17 @@
   </header>
 
   {#if settingsOpen}
-    <section class="drawer-settings">
-      <div class="settings-section">
-        <div class="settings-inline-row">
-          <div class="settings-inline-group">
-            <strong>{languageLabel()}</strong>
-            <div class="lang-switcher">
-              <button
-                class:active={$compositorStore.language === "ko"}
-                onclick={() => applyLanguage("ko")}
-              >
-                KO
-              </button>
-              <button
-                class:active={$compositorStore.language === "en"}
-                onclick={() => applyLanguage("en")}
-              >
-                EN
-              </button>
-            </div>
-          </div>
-          <div class="settings-inline-group diagnostics-inline-group">
-            <strong>{diagnosticsLabel()}</strong>
-            <button class="diag-toggle-btn" onclick={triggerToggleDiagnostics}>
-              {diagnosticsActionLabel()}
-            </button>
-          </div>
-          <div class="settings-inline-group">
-            <strong>{notificationOverlayLabel()}</strong>
-            <button
-              class="diag-toggle-btn"
-              class:active={notificationOverlayEnabled}
-              onclick={toggleNotificationOverlay}
-            >
-              {notificationOverlayActionLabel()}
-            </button>
-          </div>
-        </div>
-        <div class="settings-inline-row notification-history-settings-row">
-          <div class="settings-inline-group">
-            <strong>{t($compositorStore.language, "notificationHistory")}</strong>
-            <button
-              class="diag-toggle-btn"
-              disabled={notificationHistoryCount === 0}
-              onclick={openNotificationHistoryFromSettings}
-            >
-              {t($compositorStore.language, "notificationHistoryOpen")} ({notificationHistoryCount})
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div class="settings-section">
-        <div class="settings-title-row">
-          <strong>{uiScaleLabel()}</strong>
-          <span>{formatUiScaleOption(overlayUiScalePreference)}</span>
-        </div>
-        <div class="scale-slider">
-          <input
-            type="range"
-            min={OVERLAY_UI_SCALE_MIN}
-            max={OVERLAY_UI_SCALE_MAX}
-            step={OVERLAY_UI_SCALE_STEP}
-            value={overlayUiScalePreference}
-            oninput={handleUiScaleSliderInput}
-          />
-          <div class="scale-slider-labels">
-            <span>100%</span>
-            <span>150%</span>
-            <span>200%</span>
-          </div>
-        </div>
-      </div>
-
-      <div class="settings-section">
-        <div class="settings-title-row">
-          <strong>Frontend Guide</strong>
-          <span>Launcher help</span>
-        </div>
-        <a
-          class="settings-link-btn"
-          href={FRONTEND_GUIDE_URL}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Open Usage Guide
-        </a>
-      </div>
-    </section>
+    <LauncherSettingsPanel
+      language={$compositorStore.language}
+      uiScalePreference={overlayUiScalePreference}
+      notificationEnabled={notificationOverlayEnabled}
+      {notificationHistoryCount}
+      onLanguageChange={applyLanguage}
+      onUiScaleChange={applyOverlayUiScalePreference}
+      onOpenDiagnostics={triggerToggleDiagnostics}
+      onToggleNotification={toggleNotificationOverlay}
+      onOpenNotificationHistory={openNotificationHistoryFromSettings}
+    />
   {/if}
 
   {#if multiwindowReady && multiwindowOpen}
@@ -3172,40 +3056,6 @@
     align-items: center;
   }
 
-  .lang-switcher {
-    display: flex;
-    align-items: center;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 8px;
-    padding: 2px;
-    gap: 1px;
-  }
-
-  .lang-switcher button {
-    border: 0;
-    background: transparent;
-    color: rgba(255, 255, 255, 0.45);
-    font-size: 9px;
-    font-weight: 800;
-    height: 18px;
-    padding: 0 6px;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: background 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
-  }
-
-  .lang-switcher button:hover {
-    color: rgba(255, 255, 255, 0.85);
-  }
-
-  .lang-switcher button.active {
-    background: rgba(0, 229, 255, 0.16);
-    color: #7cf1ff;
-    border: 1px solid rgba(0, 229, 255, 0.2);
-    box-shadow: 0 1px 4px rgba(0, 229, 255, 0.1);
-  }
-
   .drawer-count {
     color: #94a3b8;
     font-size: 11px;
@@ -3213,8 +3063,7 @@
     letter-spacing: 0.01em;
   }
 
-  .settings-toggle-btn,
-  .diag-toggle-btn {
+  .settings-toggle-btn {
     border: 1px solid rgba(255, 255, 255, 0.08);
     background: rgba(255, 255, 255, 0.04);
     color: rgb(255 255 255 / 0.65);
@@ -3230,19 +3079,9 @@
     transition: background 0.2s ease, transform 0.1s ease, color 0.2s ease;
   }
 
-  .settings-toggle-btn:hover,
-  .diag-toggle-btn:hover {
+  .settings-toggle-btn:hover {
     background: rgba(255, 255, 255, 0.08);
     color: #ffffff;
-  }
-
-  .diag-toggle-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-
-  .notification-history-settings-row {
-    margin-top: 8px;
   }
 
   .drawer-settings {
@@ -3274,23 +3113,6 @@
     flex-wrap: wrap;
   }
 
-  .settings-inline-group {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .settings-inline-group strong {
-    font-size: 12px;
-    color: #f8fafc;
-    white-space: nowrap;
-  }
-
-  .diagnostics-inline-group {
-    margin-left: auto;
-  }
-
   .settings-title-row {
     display: flex;
     align-items: center;
@@ -3306,26 +3128,6 @@
   .settings-title-row span {
     font-size: 11px;
     color: #94a3b8;
-  }
-
-  .scale-slider {
-    display: grid;
-    gap: 8px;
-  }
-
-  .scale-slider input[type="range"] {
-    width: 100%;
-    margin: 0;
-    accent-color: #00e5ff;
-  }
-
-  .scale-slider-labels {
-    display: flex;
-    justify-content: space-between;
-    gap: 10px;
-    color: #94a3b8;
-    font-size: 11px;
-    font-weight: 700;
   }
 
   .search-row input {

@@ -1032,8 +1032,17 @@ class ShizukuSetup {
                 ?: "arm64-v8a"
             val libDir = "$LIB_DIR_BASE/$abi"
 
-            val innerScript = buildInnerScript(shizukuApk, libDir)
-            val outerScript = buildOuterScript()
+            val innerScript = ShizukuWatchdogScripts.inner(
+                shizukuApk = shizukuApk,
+                libDir = libDir,
+                innerPidFile = INNER_PID_FILE,
+                heartbeatFile = HEARTBEAT_FILE,
+            )
+            val outerScript = ShizukuWatchdogScripts.outer(
+                innerScript = INNER_SCRIPT,
+                innerPidFile = INNER_PID_FILE,
+                outerPidFile = OUTER_PID_FILE,
+            )
 
             // Heredocs cannot be used inside ShellDiag.buildScript steps: the wrapper
             // appends `; } 2>&1` to the same line as the step body, so a heredoc close
@@ -1151,63 +1160,6 @@ class ShizukuSetup {
             .take(200)
         return "$summary step=${firstFailure.name} output=$detail"
     }
-
-    private fun buildInnerScript(shizukuApk: String, libDir: String): String = """
-#!/bin/sh
-trap '' HUP TERM INT QUIT
-APK_PATH="$shizukuApk"
-LIB_DIR="$libDir"
-export LD_LIBRARY_PATH="${'$'}LIB_DIR"
-echo ${'$'}${'$'} > $INNER_PID_FILE
-# Best-effort: keep our own OOM score low too
-echo -900 > /proc/${'$'}${'$'}/oom_score_adj 2>/dev/null
-
-while true; do
-    date +%s > $HEARTBEAT_FILE 2>/dev/null
-    if ! pidof shizuku_server > /dev/null 2>&1; then
-        log -t shizuku_watchdog "server down, restarting"
-        setsid nohup app_process -Djava.class.path="${'$'}APK_PATH" /system/bin \
-            --nice-name=shizuku_server rikka.shizuku.server.ShizukuService \
-            </dev/null >/dev/null 2>&1 &
-        sleep 3
-        for PID in ${'$'}(pidof shizuku_server 2>/dev/null); do
-            echo -900 > /proc/${'$'}PID/oom_score_adj 2>/dev/null
-        done
-        sleep 12
-    fi
-    sleep 5
-done
-""".trimIndent()
-
-    private fun buildOuterScript(): String = """
-#!/bin/sh
-trap '' HUP TERM INT QUIT
-INNER=$INNER_SCRIPT
-echo ${'$'}${'$'} > $OUTER_PID_FILE
-echo -900 > /proc/${'$'}${'$'}/oom_score_adj 2>/dev/null
-
-while true; do
-    ALIVE=0
-    if [ -f $INNER_PID_FILE ]; then
-        IPID=${'$'}(cat $INNER_PID_FILE 2>/dev/null)
-        case "${'$'}IPID" in
-            ''|*[!0-9]*) ;;
-            *)
-                # Exact argv-element match: split NUL-delimited cmdline into lines
-                if tr '\0' '\n' < /proc/${'$'}IPID/cmdline 2>/dev/null | grep -Fxq "$INNER_SCRIPT"; then
-                    ALIVE=1
-                fi
-                ;;
-        esac
-    fi
-    if [ ${'$'}ALIVE -eq 0 ]; then
-        log -t shizuku_watchdog "inner down, respawning"
-        setsid nohup sh "${'$'}INNER" </dev/null >/dev/null 2>&1 &
-    fi
-    # Deterministic jitter per outer PID (0..4 seconds) on top of 5s base
-    sleep ${'$'}((5 + ${'$'}${'$'} % 5))
-done
-""".trimIndent()
 
     fun release() {
         Log.i(TAG, "[PRIVILEGED_SERVICE]\nrelease")

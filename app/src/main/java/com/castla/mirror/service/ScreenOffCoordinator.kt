@@ -7,7 +7,6 @@ import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.PowerManager
 import android.util.Log
-import com.castla.mirror.compositor.DisplayTier
 import com.castla.mirror.diagnostics.DiagnosticEvent
 import com.castla.mirror.diagnostics.MirrorDiagnostics
 import com.castla.mirror.policy.ScreenOffEvent

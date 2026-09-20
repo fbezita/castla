@@ -58,9 +58,12 @@ import com.castla.mirror.service.HotspotClientDetector
 import com.castla.mirror.service.MirrorForegroundService
 import com.castla.mirror.service.TeslaBleScanner
 import com.castla.mirror.service.TeslaDetectNotifier
+import com.castla.mirror.setup.SetupCoordinator
+import com.castla.mirror.setup.SetupUiState
 import com.castla.mirror.shizuku.ShizukuSetup
 import com.castla.mirror.shizuku.ShizukuInstallLinks
 import com.castla.mirror.ui.SettingsScreen
+import com.castla.mirror.ui.ShizukuSetupScreen
 import com.castla.mirror.ui.MirroringMode
 import com.castla.mirror.ui.StreamSettings
 import com.castla.mirror.ui.MeshGradientBackground
@@ -74,11 +77,8 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
         private const val USB_CONFIG_PREFS = "usb_config_advisory"
         private const val KEY_SUPPRESS_USB_CONFIG_WARNING = "suppress_warning"
-        private const val NOTIFICATION_ACCESS_PREFS = "notification_access_onboarding"
-        private const val KEY_NOTIFICATION_ACCESS_AUTO_PROMPTED = "notification_access_auto_prompted"
         private const val CASTLA_DOMAIN = "castla.fbezita.com"
         // User-facing stable entrypoint. The backend redirects this to the active
         // per-device relay URL: https://c-{deviceId}.castla.fbezita.com:9090
@@ -92,12 +92,8 @@ class MainActivity : AppCompatActivity() {
     private var currentIp by mutableStateOf("0.0.0.0")
     private var showSettings by mutableStateOf(false)
     private var streamSettings by mutableStateOf(StreamSettings())
-    private var shizukuInstalled by mutableStateOf(false)
-    private var shizukuRunning by mutableStateOf(false)
-    private var shizukuPermitted by mutableStateOf(false)
+    private var setupUiState by mutableStateOf<SetupUiState>(SetupUiState.NotInstalled)
     private var isShizukuOnPowerAllowlist by mutableStateOf(false)
-    private var isShizukuServiceConnected by mutableStateOf(false)
-    private var showShizukuPermissionDialog by mutableStateOf(false)
     private var showHotspotOffDialog by mutableStateOf(false)
     private var showUsbConfigWarningDialog by mutableStateOf(false)
     private var teslaAutoDetectEnabled by mutableStateOf(false)
@@ -116,6 +112,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var networkMonitor: NetworkMonitor
     private lateinit var shizukuSetup: ShizukuSetup
+    private lateinit var setupCoordinator: SetupCoordinator
     private lateinit var updateManager: UpdateManager
     private var mirrorService: MirrorForegroundService? = null
     private var serviceBound = false
@@ -165,11 +162,27 @@ class MainActivity : AppCompatActivity() {
         proceedAfterNotificationPermission()
     }
 
-    private val startupPermissionLauncher = registerForActivityResult(
+    private val bluetoothPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
-        Log.i(TAG, "Startup permissions: $results")
-        maybePromptNotificationAccessOnboarding()
+        Log.i(TAG, "Bluetooth permissions: $results")
+        if (hasBleScanPermissions()) {
+            startAutoDetect()
+        } else {
+            teslaAutoDetectEnabled = false
+            getSharedPreferences("castla_settings", MODE_PRIVATE).edit()
+                .putBoolean("auto_detect_enabled", false).apply()
+        }
+    }
+
+    private val localNetworkPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            beginMirroringStartFlow("local_network_granted")
+        } else {
+            clearPreparingState(getString(R.string.toast_error, "local network permission is required"))
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -182,16 +195,14 @@ class MainActivity : AppCompatActivity() {
         networkMonitor.startMonitoring()
         streamSettings = StreamSettings.load(this)
 
-        shizukuInstalled = isShizukuInstalled()
-        shizukuSetup = ShizukuSetup()
-        if (shizukuInstalled) {
-            shizukuSetup.init(this, bindService = false)
+        shizukuSetup = (application as CastlaApp).shizukuSetup
+        setupCoordinator = SetupCoordinator(this, shizukuSetup, lifecycleScope)
+        if (setupCoordinator.refreshInstallation()) {
+            (application as CastlaApp).ensureShizukuInitialized()
         }
 
         loadAutoDetectState()
         refreshNotificationAccessState()
-        requestStartupPermissions()
-        requestBatteryOptimizationExemption()
         refreshShizukuBatteryOptimizationState()
 
         // Handle intent extra to open settings (e.g. from screenshot automation)
@@ -285,19 +296,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         lifecycleScope.launch {
-            shizukuSetup.state.collect { shizukuState ->
-                Log.i(TAG, "Shizuku state: $shizukuState")
-                val wasRunning = shizukuRunning
-                shizukuRunning = shizukuState is com.castla.mirror.shizuku.ShizukuState.Running
-                if (!wasRunning && shizukuRunning) {
+            setupCoordinator.uiState.collect { state ->
+                val previous = setupUiState
+                setupUiState = state
+                Log.i(TAG, "Setup state: $state")
+                if (previous == SetupUiState.NotRunning && state != SetupUiState.NotRunning) {
                     refreshShizukuBatteryOptimizationState()
                 }
-                val wasPermitted = shizukuPermitted
-                shizukuPermitted = shizukuState is com.castla.mirror.shizuku.ShizukuState.Running && shizukuState.permitted
-                // Auto-continue mirroring after Shizuku permission granted
-                if (!wasPermitted && shizukuPermitted && showShizukuPermissionDialog) {
-                    showShizukuPermissionDialog = false
-                    onStartMirroring()
+                if (previous != SetupUiState.Ready && state == SetupUiState.Ready) {
+                    requestBatteryOptimizationExemption()
                 }
             }
         }
@@ -305,7 +312,6 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             shizukuSetup.serviceConnected.collect { connected ->
                 Log.i(TAG, "Shizuku PrivilegedService connected: $connected")
-                isShizukuServiceConnected = connected
                 if (connected) {
                     launch(kotlinx.coroutines.Dispatchers.IO) {
                         val ok = shizukuSetup.ensureShizukuHardened()
@@ -323,7 +329,30 @@ class MainActivity : AppCompatActivity() {
                 val thermalStatus by (mirrorService?.thermalStatus
                     ?: kotlinx.coroutines.flow.MutableStateFlow(0)).collectAsState()
 
-                if (showSettings) {
+                if (setupUiState != SetupUiState.Ready) {
+                    ShizukuSetupScreen(
+                        state = setupUiState,
+                        onInstall = { openShizukuDownloadPage() },
+                        onOpenShizuku = { openShizukuApp() },
+                        onOpenGuide = {
+                            startActivity(
+                                Intent(
+                                    Intent.ACTION_VIEW,
+                                    Uri.parse("https://website-ten-sigma-42.vercel.app/setup"),
+                                )
+                            )
+                        },
+                        onGrantPermission = { shizukuSetup.requestPermission() },
+                        onRetry = {
+                            setupCoordinator.clearFailure()
+                            if (shizukuSetup.isAvailable() && shizukuSetup.hasPermission()) {
+                                shizukuSetup.bindPrivilegedService()
+                            } else {
+                                openShizukuApp()
+                            }
+                        },
+                    )
+                } else if (showSettings) {
                     BackHandler { showSettings = false }
                     SettingsScreen(
                         settings = streamSettings,
@@ -349,9 +378,6 @@ class MainActivity : AppCompatActivity() {
                         serverUrl = serverUrl,
                         serverAvailability = serverAvailability,
                         reachableMirrorIp = resolveReachableMirrorIp(),
-                        shizukuInstalled = shizukuInstalled,
-                        shizukuRunning = shizukuRunning,
-                        shizukuPermitted = shizukuPermitted,
                         isImeEnabled = isImeEnabled,
                         isImeSelected = isImeSelected,
                         isCastlaImeActive = isCastlaImeActive,
@@ -374,9 +400,6 @@ class MainActivity : AppCompatActivity() {
                         onStartClick = { onStartMirroring() },
                         onStopClick = { stopMirrorService() },
                         onSettingsClick = { showSettings = true },
-                        onInstallShizuku = { openShizukuDownloadPage() },
-                        onOpenShizuku = { openShizukuApp() },
-                        onGrantShizukuPermission = { shizukuSetup.requestPermission() },
                         onEnableIme = {
                             com.castla.mirror.input.TextInputSettingsHelper.navigateToEnableImeSettings(this@MainActivity)
                         },
@@ -565,7 +588,7 @@ class MainActivity : AppCompatActivity() {
     private fun refreshShizukuBatteryOptimizationState() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         isShizukuOnPowerAllowlist = try {
-            pm.isIgnoringBatteryOptimizations(SHIZUKU_PACKAGE)
+            pm.isIgnoringBatteryOptimizations(SetupCoordinator.SHIZUKU_PACKAGE)
         } catch (_: Exception) {
             false
         }
@@ -578,31 +601,6 @@ class MainActivity : AppCompatActivity() {
                 CastlaNotificationListenerService::class.java,
             )
         }.getOrDefault(false)
-    }
-
-    private fun hasPromptedNotificationAccessOnboarding(): Boolean =
-        getSharedPreferences(NOTIFICATION_ACCESS_PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_NOTIFICATION_ACCESS_AUTO_PROMPTED, false)
-
-    private fun markNotificationAccessOnboardingPrompted() {
-        getSharedPreferences(NOTIFICATION_ACCESS_PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(KEY_NOTIFICATION_ACCESS_AUTO_PROMPTED, true)
-            .apply()
-    }
-
-    private fun maybePromptNotificationAccessOnboarding() {
-        refreshNotificationAccessState()
-        if (!NotificationAccessSettingsHelper.shouldAutoOpenSettings(
-                hasAccess = isNotificationAccessEnabled,
-                hasPromptedBefore = hasPromptedNotificationAccessOnboarding(),
-            )
-        ) {
-            return
-        }
-
-        markNotificationAccessOnboardingPrompted()
-        openNotificationAccessSettings()
     }
 
     private fun openNotificationAccessSettings() {
@@ -672,10 +670,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        val wasInstalled = shizukuInstalled
-        shizukuInstalled = isShizukuInstalled()
-        if (shizukuInstalled && !wasInstalled) {
-            shizukuSetup.init(this, bindService = false)
+        val wasInstalled = setupCoordinator.isInstalled()
+        val isInstalled = setupCoordinator.refreshInstallation()
+        if (isInstalled && !wasInstalled) {
+            (application as CastlaApp).ensureShizukuInitialized()
         }
         loadAutoDetectState()
 
@@ -689,7 +687,7 @@ class MainActivity : AppCompatActivity() {
         // from here is allowed because we're in the foreground — the same call
         // from binderDeadListener gets hit by BAL_BLOCK while the screen is
         // sleeping, which is why we also rely on this onStart hook.
-        if (shizukuInstalled) {
+        if (isInstalled) {
             shizukuSetup.launchShizukuManagerIfLostSinceBoot()
         }
     }
@@ -707,7 +705,6 @@ class MainActivity : AppCompatActivity() {
         updateManager.destroy()
         networkMonitor.stopMonitoring()
         stopAutoDetect()
-        shizukuSetup.release()
         super.onDestroy()
     }
 
@@ -848,27 +845,26 @@ class MainActivity : AppCompatActivity() {
     }
 
 
-    private fun isShizukuInstalled(): Boolean {
-        return try {
-            packageManager.getPackageInfo(SHIZUKU_PACKAGE, 0)
-            true
-        } catch (_: PackageManager.NameNotFoundException) {
-            false
-        }
-    }
-
     private fun openShizukuDownloadPage() {
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(ShizukuInstallLinks.OFFICIAL_RELEASE_PAGE))
         try {
-            startActivity(intent)
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(ShizukuInstallLinks.PLAY_STORE_APP)))
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to open official Shizuku release page", e)
-            Toast.makeText(this, "Could not open the Shizuku download page.", Toast.LENGTH_LONG).show()
+            try {
+                startActivity(
+                    Intent(
+                        Intent.ACTION_VIEW,
+                        Uri.parse(ShizukuInstallLinks.OFFICIAL_DOWNLOAD_PAGE),
+                    )
+                )
+            } catch (fallbackError: Exception) {
+                Log.e(TAG, "Failed to open official Shizuku download page", fallbackError)
+                Toast.makeText(this, "Could not open the Shizuku download page.", Toast.LENGTH_LONG).show()
+            }
         }
     }
 
     private fun openShizukuApp() {
-        val intent = packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE)
+        val intent = packageManager.getLaunchIntentForPackage(SetupCoordinator.SHIZUKU_PACKAGE)
         if (intent != null) {
             startActivity(intent)
         }
@@ -880,7 +876,16 @@ class MainActivity : AppCompatActivity() {
         teslaAutoDetectEnabled = getSharedPreferences("castla_settings", MODE_PRIVATE)
             .getBoolean("auto_detect_enabled", false)
         if (teslaAutoDetectEnabled) {
-            startAutoDetect()
+            if (hasBleScanPermissions()) {
+                startAutoDetect()
+            } else {
+                val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+                } else {
+                    arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+                }
+                bluetoothPermissionLauncher.launch(permissions)
+            }
         }
     }
 
@@ -931,44 +936,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun requestStartupPermissions() {
-        val needed = mutableListOf<String>()
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            needed.add(Manifest.permission.POST_NOTIFICATIONS)
-        }
-
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            needed.add(Manifest.permission.RECORD_AUDIO)
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-                needed.add(Manifest.permission.BLUETOOTH_CONNECT)
-            }
-            if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
-                needed.add(Manifest.permission.BLUETOOTH_SCAN)
-            }
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
-            if (checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK)
-                != PackageManager.PERMISSION_GRANTED
-            ) {
-                needed.add(Manifest.permission.ACCESS_LOCAL_NETWORK)
-            }
-        }        
-
-        if (needed.isNotEmpty()) {
-            Log.i(TAG, "Requesting startup permissions: $needed")
-            startupPermissionLauncher.launch(needed.toTypedArray())
-        } else {
-            maybePromptNotificationAccessOnboarding()
-        }
-    }
-
     private fun requestBatteryOptimizationExemption() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         if (!pm.isIgnoringBatteryOptimizations(packageName)) {
@@ -1016,11 +983,16 @@ class MainActivity : AppCompatActivity() {
         isPreparing = true
         Log.i(TAG, "isPreparing=true (starting Shizuku mirror flow)")
 
-        // Check if Shizuku is running but permission not granted
-        if (shizukuInstalled && shizukuRunning && !shizukuPermitted) {
-            Log.i(TAG, "Shizuku running but not permitted, requesting permission")
-            showShizukuPermissionDialog = true
-            shizukuSetup.requestPermission()
+        if (setupUiState != SetupUiState.Ready) {
+            Log.w(TAG, "Mirroring start blocked by mandatory setup state=$setupUiState")
+            isPreparing = false
+            return
+        }
+
+        if (Build.VERSION.SDK_INT >= 37 &&
+            checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) != PackageManager.PERMISSION_GRANTED
+        ) {
+            localNetworkPermissionLauncher.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
             return
         }
 
@@ -1212,9 +1184,6 @@ fun CastlaScreen(
     serverUrl: String,
     serverAvailability: MirrorServerAvailability = MirrorServerAvailability.IDLE,
     reachableMirrorIp: String = "0.0.0.0",
-    shizukuInstalled: Boolean,
-    shizukuRunning: Boolean,
-    shizukuPermitted: Boolean = false,
     isImeEnabled: Boolean,
     isImeSelected: Boolean,
     isCastlaImeActive: Boolean = false,
@@ -1223,9 +1192,6 @@ fun CastlaScreen(
     onStartClick: () -> Unit,
     onStopClick: () -> Unit,
     onSettingsClick: () -> Unit,
-    onInstallShizuku: () -> Unit,
-    onOpenShizuku: () -> Unit,
-    onGrantShizukuPermission: () -> Unit = {},
     onEnableIme: () -> Unit,
     onSelectIme: () -> Unit,
     onOpenNotificationAccessSettings: () -> Unit = {},
@@ -1558,119 +1524,6 @@ fun CastlaScreen(
             if (isStreaming) {
                 Spacer(modifier = Modifier.height(24.dp))
             }
-
-
-
-            AnimatedVisibility(visible = !shizukuInstalled || !shizukuRunning || !shizukuPermitted) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(24.dp))
-                        .background(Color(0xFF2D2000).copy(alpha = 0.8f))
-                        .border(1.dp, Color(0xFFFFB300).copy(alpha = 0.3f), RoundedCornerShape(24.dp))
-                        .padding(20.dp)
-                ) {
-                    Column(
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = stringResource(id = R.string.title_tesla_setup_required),
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color(0xFFFFB300)
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        if (!shizukuInstalled) {
-                            Text(
-                                text = stringResource(id = R.string.desc_shizuku_install_required),
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = Color(0xFFFFD54F),
-                                lineHeight = 20.sp
-                            )
-                            Spacer(modifier = Modifier.height(16.dp))
-
-                            Button(
-                                onClick = onInstallShizuku,
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(12.dp),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFFFFB300)
-                                )
-                            ) {
-                                Text(stringResource(id = R.string.btn_how_to_install_shizuku), color = Color.Black, fontWeight = FontWeight.Bold)
-                            }
-                        } else if (!shizukuRunning) {
-                            Text(
-                                text = stringResource(id = R.string.title_shizuku_setup_steps),
-                                style = MaterialTheme.typography.bodySmall,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFFFFD54F)
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = stringResource(id = R.string.desc_shizuku_setup_steps),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color(0xFFFFD54F),
-                                lineHeight = 20.sp
-                            )
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Button(
-                                    onClick = onOpenShizuku,
-                                    modifier = Modifier.weight(1f),
-                                    shape = RoundedCornerShape(12.dp),
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = Color(0xFFFFB300)
-                                    )
-                                ) {
-                                    Text(stringResource(id = R.string.btn_open_shizuku), color = Color.Black, fontWeight = FontWeight.Bold)
-                                }
-                                OutlinedButton(
-                                    onClick = {
-                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://website-ten-sigma-42.vercel.app/setup"))
-                                        context.startActivity(intent)
-                                    },
-                                    modifier = Modifier.weight(1f),
-                                    shape = RoundedCornerShape(12.dp),
-                                    colors = ButtonDefaults.outlinedButtonColors(
-                                        contentColor = Color(0xFFFFB300)
-                                    ),
-                                    border = BorderStroke(1.dp, Color(0xFFFFB300))
-                                ) {
-                                    Text(stringResource(id = R.string.btn_setup_guide), fontWeight = FontWeight.Bold)
-                                }
-                            }
-                        } else if (!shizukuPermitted) {
-                            Text(
-                                text = stringResource(id = R.string.desc_shizuku_permission_required),
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = Color(0xFFFFD54F),
-                                lineHeight = 20.sp
-                            )
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Button(
-                                onClick = onGrantShizukuPermission,
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(12.dp),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFFFF6D00)
-                                )
-                            ) {
-                                Text(stringResource(id = R.string.btn_grant_shizuku_permission), color = Color.White, fontWeight = FontWeight.Bold)
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (!shizukuInstalled || !shizukuRunning || !shizukuPermitted) {
-                Spacer(modifier = Modifier.height(24.dp))
-            }
-
             AnimatedVisibility(visible = !isNotificationAccessEnabled) {
                 Column {
                     Box(
@@ -1716,7 +1569,7 @@ fun CastlaScreen(
                 }
             }
 
-            AnimatedVisibility(visible = shizukuRunning && !isShizukuOnPowerAllowlist) {
+            AnimatedVisibility(visible = !isShizukuOnPowerAllowlist) {
                 Column {
                     Box(
                         modifier = Modifier
@@ -1929,10 +1782,3 @@ private fun UsbConfigWarningDialog(
         }
     }
 }
-
-
-
-
-
-
-

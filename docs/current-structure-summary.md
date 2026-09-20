@@ -64,7 +64,9 @@ Frontend:
 
 - `app/src/main/assets/web`
 
-`app/src/main/java/com/castla/mirror/compositor/` 트리는 남아 있지만 실제 오케스트레이션 경로는 `MirrorForegroundService.MirroringPipeline`입니다.
+사용되지 않던 `app/src/main/java/com/castla/mirror/compositor/` 실험 구현은 제거했습니다. 실제 오케스트레이션 경로는 `service/MirroringPipeline`이며, 운영 중인 `DisplayTier`도 같은 `service` 경계에 위치합니다.
+
+Shizuku는 선택 기능이 아니라 필수 런타임입니다. 앱 UI와 포그라운드 서비스는 모두 `SetupCoordinator`의 설치·실행·권한·privileged service 연결 상태를 통과해야 미러링을 시작합니다.
 
 ## 분리된 런타임 책임 경계
 
@@ -85,7 +87,7 @@ Frontend:
 
 ## 현재 Android 구조
 
-`MirrorForegroundService.MirroringPipeline`은 현재 다음 책임을 함께 가지고 있습니다.
+`service/MirroringPipeline`은 현재 다음 책임을 함께 가지고 있습니다.
 
 - VirtualDisplay 생성, 크기 변경, rebuild, 해제
 - 인코더와 surface 수명 주기
@@ -671,7 +673,7 @@ hot restart 스트림 복구와 내장 서버 SSL 설정을 단순화했습니�
 
 ### 현재 앱 실행 정책
 
-`MirrorForegroundService.MirroringPipeline.launchComponent()`는 패키지 전체의 Task 존재 여부가 아니라 대상 VirtualDisplay를 기준으로 앱을 라우팅합니다.
+`MirroringPipeline.launchComponent()`는 패키지 전체의 Task 존재 여부가 아니라 대상 VirtualDisplay를 기준으로 앱을 라우팅합니다.
 
 1. 대상 VD에 일치하는 Task가 없으면 해당 display에 새 Task 실행
 2. 대상 VD에 일치하는 Task가 있으면 새 Activity 없이 해당 Task를 앞으로 이동

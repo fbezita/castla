@@ -1,8 +1,12 @@
 package com.castla.mirror.network
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.content.Context
 import android.net.wifi.WifiManager
+import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat
 
 /**
  * Manages WiFi hotspot for Tesla connection.
@@ -25,6 +29,21 @@ class HotspotManager(private val context: Context) {
     )
 
     fun startHotspot(callback: (HotspotInfo?) -> Unit) {
+        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.NEARBY_WIFI_DEVICES
+        } else {
+            Manifest.permission.ACCESS_FINE_LOCATION
+        }
+        if (ContextCompat.checkSelfPermission(context, permission) != PackageManager.PERMISSION_GRANTED) {
+            Log.w(TAG, "Cannot start hotspot: permission denied ($permission)")
+            callback(null)
+            return
+        }
+        startHotspotWithPermission(callback)
+    }
+
+    @android.annotation.SuppressLint("MissingPermission")
+    private fun startHotspotWithPermission(callback: (HotspotInfo?) -> Unit) {
         try {
             wifiManager.startLocalOnlyHotspot(object : WifiManager.LocalOnlyHotspotCallback() {
                 override fun onStarted(reservation: WifiManager.LocalOnlyHotspotReservation) {

@@ -1,5 +1,6 @@
 package com.castla.mirror.capture
 
+import android.annotation.SuppressLint
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
@@ -341,6 +342,9 @@ class AudioCapture(
         }, "AudioCapture-PCM").also { it.start() }
     }
 
+    // RECORD_AUDIO is requested by the service before this context-free capture helper is created.
+    // Both public entry points catch SecurityException and fail the audio path closed.
+    @SuppressLint("MissingPermission")
     private fun setupAudioRecord() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
 

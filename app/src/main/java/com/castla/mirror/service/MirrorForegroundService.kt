@@ -1,10 +1,6 @@
 package com.castla.mirror.service
 
 import android.app.ActivityOptions
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.ComponentName
@@ -28,7 +24,6 @@ import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.util.Log
 import android.view.Surface
-import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.castla.mirror.BuildConfig
 import com.castla.mirror.R
@@ -39,7 +34,6 @@ import com.castla.mirror.capture.AudioCapture
 import com.castla.mirror.capture.JpegEncoder
 import com.castla.mirror.capture.VideoEncoder
 import com.castla.mirror.capture.VirtualDisplayController
-import com.castla.mirror.compositor.DisplayTier
 import com.castla.mirror.input.TouchInjector
 import com.castla.mirror.input.CastlaTextInputRouter
 import com.castla.mirror.server.MirrorServer
@@ -473,22 +467,8 @@ class MirrorForegroundService : Service() {
         }
     }
 
-    private fun isLaunchLikeActivity(line: String, cleanPkg: String): Boolean {
-        if (line.isBlank()) return true
-        val normalized = line.lowercase(java.util.Locale.US)
-        if (!normalized.contains(cleanPkg.lowercase(java.util.Locale.US))) return true
-        return normalized.contains("launchactivity") ||
-            normalized.contains("introactivity") ||
-            normalized.contains("splash")
-    }
-
     internal fun mostRecentTouchAgeMs(now: Long = android.os.SystemClock.elapsedRealtime()): Long? {
-        val lastTouchAt = pipelines.values
-            .map { it.lastTouchEventAt }
-            .filter { it > 0L }
-            .maxOrNull()
-            ?: return null
-        return (now - lastTouchAt).coerceAtLeast(0L)
+        return MirrorTouchRecency.mostRecentAge(pipelines.values.map { it.lastTouchEventAt }, now)
     }
 
     fun recentViewportFocusAcquisitionAgeMs(): Long? = mostRecentTouchAgeMs()
@@ -556,7 +536,7 @@ class MirrorForegroundService : Service() {
         }
         remoteInputCoordinator.initialize()
         isCleanupInProgress = false
-        createNotificationChannel()
+        MirrorServiceNotificationFactory.createChannel(this, CHANNEL_ID)
         observeAppLaunchRequests()
 
         powerLockManager = PowerLockManager(this@MirrorForegroundService)
@@ -799,7 +779,30 @@ class MirrorForegroundService : Service() {
             return START_NOT_STICKY
         }
 
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, createNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        ServiceCompat.startForeground(
+            this,
+            NOTIFICATION_ID,
+            MirrorServiceNotificationFactory.create(this, CHANNEL_ID, ACTION_STOP, ACTION_RESTORE_IME),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+        )
+
+        val mandatorySetup = ensureShizukuSetup()
+        if (mandatorySetup != null && mandatorySetup.isAvailable() && mandatorySetup.hasPermission() &&
+            !mandatorySetup.serviceConnected.value && !mandatorySetup.isBindingInProgress
+        ) {
+            mandatorySetup.bindPrivilegedService()
+        }
+        val setupReady = mandatorySetup != null && ShizukuStartGate.canStart(
+            available = mandatorySetup.isAvailable(),
+            permitted = mandatorySetup.hasPermission(),
+            connected = mandatorySetup.serviceConnected.value,
+            binding = mandatorySetup.isBindingInProgress,
+        )
+        if (!setupReady) {
+            Log.e(TAG, "Service start rejected: mandatory Shizuku runtime is not ready")
+            requestStopAsync("mandatory_shizuku_not_ready")
+            return START_NOT_STICKY
+        }
 
         val hostIp = intent?.getStringExtra("EXTRA_HOST_IP") ?: "0.0.0.0"
         val relayPublishIp =
@@ -1104,7 +1107,6 @@ class MirrorForegroundService : Service() {
                 Log.e(TAG, "Failed programmatically restoring previous IME during performCleanup", e)
             }
 
-            try { kotlinx.coroutines.withTimeoutOrNull(1000L) { shizukuSetup?.release() } } catch (_: Exception) {}
             Log.i("MirrorServiceCleanup", "projectionStopped=true")
 
             shizukuSetup = null
@@ -1468,7 +1470,11 @@ class MirrorForegroundService : Service() {
 
     private fun ensureShizukuSetup(): ShizukuSetup? {
         shizukuSetup?.let { return it }
-        return ShizukuSetup().also { it.init(this, bindService = true); shizukuSetup = it; startReconnectObserver(it) }
+        val app = application as? com.castla.mirror.CastlaApp ?: return null
+        return app.ensureShizukuInitialized().also {
+            shizukuSetup = it
+            startReconnectObserver(it)
+        }
     }
 
     private fun startReconnectObserver(setup: ShizukuSetup) {
@@ -1813,59 +1819,35 @@ class MirrorForegroundService : Service() {
             val setup = shizukuSetup
             val service = setup?.privilegedService
             if (setup != null && service != null && setup.isAvailable() && setup.hasPermission()) {
+                if (!AudioCapturePermissionGrantPolicy.shouldAttemptLegacyGrant(Build.VERSION.SDK_INT)) {
+                    Log.i(TAG, "CAPTURE_AUDIO_OUTPUT is role-managed on this Android version; using the AudioPolicy capture path")
+                    return
+                }
+
                 val pkg = packageName
                 val result = service.execCommand("appops set $pkg CAPTURE_AUDIO_OUTPUT allow")
+                if (!AudioCapturePermissionGrantPolicy.shouldAttemptPackageGrant(result)) {
+                    Log.i(TAG, "CAPTURE_AUDIO_OUTPUT app-op is unavailable; using the AudioPolicy capture path")
+                    return
+                }
+
                 Log.i(TAG, "CAPTURE_AUDIO_OUTPUT grant via appops: $result")
-                val result2 = service.execCommand("pm grant $pkg android.permission.CAPTURE_AUDIO_OUTPUT")
-                Log.i(TAG, "CAPTURE_AUDIO_OUTPUT grant via pm: $result2")
+                try {
+                    val result2 = service.execCommand("pm grant $pkg android.permission.CAPTURE_AUDIO_OUTPUT")
+                    Log.i(TAG, "CAPTURE_AUDIO_OUTPUT grant via pm: $result2")
+                } catch (e: SecurityException) {
+                    if (AudioCapturePermissionGrantPolicy.isRoleManagedFailure(e.message)) {
+                        Log.i(TAG, "CAPTURE_AUDIO_OUTPUT is role-managed; using the AudioPolicy capture path")
+                    } else {
+                        throw e
+                    }
+                }
             } else {
                 Log.i(TAG, "Skipping audio capture permission grant: privileged service not connected")
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to grant CAPTURE_AUDIO_OUTPUT via appops", e)
         }
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Mirror Service",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                setShowBadge(false)
-            }
-            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        }
-    }
-
-    private fun createNotification(): Notification {
-        val openPending = PendingIntent.getActivity(
-            this, 0,
-            Intent(this, com.castla.mirror.MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            },
-            PendingIntent.FLAG_IMMUTABLE
-        )
-        val stopPending = PendingIntent.getBroadcast(
-            this, 1,
-            Intent(ACTION_STOP).apply { setPackage(packageName) },
-            PendingIntent.FLAG_IMMUTABLE
-        )
-        val restoreImePending = PendingIntent.getService(
-            this, 2,
-            Intent(this, MirrorForegroundService::class.java).apply { action = ACTION_RESTORE_IME },
-            PendingIntent.FLAG_IMMUTABLE
-        )
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Castla")
-            .setContentText("Streaming to Tesla")
-            .setSmallIcon(android.R.drawable.ic_media_play)
-            .setOngoing(true)
-            .setContentIntent(openPending)
-            .addAction(android.R.drawable.ic_media_pause, "Stop Mirroring", stopPending)
-            .addAction(android.R.drawable.ic_menu_edit, "Restore Keyboard", restoreImePending)
-            .build()
     }
 
     class StopReceiver : BroadcastReceiver() {

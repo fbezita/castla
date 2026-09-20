@@ -32,7 +32,7 @@
     <string name="desc_shizuku_setup_steps">1. 设置 &gt; 关于手机 &gt; 软件信息\n   &gt; 连续点击版本号 7 次\n2. 设置 &gt; 开发者选项\n   &gt; 无线调试 &gt; 开启\n3. 打开 Shizuku &gt; \"通过无线调试启动\"</string>
     <string name="btn_open_shizuku">打开 Shizuku</string>
     <string name="btn_setup_guide">设置指南</string>
-    <string name="desc_shizuku_permission_required">Shizuku 正在运行，但 Castla 尚未获得权限。\n没有权限的情况下，仅可使用基本屏幕镜像 — 触摸输入和应用启动将无法工作。</string>
+    <string name="desc_shizuku_permission_required">Shizuku 正在运行，但 Castla 尚未获得权限。\n请授予权限以使用 Castla。</string>
     <string name="btn_grant_shizuku_permission">授予 Shizuku 权限</string>
     <string name="btn_stop_mirroring">停止镜像</string>
     <string name="btn_start_mirroring">开始镜像</string>

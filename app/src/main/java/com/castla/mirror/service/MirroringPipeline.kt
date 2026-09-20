@@ -35,7 +35,6 @@ import com.castla.mirror.capture.AudioCapture
 import com.castla.mirror.capture.JpegEncoder
 import com.castla.mirror.capture.VideoEncoder
 import com.castla.mirror.capture.VirtualDisplayController
-import com.castla.mirror.compositor.DisplayTier
 import com.castla.mirror.input.TouchInjector
 import com.castla.mirror.input.RemoteImeBridge
 import com.castla.mirror.input.ImeCommand
@@ -149,8 +148,9 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
         @Volatile var lastInjectionRecoveryAt = 0L
         @Volatile var lastServiceMutationAt = 0L
         @Volatile var lastServiceMutationReason = "init"
-        @Volatile var activeTouchCount = 0
-        @Volatile var lastTouchEventAt = 0L
+        private val touchInteractionTracker = TouchInteractionTracker()
+        val lastTouchEventAt: Long
+            get() = touchInteractionTracker.lastEventAt
         @Volatile var touchFocusGateArmedAt = 0L
         @Volatile var touchFocusGateTarget = ""
         @Volatile var touchFocusGateLastProbe = ""
@@ -353,24 +353,12 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
         }
 
         fun noteTouchEvent(action: String) {
-            lastTouchEventAt = android.os.SystemClock.elapsedRealtime()
-            when (action) {
-                "down" -> {
-                    activeTouchCount += 1
-                    cancelFallbackDuringTouch("touch_down")
-                }
-                "up", "cancel" -> {
-                    activeTouchCount = (activeTouchCount - 1).coerceAtLeast(0)
-                }
-            }
+            touchInteractionTracker.note(action, android.os.SystemClock.elapsedRealtime())
+            if (action == "down") cancelFallbackDuringTouch("touch_down")
         }
 
-        fun isTouchInteractionActive(): Boolean {
-            if (activeTouchCount > 0) return true
-            val lastAt = lastTouchEventAt
-            if (lastAt <= 0L) return false
-            return android.os.SystemClock.elapsedRealtime() - lastAt <= 250L
-        }
+        fun isTouchInteractionActive(): Boolean =
+            touchInteractionTracker.isActive(android.os.SystemClock.elapsedRealtime())
 
         fun armTouchFocusGate(target: String) {
             touchFocusGateArmedAt = android.os.SystemClock.elapsedRealtime()

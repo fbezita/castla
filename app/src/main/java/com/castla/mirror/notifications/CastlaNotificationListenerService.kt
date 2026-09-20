@@ -16,8 +16,12 @@ class CastlaNotificationListenerService : NotificationListenerService() {
         private const val TAG = "CastlaNotification"
     }
 
+    @Volatile
+    private var listenerConnectedAtMs = 0L
+
     override fun onListenerConnected() {
         super.onListenerConnected()
+        listenerConnectedAtMs = System.currentTimeMillis()
         Log.i(TAG, "listener_connected package=$packageName")
     }
 
@@ -27,6 +31,15 @@ class CastlaNotificationListenerService : NotificationListenerService() {
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
+        if (!NotificationFreshnessPolicy.shouldForward(sbn.postTime, listenerConnectedAtMs)) {
+            Log.i(
+                TAG,
+                "notification_filtered reason=predates_listener_connection " +
+                    "pkg=${sbn.packageName} key=${sbn.key} postedAt=${sbn.postTime} " +
+                    "connectedAt=$listenerConnectedAtMs",
+            )
+            return
+        }
         val server = MirrorForegroundService.instance?.getMirrorServer()
         if (server == null) {
             Log.w(TAG, "notification_dropped reason=mirror_server_unavailable pkg=${sbn.packageName} key=${sbn.key}")
@@ -43,9 +56,7 @@ class CastlaNotificationListenerService : NotificationListenerService() {
             sbn.packageName
         }
 
-        val messages = messagingBundles(extras)
-            ?.let { bundles -> Notification.MessagingStyle.Message.getMessagesFromBundleArray(bundles) }
-            .orEmpty()
+        val messages = messagingMessages(extras)
         val explicitConversationTitle = extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)
         val subText = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)
         val fallbackTitle = extras.getCharSequence(Notification.EXTRA_TITLE)
@@ -117,6 +128,12 @@ class CastlaNotificationListenerService : NotificationListenerService() {
             extras.getParcelableArray(Notification.EXTRA_MESSAGES)
         }
 
+    private fun messagingMessages(extras: Bundle): List<Notification.MessagingStyle.Message> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return emptyList()
+        val bundles = messagingBundles(extras) ?: return emptyList()
+        return Notification.MessagingStyle.Message.getMessagesFromBundleArray(bundles)
+    }
+
     @Suppress("DEPRECATION")
     private fun senderName(message: Notification.MessagingStyle.Message?): CharSequence? {
         if (message == null) return null
@@ -135,9 +152,7 @@ class CastlaNotificationListenerService : NotificationListenerService() {
             return true
         }
 
-        val messageBundles = messagingBundles(extras) ?: return false
-        return Notification.MessagingStyle.Message
-            .getMessagesFromBundleArray(messageBundles)
+        return messagingMessages(extras)
             .any { message -> message.dataMimeType?.startsWith("image/", ignoreCase = true) == true }
     }
 }

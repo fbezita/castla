@@ -3,7 +3,6 @@ package com.castla.mirror.service
 import android.os.Build
 import android.util.Log
 import android.util.Size
-import com.castla.mirror.compositor.DisplayTier
 import com.castla.mirror.diagnostics.ResourceTracker
 import com.castla.mirror.diagnostics.TerminalReason
 import com.castla.mirror.policy.DisconnectPolicy

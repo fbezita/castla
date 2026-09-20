@@ -16,6 +16,7 @@ import com.castla.mirror.utils.AppActionNames
  * helper so that the AssociationInfo class reference does not cause a
  * ClassNotFoundException on API <33 when the service is instantiated.
  */
+@RequiresApi(Build.VERSION_CODES.S)
 class TeslaCompanionService : CompanionDeviceService() {
 
     companion object {

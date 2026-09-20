@@ -43,7 +43,7 @@ describe("notificationOverlay helpers", () => {
     expect(shouldDisplayOverlayNotification(notification, true, ["org.telegram.messenger"])).toBe(false);
   });
 
-  it("prepends new notifications and caps queue size", () => {
+  it("keeps only the newest live notification popup", () => {
     let queue: OverlayNotification[] = [];
     for (let index = 0; index < 4; index += 1) {
       queue = upsertOverlayNotification(queue, {
@@ -56,7 +56,7 @@ describe("notificationOverlay helpers", () => {
       });
     }
 
-    expect(queue.map((item) => item.id)).toEqual(["n3", "n2", "n1"]);
+    expect(queue.map((item) => item.id)).toEqual(["n3"]);
   });
 
   it("replaces existing notification with matching id", () => {

@@ -2,10 +2,11 @@
 
 Castla is a remote Android workspace compositor, not phone-screen mirroring. The phone display and Tesla browser display remain independent by keeping at least one persistent VirtualDisplay alive for the remote environment.
 
-Current production note:
+Historical design note:
 
-- the long-term target architecture in `app/src/main/java/com/castla/mirror/compositor` still exists
-- but the live production orchestration path is still centered on `MirrorForegroundService.MirroringPipeline`
+- this document describes an earlier target architecture and is retained as design history
+- the unused `app/src/main/java/com/castla/mirror/compositor` implementation was removed to avoid a second, misleading runtime model
+- the live production orchestration path is centered on `service/MirroringPipeline`
 - recent stability work has focused on stream generation resets, fresh launch preparation, SPS/PPS clearing/replay, and removing `tapOutside`
 
 ## 1. High-Level Architecture
@@ -26,17 +27,11 @@ Fullscreen and split transitions are browser compositor layout changes first. An
 
 ## 2. Android Architecture
 
-The new core lives under `app/src/main/java/com/castla/mirror/compositor`.
-
-`DisplaySessionRegistry` owns N registered sessions and applies policy. `PersistentVirtualDisplaySession` models `VD != Surface != Encoder != Stream` by giving each layer its own restart path and lifecycle state.
-
-`DisplaySessionRegistry` contains:
-
-- `PersistentVirtualDisplaySession[]`
-- `ResourcePolicyManager`
-- `EncoderBudgetManager`
-- `StreamPriorityManager`
-- `LayoutCoordinator`
+The production core lives under `app/src/main/java/com/castla/mirror/service`.
+`MirroringPipeline` owns the active VirtualDisplay, encoder, and stream lifecycle, while
+`MirrorForegroundService` coordinates sessions and service-level recovery. The separate
+Android `compositor` prototype described by older revisions of this document was never
+the production path and has been removed.
 
 ## 3. Frontend Architecture
 
@@ -52,15 +47,17 @@ Svelte UI
 
 ## 4. Kotlin Implementation Structure
 
-Key files:
+Production files:
 
-- `DisplayTier.kt`: explicit ACTIVE, VISIBLE, SUSPENDED, PARKED policy tiers.
-- `DisplaySessionRegistry.kt`: N-display registry and policy application.
-- `PersistentVirtualDisplaySession.kt`: persistent VD session with independent encoder recovery.
-- `LifecycleStateMachine.kt`: lifecycle transitions for VD, surface, encoder, stream, first frame, recovery.
-- `StreamGenerationState.kt`: generation and first-frame metadata.
-- `RemoteImeBridge.kt`: commit/composition/delete/finish IME command bridge.
-- `AccessibilityFocusManager.kt`: focus tracking model for an AccessibilityService implementation.
+- `service/MirroringPipeline.kt`: VirtualDisplay, MediaCodec, and stream lifecycle.
+- `service/MirrorForegroundService.kt`: session orchestration and recovery.
+- `service/DisplayTier.kt`: ACTIVE, VISIBLE, SUSPENDED, and PARKED policy tiers.
+- `service/BrowserSessionCoordinator.kt`: browser connection and session coordination.
+- `service/ScreenOffCoordinator.kt`: screen-off behavior.
+
+The removed `DisplaySessionRegistry`, `PersistentVirtualDisplaySession`,
+`LifecycleStateMachine`, and `StreamGenerationState` files belong only to the historical
+prototype described by the opening note.
 
 ## 5. Svelte Frontend Structure
 
