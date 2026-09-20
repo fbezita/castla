@@ -28,6 +28,7 @@
     pairTarget,
     favorites,
     notificationApps = [],
+    activePackages = [],
     isAutorun,
     onToggle,
     onLaunch,
@@ -46,6 +47,7 @@
     pairTarget: AppInfo | null;
     favorites: string[];
     notificationApps: string[];
+    activePackages: string[];
     isAutorun: (app: AppInfo) => boolean;
     onToggle: (key: string) => void;
     onLaunch: (app: AppInfo) => void;
@@ -104,6 +106,7 @@
           class:merge-target={pairTarget?.packageName === app.packageName && draggingApp !== null}
           class:drag-source={draggingApp?.packageName === app.packageName}
           class:drag-active={draggingApp !== null}
+          class:active-app={activePackages.includes(app.packageName)}
           title={app.label}
           onpointerdown={(event) => handlePointerDown(event, app)}
           onpointermove={onPointerMove}
@@ -157,6 +160,7 @@
 
           <div class="launch-main">
             <span>{app.label}</span>
+            {#if activePackages.includes(app.packageName)}<small>RUNNING</small>{/if}
           </div>
 
           <div class="row-actions">
@@ -387,6 +391,12 @@
     outline: none;
   }
 
+  .split-app-item.compact.active-app {
+    background: rgba(0, 229, 255, 0.09);
+    border-color: rgba(0, 229, 255, 0.32);
+    box-shadow: inset 3px 0 0 #00e5ff;
+  }
+
   .split-app-item.drag-source {
     opacity: 0.35;
     transform: scale(0.97);
@@ -597,6 +607,15 @@
     line-height: 1.15;
     white-space: nowrap;
     overflow: hidden;
+  }
+
+  .launch-main small {
+    display: block;
+    margin-top: 2px;
+    color: #9cf6ff;
+    font-size: 8px;
+    font-weight: 900;
+    letter-spacing: 0.06em;
   }
 
   .star,

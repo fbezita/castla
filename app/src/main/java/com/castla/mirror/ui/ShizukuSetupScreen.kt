@@ -3,6 +3,7 @@ package com.castla.mirror.ui
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -10,6 +11,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -26,6 +30,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.castla.mirror.R
+import com.castla.mirror.setup.SetupProgressPolicy
 import com.castla.mirror.setup.SetupUiState
 
 @Composable
@@ -58,15 +63,21 @@ fun ShizukuSetupScreen(
             fontWeight = FontWeight.Bold,
             color = Color(0xFFFFB300),
         )
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(20.dp))
 
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF2D2000), RoundedCornerShape(24.dp))
+                .background(Color(0xFF171C24), RoundedCornerShape(24.dp))
                 .padding(20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            val activeStep = SetupProgressPolicy.activeStep(state)
+            SetupStepRow(0, R.string.setup_step_install, activeStep)
+            SetupStepRow(1, R.string.setup_step_start, activeStep)
+            SetupStepRow(2, R.string.setup_step_permission, activeStep)
+            SetupStepRow(3, R.string.setup_step_connect, activeStep)
+
+            Spacer(Modifier.height(20.dp))
             when (state) {
                 SetupUiState.NotInstalled -> {
                     SetupDescription(R.string.desc_shizuku_install_required)
@@ -102,16 +113,26 @@ fun ShizukuSetupScreen(
                 }
 
                 SetupUiState.Connecting -> {
-                    CircularProgressIndicator(color = Color(0xFFFFB300))
-                    Spacer(Modifier.height(16.dp))
-                    SetupDescription(R.string.desc_shizuku_connecting)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(22.dp),
+                            color = Color(0xFFFFB300),
+                            strokeWidth = 2.dp,
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            text = stringResource(R.string.desc_shizuku_connecting),
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
                 }
 
                 is SetupUiState.Failed -> {
                     SetupDescription(R.string.desc_shizuku_connection_failed)
                     Text(
-                        text = state.reason,
-                        color = Color.White.copy(alpha = 0.6f),
+                        text = stringResource(R.string.desc_shizuku_connection_recovery),
+                        color = Color.White.copy(alpha = 0.72f),
                         style = MaterialTheme.typography.bodySmall,
                         textAlign = TextAlign.Center,
                     )
@@ -126,12 +147,50 @@ fun ShizukuSetupScreen(
 }
 
 @Composable
+private fun SetupStepRow(index: Int, labelResId: Int, activeStep: Int) {
+    val completed = index < activeStep
+    val active = index == activeStep
+    val accent = when {
+        completed -> Color(0xFF69F0AE)
+        active -> Color(0xFFFFB300)
+        else -> Color.White.copy(alpha = 0.28f)
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(30.dp)
+                .background(accent.copy(alpha = if (completed || active) 0.2f else 0.08f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = if (completed) "✓" else "${index + 1}",
+                color = accent,
+                fontWeight = FontWeight.ExtraBold,
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Text(
+            text = stringResource(labelResId),
+            color = if (active || completed) Color.White else Color.White.copy(alpha = 0.45f),
+            fontWeight = if (active) FontWeight.ExtraBold else FontWeight.Medium,
+            style = MaterialTheme.typography.bodyLarge,
+        )
+    }
+}
+
+@Composable
 private fun SetupDescription(resId: Int) {
     Text(
         text = stringResource(resId),
-        color = Color(0xFFFFD54F),
+        color = Color.White.copy(alpha = 0.82f),
         style = MaterialTheme.typography.bodyMedium,
         textAlign = TextAlign.Center,
+        modifier = Modifier.fillMaxWidth(),
     )
     Spacer(Modifier.height(20.dp))
 }

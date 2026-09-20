@@ -134,6 +134,7 @@ class MirrorForegroundService : Service() {
         private const val TAG = "MirrorService"
         private const val CHANNEL_ID = "castla_mirror"
         private const val NOTIFICATION_ID = 1
+        private val EMPTY_CLIENT_COUNT = MutableStateFlow(0)
         val ACTION_STOP = AppActionNames.stop(BuildConfig.APPLICATION_ID)
         val ACTION_RESTORE_IME = AppActionNames.restoreIme(BuildConfig.APPLICATION_ID)
         const val EXTRA_MAX_RESOLUTION = "max_resolution"
@@ -204,6 +205,9 @@ class MirrorForegroundService : Service() {
 
     val thermalStatus: kotlinx.coroutines.flow.StateFlow<Int>
         get() = thermalThrottleManager.thermalStatus
+
+    val connectedClientCount: kotlinx.coroutines.flow.StateFlow<Int>
+        get() = mirrorServer?.connectedClientCount ?: EMPTY_CLIENT_COUNT
 
     internal var thermalFpsOverride: Int?
         get() = thermalThrottleManager.thermalFpsOverride

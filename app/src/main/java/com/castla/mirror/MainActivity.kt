@@ -99,7 +99,6 @@ class MainActivity : AppCompatActivity() {
     private var teslaAutoDetectEnabled by mutableStateOf(false)
     private var hotspotEnabledByApp = false
     private var isHotspotActive by mutableStateOf(false)
-    private var isPanelOff by mutableStateOf(false)
     private var teslaBleScanner: TeslaBleScanner? = null
 
     // Text Input & IME states
@@ -288,14 +287,6 @@ class MainActivity : AppCompatActivity() {
 
 
         lifecycleScope.launch {
-            repeatOnLifecycle(Lifecycle.State.STARTED) {
-                MirrorForegroundService.panelOffStateFlow.collect { state ->
-                    isPanelOff = state != com.castla.mirror.policy.ScreenOffState.ACTIVE
-                }
-            }
-        }
-
-        lifecycleScope.launch {
             setupCoordinator.uiState.collect { state ->
                 val previous = setupUiState
                 setupUiState = state
@@ -327,6 +318,8 @@ class MainActivity : AppCompatActivity() {
                 updateManager.ForceUpdateOverlay(this@MainActivity)
 
                 val thermalStatus by (mirrorService?.thermalStatus
+                    ?: kotlinx.coroutines.flow.MutableStateFlow(0)).collectAsState()
+                val connectedClientCount by (mirrorService?.connectedClientCount
                     ?: kotlinx.coroutines.flow.MutableStateFlow(0)).collectAsState()
 
                 if (setupUiState != SetupUiState.Ready) {
@@ -377,6 +370,8 @@ class MainActivity : AppCompatActivity() {
                         isPreparing = isPreparing,
                         serverUrl = serverUrl,
                         serverAvailability = serverAvailability,
+                        streamSettings = streamSettings,
+                        connectedClientCount = connectedClientCount,
                         reachableMirrorIp = resolveReachableMirrorIp(),
                         isImeEnabled = isImeEnabled,
                         isImeSelected = isImeSelected,
@@ -411,8 +406,6 @@ class MainActivity : AppCompatActivity() {
                         },
                         isHotspotActive = isHotspotActive,
                         onToggleHotspot = { toggleHotspot() },
-                        isPanelOff = isPanelOff,
-                        onTogglePanelOff = { togglePanelOff() },
                         autoHotspot = streamSettings.autoHotspot,
                         onAutoHotspotChanged = { enabled ->
                             Log.i(TAG, "Auto-hotspot changed: $enabled")
@@ -772,20 +765,6 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             Log.w(TAG, "refreshHotspotStatus failed", e)
             isHotspotActive = false
-        }
-    }
-
-    private fun togglePanelOff() {
-        val service = mirrorService ?: MirrorForegroundService.instance ?: return
-        if (isPanelOff) {
-            service.restorePhysicalPanel()
-        } else {
-            val success = service.turnPanelOffForMirroring()
-            if (!success) {
-                android.widget.Toast.makeText(
-                    this, "Screen off not available", android.widget.Toast.LENGTH_SHORT
-                ).show()
-            }
         }
     }
 
@@ -1183,6 +1162,8 @@ fun CastlaScreen(
     isPreparing: Boolean = false,
     serverUrl: String,
     serverAvailability: MirrorServerAvailability = MirrorServerAvailability.IDLE,
+    streamSettings: StreamSettings = StreamSettings(),
+    connectedClientCount: Int = 0,
     reachableMirrorIp: String = "0.0.0.0",
     isImeEnabled: Boolean,
     isImeSelected: Boolean,
@@ -1197,8 +1178,6 @@ fun CastlaScreen(
     onOpenNotificationAccessSettings: () -> Unit = {},
     isHotspotActive: Boolean = false,
     onToggleHotspot: () -> Unit = {},
-    isPanelOff: Boolean = false,
-    onTogglePanelOff: () -> Unit = {},
     autoHotspot: Boolean = false,
     onAutoHotspotChanged: (Boolean) -> Unit = {},
     currentVersion: String = "",
@@ -1222,12 +1201,13 @@ fun CastlaScreen(
         ) {
             Column(
                 modifier = Modifier
+                    .fillMaxWidth()
                     .weight(1f)
                     .verticalScroll(rememberScrollState())
                     .padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Spacer(modifier = Modifier.height(48.dp))
+                Spacer(modifier = Modifier.height(20.dp))
 
             Text(
                 text = stringResource(id = R.string.app_name),
@@ -1297,7 +1277,7 @@ fun CastlaScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(32.dp))
+            Spacer(modifier = Modifier.height(20.dp))
 
             androidx.compose.animation.AnimatedVisibility(visible = isCastlaImeActive) {
                 Column {
@@ -1423,8 +1403,56 @@ fun CastlaScreen(
                             color = Color.White.copy(alpha = 0.5f),
                             textAlign = TextAlign.Center
                         )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = stringResource(id = R.string.desc_tesla_favorite_hint),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.72f),
+                            textAlign = TextAlign.Center,
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            StreamStatusChip(
+                                stringResource(R.string.stream_status_resolution),
+                                when (streamSettings.maxResolution) {
+                                    StreamSettings.Resolution.AUTO -> stringResource(R.string.stream_status_auto)
+                                    StreamSettings.Resolution.RES_720 -> "720p"
+                                    StreamSettings.Resolution.RES_1080 -> "1080p"
+                                },
+                            )
+                            StreamStatusChip(
+                                stringResource(R.string.stream_status_fps),
+                                if (streamSettings.isAutoFps) stringResource(R.string.stream_status_auto) else "${streamSettings.fps} FPS",
+                            )
+                            StreamStatusChip(
+                                stringResource(R.string.stream_status_audio),
+                                stringResource(if (streamSettings.audioEnabled) R.string.stream_status_on else R.string.stream_status_off),
+                            )
+                            StreamStatusChip(
+                                stringResource(R.string.stream_status_clients),
+                                stringResource(R.string.stream_status_client_count, connectedClientCount),
+                            )
+                        }
                     }
                 }
+            }
+
+            AnimatedVisibility(
+                visible = isStreaming && serverAvailability.state == MirrorServerAvailabilityState.ERROR,
+            ) {
+                Text(
+                    text = stringResource(R.string.server_recovery_hint),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp),
+                    color = Color(0xFFFFAB91),
+                    style = MaterialTheme.typography.bodySmall,
+                    textAlign = TextAlign.Center,
+                )
             }
 
             // Hotspot toggle button + auto-hotspot switch — only visible when streaming
@@ -1488,35 +1516,6 @@ fun CastlaScreen(
                                 )
                             }
                         }
-                    }
-                }
-            }
-
-            // Screen off (panel-off) button — only visible when streaming
-            AnimatedVisibility(visible = isStreaming && serverReady) {
-                Column {
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Button(
-                        onClick = onTogglePanelOff,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(52.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = if (isPanelOff) {
-                            ButtonDefaults.buttonColors(containerColor = Color(0xFF69F0AE))
-                        } else {
-                            ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.15f))
-                        },
-                        border = if (!isPanelOff) BorderStroke(1.dp, Color.White.copy(alpha = 0.3f)) else null
-                    ) {
-                        Text(
-                            text = if (isPanelOff)
-                                stringResource(id = R.string.btn_screen_on)
-                            else
-                                stringResource(id = R.string.btn_screen_off),
-                            fontWeight = FontWeight.Bold,
-                            color = if (isPanelOff) Color.Black else Color.White
-                        )
                     }
                 }
             }
@@ -1604,44 +1603,8 @@ fun CastlaScreen(
                 }
             }
 
-            Button(
-                onClick = if (isStreaming) onStopClick else onStartClick,
-                enabled = !isPreparing || isStreaming,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(64.dp),
-                shape = RoundedCornerShape(20.dp),
-                colors = when {
-                    isPreparing && !isStreaming -> ButtonDefaults.buttonColors(
-                        disabledContainerColor = Color.White.copy(alpha = 0.3f),
-                        disabledContentColor = Color.Black.copy(alpha = 0.5f)
-                    )
-                    isStreaming -> ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252))
-                    else -> ButtonDefaults.buttonColors(containerColor = Color.White)
-                }
-            ) {
-                if (isPreparing && !isStreaming) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        color = Color.Black.copy(alpha = 0.5f),
-                        strokeWidth = 2.dp
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                }
-                Text(
-                    text = when {
-                        isPreparing && !isStreaming -> stringResource(id = R.string.status_preparing)
-                        isStreaming -> stringResource(id = R.string.btn_stop_mirroring)
-                        else -> stringResource(id = R.string.btn_start_mirroring)
-                    },
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = if (isStreaming) Color.White else Color.Black
-                )
-            }
-
             if (!isStreaming) {
-                Spacer(modifier = Modifier.height(32.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 Box(
                     modifier = Modifier
@@ -1668,10 +1631,79 @@ fun CastlaScreen(
             }
 
 
-                Spacer(modifier = Modifier.height(48.dp))
+                Spacer(modifier = Modifier.height(20.dp))
             }
 
+            MirrorActionButton(
+                isStreaming = isStreaming,
+                isPreparing = isPreparing,
+                onStartClick = onStartClick,
+                onStopClick = onStopClick,
+                modifier = Modifier
+                    .navigationBarsPadding()
+                    .padding(start = 24.dp, top = 8.dp, end = 24.dp, bottom = 20.dp),
+            )
+
         }
+    }
+}
+
+@Composable
+private fun StreamStatusChip(label: String, value: String) {
+    Column(
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.White.copy(alpha = 0.08f))
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(label, color = Color.White.copy(alpha = 0.58f), fontSize = 10.sp)
+        Text(value, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun MirrorActionButton(
+    isStreaming: Boolean,
+    isPreparing: Boolean,
+    onStartClick: () -> Unit,
+    onStopClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Button(
+        onClick = if (isStreaming) onStopClick else onStartClick,
+        enabled = !isPreparing || isStreaming,
+        modifier = modifier
+            .fillMaxWidth()
+            .height(64.dp),
+        shape = RoundedCornerShape(20.dp),
+        colors = when {
+            isPreparing && !isStreaming -> ButtonDefaults.buttonColors(
+                disabledContainerColor = Color.White.copy(alpha = 0.3f),
+                disabledContentColor = Color.Black.copy(alpha = 0.5f),
+            )
+            isStreaming -> ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252))
+            else -> ButtonDefaults.buttonColors(containerColor = Color.White)
+        },
+    ) {
+        if (isPreparing && !isStreaming) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(20.dp),
+                color = Color.Black.copy(alpha = 0.5f),
+                strokeWidth = 2.dp,
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+        }
+        Text(
+            text = when {
+                isPreparing && !isStreaming -> stringResource(id = R.string.status_preparing)
+                isStreaming -> stringResource(id = R.string.btn_stop_mirroring)
+                else -> stringResource(id = R.string.btn_start_mirroring)
+            },
+            fontSize = 20.sp,
+            fontWeight = FontWeight.ExtraBold,
+            color = if (isStreaming) Color.White else Color.Black,
+        )
     }
 }
 

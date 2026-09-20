@@ -19,6 +19,7 @@
     onOpenDiagnostics,
     onToggleNotification,
     onOpenNotificationHistory,
+    onClose,
   } = $props<{
     language: "ko" | "en";
     uiScalePreference: OverlayUiScalePreference;
@@ -29,12 +30,17 @@
     onOpenDiagnostics: () => void;
     onToggleNotification: () => void;
     onOpenNotificationHistory: () => void;
+    onClose: () => void;
   }>();
 
   const label = (ko: string, en: string) => language === "ko" ? ko : en;
 </script>
 
 <section class="drawer-settings">
+  <div class="settings-mobile-header">
+    <strong>{label("설정 및 진단", "Settings and diagnostics")}</strong>
+    <button aria-label={label("설정 닫기", "Close settings")} onclick={onClose}>×</button>
+  </div>
   <div class="settings-section">
     <div class="settings-inline-row">
       <div class="settings-inline-group">
@@ -86,6 +92,8 @@
 
 <style>
   .drawer-settings { margin: 6px 12px 8px; padding: 10px 12px; border: 1px solid rgba(255,255,255,.06); border-radius: 14px; background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01)), rgba(11,14,24,.72); display: grid; gap: 10px; }
+  .settings-mobile-header { display: none; align-items: center; justify-content: space-between; color: #f8fafc; }
+  .settings-mobile-header button { width: 32px; height: 32px; border: 1px solid rgba(255,255,255,.1); border-radius: 10px; background: rgba(255,255,255,.05); color: white; font-size: 20px; }
   .settings-section { display: grid; gap: 8px; }
   .settings-section + .settings-section { padding-top: 10px; border-top: 1px solid rgba(255,255,255,.05); }
   .settings-inline-row, .settings-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
@@ -101,4 +109,20 @@
   .scale-slider input { width: 100%; margin: 0; accent-color: #00e5ff; }
   .scale-slider-labels { display: flex; justify-content: space-between; gap: 10px; color: #94a3b8; font-size: 11px; font-weight: 700; }
   .settings-link-btn { color: #7cf1ff; font-size: 12px; font-weight: 700; text-decoration: none; }
+
+  @media (max-width: 720px), (max-height: 720px) {
+    .drawer-settings {
+      position: absolute;
+      inset: 8px;
+      z-index: 12;
+      margin: 0;
+      padding: 16px;
+      align-content: start;
+      overflow-y: auto;
+      border-radius: 18px;
+      background: rgba(10, 13, 22, 0.99);
+      box-shadow: 0 18px 48px rgba(0,0,0,.55);
+    }
+    .settings-mobile-header { display: flex; }
+  }
 </style>

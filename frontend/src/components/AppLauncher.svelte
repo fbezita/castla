@@ -10,6 +10,7 @@
     type LaunchMetrics,
   } from "../stores/compositorStore";
   import { t } from "../lib/i18n";
+  import { appLoadFailureKey } from "../lib/appLoadUi";
   import { canReuseHotStream } from "../lib/launchReuse";
   import {
     canKeepCurrentLaunch,
@@ -341,7 +342,8 @@
       error = "";
     } catch (err) {
       if (apps.length === 0) {
-        error = err instanceof Error ? err.message : String(err);
+        console.warn("[APP_LOAD_FAIL]", err);
+        error = t($compositorStore.language, appLoadFailureKey(err));
       }
     } finally {
       loading = false;
@@ -1510,7 +1512,7 @@
     }
     
     drawerOpen = true;
-    toast(`${app.label} launching`);
+    toast(`${app.label} ${t($compositorStore.language, "toast_launching")}`);
     setTimeout(() => {
       if (autoClosePending && !hasVisibleStream) {
         drawerOpen = true;
@@ -2670,6 +2672,7 @@
       onOpenDiagnostics={triggerToggleDiagnostics}
       onToggleNotification={toggleNotificationOverlay}
       onOpenNotificationHistory={openNotificationHistoryFromSettings}
+      onClose={() => (settingsOpen = false)}
     />
   {/if}
 
@@ -2717,6 +2720,7 @@
     {selectTab}
     {draggingApp}
     {dropZone}
+    {notificationHistoryCount}
   />
 
   <div
@@ -2737,6 +2741,7 @@
                   isStarred={favorites.includes(app.packageName)}
                   isAutorun={isAppAutorun(app)}
                   isNotification={notificationApps.includes(app.packageName)}
+                  isActive={app.packageName === $compositorStore.activePrimaryApp || app.packageName === $compositorStore.activeSecondaryApp}
                   isDragActive={draggingApp !== null}
                   recentMeta={getRecentMeta(app.packageName)}
                   onLaunch={activateApp}
@@ -2775,6 +2780,7 @@
             {pairTarget}
             {favorites}
             {notificationApps}
+            activePackages={[$compositorStore.activePrimaryApp, $compositorStore.activeSecondaryApp].filter(Boolean)}
             isAutorun={isAppAutorun}
             onToggle={toggleCategory}
             onLaunch={activateApp}

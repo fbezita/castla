@@ -7,12 +7,14 @@
     activeTab,
     selectTab,
     draggingApp,
-    dropZone
+    dropZone,
+    notificationHistoryCount = 0,
   } = $props<{
     activeTab: "autorun" | "starred" | "recent" | "notifications" | "browse";
     selectTab: (tab: "autorun" | "starred" | "recent" | "notifications" | "browse") => void;
     draggingApp: any | null;
     dropZone: string;
+    notificationHistoryCount: number;
   }>();
 </script>
 
@@ -56,6 +58,9 @@
     onclick={() => selectTab("notifications")}
   >
     <span class="tab-label">{t($compositorStore.language, "tab_notifications")}</span>
+    {#if notificationHistoryCount > 0 && !draggingApp}
+      <span class="notification-badge">{Math.min(notificationHistoryCount, 99)}</span>
+    {/if}
     {#if draggingApp && dropZone === "notifications"}
       <span class="drop-badge">DROP</span>
     {/if}
@@ -166,6 +171,20 @@
     font-weight: 900;
     letter-spacing: 0.06em;
     animation: pulse 1s infinite alternate;
+  }
+
+  .notification-badge {
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: #00b8d4;
+    color: #021014;
+    font-size: 9px;
+    font-weight: 900;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .drop-hint {

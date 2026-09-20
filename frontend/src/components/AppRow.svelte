@@ -19,6 +19,7 @@
     isStarred,
     isAutorun,
     isNotification,
+    isActive,
     isDragActive,
     recentMeta,
     onLaunch,
@@ -36,6 +37,7 @@
     isStarred: boolean;
     isAutorun: boolean;
     isNotification: boolean;
+    isActive: boolean;
     isDragActive: boolean;
     recentMeta: string;
     onLaunch: (app: AppInfo) => void;
@@ -74,6 +76,7 @@
 <div
   class="launcher-row"
   class:priority={activeTab === "autorun"}
+  class:active-app={isActive}
   class:drag-active={isDragActive}
   title={app.label}
   onkeydown={handleKeyDown}
@@ -122,6 +125,7 @@
 
   <div class="launcher-row-text">
     <span class="launcher-row-title">{app.label}</span>
+    {#if isActive}<span class="active-badge">RUNNING</span>{/if}
     {#if activeTab === "recent"}
       <span class="launcher-row-subtitle">{recentMeta}</span>
     {:else if activeTab === "autorun"}
@@ -189,8 +193,8 @@
     grid-template-columns: 42px minmax(0, 1fr) auto;
     align-items: center;
     gap: 8px;
-    min-height: 50px;
-    padding: 8px 10px;
+    min-height: 46px;
+    padding: 6px 9px;
     border: 1px solid rgb(255 255 255 / 0.06);
     border-radius: 12px;
     background: linear-gradient(
@@ -220,6 +224,12 @@
         rgb(255 255 255 / 0.03)
       ),
       rgb(22 27 40 / 0.95);
+  }
+
+  .launcher-row.active-app {
+    border-color: rgb(0 229 255 / 0.42);
+    background: linear-gradient(180deg, rgb(0 229 255 / 0.13), rgb(255 255 255 / 0.03)), rgb(18 22 34 / 0.92);
+    box-shadow: inset 3px 0 0 #00e5ff;
   }
 
   .launcher-row.drag-active {
@@ -275,9 +285,20 @@
     font-weight: 600;
   }
 
+  .active-badge {
+    width: fit-content;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: rgb(0 229 255 / 0.16);
+    color: #9cf6ff;
+    font-size: 8px;
+    font-weight: 900;
+    letter-spacing: 0.06em;
+  }
+
   .launcher-row-icon {
-    width: 36px;
-    height: 36px;
+    width: 32px;
+    height: 32px;
     object-fit: contain;
     border-radius: 8px;
   }

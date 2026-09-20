@@ -34,6 +34,8 @@ import androidx.core.content.FileProvider
 import com.castla.mirror.BuildConfig
 import com.castla.mirror.R
 import com.castla.mirror.diagnostics.FileLogger
+import com.castla.mirror.policy.ThermalUiPolicy
+import com.castla.mirror.policy.ThermalUiSeverity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -172,20 +174,27 @@ fun SettingsScreen(
                         stringResource(R.string.thermal_warning_light)
                     else -> null
                 }
+                val thermalSeverity = ThermalUiPolicy.severity(thermalStatus)
+                val thermalAccent = when (thermalSeverity) {
+                    ThermalUiSeverity.INFO -> Color(0xFFFFB300)
+                    ThermalUiSeverity.WARNING -> Color(0xFFFF8A50)
+                    ThermalUiSeverity.CRITICAL -> Color(0xFFFF5252)
+                    ThermalUiSeverity.NONE -> Color.Transparent
+                }
                 AnimatedVisibility(visible = thermalWarning != null) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(bottom = 24.dp)
                             .clip(RoundedCornerShape(16.dp))
-                            .background(Color(0xFFFF5252).copy(alpha = 0.15f))
-                            .border(1.dp, Color(0xFFFF5252).copy(alpha = 0.4f), RoundedCornerShape(16.dp))
+                            .background(thermalAccent.copy(alpha = 0.15f))
+                            .border(1.dp, thermalAccent.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
                             .padding(16.dp)
                     ) {
                         Text(
                             text = thermalWarning ?: "",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = Color(0xFFFF5252),
+                            color = thermalAccent,
                             fontWeight = FontWeight.Bold
                         )
                     }

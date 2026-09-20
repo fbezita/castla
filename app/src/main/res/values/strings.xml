@@ -29,7 +29,17 @@
     <string name="status_waiting_for_secure_relay">Waiting for secure relay…</string>
     <string name="status_server_setup_failed">Server setup failed</string>
     <string name="status_server_starting">Starting server…</string>
-    <string name="title_open_tesla_browser">Open Tesla Browser</string>
+    <string name="title_open_tesla_browser">Tesla browser address</string>
+    <string name="desc_tesla_favorite_hint">Save this address once in Tesla Browser favorites.</string>
+    <string name="stream_status_resolution">Resolution</string>
+    <string name="stream_status_fps">Frame rate</string>
+    <string name="stream_status_audio">Audio</string>
+    <string name="stream_status_clients">Connected</string>
+    <string name="stream_status_auto">Auto</string>
+    <string name="stream_status_on">On</string>
+    <string name="stream_status_off">Off</string>
+    <string name="stream_status_client_count">%d client(s)</string>
+    <string name="server_recovery_hint">The server could not start. Stop mirroring, check Shizuku, and try again.</string>
     <string name="title_tesla_setup_required">Shizuku Setup Required</string>
     <string name="title_shizuku_required">Shizuku is required</string>
     <string name="desc_shizuku_connecting">Connecting to the Shizuku privileged service…</string>
@@ -43,6 +53,11 @@
     <string name="btn_setup_guide">Setup Guide</string>
     <string name="desc_shizuku_permission_required">Shizuku is running, but Castla does not have permission yet.\nGrant permission to use Castla.</string>
     <string name="btn_grant_shizuku_permission">Grant Shizuku Permission</string>
+    <string name="setup_step_install">Install Shizuku</string>
+    <string name="setup_step_start">Pair and start Shizuku</string>
+    <string name="setup_step_permission">Allow Castla</string>
+    <string name="setup_step_connect">Connect privileged service</string>
+    <string name="desc_shizuku_connection_recovery">Open Shizuku, confirm it is running, then try connecting again.</string>
     <string name="title_notification_overlay_setup">Notification Overlay Setup</string>
     <string name="desc_notification_overlay_setup">Show KakaoTalk and other message alerts on the mirrored screen by enabling notification access once in system settings.</string>
     <string name="btn_enable_notification_access">Enable Notification Access</string>
@@ -61,7 +76,7 @@
     <string name="settings_back">Back</string>
     <string name="settings_title">Settings</string>
     <string name="settings_stop_streaming_warning">Stop streaming to change settings</string>
-    <string name="thermal_warning_light">Device is warm — quality slightly reduced</string>
+    <string name="thermal_warning_light">Charging or use has warmed the device. Android is temporarily preventing quality increases as a precaution.</string>
     <string name="thermal_warning_moderate">Device is getting hot — quality reduced to prevent overheating</string>
     <string name="thermal_warning_critical">Device is very hot — quality heavily reduced</string>
     <string name="thermal_warning_emergency">Device is overheating — audio disabled, quality at minimum</string>
@@ -100,8 +115,6 @@
     <string name="btn_hotspot_on">Hotspot ON</string>
     <string name="btn_hotspot_off">Turn on Hotspot</string>
     <string name="btn_auto_hotspot">Auto</string>
-    <string name="btn_screen_off">Screen Off</string>
-    <string name="btn_screen_on">Screen On</string>
     <string name="toast_thermal_warning">⚠️ Device is very hot. Mirroring quality may be reduced.</string>
 
     <!-- Samsung USB config advisory (Default USB Configuration regression) -->

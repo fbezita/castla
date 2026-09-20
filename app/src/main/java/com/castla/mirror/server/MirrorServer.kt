@@ -18,6 +18,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 
 data class TouchEvent(
     val action: String,
@@ -47,6 +49,8 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     private val audioSockets = ConcurrentHashMap.newKeySet<AudioStreamSocket>()
     private val controlSocketLock = Any()
     private val activeControlSessionId = AtomicInteger(0)
+    private val _connectedClientCount = MutableStateFlow(0)
+    val connectedClientCount: StateFlow<Int> = _connectedClientCount
     private val browserConnectionEpoch = AtomicInteger(0)
     private val keyframeRequestCount = AtomicInteger(0)
     private val lastSpsPpsReplayLogAtByChannel = ConcurrentHashMap<String, Long>()
@@ -488,6 +492,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             TAG,
             "Control client connected total=${controlSocketCount()} primaryVideo=${primaryVideoSockets.size} secondaryVideo=${secondaryVideoSockets.size} audio=${audioSockets.size}"
         )
+        _connectedClientCount.value = controlSocketCount()
 
         // Send serverInit greeting with unique instanceId. WebSocket.send() is
         // always dispatched off the main thread.
@@ -531,6 +536,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             TAG,
             "Control client disconnected total=${controlSocketCount()} primaryVideo=${primaryVideoSockets.size} secondaryVideo=${secondaryVideoSockets.size} audio=${audioSockets.size}"
         )
+        _connectedClientCount.value = controlSocketCount()
         updateConnectionState()
     }
 
@@ -1134,6 +1140,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         secondaryVideoSockets.clear()
         synchronized(controlSocketLock) {
             controlSockets.clear()
+            _connectedClientCount.value = 0
             activeControlSocket = null
         }
         audioSockets.clear()
