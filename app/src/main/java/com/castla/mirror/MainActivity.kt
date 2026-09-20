@@ -319,9 +319,6 @@ class MainActivity : AppCompatActivity() {
 
                 val thermalStatus by (mirrorService?.thermalStatus
                     ?: kotlinx.coroutines.flow.MutableStateFlow(0)).collectAsState()
-                val connectedClientCount by (mirrorService?.connectedClientCount
-                    ?: kotlinx.coroutines.flow.MutableStateFlow(0)).collectAsState()
-
                 if (setupUiState != SetupUiState.Ready) {
                     ShizukuSetupScreen(
                         state = setupUiState,
@@ -371,7 +368,6 @@ class MainActivity : AppCompatActivity() {
                         serverUrl = serverUrl,
                         serverAvailability = serverAvailability,
                         streamSettings = streamSettings,
-                        connectedClientCount = connectedClientCount,
                         reachableMirrorIp = resolveReachableMirrorIp(),
                         isImeEnabled = isImeEnabled,
                         isImeSelected = isImeSelected,
@@ -989,6 +985,10 @@ class MainActivity : AppCompatActivity() {
     private fun onStartMirroring() {
         Log.i(TAG, "onStartMirroring called")
 
+        // The Tesla/browser UI can update the next-session stream profile while
+        // this activity is already alive, so refresh persisted settings here.
+        streamSettings = StreamSettings.load(this)
+
         if (isCleanupInProgress || MirrorForegroundService.isCleanupInProgress) {
             queueStartAfterCleanup("cleanup_in_progress")
             return
@@ -1163,7 +1163,6 @@ fun CastlaScreen(
     serverUrl: String,
     serverAvailability: MirrorServerAvailability = MirrorServerAvailability.IDLE,
     streamSettings: StreamSettings = StreamSettings(),
-    connectedClientCount: Int = 0,
     reachableMirrorIp: String = "0.0.0.0",
     isImeEnabled: Boolean,
     isImeSelected: Boolean,
@@ -1197,7 +1196,9 @@ fun CastlaScreen(
     }
     MeshGradientBackground {
         Column(
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier
+                .fillMaxSize()
+                .safeDrawingPadding()
         ) {
             Column(
                 modifier = Modifier
@@ -1431,10 +1432,6 @@ fun CastlaScreen(
                             StreamStatusChip(
                                 stringResource(R.string.stream_status_audio),
                                 stringResource(if (streamSettings.audioEnabled) R.string.stream_status_on else R.string.stream_status_off),
-                            )
-                            StreamStatusChip(
-                                stringResource(R.string.stream_status_clients),
-                                stringResource(R.string.stream_status_client_count, connectedClientCount),
                             )
                         }
                     }

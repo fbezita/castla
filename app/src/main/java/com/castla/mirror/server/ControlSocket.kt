@@ -15,6 +15,10 @@ class ControlSocket(
     private val server: MirrorServer
 ) : NanoWSD.WebSocket(handshake) {
 
+    val takeoverRequested: Boolean = handshake.parameters["takeover"]
+        ?.any { it == "1" || it.equals("true", ignoreCase = true) }
+        ?: false
+
     companion object {
         private const val TAG = "ControlSocket"
         private const val DECODER_TAG = "CastlaDecoder"
@@ -52,7 +56,6 @@ class ControlSocket(
         private set
     private var messageCount = 0
     private var touchMessageCount = 0
-    private var staleCloseRequested = false
 
     override fun onOpen() {
         openTimeElapsedMs = SystemClock.elapsedRealtime()
@@ -71,16 +74,6 @@ class ControlSocket(
             messageCount += 1
             if (!server.shouldAcceptControlMessage(this) && !server.ensureActiveControlSocket(this)) {
                 server.logStaleControlMessage(this, messageCount)
-                if (!staleCloseRequested) {
-                    staleCloseRequested = true
-                    try {
-                        close(
-                            NanoWSD.WebSocketFrame.CloseCode.NormalClosure,
-                            "Stale control socket",
-                            false
-                        )
-                    } catch (_: Exception) {}
-                }
                 return
             }
             // Binary frames: 10-byte touch protocol [action:u8][id:u8][x:f32LE][y:f32LE]
@@ -299,6 +292,16 @@ class ControlSocket(
                         backlogDrops = json.optInt("backlogDrops", 0)
                     )
                 }
+                "streamProfile" -> {
+                    val profile = json.optString("profile", "balanced").lowercase()
+                    val success = server.onStreamProfileRequest(profile)
+                    send(JSONObject().apply {
+                        put("type", "streamProfileChanged")
+                        put("profile", profile)
+                        put("success", success)
+                        put("appliesNextSession", true)
+                    }.toString())
+                }
                 "decoderStatus" -> {
                     val pane = json.optString("pane", "primary")
                     val event = json.optString("event", "")
@@ -422,7 +425,6 @@ class ControlSocket(
         this.registered = true
         this.active = true
         this.closeTimeElapsedMs = 0L
-        this.staleCloseRequested = false
     }
 
     fun markInactive(reason: String) {

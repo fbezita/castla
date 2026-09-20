@@ -16,6 +16,7 @@ export class ControlTransport {
   private connectionStateKnown = false;
   private controlSessionId = 0;
   private manuallyClosed = false;
+  private takeoverOnNextConnect = false;
 
   constructor(private readonly host: string) {}
 
@@ -34,7 +35,9 @@ export class ControlTransport {
     this.controlSessionId = 0;
     // Enforce plain ws:// connection to bypass redundant secure handshake overheads
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    this.socket = new WebSocket(`${protocol}://${this.host}/ws/control`);
+    const takeoverQuery = this.takeoverOnNextConnect ? "?takeover=1" : "";
+    this.takeoverOnNextConnect = false;
+    this.socket = new WebSocket(`${protocol}://${this.host}/ws/control${takeoverQuery}`);
     this.socket.onopen = () => {
       this.lastPongAt = performance.now();
       this.setConnectionState(true);
@@ -48,6 +51,15 @@ export class ControlTransport {
       if (typeof event.data !== "string") return;
       try {
         const message = JSON.parse(event.data) as ControlMessage;
+        if ((message as { type?: string }).type === "controlBusy") {
+          this.manuallyClosed = true;
+          this.readyForControl = false;
+          this.pendingMessages = [];
+          this.setConnectionState(false);
+          this.listeners.forEach((listener) => listener(message));
+          this.socket?.close(1000, "Another browser already controls Castla");
+          return;
+        }
         if ((message as { type?: string }).type === "pong") {
           this.lastPongAt = performance.now();
         }
@@ -103,6 +115,12 @@ export class ControlTransport {
   }
 
   reconnectNow(): void {
+    window.clearTimeout(this.reconnectTimer);
+    this.connect();
+  }
+
+  takeControlNow(): void {
+    this.takeoverOnNextConnect = true;
     window.clearTimeout(this.reconnectTimer);
     this.connect();
   }

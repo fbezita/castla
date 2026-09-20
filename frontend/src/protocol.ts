@@ -58,6 +58,19 @@ export interface ServerInitMessage {
   instanceId: string;
   controlSessionId?: number;
   verboseDiagnosticsEnabled?: boolean;
+  streamProfile?: 'stability' | 'balanced' | 'quality' | 'custom';
+}
+
+export interface ControlBusyMessage {
+  type: 'controlBusy';
+  reason?: string;
+}
+
+export interface StreamProfileChangedMessage {
+  type: 'streamProfileChanged';
+  profile: 'stability' | 'balanced' | 'quality' | 'custom';
+  success: boolean;
+  appliesNextSession: boolean;
 }
 
 export interface NotificationMessage {
@@ -83,6 +96,8 @@ export type ControlMessage =
   | DiagnosticsMessage
   | NotificationMessage
   | ServerInitMessage
+  | ControlBusyMessage
+  | StreamProfileChangedMessage
   | AckMessage
   | Record<string, unknown>;
 

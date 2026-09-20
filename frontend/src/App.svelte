@@ -62,6 +62,7 @@
   let controlConnected = false;
   let controlWasConnected = false;
   let controlConnectionPending = true;
+  let controlBusy = false;
   let controlStatusTimer = 0;
 
   function updateNotificationApps(appsList: string[]): void {
@@ -276,6 +277,7 @@
     window.clearTimeout(controlStatusTimer);
     controlConnected = false;
     controlConnectionPending = true;
+    controlBusy = false;
     runtime = new StreamRuntime(location.host);
     (window as any).castlaRuntime = runtime;
     const frontendBuildPayload = {
@@ -480,7 +482,12 @@
     // Focus or blur the hidden ime-proxy element based on Android IME focus session status
     let lastInstanceId: string | null = null;
     const msgCleanup = runtime.control.onMessage((msg) => {
+      if (msg.type === "controlBusy") {
+        controlBusy = true;
+        controlConnectionPending = false;
+      }
       if (msg.type === "serverInit") {
+        controlBusy = false;
         const nextId = String((msg as any).instanceId ?? "unknown");
         (window as any).__CASTLA_VERBOSE_DIAGNOSTICS__ = (msg as any).verboseDiagnosticsEnabled === true;
         if (lastInstanceId && lastInstanceId !== nextId) {
@@ -821,6 +828,7 @@
         serverConnected={controlConnected}
         serverWasConnected={controlWasConnected}
         serverConnectionPending={controlConnectionPending}
+        serverControlBusy={controlBusy}
         onOpenNotificationHistory={openNotificationHistory}
         onOverlayUiScalePreferenceChange={updateOverlayUiScalePreference}
         onNotificationOverlayEnabledChange={updateNotificationOverlayEnabled}

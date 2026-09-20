@@ -97,4 +97,53 @@ describe("ControlTransport connection state", () => {
     expect(listener).toHaveBeenCalledOnce();
     expect(listener).toHaveBeenCalledWith(true);
   });
+
+  it("stops reconnecting when another browser already owns control", () => {
+    let socket: FakeWebSocket | undefined;
+    const urls: string[] = [];
+    const reconnect = vi.fn(() => 1);
+    class FakeWebSocket {
+      static OPEN = 1;
+      static CLOSED = 3;
+      readyState = FakeWebSocket.OPEN;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onclose: (() => void) | null = null;
+
+      constructor(url: string) {
+        urls.push(url);
+        socket = this;
+      }
+
+      close() {
+        this.readyState = FakeWebSocket.CLOSED;
+      }
+
+      send(_payload: string) {}
+    }
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    vi.stubGlobal("window", {
+      location: { protocol: "http:" },
+      clearInterval: vi.fn(),
+      clearTimeout: vi.fn(),
+      setInterval: vi.fn(() => 1),
+      setTimeout: reconnect,
+    });
+    vi.stubGlobal("performance", { now: vi.fn(() => 1) });
+    const transport = new ControlTransport("castla.test");
+    const listener = vi.fn();
+    transport.onConnectionChange(listener);
+
+    transport.connect();
+    socket?.onopen?.();
+    socket?.onmessage?.({ data: JSON.stringify({ type: "controlBusy" }) } as MessageEvent);
+    socket?.onclose?.();
+
+    expect(listener).toHaveBeenLastCalledWith(false);
+    expect(reconnect).not.toHaveBeenCalled();
+
+    transport.takeControlNow();
+    expect(urls).toHaveLength(2);
+    expect(urls[1]).toContain("takeover=1");
+  });
 });

@@ -131,10 +131,16 @@ export function formatNotificationTime(
   postedAtMs: number,
   language: Language,
 ): string {
-  return new Intl.DateTimeFormat(language === "ko" ? "ko-KR" : "en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(postedAtMs);
+  const date = new Date(postedAtMs);
+  const hour24 = date.getHours();
+  const hour12 = hour24 % 12 || 12;
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  const period = language === "ko"
+    ? (hour24 < 12 ? "오전" : "오후")
+    : (hour24 < 12 ? "AM" : "PM");
+  return language === "ko"
+    ? `${period} ${hour12}:${minute}`
+    : `${hour12}:${minute} ${period}`;
 }
 
 export function shouldShowNotificationSender(

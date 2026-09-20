@@ -11,6 +11,12 @@
   } from "../stores/compositorStore";
   import { t } from "../lib/i18n";
   import { appLoadFailureKey } from "../lib/appLoadUi";
+  import {
+    buildSelectedAppLaunchRequest,
+    resolveConnectionView,
+    resolveLaunchStage,
+    type AppSelectionTarget,
+  } from "../lib/frontendExperience";
   import { canReuseHotStream } from "../lib/launchReuse";
   import {
     canKeepCurrentLaunch,
@@ -56,6 +62,8 @@
   import PairDialog from "./PairDialog.svelte";
   import PlacementPickerOverlay from "./PlacementPickerOverlay.svelte";
   import LauncherSettingsPanel from "./LauncherSettingsPanel.svelte";
+  import ConnectionPanel from "./ConnectionPanel.svelte";
+  import CurrentSessionPanel from "./CurrentSessionPanel.svelte";
 
   let {
     runtime,
@@ -68,6 +76,7 @@
     serverConnected = false,
     serverWasConnected = false,
     serverConnectionPending = true,
+    serverControlBusy = false,
     onOpenNotificationHistory,
     onOverlayUiScalePreferenceChange,
     onNotificationOverlayEnabledChange,
@@ -83,6 +92,7 @@
     serverConnected?: boolean;
     serverWasConnected?: boolean;
     serverConnectionPending?: boolean;
+    serverControlBusy?: boolean;
     onOpenNotificationHistory: () => void;
     onOverlayUiScalePreferenceChange: (preference: OverlayUiScalePreference) => void;
     onNotificationOverlayEnabledChange: (enabled: boolean) => void;
@@ -104,7 +114,8 @@
     lastUsedAt: number;
   }
 
-  type LaunchHubTab = "autorun" | "starred" | "recent" | "notifications" | "browse";
+  type LaunchHubTab = "session" | "autorun" | "starred" | "recent" | "notifications" | "browse";
+  type StreamProfile = "stability" | "balanced" | "quality" | "custom";
   type DropZone =
     | "favorite"
     | "autorun"
@@ -117,7 +128,7 @@
   const APP_CACHE_KEY = "castla_cached_apps_v1";
   const AUTORUN_SESSION_KEY = "castla_autorun_done";
   const RECENT_APPS_KEY = "castla_recent_apps_v1";
-  const ACTIVE_TAB_KEY = "castla_launch_hub_active_tab";
+  const ACTIVE_TAB_KEY = "castla_launch_hub_active_tab_v2";
   const MAX_RECENT_APPS = 8;
   const DRAWER_HANDLE_HOTZONE = 56;
 
@@ -138,6 +149,7 @@
   let drawerListElement = $state<HTMLDivElement | null>(null);
   let search = $state("");
   let activeTab = $state<LaunchHubTab>(readActiveTab());
+  let appSelectionTarget = $state<AppSelectionTarget>("primary");
   let expandedCategory = $state("");
   let favorites = $state<string[]>(readArray("castla_favorites"));
   let recentEntries = $state<RecentLaunchRecord[]>(readRecentLaunches());
@@ -186,12 +198,24 @@
   let autoScrollFrame = $state<number | undefined>(undefined);
   let drawerAutoCollapsedForDrag = $state(false);
   let settingsOpen = $state(false);
+  let streamProfile = $state<StreamProfile>("balanced");
   let multiwindowOpen = $state(false);
   let placementPickerOpen = $state(false);
 
   // Lifecycle bindings
   onMount(() => {
     appStreamStoppedCleanup = runtime.control.onMessage((message: ControlMessage) => {
+      if (message.type === "serverInit") {
+        const profile = (message as { streamProfile?: StreamProfile }).streamProfile;
+        if (profile) streamProfile = profile;
+      } else if (message.type === "streamProfileChanged") {
+        const result = message as { profile?: StreamProfile; success?: boolean };
+        if (result.success && result.profile) {
+          streamProfile = result.profile;
+          toast($compositorStore.language === "ko" ? "다음 미러링부터 적용됩니다" : "Applies from the next mirroring session");
+        }
+      }
+
       const action = resolveAppStreamStoppedUi(
         message,
         Boolean(get(compositorStore).activeSecondaryApp),
@@ -301,6 +325,15 @@
     ) ?? "right"
   );
   let multiwindowReady = $derived(Boolean($compositorStore.activeSecondaryApp));
+  let connectionView = $derived(
+    resolveConnectionView(
+      serverConnected,
+      serverConnectionPending,
+      serverWasConnected,
+      serverControlBusy,
+    ),
+  );
+  let launchStage = $derived(resolveLaunchStage($compositorStore.launchSequence.state));
 
   // Effects bindings using Svelte 5 $effect Rune
   $effect(() => {
@@ -1587,14 +1620,38 @@
   }
 
   function activateApp(app: AppInfo) {
+    if (!serverConnected) {
+      toast(t($compositorStore.language, "serverUnavailable"));
+      return;
+    }
     if (app.isPair) {
+      appSelectionTarget = "primary";
       const appPair = appPairFromAppInfo(app);
       if (appPair) {
         launchAppPair(appPair);
         return;
       }
     }
-    launch(app, "primary");
+    const state = get(compositorStore);
+    if (appSelectionTarget === "secondary" && app.packageName === state.activePrimaryApp) {
+      toast($compositorStore.language === "ko" ? "현재 앱과 다른 앱을 선택하세요" : "Choose a different app");
+      return;
+    }
+    const target = appSelectionTarget;
+    appSelectionTarget = "primary";
+    launchedOnce = true;
+    autoClosePending = true;
+    recordRecentLaunch(app.packageName);
+    startLaunchSequence(buildSelectedAppLaunchRequest(target, app.packageName, {
+      activePrimaryApp: state.activePrimaryApp,
+      layoutMode: state.layoutMode,
+      secondaryPlacement: state.secondaryPlacement ?? null,
+    }));
+    drawerOpen = true;
+    toast(`${app.label} ${t($compositorStore.language, "toast_launching")}`);
+    setTimeout(() => {
+      if (autoClosePending && !hasVisibleStream) drawerOpen = true;
+    }, 8000);
   }
 
   function openPlacementPicker() {
@@ -1919,11 +1976,47 @@
   }
 
   function selectTab(tab: LaunchHubTab) {
+    appSelectionTarget = "primary";
     activeTab = tab;
     localStorage.setItem(ACTIVE_TAB_KEY, tab);
     if (tab === "browse" && search.trim().length > 0 && !expandedCategory) {
       expandedCategory = browseGroups[0]?.key ?? "";
     }
+  }
+
+  function reconnectServer() {
+    error = "";
+    runtime.control.takeControlNow();
+    loadApps();
+  }
+
+  function retryCurrentSession() {
+    if (!serverConnected) {
+      reconnectServer();
+      return;
+    }
+    const state = get(compositorStore);
+    if (!state.activePrimaryApp) {
+      selectTab("browse");
+      return;
+    }
+    startLaunchSequence({
+      primaryPkg: state.activePrimaryApp,
+      secondaryPkg: state.activeSecondaryApp || undefined,
+      layoutMode: state.layoutMode,
+      secondaryPlacement: state.secondaryPlacement ?? null,
+      forceRelaunch: true,
+    });
+  }
+
+  function chooseSecondaryApp() {
+    selectTab("browse");
+    appSelectionTarget = "secondary";
+    toast($compositorStore.language === "ko" ? "분할 화면에 추가할 앱을 선택하세요" : "Choose an app to add to split view");
+  }
+
+  function applyStreamProfile(profile: Exclude<StreamProfile, "custom">) {
+    runtime.control.send({ type: "streamProfile", profile });
   }
 
   function toggleCategory(categoryKey: string) {
@@ -1978,7 +2071,7 @@
 
   function readActiveTab(): LaunchHubTab {
     const value = localStorage.getItem(ACTIVE_TAB_KEY);
-    return value === "autorun" || value === "starred" || value === "recent" || value === "browse" ? value : "autorun";
+    return value === "session" || value === "autorun" || value === "starred" || value === "recent" || value === "notifications" || value === "browse" ? value : "session";
   }
 
   function readArray(key: string): string[] {
@@ -2341,7 +2434,7 @@
   function getHoveredLauncherTab(x: number, y: number): LaunchHubTab | null {
     const tab = document.elementFromPoint(x, y)?.closest("[data-launcher-tab]") as HTMLElement | null;
     const value = tab?.dataset.launcherTab;
-    return value === "autorun" || value === "starred" || value === "recent" || value === "notifications" || value === "browse"
+    return value === "session" || value === "autorun" || value === "starred" || value === "recent" || value === "notifications" || value === "browse"
       ? value
       : null;
   }
@@ -2571,14 +2664,20 @@
 
 <div class:hidden={standbyReason !== "app-left" && (hasVisibleStream || launchedOnce)} class="standby">
   <div class="status-mark">
-    {#if autoClosePending}
+    {#if autoClosePending || connectionView === "connecting" || connectionView === "reconnecting"}
       <span class="loading-spinner"></span>
+    {:else if connectionView === "unavailable"}
+      !
     {:else}
       ✓
     {/if}
   </div>
   <div class="standby-logo">CASTLA</div>
-  {#if autoClosePending}
+  {#if connectionView === "unavailable"}
+    <p>{t($compositorStore.language, "serverUnavailable")}</p>
+  {:else if connectionView === "connecting" || connectionView === "reconnecting"}
+    <p>{t($compositorStore.language, "reconnecting")}</p>
+  {:else if autoClosePending}
     <p>{t($compositorStore.language, "standbyLaunching")}</p>
   {:else if standbyReason === "app-left"}
     <p>{t($compositorStore.language, "standbyAppLeft")}</p>
@@ -2667,11 +2766,13 @@
       uiScalePreference={overlayUiScalePreference}
       notificationEnabled={notificationOverlayEnabled}
       {notificationHistoryCount}
+      {streamProfile}
       onLanguageChange={applyLanguage}
       onUiScaleChange={applyOverlayUiScalePreference}
       onOpenDiagnostics={triggerToggleDiagnostics}
       onToggleNotification={toggleNotificationOverlay}
       onOpenNotificationHistory={openNotificationHistoryFromSettings}
+      onStreamProfileChange={applyStreamProfile}
       onClose={() => (settingsOpen = false)}
     />
   {/if}
@@ -2712,7 +2813,7 @@
     />
   </div>
 
-  {#if error}<div class="notice error">{error}</div>{/if}
+  {#if error && connectionView === "connected"}<div class="notice error">{error}</div>{/if}
   {#if notice}<div class="notice">{notice}</div>{/if}
 
   <LauncherTabs
@@ -2728,9 +2829,32 @@
     class="split-app-list"
     class:no-scroll={draggingApp !== null}
   >
-    {#if activeTab !== "browse"}
+    {#if connectionView !== "connected"}
+      <ConnectionPanel
+        view={connectionView}
+        language={$compositorStore.language}
+        onRetry={reconnectServer}
+      />
+    {:else if activeTab === "session"}
+      <CurrentSessionPanel
+        language={$compositorStore.language}
+        primaryLabel={$compositorStore.activePrimaryApp ? getAppLabelByPackage($compositorStore.activePrimaryApp) : ""}
+        secondaryLabel={$compositorStore.activeSecondaryApp ? getAppLabelByPackage($compositorStore.activeSecondaryApp) : ""}
+        {launchStage}
+        onChooseApp={() => selectTab("browse")}
+        onRecent={() => selectTab("recent")}
+        onAddSecondary={chooseSecondaryApp}
+        onRetry={retryCurrentSession}
+      />
+    {:else if activeTab !== "browse"}
       <section class="launcher-hero single-panel">
         <div class="panel-shell rows-only" class:priority={activeTab === "autorun"}>
+          {#if activeTab === "notifications" && notificationHistoryCount > 0}
+            <button class="notification-history-entry" onclick={openNotificationHistoryFromSettings}>
+              <span>{t($compositorStore.language, "notificationHistory")}</span>
+              <strong>{notificationHistoryCount}</strong>
+            </button>
+          {/if}
           {#if activePanelApps.length > 0}
             <div class="launcher-row-list">
               {#each activePanelApps as app (app.packageName)}
@@ -2762,6 +2886,12 @@
         </div>
       </section>
     {:else}
+      {#if appSelectionTarget === "secondary"}
+        <div class="selection-intent" role="status">
+          <span>{$compositorStore.language === "ko" ? "분할 화면에 추가할 앱을 선택하세요" : "Choose an app to add to split view"}</span>
+          <button onclick={() => selectTab("session")}>{$compositorStore.language === "ko" ? "취소" : "Cancel"}</button>
+        </div>
+      {/if}
       {#if search}
         <section class="library-section">
           <div class="library-header">
@@ -3179,6 +3309,35 @@
     color: #f87171;
   }
 
+  .selection-intent {
+    margin: 0 12px 12px;
+    min-height: 44px;
+    padding: 8px 10px 8px 13px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    border: 1px solid rgba(0, 229, 255, 0.28);
+    border-radius: 12px;
+    background: rgba(0, 229, 255, 0.08);
+    color: #dffbff;
+    font-size: 12px;
+    font-weight: 800;
+  }
+
+  .selection-intent button {
+    min-height: 30px;
+    padding: 0 11px;
+    flex: 0 0 auto;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.06);
+    color: #d8deea;
+    font-size: 11px;
+    font-weight: 800;
+    cursor: pointer;
+  }
+
   .split-app-list {
     flex: 1;
     overflow-y: auto;
@@ -3230,6 +3389,32 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  .notification-history-entry {
+    width: 100%;
+    min-height: 42px;
+    margin-bottom: 8px;
+    padding: 0 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border: 1px solid rgba(0, 229, 255, 0.2);
+    border-radius: 11px;
+    background: rgba(0, 229, 255, 0.07);
+    color: #dffbff;
+    font-size: 12px;
+    font-weight: 800;
+    cursor: pointer;
+  }
+
+  .notification-history-entry strong {
+    min-width: 25px;
+    height: 22px;
+    display: grid;
+    place-items: center;
+    border-radius: 999px;
+    background: rgba(0, 229, 255, 0.18);
   }
 
   .quick-empty {

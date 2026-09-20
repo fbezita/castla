@@ -10,8 +10,8 @@
     dropZone,
     notificationHistoryCount = 0,
   } = $props<{
-    activeTab: "autorun" | "starred" | "recent" | "notifications" | "browse";
-    selectTab: (tab: "autorun" | "starred" | "recent" | "notifications" | "browse") => void;
+    activeTab: "session" | "autorun" | "starred" | "recent" | "notifications" | "browse";
+    selectTab: (tab: "session" | "autorun" | "starred" | "recent" | "notifications" | "browse") => void;
     draggingApp: any | null;
     dropZone: string;
     notificationHistoryCount: number;
@@ -19,6 +19,14 @@
 </script>
 
 <nav class="hub-tabs" aria-label="Launch hub views" class:dragging-mode={draggingApp !== null}>
+  <button
+    data-launcher-tab="session"
+    class:active={activeTab === "session"}
+    onclick={() => selectTab("session")}
+  >
+    {t($compositorStore.language, "tab_session")}
+  </button>
+
   <button
     data-launcher-tab="autorun"
     class:active={activeTab === "autorun"}
@@ -84,7 +92,7 @@
 <style>
   .hub-tabs {
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 6px;
     padding: 0 12px 12px;
     margin-bottom: 8px;

@@ -14,22 +14,26 @@
     uiScalePreference,
     notificationEnabled,
     notificationHistoryCount,
+    streamProfile,
     onLanguageChange,
     onUiScaleChange,
     onOpenDiagnostics,
     onToggleNotification,
     onOpenNotificationHistory,
+    onStreamProfileChange,
     onClose,
   } = $props<{
     language: "ko" | "en";
     uiScalePreference: OverlayUiScalePreference;
     notificationEnabled: boolean;
     notificationHistoryCount: number;
+    streamProfile: "stability" | "balanced" | "quality" | "custom";
     onLanguageChange: (language: "ko" | "en") => void;
     onUiScaleChange: (preference: OverlayUiScalePreference) => void;
     onOpenDiagnostics: () => void;
     onToggleNotification: () => void;
     onOpenNotificationHistory: () => void;
+    onStreamProfileChange: (profile: "stability" | "balanced" | "quality") => void;
     onClose: () => void;
   }>();
 
@@ -41,6 +45,25 @@
     <strong>{label("설정 및 진단", "Settings and diagnostics")}</strong>
     <button aria-label={label("설정 닫기", "Close settings")} onclick={onClose}>×</button>
   </div>
+  <div class="settings-section">
+    <div class="settings-title-row">
+      <strong>{label("스트리밍 프리셋", "Streaming preset")}</strong>
+      <span>{label("다음 미러링부터 적용", "Applies next session")}</span>
+    </div>
+    <div class="profile-grid">
+      <button class:active={streamProfile === "stability"} onclick={() => onStreamProfileChange("stability")}>
+        <strong>{label("안정성", "Stable")}</strong><small>720p · 30 FPS</small>
+      </button>
+      <button class:active={streamProfile === "balanced"} onclick={() => onStreamProfileChange("balanced")}>
+        <strong>{label("균형", "Balanced")}</strong><small>720p · AUTO</small>
+      </button>
+      <button class:active={streamProfile === "quality"} onclick={() => onStreamProfileChange("quality")}>
+        <strong>{label("화질", "Quality")}</strong><small>1080p · 60 FPS</small>
+      </button>
+    </div>
+    {#if streamProfile === "custom"}<small class="custom-profile">{label("휴대폰에서 직접 설정한 값 사용 중", "Using custom phone settings")}</small>{/if}
+  </div>
+
   <div class="settings-section">
     <div class="settings-inline-row">
       <div class="settings-inline-group">
@@ -106,6 +129,13 @@
   .lang-switcher button.active { background: rgba(0,229,255,.16); color: #7cf1ff; border: 1px solid rgba(0,229,255,.2); }
   .diag-toggle-btn { border: 1px solid rgba(255,255,255,.08); background: rgba(255,255,255,.04); color: rgb(255 255 255 / .65); font-size: 11px; height: 24px; padding: 0 10px; cursor: pointer; border-radius: 999px; }
   .scale-slider { display: grid; gap: 8px; }
+  .profile-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+  .profile-grid button { min-width: 0; min-height: 50px; display: grid; place-items: center; gap: 2px; padding: 7px 5px; border: 1px solid rgba(255,255,255,.08); border-radius: 10px; background: rgba(255,255,255,.035); color: #c7cfdd; cursor: pointer; }
+  .profile-grid button strong { font-size: 11px; }
+  .profile-grid button small { color: #7f8a9d; font-size: 9px; }
+  .profile-grid button.active { border-color: rgba(0,229,255,.36); background: rgba(0,229,255,.11); color: #e6fdff; }
+  .profile-grid button.active small { color: #8cefff; }
+  .custom-profile { color: #f6b26b; font-size: 10px; }
   .scale-slider input { width: 100%; margin: 0; accent-color: #00e5ff; }
   .scale-slider-labels { display: flex; justify-content: space-between; gap: 10px; color: #94a3b8; font-size: 11px; font-weight: 700; }
   .settings-link-btn { color: #7cf1ff; font-size: 12px; font-weight: 700; text-decoration: none; }

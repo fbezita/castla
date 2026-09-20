@@ -310,6 +310,7 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     private var onAppLaunchListener: ((String, String?, String, Boolean, Int) -> Unit)? = null
     private var onDisplayDensityListener: ((Float) -> Unit)? = null
     private var onQualityReportListener: ((Int, Double, Int) -> Unit)? = null
+    private var onStreamProfileListener: ((String) -> Boolean)? = null
     private var onBubbleClosedListener: (() -> Unit)? = null
 
     // Track active connection status
@@ -411,6 +412,10 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
         onQualityReportListener = listener
     }
 
+    fun setStreamProfileListener(listener: (String) -> Boolean) {
+        onStreamProfileListener = listener
+    }
+
     fun setBubbleClosedListener(listener: () -> Unit) {
         onBubbleClosedListener = listener
     }
@@ -461,32 +466,54 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     }
 
     fun registerControlSocket(socket: ControlSocket): Int {
-        val staleSockets = mutableListOf<ControlSocket>()
         val sessionId: Int
         val epoch: Int
+        val accepted: Boolean
+        var displacedSocket: ControlSocket? = null
         synchronized(controlSocketLock) {
-            sessionId = activeControlSessionId.incrementAndGet()
             epoch = browserConnectionEpoch.incrementAndGet()
-            socket.attachSession(sessionId)
             controlSockets.remove(socket)
             controlSockets.add(socket)
-            staleSockets += controlSockets.filter { it !== socket }
-            staleSockets.forEach { stale ->
-                stale.markInactive("superseded_by_session_$sessionId")
+            accepted = ControlConnectionPolicy.newConnectionTakesControl(
+                hasActiveConnection = activeControlSocket != null,
+                takeoverRequested = socket.takeoverRequested,
+            )
+            if (accepted) {
+                displacedSocket = activeControlSocket?.takeIf { it !== socket }
+                displacedSocket?.markInactive("explicit_control_takeover")
+                displacedSocket?.let(controlSockets::remove)
+                sessionId = activeControlSessionId.incrementAndGet()
+                socket.attachSession(sessionId)
+                activeControlSocket = socket
+            } else {
+                sessionId = 0
+                socket.attachSession(sessionId)
+                socket.markInactive("active_control_connection_exists")
             }
-            controlSockets.retainAll(setOf(socket))
-            activeControlSocket = socket
         }
-        staleSockets.forEach { stale ->
+        displacedSocket?.let { displaced ->
             try {
-                stale.close(
+                displaced.close(
                     NanoWSD.WebSocketFrame.CloseCode.NormalClosure,
-                    "Superseded by control session $sessionId",
-                    false
+                    "Control transferred to another browser",
+                    false,
                 )
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to close stale control socket ${stale.debugId}", e)
+                Log.w(TAG, "Failed to close displaced control socket ${displaced.debugId}", e)
             }
+        }
+        if (!accepted) {
+            try {
+                socket.send(JSONObject().apply {
+                    put("type", "controlBusy")
+                    put("reason", "another_browser_controls_castla")
+                }.toString())
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to reject additional control socket ${socket.debugId}", e)
+                unregisterControlSocket(socket)
+            }
+            Log.i(TAG, "Additional control client rejected while another browser owns control")
+            return sessionId
         }
         Log.i(
             TAG,
@@ -496,11 +523,16 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
 
         // Send serverInit greeting with unique instanceId. WebSocket.send() is
         // always dispatched off the main thread.
+        val savedSettings = com.castla.mirror.ui.StreamSettings.load(context)
         val initMsg = JSONObject().apply {
             put("type", "serverInit")
             put("instanceId", instanceId)
             put("controlSessionId", sessionId)
-            put("verboseDiagnosticsEnabled", com.castla.mirror.ui.StreamSettings.load(context).verboseDiagnosticsEnabled)
+            put("verboseDiagnosticsEnabled", savedSettings.verboseDiagnosticsEnabled)
+            put(
+                "streamProfile",
+                com.castla.mirror.policy.StreamProfilePolicy.detect(savedSettings).name.lowercase(),
+            )
             // Announce handshake capability details to establish E2E ACK validation mode
             put("protocolVersion", "1.1.0")
             put("supportsAckFeatures", true)
@@ -776,7 +808,10 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
             if (alreadyAccepted) {
                 return true
             }
-            if (activeSocket == null) {
+            val action = ControlConnectionPolicy.inactiveMessageAction(
+                hasActiveConnection = activeSocket != null,
+            )
+            if (action == InactiveControlMessageAction.PROMOTE && controlSockets.contains(socket)) {
                 val adoptedSessionId = activeControlSessionId.incrementAndGet()
                 socket.attachSession(adoptedSessionId)
                 controlSockets.remove(socket)
@@ -1035,6 +1070,9 @@ class MirrorServer(private val context: Context, hostname: String? = null) : Nan
     fun onQualityReport(droppedFrames: Int, avgDelayMs: Double, backlogDrops: Int) {
         onQualityReportListener?.invoke(droppedFrames, avgDelayMs, backlogDrops)
     }
+
+    fun onStreamProfileRequest(profile: String): Boolean =
+        onStreamProfileListener?.invoke(profile) ?: false
 
     fun onBubbleClosed() {
         onBubbleClosedListener?.invoke()

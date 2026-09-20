@@ -86,19 +86,27 @@ fun Modifier.glassCard() = this
     .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(24.dp))
 
 @Composable
-fun ModernOptionChip(text: String, selected: Boolean, onClick: () -> Unit, enabled: Boolean = true) {
+fun ModernOptionChip(
+    text: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+) {
     Box(
-        modifier = Modifier
+        modifier = modifier
             .clip(RoundedCornerShape(16.dp))
             .background(if (selected) Color.White else Color.White.copy(alpha = 0.05f))
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 12.dp)
+            .padding(horizontal = 12.dp, vertical = 12.dp),
+        contentAlignment = Alignment.Center,
     ) {
         Text(
             text = text,
             color = if (selected) Color.Black else Color.White.copy(alpha = if (enabled) 1f else 0.4f),
             fontWeight = FontWeight.Bold,
-            fontSize = 14.sp
+            fontSize = 14.sp,
+            maxLines = 1,
         )
     }
 }
@@ -120,6 +128,7 @@ fun SettingsScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .safeDrawingPadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 24.dp, vertical = 48.dp)
         ) {
@@ -203,18 +212,19 @@ fun SettingsScreen(
 
             // Resolution
             SettingSection(title = stringResource(R.string.settings_max_resolution)) {
-                FlowRow(
+                Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     StreamSettings.Resolution.entries.forEach { res ->
                         val localizedLabel = when (res) {
                             StreamSettings.Resolution.AUTO -> stringResource(R.string.settings_res_auto)
-                            StreamSettings.Resolution.RES_720 -> stringResource(R.string.settings_res_720)
-                            StreamSettings.Resolution.RES_1080 -> stringResource(R.string.settings_res_1080)
+                            StreamSettings.Resolution.RES_720 -> "720p"
+                            StreamSettings.Resolution.RES_1080 -> "1080p"
                         }
                         ModernOptionChip(
+                            modifier = Modifier.weight(1f),
                             text = localizedLabel,
                             selected = settings.maxResolution == res,
                             onClick = {

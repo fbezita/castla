@@ -25,6 +25,7 @@ export const TRANSLATIONS = {
     placement: "화면 배치",
 
     // Tabs
+    tab_session: "현재 세션",
     tab_autorun: "자동 실행",
     tab_starred: "즐겨찾기",
     tab_recent: "최근 사용",
@@ -119,6 +120,7 @@ export const TRANSLATIONS = {
     placement: "Placement",
 
     // Tabs
+    tab_session: "Session",
     tab_autorun: "Auto-run",
     tab_starred: "Starred",
     tab_recent: "Recent",

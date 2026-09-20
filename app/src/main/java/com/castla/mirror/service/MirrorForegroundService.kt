@@ -1369,6 +1369,20 @@ class MirrorForegroundService : Service() {
                         }
                     }
                 }
+                server.setStreamProfileListener { wireProfile ->
+                    val profile = runCatching {
+                        com.castla.mirror.policy.StreamProfile.valueOf(wireProfile.uppercase())
+                    }.getOrNull()
+                    if (profile == null || profile == com.castla.mirror.policy.StreamProfile.CUSTOM) {
+                        false
+                    } else {
+                        val current = com.castla.mirror.ui.StreamSettings.load(this@MirrorForegroundService)
+                        val updated = com.castla.mirror.policy.StreamProfilePolicy.apply(profile, current)
+                        com.castla.mirror.ui.StreamSettings.save(this@MirrorForegroundService, updated)
+                        Log.i(TAG, "Saved browser stream profile=$profile for next mirroring session")
+                        true
+                    }
+                }
                 server.setBrowserConnectionListener { connected ->
                     if (connected) {
                         cancelPendingBrowserDisconnect("browser_reconnected")
