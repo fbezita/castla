@@ -52,6 +52,7 @@ import com.castla.mirror.network.NetworkMonitor
 import com.castla.mirror.network.NetworkState
 import com.castla.mirror.network.CastlaDeviceId
 import com.castla.mirror.network.RelayRetryPolicy
+import com.castla.mirror.automation.RoutineAutomationPolicy
 import com.castla.mirror.notifications.CastlaNotificationListenerService
 import com.castla.mirror.notifications.NotificationAccessSettingsHelper
 import com.castla.mirror.service.HotspotClientDetector
@@ -118,6 +119,7 @@ class MainActivity : AppCompatActivity() {
     private var bindRequested = false
     private var isCleanupInProgress by mutableStateOf(false)
     private var pendingStartAfterCleanup = false
+    private var pendingAutomationStart = false
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -281,6 +283,9 @@ class MainActivity : AppCompatActivity() {
                         Log.i(TAG, "Cleanup finished — continuing queued mirroring start")
                         beginMirroringStartFlow("cleanup_completed")
                     }
+                    if (wasCleanupInProgress && !cleanupInProgress) {
+                        maybeStartFromAutomation()
+                    }
                 }
             }
         }
@@ -296,6 +301,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 if (previous != SetupUiState.Ready && state == SetupUiState.Ready) {
                     requestBatteryOptimizationExemption()
+                }
+                if (state == SetupUiState.Ready) {
+                    maybeStartFromAutomation()
                 }
             }
         }
@@ -527,28 +535,81 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        if (intent?.getBooleanExtra("start_mirroring", false) == true && !isStreaming) {
-            Log.i(TAG, "Start mirroring triggered from widget (cold launch)")
-            onStartMirroring()
-        }
-        
         handleNewIntent(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         handleNewIntent(intent)
     }
     
     private fun handleNewIntent(intent: Intent?) {
         if (intent == null) return
+
+        if (RoutineAutomationPolicy.isServerStopAction(intent.action)) {
+            intent.action = Intent.ACTION_MAIN
+            requestStopFromAutomation()
+            return
+        }
         
-        if (intent.getBooleanExtra("start_mirroring", false) && !isStreaming) {
-            Log.i(TAG, "Start mirroring triggered from widget")
-            onStartMirroring()
+        val startRequested =
+            RoutineAutomationPolicy.isServerStartAction(intent.action) ||
+                intent.getBooleanExtra("start_mirroring", false)
+        if (startRequested) {
+            pendingAutomationStart = true
+            intent.action = Intent.ACTION_MAIN
+            intent.removeExtra("start_mirroring")
+            Log.i(TAG, "Server start requested from an explicit automation entry point")
+            maybeStartFromAutomation()
         }
         if (intent.getBooleanExtra("open_settings", false)) {
             showSettings = true
+        }
+    }
+
+    private fun requestStopFromAutomation() {
+        pendingAutomationStart = false
+        pendingStartAfterCleanup = false
+        Log.i(TAG, "Server stop requested from an explicit automation entry point")
+
+        if (MirrorForegroundService.isServiceRunning) {
+            startService(
+                Intent(this, MirrorForegroundService::class.java).apply {
+                    action = MirrorForegroundService.ACTION_STOP
+                },
+            )
+        }
+        finishAndRemoveTask()
+    }
+
+    private fun maybeStartFromAutomation() {
+        if (!pendingAutomationStart) return
+
+        if (isCleanupInProgress || setupUiState != SetupUiState.Ready) {
+            Log.i(
+                TAG,
+                "Automation start deferred: setup=$setupUiState cleanup=$isCleanupInProgress",
+            )
+            return
+        }
+
+        if (MirrorForegroundService.isServiceRunning || isStreaming || isPreparing) {
+            pendingAutomationStart = false
+            Log.i(TAG, "Automation start ignored because mirroring is already active or starting")
+            return
+        }
+
+        if (
+            RoutineAutomationPolicy.canStartNow(
+                startRequested = pendingAutomationStart,
+                setupReady = true,
+                serviceRunning = false,
+                startInProgress = false,
+            )
+        ) {
+            pendingAutomationStart = false
+            onStartMirroring()
         }
     }
     

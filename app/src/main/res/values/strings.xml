@@ -3,6 +3,10 @@
 <resources xmlns:tools="http://schemas.android.com/tools"
     tools:ignore="MissingTranslation">
     <string name="app_name">Castla</string>
+    <string name="shortcut_start_server_short">Start server</string>
+    <string name="shortcut_start_server_long">Start Castla mirroring server</string>
+    <string name="shortcut_stop_server_short">Stop server</string>
+    <string name="shortcut_stop_server_long">Stop Castla mirroring server</string>
     <string name="widget_description">Castla mirroring control and Shizuku status</string>
     <string name="tesla_detect_channel">Tesla Auto-Detect</string>
     <string name="tesla_detected_title">Tesla detected</string>

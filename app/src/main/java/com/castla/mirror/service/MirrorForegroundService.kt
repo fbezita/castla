@@ -601,6 +601,12 @@ class MirrorForegroundService : Service() {
         super.onDestroy()
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        Log.i(TAG, "onTaskRemoved() - App task removed; requesting graceful mirroring shutdown")
+        requestStopAsync("app_task_removed")
+        super.onTaskRemoved(rootIntent)
+    }
+
     private var lastBitrateChangeMs = 0L
 
     private fun observeAppLaunchRequests() {

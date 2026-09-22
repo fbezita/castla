@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Castla</string>
+    <string name="shortcut_start_server_short">서버 시작</string>
+    <string name="shortcut_start_server_long">Castla 미러링 서버 시작</string>
+    <string name="shortcut_stop_server_short">서버 종료</string>
+    <string name="shortcut_stop_server_long">Castla 미러링 서버 종료</string>
     <string name="widget_description">Castla 미러링 제어 및 Shizuku 상태</string>
     <string name="tesla_detect_channel">테슬라 자동 감지</string>
     <string name="tesla_detected_title">테슬라 감지됨</string>

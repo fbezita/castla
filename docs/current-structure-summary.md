@@ -1,6 +1,6 @@
 # Castla 현재 구조 요약
 
-최종 갱신: 2026-08-11
+최종 갱신: 2026-09-22
 
 이 문서는 다음 리팩터링 작업을 위한 인수인계 요약입니다. 현재 실제로 동작하는 코드 경로, 로그로 재현된 장애 패턴, 이미 적용한 완화책, 앞으로 필요한 구조 변경을 중심으로 정리합니다.
 
@@ -67,6 +67,14 @@ Frontend:
 사용되지 않던 `app/src/main/java/com/castla/mirror/compositor/` 실험 구현은 제거했습니다. 실제 오케스트레이션 경로는 `service/MirroringPipeline`이며, 운영 중인 `DisplayTier`도 같은 `service` 경계에 위치합니다.
 
 Shizuku는 선택 기능이 아니라 필수 런타임입니다. 앱 UI와 포그라운드 서비스는 모두 `SetupCoordinator`의 설치·실행·권한·privileged service 연결 상태를 통과해야 미러링을 시작합니다.
+
+### 삼성 모드 및 루틴 자동화 진입점
+
+- `CastlaApp`은 Android 동적 앱 바로가기 `서버 시작`과 `서버 종료`를 등록합니다. 별도 `MAIN/LAUNCHER` Activity를 추가하지 않으므로 설치 앱과 앱 서랍 아이콘은 기존처럼 하나입니다.
+- 두 바로가기는 `MainActivity`에 각각 `RoutineAutomationPolicy.ACTION_START_SERVER`와 `ACTION_STOP_SERVER`를 전달합니다. 일반 런처 실행은 `Intent.ACTION_MAIN`이므로 서버를 자동 시작하지 않습니다.
+- 시작 요청은 Shizuku 설정이 `Ready`가 될 때까지 보류합니다. 실행 또는 준비 중인 서버에는 중복 시작 요청을 적용하지 않습니다.
+- 종료 요청은 `MirrorForegroundService.ACTION_STOP`으로 기존 `requestStopAsync()` 정리 경로를 실행한 뒤 Castla 태스크를 닫습니다.
+- 삼성 루틴의 `앱 종료`처럼 태스크가 직접 제거되는 경우에도 `MirrorForegroundService.onTaskRemoved()`가 같은 정상 종료 경로를 요청합니다.
 
 ## 분리된 런타임 책임 경계
 

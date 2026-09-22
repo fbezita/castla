@@ -2,6 +2,17 @@
 
 본 문서는 `MirrorForegroundService`의 클래스 구조, 핵심 컴포넌트 간의 상호작용 흐름, 그리고 다중 가상 디스플레이(VD)가 어떻게 상호 간섭 없이 완전하게 대칭적이고 독립적으로 동작하는지를 설계 관점에서 상세히 설명합니다.
 
+## 자동화 시작·종료 수명 주기
+
+Castla는 앱 아이콘을 추가하지 않고 Android 동적 앱 바로가기 두 개를 제공합니다.
+
+1. `서버 시작`은 전용 action으로 `MainActivity`를 실행합니다.
+2. `MainActivity`는 Shizuku 설정 완료를 기다린 뒤 저장된 스트림 설정으로 서비스를 시작합니다. 일반 앱 아이콘의 `ACTION_MAIN` 실행은 자동 시작하지 않습니다.
+3. `서버 종료`는 서비스에 `ACTION_STOP`을 전달합니다. 서비스는 `requestStopAsync()`와 `performCleanup()`을 거쳐 서버, 인코더, 오디오, VirtualDisplay 및 입력 상태를 정리합니다.
+4. 외부 자동화가 Castla 태스크를 직접 제거하면 `onTaskRemoved()`가 동일한 정상 종료 경로를 요청합니다.
+
+시작과 종료 action 판별 및 중복 시작 차단 조건은 순수 정책 객체 `RoutineAutomationPolicy`에 둡니다.
+
 ---
 
 ## 📌 1. 전체 시스템 아키텍처 (Mermaid Diagram)
