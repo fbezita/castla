@@ -79,6 +79,18 @@ fun gitCommitCount(): Int = try {
     }
 } catch (_: Throwable) { 0 }
 
+fun gitLatestFrontendCommit(): String = try {
+    val proc = ProcessBuilder("git", "log", "-1", "--format=%H", "--", "frontend")
+        .directory(rootProject.projectDir)
+        .redirectErrorStream(true)
+        .start()
+    if (proc.waitFor(2, TimeUnit.SECONDS)) {
+        proc.inputStream.bufferedReader().readText().trim().ifEmpty { "unknown" }
+    } else {
+        proc.destroyForcibly(); "unknown"
+    }
+} catch (_: Throwable) { "unknown" }
+
 val buildTimestamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ").format(Date())
 
 android {
@@ -234,6 +246,27 @@ dependencies {
 val frontendDistDir = rootProject.layout.projectDirectory.dir("frontend/dist")
 val frontendDir = rootProject.layout.projectDirectory.dir("frontend")
 val embeddedWebDir = layout.projectDirectory.dir("src/main/assets/web")
+val frontendDependencyFiles = files(
+    frontendDir.file("package.json"),
+    frontendDir.file("pnpm-lock.yaml"),
+    frontendDir.file("pnpm-workspace.yaml"),
+)
+val frontendSourceFiles = files(
+    frontendDir.dir("src"),
+    frontendDir.dir("public"),
+    frontendDir.file("index.html"),
+    frontendDir.file("package.json"),
+    frontendDir.file("pnpm-lock.yaml"),
+    frontendDir.file("pnpm-workspace.yaml"),
+    frontendDir.file("svelte.config.js"),
+    frontendDir.file("tsconfig.json"),
+    frontendDir.file("tsconfig.node.json"),
+    frontendDir.file("vite.config.ts"),
+)
+val frontendBuildId = providers.environmentVariable("CASTLA_BUILD_TIMESTAMP")
+    .map { it.trim() }
+    .filter { it.isNotEmpty() }
+    .orElse(providers.provider { gitLatestFrontendCommit() })
 
 fun pnpmCommand(vararg args: String): List<String> {
     return if (org.gradle.internal.os.OperatingSystem.current().isWindows) {
@@ -245,6 +278,11 @@ fun pnpmCommand(vararg args: String): List<String> {
 
 tasks.register<Exec>("pnpmInstallFrontend") {
     onlyIf { frontendDir.asFile.exists() }
+    inputs.files(frontendDependencyFiles)
+        .withPropertyName("frontendDependencyFiles")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    outputs.file(frontendDir.file("node_modules/.modules.yaml"))
+        .withPropertyName("pnpmModulesState")
     workingDir = frontendDir.asFile
     commandLine(pnpmCommand("install", "--frozen-lockfile"))
 }
@@ -252,6 +290,12 @@ tasks.register<Exec>("pnpmInstallFrontend") {
 tasks.register<Exec>("buildFrontend") {
     onlyIf { frontendDir.asFile.exists() }
     dependsOn("pnpmInstallFrontend")
+    inputs.files(frontendSourceFiles)
+        .withPropertyName("frontendSources")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.property("frontendBuildId", frontendBuildId)
+    outputs.dir(frontendDistDir)
+        .withPropertyName("frontendDist")
     workingDir = frontendDir.asFile
     commandLine(pnpmCommand("run", "build"))
 }

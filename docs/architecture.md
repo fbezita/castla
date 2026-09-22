@@ -552,3 +552,5 @@ The foreground service remains the Android lifecycle owner, while browser sessio
 VD rebuild execution now uses a bounded 16-entry FIFO channel. Equivalent requests are coalesced by `RebuildRequestPolicy`; when the queue reaches capacity, coroutine producers suspend rather than allowing unbounded memory growth. Completion-bearing and immediate requests are never coalesced.
 
 The embedded frontend no longer injects the current wall-clock time on every build. Identical source builds use the latest commit SHA that changed `frontend/` by default and may receive an explicit `CASTLA_BUILD_TIMESTAMP` from release automation. This keeps generated asset hashes reproducible while retaining optional release diagnostics.
+
+The Gradle frontend tasks declare dependency manifests, source/configuration files, the effective frontend build ID, the pnpm module-state file, and `frontend/dist` as inputs and outputs. When none of those inputs changes, dependency installation, Vite compilation, and asset synchronization are all skipped as `UP-TO-DATE`.
