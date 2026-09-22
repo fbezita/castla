@@ -1,105 +1,35 @@
 <p align="center">
-  <img src="docs/images/app-icon.png" width="120" alt="Castla App Icon">
+  <img src="docs/images/app-icon.png" width="120" alt="Icône Castla">
   <h1 align="center">Castla</h1>
-  <p align="center">
-    <strong>L'alternative ultime à Android Auto pour Tesla. Waze, Google Maps et votre écran directement dans le navigateur Tesla.</strong>
-  </p>
-  <p align="center">
-    <a href="https://github.com/fbezita/castla/releases/latest"><img src="https://img.shields.io/github/v/release/fbezita/castla?style=flat-square" alt="Latest Release"></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
-  </p>
+  <p align="center">Exécutez des applications Android dans le navigateur intégré de Tesla.</p>
   <p align="center">
     <a href="README.md">English</a> · <a href="README.ko.md">한국어</a> · <a href="README.ja.md">日本語</a> · <a href="README.zh-CN.md">中文</a> · <a href="README.de.md">Deutsch</a> · <a href="README.es.md">Español</a>
   </p>
 </p>
 
-<p align="center">
-  <img src="docs/images/main.png" width="700" alt="Castla - Miroir Android sur écran Tesla">
-</p>
-
----
-
-## Qu'est-ce que Castla ?
-
-**Android Auto** vous manque dans votre Tesla ? Vous voulez utiliser **Waze** ou Google Maps sur le grand écran ?
-
-Castla est une solution gratuite et open source qui diffuse l'écran de votre téléphone Android directement sur le navigateur intégré de Tesla via votre réseau WiFi local. Pas de connexion internet, pas de dongles coûteux, pas de serveurs cloud, pas d'abonnement — tout reste rapide, sécurisé et entièrement entre votre téléphone et votre voiture.
-
-**Points forts :**
-
-- **L'expérience Android Auto** — Utilisez vos apps de navigation et musique préférées sur l'écran Tesla
-- **Miroir en temps réel** — Encodage H.264 matériel + streaming WebSocket pour une latence ultra-faible
-- **Contrôle tactile complet** — Touchez, glissez et interagissez directement depuis l'écran Tesla (via Shizuku)
-- **Streaming audio** — Audio de l'appareil directement sur les haut-parleurs Tesla (Android 10+)
-- **100% local et privé** — Toutes les données restent sur votre WiFi/hotspot
-- **Entièrement gratuit** — Sans pub, sans paywall. Open source sous Apache-2.0
-
-## Fonctionnalités
-
-| Fonctionnalité | Détails |
-|----------------|---------|
-| **Navigation grand écran** | **Waze**, Google Maps et toute app jusqu'à 1080p @ 60fps |
-| **Saisie tactile** | Injection tactile complète via Shizuku. Contrôlez votre téléphone depuis l'écran de la voiture |
-| **Vue partagée** | Multitâche en double panneau. Waze à gauche, YouTube à droite ! |
-| **Écran virtuel** | Exécutez des apps indépendamment sur Tesla sans garder l'écran du téléphone allumé (Prend en charge le mirroring écran éteint sur Samsung One UI via la vérification de l'état de l'écran) |
-| **Audio** | Capture audio système (Android 10+, expérimental) |
-| **Auto-détection Tesla** | BLE + détection des clients hotspot pour une connexion automatique |
-| **Auto Hotspot** | Activer/désactiver le hotspot automatiquement avec le miroir |
-| **Navigateur OTT** | Navigateur intégré pour le contenu DRM (YouTube, Netflix, etc.) |
-| **Protection thermique** | Réduction automatique de la qualité en cas de surchauffe |
-| **9 langues** | EN, KO, DE, ES, FR, JA, NL, NO, ZH |
+Castla utilise Shizuku pour créer des écrans virtuels indépendants sur un téléphone Android et les diffuser vers le navigateur Tesla. Il prend en charge le tactile, les dispositions simple, partagée et popup, l'audio, les notifications et le contrôle facultatif du point d'accès.
 
 ## Prérequis
 
-- Android 8.0+ (API 26)
-- [Shizuku](https://shizuku.rikka.app/) pour le contrôle tactile et les fonctions avancées
-- Véhicule Tesla avec navigateur web
-- Téléphone et Tesla sur le même réseau WiFi (ou hotspot du téléphone)
+- Android 8.0 ou version ultérieure
+- [Shizuku](https://shizuku.rikka.app/) en cours d'exécution et autorisé pour Castla
+- Tesla avec navigateur intégré
+- Téléphone et véhicule connectés au même Wi-Fi ou au point d'accès du téléphone
 
-## Installation
+## Installation et utilisation
 
-1. Allez sur [Releases](https://github.com/fbezita/castla/releases/latest)
-2. Téléchargez le dernier fichier `.apk`
-3. Installez sur votre appareil Android
+1. Téléchargez et installez l'APK depuis [Releases](https://github.com/fbezita/castla/releases/latest).
+2. Démarrez Shizuku avec le débogage sans fil et autorisez Castla.
+3. Connectez le téléphone et la Tesla au même réseau.
+4. Démarrez le serveur de mirroring dans Castla.
+5. Ouvrez dans le navigateur Tesla l'adresse affichée par Castla.
 
-## Démarrage rapide
+Consultez le [guide Shizuku](shizuku-install-guide.md) et le [guide du navigateur](docs/frontend-user-guide.md) pour plus de détails.
 
-1. **Installer Shizuku** — Ouvrez Castla, appuyez sur « Installer Shizuku »
-2. **Démarrer Shizuku** — Options développeur → Débogage sans fil → Ouvrir Shizuku → « Démarrer via Débogage sans fil »
-3. **Accorder la permission** — Autorisez Castla à utiliser Shizuku
-4. **Connecter** — Assurez-vous que le téléphone et Tesla sont sur le même WiFi
-5. **Démarrer le miroir** — Appuyez sur « Démarrer le Miroir » dans Castla
-6. **Ouvrir dans Tesla** — Entrez l'URL affichée dans le navigateur Tesla
+## Informations du projet
 
-## Contribuer
-
-Les contributions sont les bienvenues ! Consultez le [Guide de Contribution](CONTRIBUTING.md).
-
-## Confidentialité
-
-Castla **ne collecte aucune donnée**. Voir la [Politique de Confidentialité](PRIVACY.md).
-
-
-
-## Construit avec
-
-Castla s'appuie sur d'excellents projets open source :
-
-- [Shizuku](https://shizuku.rikka.app/) — accès aux API privilégiées sans root
-- [NanoHTTPD](https://github.com/NanoHttpd/nanohttpd) — serveur HTTP + WebSocket embarqué
-- [ZXing](https://github.com/zxing/zxing) — génération de codes QR
-- [AndroidX / Jetpack Compose](https://developer.android.com/jetpack) — boîte à outils UI Android moderne
-- [Kotlin Coroutines](https://github.com/Kotlin/kotlinx.coroutines) — pipeline de streaming asynchrone
-
-Certaines techniques du mode privilégié s'inspirent de [scrcpy](https://github.com/Genymobile/scrcpy) (Apache-2.0), en particulier :
-
-- L'allumage/extinction physique du panneau d'affichage via `SurfaceControl` pour le mirroring écran éteint
-- Le motif `fillAppInfo` / `FakeContext` pour usurper `AttributionSource` lors de la capture audio système depuis un service en UID shell
-
-Aucun code source de scrcpy n'est inclus — Castla réimplémente ces approches pour sa propre architecture.
-
-Voir [NOTICE](NOTICE) pour la liste complète des attributions tierces.
-
-## Licence
-
-[Apache License 2.0](LICENSE)
+- [Architecture](docs/architecture.md)
+- [Contribuer](CONTRIBUTING.md)
+- [Confidentialité](PRIVACY.md)
+- [Mentions tierces](NOTICE)
+- [Apache License 2.0](LICENSE)

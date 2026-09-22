@@ -11,10 +11,6 @@
   </p>
 </p>
 
-<p align="center">
-  <img src="docs/images/main.png" width="700" alt="테슬라 화면에서 실행 중인 Castla">
-</p>
-
 Castla는 Shizuku 기반 가상 디스플레이를 안드로이드 폰에 만들고 테슬라 브라우저로 전송합니다. 터치 입력, 싱글·분할·팝업 레이아웃, 오디오 스트리밍, 알림 오버레이 및 선택적 핫스팟 제어를 지원합니다.
 
 ## 요구 사항

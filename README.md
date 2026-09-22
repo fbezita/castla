@@ -11,10 +11,6 @@
   </p>
 </p>
 
-<p align="center">
-  <img src="docs/images/main.png" width="700" alt="Castla mirroring Android apps to a Tesla display">
-</p>
-
 Castla creates Shizuku-backed virtual displays on an Android phone and streams them to Tesla's browser. It supports touch input, single/split/popup layouts, audio streaming, notification overlays, and optional hotspot control.
 
 ## Requirements

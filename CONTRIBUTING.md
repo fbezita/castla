@@ -1,59 +1,54 @@
-# Contributing to Castla Mirror
+# Contributing to Castla
 
-Thank you for your interest in contributing to Castla Mirror! This guide will help you get started.
+## Before opening a change
 
-## Reporting Bugs
+- Use GitHub Issues for reproducible bugs and feature proposals.
+- Include the Android version, device model, Shizuku version, Tesla browser behavior, reproduction steps, and sanitized logs when relevant.
+- Keep unrelated changes in separate pull requests.
 
-Please use [GitHub Issues](../../issues) with the **Bug Report** template. Include:
-- Device model and Android version
-- Shizuku version (if applicable)
-- Tesla model and browser version
-- Steps to reproduce
-- Logs (if available)
+## Development setup
 
-## Suggesting Features
+Requirements:
 
-Use the **Feature Request** issue template. Describe the use case and any alternatives you've considered.
-
-## Development Setup
-
-1. Clone the repository
-2. Open in Android Studio (Hedgehog or newer)
-3. Sync Gradle and build
-4. For full testing, install [Shizuku](https://shizuku.rikka.app/) on your device
+- Android Studio with the Android SDK used by the project
+- JDK 17
+- Node.js and pnpm for the Svelte frontend
+- An Android device running Shizuku for end-to-end testing
 
 ```bash
-git clone https://github.com/user/castla-mirror.git
-cd castla-mirror
-./gradlew assembleRelease
+git clone https://github.com/fbezita/castla.git
+cd castla
+pnpm --dir frontend install --frozen-lockfile
+./gradlew assembleDebug
 ```
 
-## Pull Request Process
+Gradle builds the frontend and copies `frontend/dist` into the APK. When frontend inputs have not changed, those tasks are skipped as `UP-TO-DATE`.
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/my-feature`)
-3. Commit your changes with clear messages
-4. Push and open a Pull Request against `master`
-5. Ensure the build passes
+## Tests
 
-## Code Style
+Write tests before implementation when adding policy or state-transition logic. Put testable decisions in pure Kotlin or TypeScript modules instead of Android components or Svelte views.
 
-- Follow standard Kotlin conventions
-- Use Jetpack Compose for UI components
-- Keep functions small and focused
-- Write meaningful commit messages
+```bash
+./gradlew :app:testDebugUnitTest
+pnpm --dir frontend test
+pnpm --dir frontend run check
+```
 
-## Adding Translations
+For display, touch, audio, screen-off, or Shizuku changes, also verify the behavior on a physical device.
 
-Castla currently supports 9 languages. To add a new language:
+## Pull requests
 
-1. Copy `app/src/main/res/values/strings.xml`
-2. Create a new folder `app/src/main/res/values-xx/` (where `xx` is the language code)
-3. Translate all strings in the copied file
-4. Submit a Pull Request
+1. Create a focused branch.
+2. Update tests and current documentation with the code.
+3. Run the relevant Android and frontend checks.
+4. Open the pull request against `master` and describe user-visible behavior and manual verification.
 
-Existing translations: en, ko, de, es, fr, ja, nl, no, zh-CN
+The repository requires one release label: `major`, `minor`, `patch`, or `chore`.
+
+## Translations
+
+Android strings are stored in `app/src/main/res/values*`. Frontend strings are in `frontend/src/lib/i18n.ts`. Update both surfaces when a user-facing term exists in both.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the Apache License 2.0.
+Contributions are licensed under the [Apache License 2.0](LICENSE).

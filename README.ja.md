@@ -1,105 +1,35 @@
 <p align="center">
-  <img src="docs/images/app-icon.png" width="120" alt="Castla App Icon">
+  <img src="docs/images/app-icon.png" width="120" alt="Castlaアプリアイコン">
   <h1 align="center">Castla</h1>
-  <p align="center">
-    <strong>Tesla向け究極のAndroid Auto代替アプリ。Waze、Googleマップ、Yahoo!カーナビをテスラのブラウザで直接表示。</strong>
-  </p>
-  <p align="center">
-    <a href="https://github.com/fbezita/castla/releases/latest"><img src="https://img.shields.io/github/v/release/fbezita/castla?style=flat-square" alt="Latest Release"></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
-  </p>
+  <p align="center">AndroidアプリをTeslaの内蔵ブラウザで実行します。</p>
   <p align="center">
     <a href="README.md">English</a> · <a href="README.ko.md">한국어</a> · <a href="README.zh-CN.md">中文</a> · <a href="README.de.md">Deutsch</a> · <a href="README.es.md">Español</a> · <a href="README.fr.md">Français</a>
   </p>
 </p>
 
-<p align="center">
-  <img src="docs/images/main.png" width="700" alt="Castla - AndroidをTeslaにミラーリング">
-</p>
+Castlaは、Shizukuを使ってAndroidスマートフォン上に独立した仮想ディスプレイを作成し、Teslaブラウザへストリーミングします。タッチ操作、単一・分割・ポップアップ表示、音声ストリーミング、通知オーバーレイ、オプションのホットスポット制御に対応します。
 
----
+## 必要条件
 
-## Castlaとは？
+- Android 8.0以降
+- 起動中で、Castlaへの権限が許可された[Shizuku](https://shizuku.rikka.app/)
+- 内蔵ブラウザを搭載したTesla
+- 同じWi-Fiまたはスマートフォンのホットスポットに接続されたスマートフォンと車両
 
-テスラに**Android Auto**がなくて困っていませんか？**Waze**やGoogleマップ、Yahoo!カーナビを大画面で使いたくありませんか？
+## インストールと使用
 
-Castlaは、ローカルWiFiネットワーク経由でAndroidスマートフォンの画面をテスラの内蔵ブラウザに直接ストリーミングする無料のオープンソースソリューションです。インターネット接続、高価なドングル、クラウドサーバー、サブスクリプション不要 — すべてが高速、安全、完全にスマートフォンと車両の間だけで完結します。
+1. [Releases](https://github.com/fbezita/castla/releases/latest)からAPKをインストールします。
+2. ワイヤレスデバッグでShizukuを起動し、Castlaへのアクセスを許可します。
+3. スマートフォンとTeslaを同じネットワークに接続します。
+4. Castlaでミラーリングサーバーを開始します。
+5. Castlaに表示されたアドレスをTeslaブラウザで開きます。
 
-**主な特徴：**
+詳しくは[Shizuku設定ガイド](shizuku-install-guide.md)と[ブラウザ使用ガイド](docs/frontend-user-guide.md)を参照してください。
 
-- **Android Auto体験** — お気に入りのナビや音楽アプリをテスラ画面で使用
-- **リアルタイムミラーリング** — H.264ハードウェアエンコード + WebSocketストリーミングで超低遅延
-- **フルタッチコントロール** — テスラ画面から直接タップ、スワイプ、操作（Shizuku使用）
-- **オーディオストリーミング** — デバイスオーディオをテスラスピーカーに直接送信（Android 10+）
-- **100%ローカル＆プライベート** — すべてのデータはWiFi/ホットスポット内のみ
-- **完全無料** — 広告なし、課金なし。Apache-2.0オープンソース
+## プロジェクト情報
 
-## 機能
-
-| 機能 | 詳細 |
-|------|------|
-| **大画面ナビゲーション** | **Waze**、Googleマップなど最大1080p @ 60fpsでスムーズに実行 |
-| **タッチ入力** | Shizukuによる完全なタッチインジェクション。車の画面からスマホを操作 |
-| **分割表示** | デュアルパネルマルチタスキング。左にWaze、右にYouTube！ |
-| **仮想ディスプレイ** | スマホ画面をオンにしなくてもテスラで独立してアプリ実行（Display state検証に基づくSamsung One UI画面オフミラーリングのサポート） |
-| **オーディオ** | システムオーディオキャプチャ（Android 10+、実験的） |
-| **テスラ自動検出** | BLE + ホットスポットクライアント検出で自動接続 |
-| **自動ホットスポット** | ミラーリング開始/停止時にホットスポットを自動オン/オフ |
-| **OTTブラウザ** | DRMコンテンツ用内蔵ブラウザ（YouTube、Netflixなど） |
-| **発熱保護** | デバイス過熱時にバッテリー保護のため自動画質調整 |
-| **9言語対応** | EN, KO, DE, ES, FR, JA, NL, NO, ZH |
-
-## 要件
-
-- Android 8.0+（API 26）
-- タッチコントロールと高度な機能には[Shizuku](https://shizuku.rikka.app/)が必要
-- ウェブブラウザ搭載のテスラ車両
-- スマートフォンとテスラが同じWiFiネットワーク（またはスマートフォンのホットスポット）
-
-## インストール
-
-1. [Releases](https://github.com/fbezita/castla/releases/latest)にアクセス
-2. 最新の`.apk`ファイルをダウンロード
-3. Androidデバイスにインストール
-
-## クイックスタート
-
-1. **Shizukuをインストール** — Castlaを開き「Shizukuをインストール」をタップ
-2. **Shizukuを起動** — 開発者オプション → ワイヤレスデバッグ → Shizukuを開く → 「ワイヤレスデバッグで開始」
-3. **権限を付与** — Shizukuの使用を許可
-4. **接続** — スマートフォンとテスラを同じWiFiに接続
-5. **ミラーリング開始** — Castlaで「ミラーリング開始」をタップ
-6. **テスラで開く** — 表示されたURLをテスラブラウザに入力
-
-## 貢献
-
-貢献を歓迎します！詳細は[貢献ガイド](CONTRIBUTING.md)をご覧ください。
-
-## プライバシー
-
-Castlaは**一切のデータを収集しません**。詳細は[プライバシーポリシー](PRIVACY.md)をご確認ください。
-
-
-
-## 使用しているオープンソース
-
-Castla は素晴らしいオープンソースプロジェクトの上に成り立っています：
-
-- [Shizuku](https://shizuku.rikka.app/) — root なしで特権 API にアクセス
-- [NanoHTTPD](https://github.com/NanoHttpd/nanohttpd) — 組み込み HTTP + WebSocket サーバー
-- [ZXing](https://github.com/zxing/zxing) — QR コード生成
-- [AndroidX / Jetpack Compose](https://developer.android.com/jetpack) — モダンな Android UI ツールキット
-- [Kotlin Coroutines](https://github.com/Kotlin/kotlinx.coroutines) — 非同期ストリーミングパイプライン
-
-一部の特権モード手法は [scrcpy](https://github.com/Genymobile/scrcpy) (Apache-2.0) のアプローチから着想を得ています。具体的には次のとおりです:
-
-- 画面オフミラーリング時の `SurfaceControl` による物理ディスプレイパネルの電源制御
-- shell UID のサービスからシステム音声をキャプチャする際に `AttributionSource` を偽装するための `fillAppInfo` / `FakeContext` パターン
-
-scrcpy のソースコードは含まれておらず、Castla は自身のアーキテクチャに合わせてこれらの手法を再実装しています。
-
-サードパーティの完全な表記については [NOTICE](NOTICE) を参照してください。
-
-## ライセンス
-
-[Apache License 2.0](LICENSE)
+- [アーキテクチャ](docs/architecture.md)
+- [コントリビューション](CONTRIBUTING.md)
+- [プライバシー](PRIVACY.md)
+- [第三者ライセンス表記](NOTICE)
+- [Apache License 2.0](LICENSE)

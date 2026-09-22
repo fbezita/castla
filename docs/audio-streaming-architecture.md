@@ -1,7 +1,5 @@
 # Castla 오디오 스트리밍 및 라우팅 아키텍처
 
-Last updated: 2026-08-10
-
 이 문서는 현재 구현된 오디오 캡처, 앱별 출력 분리, 코덱 협상, 브라우저 재생 및 A/V 동기화 정책을 설명합니다.
 
 ## 1. 동작 모드
@@ -83,4 +81,3 @@ Bluetooth와 스트리밍 오디오는 지연 특성이 다르므로 값을 별�
 - `Audio route kept without restart`: 앱 전환 후에도 캡처 구성을 유지함
 - `[Audio] First Opus frame decoded`: 브라우저에서 최초 Opus 출력 확인
 - `Requesting PCM fallback`: Opus 디코딩 실패 후 PCM 전환 요청
-
