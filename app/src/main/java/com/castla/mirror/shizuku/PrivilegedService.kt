@@ -694,27 +694,32 @@ class PrivilegedService : IPrivilegedService.Stub() {
     }
 
     private fun findShellAppStreamingAssociationId(output: String): Int? {
-        return output.lineSequence()
-            .firstOrNull { line ->
-                line.contains("mPackageName='com.android.shell'") &&
-                    line.contains("mDeviceProfile='$SHELL_APP_STREAMING_PROFILE'")
-            }
-            ?.let { line -> Regex("mId=(\\d+)").find(line)?.groupValues?.get(1)?.toIntOrNull() }
+        return CompanionAssociationParser.findShellAppStreamingId(output)
     }
 
     private fun ensureShellAppStreamingAssociationId(): Int {
-        val existing = findShellAppStreamingAssociationId(
-            execCommand("cmd companiondevice list 0")
+        val initialOutput = execCommand("cmd companiondevice list 0")
+        val existing = findShellAppStreamingAssociationId(initialOutput)
+        Log.i(
+            TAG,
+            "[VD_ASSOCIATION] phase=lookup parsedId=${existing ?: -1} " +
+                "output=${initialOutput.replace('\n', ';').take(2000)}",
         )
         if (existing != null) return existing
 
-        execCommand(
+        val associateOutput = execCommand(
             "cmd companiondevice associate 0 com.android.shell " +
                 "$SHELL_ASSOCIATION_DEVICE_ADDRESS $SHELL_APP_STREAMING_PROFILE"
         )
-        return findShellAppStreamingAssociationId(
-            execCommand("cmd companiondevice list 0")
-        ) ?: error("Unable to create shell APP_STREAMING association")
+        val refreshedOutput = execCommand("cmd companiondevice list 0")
+        val created = findShellAppStreamingAssociationId(refreshedOutput)
+        Log.i(
+            TAG,
+            "[VD_ASSOCIATION] phase=create parsedId=${created ?: -1} " +
+                "associateOutput=${associateOutput.replace('\n', ';').take(500)} " +
+                "listOutput=${refreshedOutput.replace('\n', ';').take(2000)}",
+        )
+        return created ?: error("Unable to create shell APP_STREAMING association")
     }
 
     private fun closeVirtualDevice(virtualDevice: Any?, displayId: Int) {

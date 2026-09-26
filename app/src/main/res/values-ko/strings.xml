@@ -30,6 +30,10 @@
     <string name="status_ready_to_stream">스트리밍 준비 완료</string>
     <string name="title_open_tesla_browser">테슬라 브라우저 주소</string>
     <string name="desc_tesla_favorite_hint">이 주소를 테슬라 브라우저 즐겨찾기에 한 번 등록해 두세요.</string>
+    <string name="ip_selection_hint">IP를 눌러 다른 주소를 선택할 수 있습니다</string>
+    <string name="ip_selection_title">릴레이 IP 선택</string>
+    <string name="ip_selection_auto">자동 선택 (권장)</string>
+    <string name="ip_selection_close">닫기</string>
     <string name="stream_status_resolution">해상도</string>
     <string name="stream_status_fps">프레임</string>
     <string name="stream_status_audio">오디오</string>

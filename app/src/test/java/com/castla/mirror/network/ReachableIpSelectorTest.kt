@@ -87,6 +87,44 @@ class ReachableIpSelectorTest {
     }
 
     @Test
+    fun `cellular protocol range wins over samsung hotspot private address`() {
+        val selected = ReachableIpSelector.select(
+            listOf(
+                ReachableIpCandidate("rmnet_data2", "192.0.0.4"),
+                ReachableIpCandidate("swlan0", "10.105.54.229"),
+            )
+        )
+
+        assertEquals(ReachableIpCandidate("rmnet_data2", "192.0.0.4"), selected)
+    }
+
+    @Test
+    fun `available manual selection overrides automatic ranking`() {
+        val candidates = listOf(
+            ReachableIpCandidate("rmnet_data2", "192.0.0.4"),
+            ReachableIpCandidate("swlan0", "10.105.54.229"),
+        )
+
+        assertEquals(
+            ReachableIpCandidate("swlan0", "10.105.54.229"),
+            ReachableIpSelector.select(candidates, preferredIp = "10.105.54.229"),
+        )
+    }
+
+    @Test
+    fun `missing manual selection falls back to automatic ranking`() {
+        val candidates = listOf(
+            ReachableIpCandidate("rmnet_data2", "192.0.0.4"),
+            ReachableIpCandidate("swlan0", "10.105.54.229"),
+        )
+
+        assertEquals(
+            ReachableIpCandidate("rmnet_data2", "192.0.0.4"),
+            ReachableIpSelector.select(candidates, preferredIp = "192.0.0.8"),
+        )
+    }
+
+    @Test
     fun `cellular address outside 192 0 0 subnet is rejected`() {
         assertNull(
             ReachableIpSelector.select(listOf(ReachableIpCandidate("rmnet_data1", "192.0.1.2")))

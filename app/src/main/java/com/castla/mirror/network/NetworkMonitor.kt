@@ -14,7 +14,10 @@ import java.net.NetworkInterface
 
 sealed class NetworkState {
     object Disconnected : NetworkState()
-    data class Connected(val ip: String) : NetworkState()
+    data class Connected(
+        val ip: String,
+        val candidates: List<ReachableIpCandidate> = emptyList(),
+    ) : NetworkState()
 }
 
 class NetworkMonitor(private val context: Context) {
@@ -41,13 +44,13 @@ class NetworkMonitor(private val context: Context) {
     }
 
     private fun refreshState(trigger: String) {
-        val ip = getDeviceIp()
-        if (ip == "0.0.0.0") {
+        val snapshot = getDeviceIpSnapshot()
+        if (snapshot.ip == "0.0.0.0") {
             _state.value = NetworkState.Disconnected
             Log.i(TAG, "Network $trigger: no reachable IP")
         } else {
-            _state.value = NetworkState.Connected(ip)
-            Log.i(TAG, "Network $trigger: $ip")
+            _state.value = NetworkState.Connected(snapshot.ip, snapshot.candidates)
+            Log.i(TAG, "Network $trigger: ${snapshot.ip}")
         }
     }
 
@@ -58,10 +61,10 @@ class NetworkMonitor(private val context: Context) {
         connectivityManager.registerNetworkCallback(request, networkCallback)
 
         // Set initial state — also covers hotspot mode where callback may not fire
-        val ip = getDeviceIp()
-        if (ip != "0.0.0.0") {
-            _state.value = NetworkState.Connected(ip)
-            Log.i(TAG, "Initial IP: $ip")
+        val snapshot = getDeviceIpSnapshot()
+        if (snapshot.ip != "0.0.0.0") {
+            _state.value = NetworkState.Connected(snapshot.ip, snapshot.candidates)
+            Log.i(TAG, "Initial IP: ${snapshot.ip}")
         }
     }
 
@@ -71,9 +74,15 @@ class NetworkMonitor(private val context: Context) {
         } catch (_: Exception) {}
     }
 
-    private fun getDeviceIp(): String {
+    private data class IpSnapshot(
+        val ip: String,
+        val candidates: List<ReachableIpCandidate>,
+    )
+
+    private fun getDeviceIpSnapshot(): IpSnapshot {
         try {
-            val allInterfaces = NetworkInterface.getNetworkInterfaces()?.toList() ?: return "0.0.0.0"
+            val allInterfaces = NetworkInterface.getNetworkInterfaces()?.toList()
+                ?: return IpSnapshot("0.0.0.0", emptyList())
 
             // Log ALL interfaces for debugging
             for (iface in allInterfaces) {
@@ -104,17 +113,18 @@ class NetworkMonitor(private val context: Context) {
                 "${candidate.interfaceName}=${candidate.ip}:${ReachableIpSelector.score(candidate) ?: "rejected"}"
             }
             val best = ReachableIpSelector.select(candidates)
+            val selectableCandidates = ReachableIpSelector.rankedCandidates(candidates)
             FileLogger.i(
                 "IP_SELECTION",
                 "candidates=[$summary] selected=${best?.interfaceName ?: "none"}=${best?.ip ?: "0.0.0.0"}",
             )
             if (best != null) {
                 Log.i(TAG, "Selected IP ${best.ip} on ${best.interfaceName}")
-                return best.ip
+                return IpSnapshot(best.ip, selectableCandidates)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to get device IP", e)
         }
-        return "0.0.0.0"
+        return IpSnapshot("0.0.0.0", emptyList())
     }
 }

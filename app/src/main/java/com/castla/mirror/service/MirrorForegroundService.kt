@@ -242,6 +242,9 @@ class MirrorForegroundService : Service() {
     @Volatile private var cleanupCompleted = false
     private val terminalReason = java.util.concurrent.atomic.AtomicReference<TerminalReason?>(null)
     internal var serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val postLaunchCoordinator = NonBlockingPostLaunchCoordinator { work ->
+        serviceScope.launch(Dispatchers.IO) { work() }
+    }
 
     internal var browserConnected = false
     internal var isInitialRebuildTriggered = false
@@ -300,6 +303,7 @@ class MirrorForegroundService : Service() {
     private var audioCodecPreference = com.castla.mirror.policy.AudioCodecPreference.OPUS_FIRST
     private var systemSeparatedAudioPackages: Set<String>? = null
     private val audioStreamGeneration = java.util.concurrent.atomic.AtomicLong(0)
+    private val postLaunchGenerations = ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()
     private var teslaBluetoothVideoLatencyMs = 0
     private var streamedAudioVideoLatencyMs = com.castla.mirror.policy.VideoLatencyPolicy.DEFAULT_STREAMED_AUDIO_LATENCY_MS
     private var bluetoothAudioConnected = false
@@ -685,25 +689,15 @@ class MirrorForegroundService : Service() {
 
                 // 1-2. Reflected the new guideline (isVideoApp) written in the ticket immediately to the pipeline context.
                 targetPipeline.isVideoApp = request.isVideoApp
-                targetPipeline.audioTargetPackage = request.packageName.substringBefore('/')
+                val requestedAudioPackage = request.packageName.substringBefore('/')
+                val requestedAudioUserId = request.userId
+                val panePostLaunchGeneration = postLaunchGenerations.computeIfAbsent(pane) {
+                    java.util.concurrent.atomic.AtomicLong(0)
+                }
+                val launchGeneration = panePostLaunchGeneration.incrementAndGet()
+                targetPipeline.audioTargetPackage = requestedAudioPackage
                 targetPipeline.currentAppUserId = request.userId
-                targetPipeline.currentAppUid = try {
-                    shizukuSetup?.privilegedService?.resolvePackageUidForUser(targetPipeline.audioTargetPackage, request.userId) ?: -1
-                } catch (e: Exception) {
-                    Log.w(TAG, "UID resolve failed package=${targetPipeline.audioTargetPackage} userId=${request.userId}", e)
-                    -1
-                }
-                if (targetPipeline.currentAppUid >= 0) {
-                    audioTargetRegistry.remember(
-                        AppAudioTarget(
-                            targetPipeline.audioTargetPackage,
-                            targetPipeline.currentAppUserId,
-                            targetPipeline.currentAppUid,
-                        )
-                    )
-                }
-                refreshVideoLatencies()
-                refreshAudioCaptureRouting()
+                targetPipeline.currentAppUid = -1
 
                 // 1-3. Calculate the target profile based on the identification info of the app scheduled to start.
                 val newProfile = contentAwareQualityEngine.resolveContentProfile(
@@ -733,23 +727,69 @@ class MirrorForegroundService : Service() {
                     request.className,
                     request.launchMode,
                 )
-                when (routingDecision.kind) {
-                    LaunchRoutingKind.STANDARD_APP -> {
-                        targetPipeline.launchAppFromWebLauncher(
-                            request.packageName,
-                            request.className,
-                            forceDisplayId = request.forceDisplayId
-                        )
-                    }
-                    LaunchRoutingKind.WEB_URL -> {
-                        targetPipeline.launchBrowser(
-                            routingDecision.launchTarget,
-                            sourceAppPackage = routingDecision.sourceAppPackage,
-                            allowFallback = routingDecision.allowEmbeddedFallback,
-                            forceEmbeddedBrowser = routingDecision.forceEmbeddedBrowser,
-                        )
-                    }
-                }
+                postLaunchCoordinator.execute(
+                    launch = {
+                        Log.i(TAG, "[APP_LAUNCH_SEQUENCE] launch_begin package=${request.packageName} pane=$pane")
+                        when (routingDecision.kind) {
+                            LaunchRoutingKind.STANDARD_APP -> {
+                                targetPipeline.launchAppFromWebLauncher(
+                                    request.packageName,
+                                    request.className,
+                                    forceDisplayId = request.forceDisplayId
+                                )
+                            }
+                            LaunchRoutingKind.WEB_URL -> {
+                                targetPipeline.launchBrowser(
+                                    routingDecision.launchTarget,
+                                    sourceAppPackage = routingDecision.sourceAppPackage,
+                                    allowFallback = routingDecision.allowEmbeddedFallback,
+                                    forceEmbeddedBrowser = routingDecision.forceEmbeddedBrowser,
+                                )
+                            }
+                        }
+                        Log.i(TAG, "[APP_LAUNCH_SEQUENCE] launch_end package=${request.packageName} pane=$pane")
+                    },
+                    postLaunch = postLaunch@{
+                        try {
+                            Log.i(TAG, "[APP_LAUNCH_SEQUENCE] post_begin package=${request.packageName} pane=$pane")
+                            val resolvedUid = try {
+                                shizukuSetup?.privilegedService?.resolvePackageUidForUser(
+                                    requestedAudioPackage,
+                                    requestedAudioUserId,
+                                ) ?: -1
+                            } catch (e: Exception) {
+                                Log.w(
+                                    TAG,
+                                    "UID resolve failed package=$requestedAudioPackage userId=$requestedAudioUserId",
+                                    e,
+                                )
+                                -1
+                            }
+                            if (launchGeneration != panePostLaunchGeneration.get()) {
+                                Log.i(
+                                    TAG,
+                                    "[APP_LAUNCH_SEQUENCE] post_stale package=${request.packageName} pane=$pane generation=$launchGeneration",
+                                )
+                                return@postLaunch
+                            }
+                            targetPipeline.currentAppUid = resolvedUid
+                            if (resolvedUid >= 0) {
+                                audioTargetRegistry.remember(
+                                    AppAudioTarget(
+                                        requestedAudioPackage,
+                                        requestedAudioUserId,
+                                        resolvedUid,
+                                    )
+                                )
+                            }
+                            refreshVideoLatencies()
+                            refreshAudioCaptureRouting()
+                            Log.i(TAG, "[APP_LAUNCH_SEQUENCE] post_end package=${request.packageName} pane=$pane")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Post-launch routing refresh failed package=${request.packageName} pane=$pane", e)
+                        }
+                    },
+                )
 
                 // 2-2. Link subsequent autoscale (resolution and FPS tiering) evaluations
                 if (targetPipeline.autoResolution || targetPipeline.autoFps) {

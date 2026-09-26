@@ -15,7 +15,16 @@ object ReachableIpSelector {
         "tun", "tap", "ppp", "wg", "ipsec", "vpn", "tailscale",
     )
 
-    fun select(candidates: List<ReachableIpCandidate>): ReachableIpCandidate? {
+    fun select(
+        candidates: List<ReachableIpCandidate>,
+        preferredIp: String? = null,
+    ): ReachableIpCandidate? {
+        val selectable = rankedCandidates(candidates)
+        return selectable.firstOrNull { it.ip == preferredIp }
+            ?: selectable.firstOrNull()
+    }
+
+    fun rankedCandidates(candidates: List<ReachableIpCandidate>): List<ReachableIpCandidate> {
         return candidates
             .mapNotNull { candidate -> score(candidate)?.let { candidate to it } }
             .sortedWith(
@@ -23,8 +32,8 @@ object ReachableIpSelector {
                     .thenBy { it.first.interfaceName.lowercase() }
                     .thenBy { it.first.ip }
             )
-            .firstOrNull()
-            ?.first
+            .map { it.first }
+            .distinctBy { it.ip }
     }
 
     fun score(candidate: ReachableIpCandidate): Int? {
@@ -39,6 +48,11 @@ object ReachableIpSelector {
 
         return when {
             hotspot && cellularContinuityAddress -> 500
+            // Samsung exposes the hotspot-side network as swlan*. Its RFC1918
+            // address is reachable locally, but 192.0.0.x on the cellular CLAT
+            // interface is the proven Castla relay route and must win when both
+            // appear during tethering transitions.
+            name.startsWith("swlan") && privateAddress -> 90
             hotspot && privateAddress -> 450
             name.startsWith("wlan") && privateAddress -> 300
             (name.startsWith("eth") || name.startsWith("rndis") || name.startsWith("usb")) && privateAddress -> 200

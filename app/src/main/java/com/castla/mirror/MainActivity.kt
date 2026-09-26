@@ -50,6 +50,8 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.castla.mirror.network.NetworkMonitor
 import com.castla.mirror.network.NetworkState
+import com.castla.mirror.network.ReachableIpCandidate
+import com.castla.mirror.network.ReachableIpSelector
 import com.castla.mirror.network.CastlaDeviceId
 import com.castla.mirror.network.RelayRetryPolicy
 import com.castla.mirror.automation.RoutineAutomationPolicy
@@ -81,6 +83,8 @@ class MainActivity : AppCompatActivity() {
         private const val USB_CONFIG_PREFS = "usb_config_advisory"
         private const val KEY_SUPPRESS_USB_CONFIG_WARNING = "suppress_warning"
         private const val CASTLA_DOMAIN = "castla.fbezita.com"
+        private const val IP_SELECTION_PREFS = "ip_selection"
+        private const val KEY_PREFERRED_IP = "preferred_ip"
         // User-facing stable entrypoint. The backend redirects this to the active
         // per-device relay URL: https://c-{deviceId}.castla.fbezita.com:9090
         private const val CASTLA_PUBLIC_URL = "https://castla.fbezita.com"
@@ -91,6 +95,8 @@ class MainActivity : AppCompatActivity() {
     private var serverUrl by mutableStateOf("")
     private var serverAvailability by mutableStateOf(MirrorServerAvailability.IDLE)
     private var currentIp by mutableStateOf("0.0.0.0")
+    private var availableIpCandidates by mutableStateOf<List<ReachableIpCandidate>>(emptyList())
+    private var selectedIpOverride by mutableStateOf<String?>(null)
     private var showSettings by mutableStateOf(false)
     private var streamSettings by mutableStateOf(StreamSettings())
     private var setupUiState by mutableStateOf<SetupUiState>(SetupUiState.NotInstalled)
@@ -192,6 +198,8 @@ class MainActivity : AppCompatActivity() {
         updateManager = UpdateManagerFactory.create()
         updateManager.checkForUpdate(this)
 
+        selectedIpOverride = getSharedPreferences(IP_SELECTION_PREFS, MODE_PRIVATE)
+            .getString(KEY_PREFERRED_IP, null)
         networkMonitor = NetworkMonitor(this)
         networkMonitor.startMonitoring()
         streamSettings = StreamSettings.load(this)
@@ -216,7 +224,11 @@ class MainActivity : AppCompatActivity() {
                 networkMonitor.state.collect { state ->
                     when (state) {
                         is NetworkState.Connected -> {
-                            currentIp = state.ip
+                            availableIpCandidates = state.candidates
+                            currentIp = ReachableIpSelector.select(
+                                state.candidates,
+                                selectedIpOverride,
+                            )?.ip ?: state.ip
                             updateServerUrl()
                             (mirrorService ?: MirrorForegroundService.instance)?.refreshRelayRegistration(
                                 resolveReachableMirrorIp(),
@@ -227,6 +239,7 @@ class MainActivity : AppCompatActivity() {
                         }
                         is NetworkState.Disconnected -> {
                             currentIp = "0.0.0.0"
+                            availableIpCandidates = emptyList()
                             updateServerUrl()
                         }
                     }
@@ -377,6 +390,9 @@ class MainActivity : AppCompatActivity() {
                         serverAvailability = serverAvailability,
                         streamSettings = streamSettings,
                         reachableMirrorIp = resolveReachableMirrorIp(),
+                        availableIpCandidates = availableIpCandidates,
+                        selectedIpOverride = selectedIpOverride,
+                        onIpSelected = { selectReachableMirrorIp(it) },
                         isImeEnabled = isImeEnabled,
                         isImeSelected = isImeSelected,
                         isCastlaImeActive = isCastlaImeActive,
@@ -780,6 +796,29 @@ class MainActivity : AppCompatActivity() {
             hotspotIp != "0.0.0.0" && hotspotIp.isNotEmpty() -> hotspotIp
             else -> "0.0.0.0"
         }
+    }
+
+    private fun selectReachableMirrorIp(preferredIp: String?) {
+        selectedIpOverride = preferredIp
+        getSharedPreferences(IP_SELECTION_PREFS, MODE_PRIVATE).edit().apply {
+            if (preferredIp == null) {
+                remove(KEY_PREFERRED_IP)
+            } else {
+                putString(KEY_PREFERRED_IP, preferredIp)
+            }
+        }.apply()
+
+        currentIp = ReachableIpSelector.select(availableIpCandidates, preferredIp)?.ip
+            ?: "0.0.0.0"
+        updateServerUrl()
+        com.castla.mirror.diagnostics.FileLogger.i(
+            "IP_SELECTION",
+            "manual_selection preferred=${preferredIp ?: "auto"} selected=$currentIp",
+        )
+        (mirrorService ?: MirrorForegroundService.instance)?.refreshRelayRegistration(
+            resolveReachableMirrorIp(),
+            "manual_ip_selection",
+        )
     }
 
     /**
@@ -1225,6 +1264,9 @@ fun CastlaScreen(
     serverAvailability: MirrorServerAvailability = MirrorServerAvailability.IDLE,
     streamSettings: StreamSettings = StreamSettings(),
     reachableMirrorIp: String = "0.0.0.0",
+    availableIpCandidates: List<ReachableIpCandidate> = emptyList(),
+    selectedIpOverride: String? = null,
+    onIpSelected: (String?) -> Unit = {},
     isImeEnabled: Boolean,
     isImeSelected: Boolean,
     isCastlaImeActive: Boolean = false,
@@ -1248,6 +1290,10 @@ fun CastlaScreen(
     onOpenShizukuBatterySettings: () -> Unit = {}
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    var showIpSelectionDialog by remember { mutableStateOf(false) }
+    val activeManualIp = selectedIpOverride?.takeIf { preferred ->
+        availableIpCandidates.any { it.ip == preferred }
+    }
     val serverReady = serverAvailability.isReady
     val serverStatusColor = when {
         isPreparing || serverAvailability.state == MirrorServerAvailabilityState.STARTING -> Color(0xFFFFB300)
@@ -1461,10 +1507,21 @@ fun CastlaScreen(
                         
                         Text(
                             text = "Device ID: $orgDeviceId / Active: c-$mixedDeviceId ($reachableMirrorIp)",
+                            modifier = Modifier.clickable(
+                                enabled = availableIpCandidates.isNotEmpty(),
+                            ) { showIpSelectionDialog = true },
                             style = MaterialTheme.typography.bodySmall,
                             color = Color.White.copy(alpha = 0.5f),
                             textAlign = TextAlign.Center
                         )
+                        if (availableIpCandidates.isNotEmpty()) {
+                            Text(
+                                text = stringResource(id = R.string.ip_selection_hint),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White.copy(alpha = 0.45f),
+                                textAlign = TextAlign.Center,
+                            )
+                        }
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
                             text = stringResource(id = R.string.desc_tesla_favorite_hint),
@@ -1703,6 +1760,65 @@ fun CastlaScreen(
             )
 
         }
+    }
+
+    if (showIpSelectionDialog) {
+        AlertDialog(
+            onDismissRequest = { showIpSelectionDialog = false },
+            title = { Text(stringResource(id = R.string.ip_selection_title)) },
+            text = {
+                Column {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                onIpSelected(null)
+                                showIpSelectionDialog = false
+                            }
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = activeManualIp == null,
+                            onClick = null,
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(stringResource(id = R.string.ip_selection_auto))
+                    }
+                    availableIpCandidates.forEach { candidate ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onIpSelected(candidate.ip)
+                                    showIpSelectionDialog = false
+                                }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(
+                                selected = activeManualIp == candidate.ip,
+                                onClick = null,
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(candidate.ip)
+                                Text(
+                                    text = candidate.interfaceName,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showIpSelectionDialog = false }) {
+                    Text(stringResource(id = R.string.ip_selection_close))
+                }
+            },
+        )
     }
 }
 

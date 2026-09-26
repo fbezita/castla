@@ -35,6 +35,10 @@
     <string name="status_server_starting">Starting server…</string>
     <string name="title_open_tesla_browser">Tesla browser address</string>
     <string name="desc_tesla_favorite_hint">Save this address once in Tesla Browser favorites.</string>
+    <string name="ip_selection_hint">Tap the IP to choose another address</string>
+    <string name="ip_selection_title">Select relay IP</string>
+    <string name="ip_selection_auto">Automatic (recommended)</string>
+    <string name="ip_selection_close">Close</string>
     <string name="stream_status_resolution">Resolution</string>
     <string name="stream_status_fps">Frame rate</string>
     <string name="stream_status_audio">Audio</string>
