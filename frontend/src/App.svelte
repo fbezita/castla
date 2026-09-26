@@ -19,6 +19,7 @@
   import { TouchRouter } from "./touch/TouchRouter";
   import { ImeBridge } from "./ime/ImeBridge";
   import { triggerDump, isLoggingEnabled, setLoggingEnabled } from "./utils/debugLogger";
+  import { resolveEmbeddedUiScale } from "./utils/embeddedUiScale";
   import {
     readOverlayUiScalePreference,
     writeOverlayUiScalePreference,
@@ -49,7 +50,13 @@
   let frontendResetEpoch = 0;
   let runtimeEpoch = 0;
   let showDiagnostics = false;
-  let overlayUiScalePreference: OverlayUiScalePreference = readOverlayUiScalePreference();
+  const defaultOverlayUiScale = resolveEmbeddedUiScale({
+    userAgent: navigator.userAgent,
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+  }).scale;
+  let overlayUiScalePreference: OverlayUiScalePreference =
+    readOverlayUiScalePreference(defaultOverlayUiScale);
   let overlayUiScale = 1;
   const DEFAULT_NOTIFICATION_APPS = DEFAULT_NOTIFICATION_ALLOWED_PACKAGES;
 

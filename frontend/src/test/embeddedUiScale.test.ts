@@ -17,7 +17,7 @@ describe("resolveEmbeddedUiScale", () => {
     });
   });
 
-  it("enlarges UI for Tesla-class automotive browsers on wide displays", () => {
+  it("uses 110% UI for Tesla-class automotive browsers on wide displays", () => {
     expect(
       resolveEmbeddedUiScale({
         userAgent:
@@ -27,11 +27,11 @@ describe("resolveEmbeddedUiScale", () => {
       }),
     ).toEqual({
       isEmbeddedAutomotive: true,
-      scale: 1.25,
+      scale: 1.1,
     });
   });
 
-  it("uses a milder bump for smaller embedded browser panes", () => {
+  it("uses the same 110% default for smaller embedded browser panes", () => {
     expect(
       resolveEmbeddedUiScale({
         userAgent:
@@ -41,7 +41,7 @@ describe("resolveEmbeddedUiScale", () => {
       }),
     ).toEqual({
       isEmbeddedAutomotive: true,
-      scale: 1.15,
+      scale: 1.1,
     });
   });
 });

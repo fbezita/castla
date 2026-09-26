@@ -31,7 +31,8 @@ object LaunchRouting {
         }
 
         val ottTarget = OttCatalog.resolve(trimmedPackage)
-        if (ottTarget != null || launchMode == LaunchMode.EXTERNAL_BROWSER_URL) {
+        val shouldUseOttWebTarget = ottTarget != null && !ottTarget.preferNativeLaunch
+        if (shouldUseOttWebTarget || launchMode == LaunchMode.EXTERNAL_BROWSER_URL) {
             return LaunchRoutingDecision(
                 kind = LaunchRoutingKind.WEB_URL,
                 launchTarget = ottTarget?.webUrl ?: trimmedPackage,

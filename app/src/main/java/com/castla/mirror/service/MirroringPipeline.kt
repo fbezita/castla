@@ -1340,18 +1340,16 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
 
             try {
                 if (forceColdStart && cleanPkg != "HOME") { try { service.execCommand("am force-stop $cleanPkg") } catch (_: Exception) {} }
-                val originalDisplayId = try { host.runBinderSafe { service.getDisplayIdForPackage(cleanPkg) } ?: -1 } catch (_: Exception) { -1 }
                 // Always route to the requested virtual display. A package task on Display 0 must not redirect this launch to the phone.
                 val targetDisplayId = correctedDisplayId
 
                 Log.i(TAG, "[$name Pipeline] Symmetric task processing initialized -> Routing $cleanPkg to Display token: $targetDisplayId freshLaunchPrep=$needsFreshLaunchPreparation previousPkg=$previousPkg lastPrepared=$lastPreparedTargetPackage")
-                FileLogger.i("PIPELINE_DEBUG", "[$name] launchDecision pkg=$cleanPkg freshPrep=$needsFreshLaunchPreparation sameAppGuard=false originalDisplayId=$originalDisplayId correctedDisplayId=$correctedDisplayId targetDisplayId=$targetDisplayId previousPkg=$previousPkg lastPrepared=$lastPreparedTargetPackage forceDisplayId=$forceDisplayId")
 
-                val matchingTaskIds = try { host.runBinderSafe(1000L) { service.getTaskIdsForPackage(cleanPkg).toList() } ?: emptyList() } catch (_: Exception) { emptyList() }
+                val discoveredTaskIds = try { host.runBinderSafe(1000L) { service.getTaskIdsForPackage(cleanPkg).toList() } ?: emptyList() } catch (_: Exception) { emptyList() }
                 val tasklessActiveRelaunch = LaunchRecoveryPolicy.shouldForceFreshPreparationForTasklessRelaunch(
                     targetPkg = cleanPkg,
                     currentAppPkg = currentApp.substringBefore('/'),
-                    matchingTaskCount = matchingTaskIds.size,
+                    matchingTaskCount = discoveredTaskIds.size,
                     forceTaskRealign = forceTaskRealign,
                     encoderActive = isEncoderActive,
                     requiresFreshLaunchPreparation = needsFreshLaunchPreparation,
@@ -1370,12 +1368,45 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
                 } catch (_: Exception) {
                     emptyList()
                 }
+                val targetDisplayTaskIds = try {
+                    host.runBinderSafe(1000L) { service.getTaskIdsOnDisplay(targetDisplayId).toList() } ?: emptyList()
+                } catch (_: Exception) {
+                    emptyList()
+                }
+                val phoneDisplayTaskIds = if (targetDisplayId == 0) {
+                    targetDisplayTaskIds
+                } else {
+                    try {
+                        host.runBinderSafe(1000L) { service.getTaskIdsOnDisplay(0).toList() } ?: emptyList()
+                    } catch (_: Exception) {
+                        emptyList()
+                    }
+                }
+                val taskPlacement = TaskPlacementSelector.select(
+                    packageTaskIds = discoveredTaskIds,
+                    targetDisplayTaskIds = targetDisplayTaskIds,
+                    phoneDisplayTaskIds = phoneDisplayTaskIds,
+                    targetDisplayId = targetDisplayId,
+                )
+                val matchingTaskIds = taskPlacement.taskIds
+                val originalDisplayId = taskPlacement.originalDisplayId
+                val verifiedTargetDisplayPackages = if (originalDisplayId == targetDisplayId) {
+                    targetDisplayPackages
+                } else {
+                    targetDisplayPackages.filterNot {
+                        it == cleanPkg || it.startsWith("$cleanPkg/")
+                    }
+                }
+                FileLogger.i(
+                    "PIPELINE_DEBUG",
+                    "[$name] launchDecision pkg=$cleanPkg freshPrep=$needsFreshLaunchPreparation sameAppGuard=false discoveredTasks=${discoveredTaskIds.size} selectedTask=${matchingTaskIds.firstOrNull() ?: -1} originalDisplayId=$originalDisplayId correctedDisplayId=$correctedDisplayId targetDisplayId=$targetDisplayId previousPkg=$previousPkg lastPrepared=$lastPreparedTargetPackage forceDisplayId=$forceDisplayId"
+                )
                 val taskRoutingResult = TaskRoutingCoordinator().route(
                     TaskRoutingRequest(
                         targetDisplayId = targetDisplayId,
                         originalDisplayId = originalDisplayId,
                         matchingTaskIds = matchingTaskIds,
-                        targetDisplayPackages = targetDisplayPackages,
+                        targetDisplayPackages = verifiedTargetDisplayPackages,
                         packageName = cleanPkg,
                         forceColdStart = forceColdStart,
                         displaySizeMatches = width == alignedW && height == alignedH,
@@ -1414,7 +1445,7 @@ class MirroringPipeline(private val host: MirrorForegroundService, val name: Str
                 }
                 val canReuseWarmTask = launchPlan.taskAction == TaskLaunchAction.MOVE_TASK_TO_FRONT ||
                     taskRoutingResult.borrowedTaskId != null
-                Log.i(TAG, "[$name Pipeline] taskResidency pkg=$cleanPkg matching=${matchingTaskIds.size} originalDisplayId=$originalDisplayId targetDisplayId=$targetDisplayId targetDisplayHasTask=$targetDisplayHasTask targetEntries=${targetDisplayPackages.size} plan=${launchPlan.taskAction} reason=${launchPlan.reason} resize=${launchPlan.resizeRequired} encoderReconnect=${launchPlan.encoderReconnectRequired}")
+                Log.i(TAG, "[$name Pipeline] taskResidency pkg=$cleanPkg discovered=${discoveredTaskIds.size} selected=${matchingTaskIds.firstOrNull() ?: -1} originalDisplayId=$originalDisplayId targetDisplayId=$targetDisplayId targetDisplayHasTask=$targetDisplayHasTask targetEntries=${verifiedTargetDisplayPackages.size} plan=${launchPlan.taskAction} reason=${launchPlan.reason} resize=${launchPlan.resizeRequired} encoderReconnect=${launchPlan.encoderReconnectRequired}")
                 host.scheduleDisplayRoutingDiagnostics(
                     pane = name,
                     service = service,

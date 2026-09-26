@@ -8,6 +8,22 @@ import org.junit.Test
 
 class LaunchRoutingTest {
     @Test
+    fun keepsYouTubeOnNativeAppPathWhenSelectedFromInstalledApps() {
+        val decision = LaunchRouting.resolve(
+            packageName = "com.google.android.youtube",
+            className = "com.google.android.youtube/com.google.android.youtube.app.honeycomb.Shell\$HomeActivity",
+            launchMode = LaunchMode.STANDARD_APP,
+        )
+
+        assertEquals(LaunchRoutingKind.STANDARD_APP, decision.kind)
+        assertEquals(
+            "com.google.android.youtube/com.google.android.youtube.app.honeycomb.Shell\$HomeActivity",
+            decision.launchTarget,
+        )
+        assertEquals("com.google.android.youtube", decision.sourceAppPackage)
+    }
+
+    @Test
     fun routesKnownOttPackagesToTheirWebUrlEvenWhenComponentIsProvided() {
         val decision = LaunchRouting.resolve(
             packageName = "com.disney.disneyplus",

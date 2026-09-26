@@ -12,10 +12,16 @@ object OttCatalog {
         val serviceName: String = "",
         val allowEmbeddedFallback: Boolean = true,
         val forceEmbeddedBrowser: Boolean = false,
+        val preferNativeLaunch: Boolean = false,
     )
 
     private val targets = listOf(
-        OttTarget("com.google.android.youtube", "https://m.youtube.com", "YouTube"),
+        OttTarget(
+            "com.google.android.youtube",
+            "https://m.youtube.com",
+            "YouTube",
+            preferNativeLaunch = true,
+        ),
         OttTarget(
             "com.netflix.mediaclient",
             "https://www.netflix.com",
@@ -41,6 +47,10 @@ object OttCatalog {
     /** True when this OTT should bypass external mobile browsers and use the embedded WebView. */
     fun forceEmbeddedBrowserFor(packageName: String?): Boolean =
         packageName?.let { byPackage[it]?.forceEmbeddedBrowser } == true
+
+    /** True when launcher selections for this package should open its installed app task. */
+    fun prefersNativeLaunch(packageName: String): Boolean =
+        byPackage[packageName]?.preferNativeLaunch == true
 
     /** Check if a package is a known OTT app. */
     fun isOtt(packageName: String): Boolean = byPackage.containsKey(packageName)

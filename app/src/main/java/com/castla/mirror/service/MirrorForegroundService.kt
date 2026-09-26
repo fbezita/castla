@@ -1365,7 +1365,10 @@ class MirrorForegroundService : Service() {
                             // pipelines[pane]?.isVideoApp = isVideoApp
                             // pipelines[pane]?.launchAppFromWebLauncher(pkg, cmp)
                             // 💡 Proactively categorize the nature of the launch request here
-                           val mode = if (pkg.startsWith("http") || OttCatalog.isOtt(pkg)) {
+                           val mode = if (
+                               pkg.startsWith("http") ||
+                               (OttCatalog.isOtt(pkg) && !OttCatalog.prefersNativeLaunch(pkg))
+                           ) {
                                LaunchMode.EXTERNAL_BROWSER_URL
                            } else {
                                LaunchMode.STANDARD_APP

@@ -18,8 +18,8 @@ describe("overlayUiScalePreference", () => {
     expect(normalizeOverlayUiScalePreference("2")).toBe(2);
   });
 
-  it("clamps to the supported 100%-200% range", () => {
-    expect(clampOverlayUiScale(0.7)).toBe(1);
+  it("clamps to the supported 80%-200% range", () => {
+    expect(clampOverlayUiScale(0.7)).toBe(0.8);
     expect(clampOverlayUiScale(1.5)).toBe(1.5);
     expect(clampOverlayUiScale(2.2)).toBe(2);
   });

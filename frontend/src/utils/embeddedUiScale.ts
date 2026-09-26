@@ -20,7 +20,7 @@ function isEmbeddedAutomotiveUserAgent(userAgent: string): boolean {
 }
 
 export function resolveEmbeddedUiScale(input: EmbeddedUiScaleInput): EmbeddedUiScaleResult {
-  const { userAgent, viewportWidth, viewportHeight } = input;
+  const { userAgent } = input;
   const isEmbeddedAutomotive = isEmbeddedAutomotiveUserAgent(userAgent);
 
   if (!isEmbeddedAutomotive) {
@@ -30,11 +30,8 @@ export function resolveEmbeddedUiScale(input: EmbeddedUiScaleInput): EmbeddedUiS
     };
   }
 
-  const shortestSide = Math.min(viewportWidth, viewportHeight);
-  const scale = shortestSide >= 720 ? 1.25 : 1.15;
-
   return {
     isEmbeddedAutomotive: true,
-    scale,
+    scale: 1.1,
   };
 }

@@ -101,7 +101,7 @@
         value={uiScalePreference}
         oninput={(event) => onUiScaleChange(Number(event.currentTarget.value))}
       />
-      <div class="scale-slider-labels"><span>100%</span><span>150%</span><span>200%</span></div>
+      <div class="scale-slider-labels"><span>80%</span><span>140%</span><span>200%</span></div>
     </div>
   </div>
 

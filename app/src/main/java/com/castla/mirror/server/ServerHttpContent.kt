@@ -34,15 +34,16 @@ internal class ServerHttpContent(private val context: Context) {
             val className = info.activityInfo.name
             val label = info.loadLabel(packageManager).toString()
             val ottTarget = OttCatalog.resolve(packageName)
+            val launchesAsWeb = ottTarget != null && !ottTarget.preferNativeLaunch
             apps.put(JSONObject().apply {
                 put("packageName", packageName)
                 put("className", className)
                 put("componentName", ComponentName(packageName, className).flattenToShortString())
                 put("label", label)
                 put("category", AppCategoryClassifier.classify(packageName, label))
-                put("isWeb", ottTarget != null)
+                put("isWeb", launchesAsWeb)
                 put("webUrl", ottTarget?.webUrl ?: JSONObject.NULL)
-                put("launchMode", if (ottTarget != null) "EXTERNAL_BROWSER_URL" else "STANDARD_APP")
+                put("launchMode", if (launchesAsWeb) "EXTERNAL_BROWSER_URL" else "STANDARD_APP")
             })
         }
         val payload = JSONObject().apply {
