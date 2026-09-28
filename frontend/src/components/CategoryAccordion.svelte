@@ -26,15 +26,9 @@
     isExpanded,
     draggingApp,
     pairTarget,
-    favorites,
-    notificationApps = [],
     activePackages = [],
-    isAutorun,
     onToggle,
     onLaunch,
-    onToggleStar,
-    onToggleAutorun,
-    onToggleNotification,
     onOpenEdit,
     onStartPress,
     onPointerMove,
@@ -45,15 +39,9 @@
     isExpanded: boolean;
     draggingApp: AppInfo | null;
     pairTarget: AppInfo | null;
-    favorites: string[];
-    notificationApps: string[];
     activePackages: string[];
-    isAutorun: (app: AppInfo) => boolean;
     onToggle: (key: string) => void;
     onLaunch: (app: AppInfo) => void;
-    onToggleStar: (pkg: string) => void;
-    onToggleAutorun: (app: AppInfo) => void;
-    onToggleNotification: (pkg: string) => void;
     onOpenEdit: (app: AppInfo) => void;
     onStartPress: (event: PointerEvent, app: AppInfo, element: HTMLElement) => void;
     onPointerMove: (event: PointerEvent) => void;
@@ -117,6 +105,9 @@
           role="button"
           tabindex="0"
         >
+          {#if activePackages.includes(app.packageName)}
+            <span class="active-indicator" title="Currently running" aria-label="Currently running"></span>
+          {/if}
           {#if app.isPair && previewPackages(app).length > 1}
             <div class={`pair-icons split-pair-icon placement-${app.secondaryPlacement || "right"}`}>
               <img
@@ -160,49 +151,10 @@
 
           <div class="launch-main">
             <span>{app.label}</span>
-            {#if activePackages.includes(app.packageName)}<small>RUNNING</small>{/if}
           </div>
 
-          <div class="row-actions">
-            <button
-              class="star"
-              class:active={favorites.includes(app.packageName)}
-              title="Star"
-              onclick={(event) => {
-                event.stopPropagation();
-                onToggleStar(app.packageName);
-              }}
-            >
-              ★
-            </button>
-
-            <button
-              class="auto-pill"
-              class:active={isAutorun(app)}
-              title="Auto-run"
-              onclick={(event) => {
-                event.stopPropagation();
-                onToggleAutorun(app);
-              }}
-            >
-              AUTO
-            </button>
-
-            {#if !app.isPair}
-              <button
-                class="noti-btn"
-                class:active={notificationApps.includes(app.packageName)}
-                title="Toggle notifications"
-                onclick={(event) => {
-                  event.stopPropagation();
-                  onToggleNotification(app.packageName);
-                }}
-              >
-                🔔
-              </button>
-            {/if}
-
-            {#if app.isPair}
+          {#if app.isPair}
+            <div class="row-actions">
               <button
                 class="pair-settings"
                 title="Pair settings"
@@ -213,8 +165,8 @@
               >
                 ⚙️
               </button>
-            {/if}
-          </div>
+            </div>
+          {/if}
 
           <!-- Merge preview overlays when dragging another app onto this app -->
           {#if pairTarget?.packageName === app.packageName && draggingApp}
@@ -348,9 +300,9 @@
 
   .browse-list {
     min-height: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
     padding: 0 10px;
     background: rgba(0, 0, 0, 0.08);
   }
@@ -374,12 +326,18 @@
   }
 
   .split-app-item.compact {
-    grid-template-columns: 40px minmax(0, 1fr) auto;
-    min-height: 36px;
-    padding: 4px 6px;
-    border: 1px solid transparent;
-    border-radius: 10px;
-    background: transparent;
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+    align-content: center;
+    gap: 6px;
+    min-width: 0;
+    aspect-ratio: 1 / 1;
+    min-height: 0;
+    padding: 8px 4px;
+    box-sizing: border-box;
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 14px;
+    background: linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.02)), rgba(18,22,34,.88);
     color: white;
   }
 
@@ -392,9 +350,9 @@
   }
 
   .split-app-item.compact.active-app {
-    background: rgba(0, 229, 255, 0.09);
-    border-color: rgba(0, 229, 255, 0.32);
-    box-shadow: inset 3px 0 0 #00e5ff;
+    background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.02)), rgba(18,22,34,.88);
+    border-color: rgba(74, 222, 128, 0.38);
+    box-shadow: inset 0 0 0 1px rgba(74, 222, 128, 0.08);
   }
 
   .split-app-item.drag-source {
@@ -419,8 +377,8 @@
   }
 
   .split-app-icon {
-    width: 28px;
-    height: 28px;
+    width: 42px;
+    height: 42px;
     object-fit: contain;
     border-radius: 6px;
     -webkit-user-drag: none;
@@ -429,15 +387,15 @@
 
   .pair-icons {
     position: relative;
-    width: 34px;
-    height: 28px;
+    width: 46px;
+    height: 42px;
   }
 
   .app-pair-icon-left,
   .app-pair-icon-right {
     position: absolute;
-    width: 18px;
-    height: 18px;
+    width: 28px;
+    height: 28px;
     object-fit: contain;
     border-radius: 5px;
     background: rgb(18 22 34 / 0.92);
@@ -451,45 +409,45 @@
   /* Horizontal layout styles */
   .placement-right .app-pair-icon-left {
     left: 0;
-    top: 5px;
+    top: 7px;
     z-index: 1;
   }
   .placement-right .app-pair-icon-right {
-    left: 14px;
-    top: 5px;
+    left: 17px;
+    top: 7px;
     z-index: 2;
   }
 
   .placement-left .app-pair-icon-left {
-    left: 14px;
-    top: 5px;
+    left: 17px;
+    top: 7px;
     z-index: 1;
   }
   .placement-left .app-pair-icon-right {
     left: 0;
-    top: 5px;
+    top: 7px;
     z-index: 2;
   }
 
   /* Vertical layout styles */
   .placement-bottom .app-pair-icon-left {
-    left: 8px;
+    left: 9px;
     top: 0;
     z-index: 1;
   }
   .placement-bottom .app-pair-icon-right {
-    left: 8px;
-    top: 10px;
+    left: 9px;
+    top: 13px;
     z-index: 2;
   }
 
   .placement-top .app-pair-icon-left {
-    left: 8px;
-    top: 10px;
+    left: 9px;
+    top: 13px;
     z-index: 1;
   }
   .placement-top .app-pair-icon-right {
-    left: 8px;
+    left: 9px;
     top: 0;
     z-index: 2;
   }
@@ -582,21 +540,25 @@
   }
 
   .launch-main {
+    width: 100%;
     min-width: 0;
-    text-align: left;
-    font-size: 13px;
-    font-weight: 700;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 800;
     cursor: pointer;
     color: #e2e8f0;
-    padding-left: 2px;
+    padding: 0;
   }
 
   .row-actions {
+    position: absolute;
+    top: 5px;
+    right: 5px;
     display: flex;
     align-items: center;
-    justify-self: end;
-    gap: 4px;
-    margin-left: 8px;
+    justify-self: auto;
+    gap: 3px;
+    margin: 0;
   }
 
   .launch-main span {
@@ -609,17 +571,8 @@
     overflow: hidden;
   }
 
-  .launch-main small {
-    display: block;
-    margin-top: 2px;
-    color: #9cf6ff;
-    font-size: 8px;
-    font-weight: 900;
-    letter-spacing: 0.06em;
-  }
+  .active-indicator { position: absolute; top: 8px; left: 8px; width: 7px; height: 7px; border: 2px solid rgba(18,22,34,.95); border-radius: 999px; background: #4ade80; box-shadow: 0 0 7px rgba(74,222,128,.45); box-sizing: content-box; }
 
-  .star,
-  .auto-pill,
   .pair-settings {
     border: 0;
     color: white;
@@ -627,52 +580,9 @@
     cursor: pointer;
   }
 
-  .star,
-  .auto-pill {
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    color: rgb(255 255 255 / 0.72);
-    font-size: 13px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition:
-      background 0.16s ease,
-      color 0.16s ease,
-      transform 0.16s ease;
-  }
-
-  .star:hover,
-  .auto-pill:hover,
   .pair-settings:hover {
     background: rgb(255 255 255 / 0.08);
     transform: scale(1.1);
-  }
-
-  .star.active {
-    color: #ffd56a;
-  }
-
-  .auto-pill {
-    width: auto;
-    min-width: 0;
-    padding: 0 5px;
-    height: 16px;
-    border: 1px solid rgb(255 112 67 / 0.16);
-    border-radius: 999px;
-    background: rgb(255 112 67 / 0.08);
-    color: rgb(255 189 145 / 0.62);
-    font-size: 8px;
-    font-weight: 800;
-    letter-spacing: 0.04em;
-    justify-self: auto;
-  }
-
-  .auto-pill.active {
-    color: #ffd0b7;
-    background: rgb(255 112 67 / 0.18);
-    border-color: rgb(255 112 67 / 0.32);
   }
 
   .pair-settings {
@@ -684,34 +594,6 @@
     display: flex;
     align-items: center;
     justify-content: center;
-  }
-
-  .noti-btn {
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    color: rgb(255 255 255 / 0.4);
-    font-size: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: 0;
-    background: transparent;
-    cursor: pointer;
-    transition:
-      background 0.16s ease,
-      color 0.16s ease,
-      transform 0.16s ease;
-  }
-
-  .noti-btn:hover {
-    background: rgb(255 255 255 / 0.08);
-    transform: scale(1.1);
-  }
-
-  .noti-btn.active {
-    color: #00e5ff;
-    text-shadow: 0 0 8px rgba(0, 229, 255, 0.4);
   }
 
   /* Merge Preview Overlay styles */

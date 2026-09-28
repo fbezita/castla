@@ -1,10 +1,22 @@
 package com.castla.mirror.notifications
 
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NotificationAccessSettingsHelperTest {
+    @Test
+    fun settingsNavigationPrefersTheAppSpecificScreen() {
+        assertEquals(
+            listOf(
+                "android.settings.NOTIFICATION_LISTENER_DETAIL_SETTINGS",
+                "android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS",
+            ),
+            NotificationAccessSettingsHelper.settingsActions(),
+        )
+    }
+
     @Test
     fun rebindPolicyRequiresNotificationAccess() {
         assertTrue(NotificationAccessSettingsHelper.shouldRequestRebind(hasAccess = true))

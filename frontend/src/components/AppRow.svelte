@@ -16,16 +16,11 @@
   let {
     app,
     activeTab,
-    isStarred,
-    isAutorun,
-    isNotification,
     isActive,
     isDragActive,
     recentMeta,
+    notificationCount = 0,
     onLaunch,
-    onToggleStar,
-    onToggleAutorun,
-    onToggleNotification,
     onOpenEdit,
     onStartPress,
     onPointerMove,
@@ -34,16 +29,11 @@
   } = $props<{
     app: AppInfo;
     activeTab: "autorun" | "starred" | "recent" | "notifications" | "browse";
-    isStarred: boolean;
-    isAutorun: boolean;
-    isNotification: boolean;
     isActive: boolean;
     isDragActive: boolean;
     recentMeta: string;
+    notificationCount?: number;
     onLaunch: (app: AppInfo) => void;
-    onToggleStar: (pkg: string) => void;
-    onToggleAutorun: (app: AppInfo) => void;
-    onToggleNotification: (pkg: string) => void;
     onOpenEdit: (app: AppInfo) => void;
     onStartPress?: (event: PointerEvent, app: AppInfo, element: HTMLElement) => void;
     onPointerMove?: (event: PointerEvent) => void;
@@ -88,8 +78,12 @@
   role="button"
   tabindex="0"
 >
-  {#if app.isPair && previewPackages(app).length > 1}
-    <div class="pair-icons row-pair-icon">
+  {#if isActive}
+    <span class="active-indicator" title="Currently running" aria-label="Currently running"></span>
+  {/if}
+  <div class="launcher-icon-wrap">
+    {#if app.isPair && previewPackages(app).length > 1}
+      <div class="pair-icons row-pair-icon">
       <img
         class="app-pair-icon-left"
         src={`/api/icon?pkg=${encodeURIComponent(previewPackages(app)[0])}`}
@@ -104,28 +98,31 @@
         loading="lazy"
         draggable="false"
       />
-    </div>
-  {:else if app.isPair && previewPackages(app).length === 1}
-    <img
-      class="launcher-row-icon"
-      src={`/api/icon?pkg=${encodeURIComponent(previewPackages(app)[0])}`}
-      alt=""
-      loading="lazy"
-      draggable="false"
-    />
-  {:else}
-    <img
-      class="launcher-row-icon"
-      src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`}
-      alt=""
-      loading="lazy"
-      draggable="false"
-    />
-  {/if}
+      </div>
+    {:else if app.isPair && previewPackages(app).length === 1}
+      <img
+        class="launcher-row-icon"
+        src={`/api/icon?pkg=${encodeURIComponent(previewPackages(app)[0])}`}
+        alt=""
+        loading="lazy"
+        draggable="false"
+      />
+    {:else}
+      <img
+        class="launcher-row-icon"
+        src={`/api/icon?pkg=${encodeURIComponent(app.packageName)}`}
+        alt=""
+        loading="lazy"
+        draggable="false"
+      />
+    {/if}
+    {#if notificationCount > 0}
+      <span class="app-notification-badge">{notificationCount > 9 ? "9+" : notificationCount}</span>
+    {/if}
+  </div>
 
   <div class="launcher-row-text">
     <span class="launcher-row-title">{app.label}</span>
-    {#if isActive}<span class="active-badge">RUNNING</span>{/if}
     {#if activeTab === "recent"}
       <span class="launcher-row-subtitle">{recentMeta}</span>
     {:else if activeTab === "autorun"}
@@ -133,46 +130,8 @@
     {/if}
   </div>
 
-  <div class="row-actions">
-    <button
-      class="star"
-      class:active={isStarred}
-      title="Toggle star"
-      onclick={(event) => {
-        event.stopPropagation();
-        onToggleStar(app.packageName);
-      }}
-    >
-      ★
-    </button>
-
-    <button
-      class="auto-pill"
-      class:active={isAutorun}
-      title="Toggle auto-run"
-      onclick={(event) => {
-        event.stopPropagation();
-        onToggleAutorun(app);
-      }}
-    >
-      AUTO
-    </button>
-
-    {#if !app.isPair}
-      <button
-        class="noti-btn"
-        class:active={isNotification}
-        title="Toggle notifications"
-        onclick={(event) => {
-          event.stopPropagation();
-          onToggleNotification(app.packageName);
-        }}
-      >
-        🔔
-      </button>
-    {/if}
-
-    {#if app.isPair}
+  {#if app.isPair}
+    <div class="row-actions">
       <button
         class="pair-settings"
         title="Pair settings"
@@ -183,20 +142,25 @@
       >
         ⚙️
       </button>
-    {/if}
-  </div>
+    </div>
+  {/if}
 </div>
 
 <style>
   .launcher-row {
+    position: relative;
     display: grid;
-    grid-template-columns: 42px minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 8px;
-    min-height: 46px;
-    padding: 6px 9px;
-    border: 1px solid rgb(255 255 255 / 0.06);
-    border-radius: 12px;
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+    align-content: center;
+    gap: 6px;
+    min-width: 0;
+    aspect-ratio: 1 / 1;
+    min-height: 0;
+    padding: 8px 4px;
+    box-sizing: border-box;
+    border: 1px solid rgb(255 255 255 / 0.09);
+    border-radius: 14px;
     background: linear-gradient(
         180deg,
         rgb(255 255 255 / 0.05),
@@ -216,8 +180,8 @@
   }
 
   .launcher-row.priority {
-    min-height: 54px;
-    padding: 9px 10px;
+    min-height: 0;
+    padding: 8px 4px;
     background: linear-gradient(
         180deg,
         rgb(255 255 255 / 0.08),
@@ -227,9 +191,9 @@
   }
 
   .launcher-row.active-app {
-    border-color: rgb(0 229 255 / 0.42);
-    background: linear-gradient(180deg, rgb(0 229 255 / 0.13), rgb(255 255 255 / 0.03)), rgb(18 22 34 / 0.92);
-    box-shadow: inset 3px 0 0 #00e5ff;
+    border-color: rgb(74 222 128 / 0.38);
+    background: linear-gradient(180deg, rgb(255 255 255 / 0.055), rgb(255 255 255 / 0.02)), rgb(18 22 34 / 0.92);
+    box-shadow: inset 0 0 0 1px rgb(74 222 128 / 0.08);
   }
 
   .launcher-row.drag-active {
@@ -251,69 +215,68 @@
   }
 
   .launcher-row-text {
+    width: 100%;
     min-width: 0;
     display: grid;
     gap: 2px;
-    padding-left: 4px;
+    padding: 0;
+    text-align: center;
   }
 
   .row-actions {
+    position: absolute;
+    top: 5px;
+    right: 5px;
     display: flex;
     align-items: center;
-    justify-self: end;
-    gap: 6px;
-    margin-left: 10px;
+    justify-self: auto;
+    gap: 3px;
+    margin: 0;
   }
 
   .launcher-row-title {
-    display: -webkit-box;
+    display: block;
     overflow: hidden;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    -webkit-box-orient: vertical;
-    font-size: 14px;
-    font-weight: 700;
-    line-height: 1.25;
-    word-break: keep-all;
-    overflow-wrap: normal;
+    width: 100%;
+    font-size: 11px;
+    font-weight: 800;
+    line-height: 1.2;
+    white-space: nowrap;
     text-overflow: ellipsis;
   }
 
   .launcher-row-subtitle {
     color: #8f96a4;
-    font-size: 10px;
+    overflow: hidden;
+    font-size: 8px;
     font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .active-badge {
-    width: fit-content;
-    padding: 1px 6px;
-    border-radius: 999px;
-    background: rgb(0 229 255 / 0.16);
-    color: #9cf6ff;
-    font-size: 8px;
-    font-weight: 900;
-    letter-spacing: 0.06em;
-  }
+  .active-indicator { position: absolute; top: 8px; left: 8px; width: 7px; height: 7px; border: 2px solid rgb(18 22 34 / .95); border-radius: 999px; background: #4ade80; box-shadow: 0 0 7px rgb(74 222 128 / .45); box-sizing: content-box; }
 
   .launcher-row-icon {
-    width: 32px;
-    height: 32px;
+    width: 42px;
+    height: 42px;
     object-fit: contain;
     border-radius: 8px;
   }
 
+  .launcher-icon-wrap { position: relative; width: 46px; height: 44px; display: grid; place-items: center; }
+  .app-notification-badge { position: absolute; top: -3px; right: -4px; min-width: 17px; height: 17px; padding: 0 3px; display: grid; place-items: center; box-sizing: border-box; border: 2px solid #171b27; border-radius: 999px; background: #ff4d63; color: white; font-size: 8px; font-weight: 900; }
+
   .row-pair-icon {
     position: relative;
     width: 42px;
-    height: 34px;
+    height: 42px;
   }
 
   .app-pair-icon-left,
   .app-pair-icon-right {
     position: absolute;
-    width: 24px;
-    height: 24px;
+    width: 29px;
+    height: 29px;
     object-fit: contain;
     border-radius: 6px;
     background: rgb(18 22 34 / 0.92);
@@ -323,18 +286,16 @@
 
   .app-pair-icon-left {
     left: 0;
-    top: 5px;
+    top: 7px;
     z-index: 1;
   }
 
   .app-pair-icon-right {
-    left: 16px;
-    top: 5px;
+    left: 17px;
+    top: 7px;
     z-index: 2;
   }
 
-  .star,
-  .auto-pill,
   .pair-settings {
     border: 0;
     color: white;
@@ -342,54 +303,9 @@
     cursor: pointer;
   }
 
-  .star,
-  .auto-pill {
-    width: 22px;
-    height: 22px;
-    border-radius: 50%;
-    color: rgb(255 255 255 / 0.88);
-    font-size: 14px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition:
-      background 0.16s ease,
-      color 0.16s ease,
-      transform 0.16s ease;
-  }
-
-  .star:hover,
-  .auto-pill:hover,
   .pair-settings:hover {
     background: rgb(255 255 255 / 0.08);
     transform: scale(1.1);
-  }
-
-  .star.active {
-    color: #ffd56a;
-    text-shadow: 0 0 8px rgba(255, 213, 106, 0.4);
-  }
-
-  .auto-pill {
-    width: auto;
-    min-width: 0;
-    padding: 0 6px;
-    height: 18px;
-    border: 1px solid rgb(255 112 67 / 0.16);
-    border-radius: 999px;
-    background: rgb(255 112 67 / 0.08);
-    color: rgb(255 189 145 / 0.62);
-    font-size: 9px;
-    font-weight: 800;
-    letter-spacing: 0.04em;
-    justify-self: auto;
-  }
-
-  .auto-pill.active {
-    color: #ffd0b7;
-    background: rgb(255 112 67 / 0.18);
-    border-color: rgb(255 112 67 / 0.32);
-    box-shadow: 0 0 8px rgba(255, 112, 67, 0.2);
   }
 
   .pair-settings {
@@ -402,34 +318,6 @@
     align-items: center;
     justify-content: center;
     line-height: 1;
-  }
-
-  .noti-btn {
-    width: 22px;
-    height: 22px;
-    border-radius: 50%;
-    color: rgb(255 255 255 / 0.4);
-    font-size: 13px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: 0;
-    background: transparent;
-    cursor: pointer;
-    transition:
-      background 0.16s ease,
-      color 0.16s ease,
-      transform 0.16s ease;
-  }
-
-  .noti-btn:hover {
-    background: rgb(255 255 255 / 0.08);
-    transform: scale(1.1);
-  }
-
-  .noti-btn.active {
-    color: #00e5ff;
-    text-shadow: 0 0 8px rgba(0, 229, 255, 0.4);
   }
 
 </style>

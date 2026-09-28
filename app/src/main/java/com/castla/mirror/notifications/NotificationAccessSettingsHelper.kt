@@ -5,6 +5,11 @@ import android.content.Context
 import android.provider.Settings
 
 object NotificationAccessSettingsHelper {
+    fun settingsActions(): List<String> = listOf(
+        Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS,
+        Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS,
+    )
+
     fun isNotificationAccessEnabled(
         enabledListenersValue: String?,
         packageName: String,

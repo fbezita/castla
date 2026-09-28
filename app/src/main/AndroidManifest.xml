@@ -19,6 +19,7 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- 배터리 최적화 제외 요청: Shizuku 데몬 + 스트리밍 안정성 확보 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- Bluetooth permissions for CDM device address retrieval -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
@@ -144,6 +145,16 @@
                 <action android:name="android.companion.CompanionDeviceService" />
             </intent-filter>
         </service>
+
+        <!-- Stop mirroring receiver (notification action) -->
+        <receiver
+            android:name=".setup.BootRecoveryReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Stop mirroring receiver (notification action) -->
         <receiver

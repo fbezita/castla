@@ -85,6 +85,15 @@ fun ShizukuSetupScreen(
                 }
 
                 SetupUiState.NotRunning -> {
+                    Text(
+                        text = stringResource(R.string.desc_shizuku_reboot_recovery),
+                        color = Color(0xFFFFD180),
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(12.dp))
                     SetupDescription(R.string.desc_shizuku_setup_steps)
                     Row(
                         modifier = Modifier.fillMaxWidth(),

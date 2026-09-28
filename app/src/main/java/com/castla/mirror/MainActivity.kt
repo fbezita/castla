@@ -63,6 +63,10 @@ import com.castla.mirror.service.TeslaBleScanner
 import com.castla.mirror.service.TeslaDetectNotifier
 import com.castla.mirror.setup.SetupCoordinator
 import com.castla.mirror.setup.SetupUiState
+import com.castla.mirror.setup.ConnectionReadinessPolicy
+import com.castla.mirror.setup.ReadinessItemKind
+import com.castla.mirror.setup.ReadinessState
+import com.castla.mirror.setup.BootRecoveryReceiver
 import com.castla.mirror.shizuku.ShizukuSetup
 import com.castla.mirror.shizuku.ShizukuInstallLinks
 import com.castla.mirror.ui.SettingsScreen
@@ -113,6 +117,8 @@ class MainActivity : AppCompatActivity() {
     private var isImeSelected by mutableStateOf(false)
     private var isCastlaImeActive by mutableStateOf(false)
     private var isNotificationAccessEnabled by mutableStateOf(false)
+    private var isLocalNetworkPermissionGranted by mutableStateOf(Build.VERSION.SDK_INT < 37)
+    private var isAppNotificationPermissionGranted by mutableStateOf(Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU)
 
     // Shizuku download state
 
@@ -163,10 +169,16 @@ class MainActivity : AppCompatActivity() {
         startMirrorService()
     }
 
-    private val notificationPermissionLauncher = registerForActivityResult(
+    private val readinessNotificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { _ ->
-        proceedAfterNotificationPermission()
+    ) { granted ->
+        isAppNotificationPermissionGranted = granted
+    }
+
+    private val readinessLocalNetworkPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        isLocalNetworkPermissionGranted = granted
     }
 
     private val bluetoothPermissionLauncher = registerForActivityResult(
@@ -316,6 +328,7 @@ class MainActivity : AppCompatActivity() {
                     requestBatteryOptimizationExemption()
                 }
                 if (state == SetupUiState.Ready) {
+                    BootRecoveryReceiver.markSetupCompleted(this@MainActivity)
                     maybeStartFromAutomation()
                 }
             }
@@ -397,6 +410,8 @@ class MainActivity : AppCompatActivity() {
                         isImeSelected = isImeSelected,
                         isCastlaImeActive = isCastlaImeActive,
                         isNotificationAccessEnabled = isNotificationAccessEnabled,
+                        isLocalNetworkPermissionGranted = isLocalNetworkPermissionGranted,
+                        isAppNotificationPermissionGranted = isAppNotificationPermissionGranted,
                         onRestoreIme = {
                             lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                                 try {
@@ -423,6 +438,16 @@ class MainActivity : AppCompatActivity() {
                         },
                         onOpenNotificationAccessSettings = {
                             openNotificationAccessSettings()
+                        },
+                        onRequestLocalNetworkPermission = {
+                            if (Build.VERSION.SDK_INT >= 37) {
+                                readinessLocalNetworkPermissionLauncher.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
+                            }
+                        },
+                        onRequestAppNotificationPermission = {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                readinessNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            }
                         },
                         isHotspotActive = isHotspotActive,
                         onToggleHotspot = { toggleHotspot() },
@@ -635,6 +660,14 @@ class MainActivity : AppCompatActivity() {
         refreshShizukuBatteryOptimizationState()
         refreshTextInputPermissions()
         refreshNotificationAccessState()
+        refreshRuntimePermissionState()
+    }
+
+    private fun refreshRuntimePermissionState() {
+        isLocalNetworkPermissionGranted = Build.VERSION.SDK_INT < 37 ||
+            checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
+        isAppNotificationPermissionGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
     }
 
     private fun refreshTextInputPermissions() {
@@ -670,16 +703,28 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openNotificationAccessSettings() {
-        try {
-            startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to open notification listener settings", e)
-            Toast.makeText(
-                this,
-                getString(R.string.toast_notification_access_settings_fallback),
-                Toast.LENGTH_LONG,
-            ).show()
+        val listenerComponent = ComponentName(this, CastlaNotificationListenerService::class.java)
+        for (action in NotificationAccessSettingsHelper.settingsActions()) {
+            val intent = Intent(action).apply {
+                if (action == Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS) {
+                    putExtra(
+                        Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME,
+                        listenerComponent.flattenToString(),
+                    )
+                }
+            }
+            try {
+                startActivity(intent)
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to open notification listener settings action=$action", e)
+            }
         }
+        Toast.makeText(
+            this,
+            getString(R.string.toast_notification_access_settings_fallback),
+            Toast.LENGTH_LONG,
+        ).show()
     }
 
     /**
@@ -1071,14 +1116,6 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            Log.i(TAG, "Requesting POST_NOTIFICATIONS permission")
-            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            return
-        }
-
         proceedAfterNotificationPermission()
     }
 
@@ -1271,6 +1308,8 @@ fun CastlaScreen(
     isImeSelected: Boolean,
     isCastlaImeActive: Boolean = false,
     isNotificationAccessEnabled: Boolean = false,
+    isLocalNetworkPermissionGranted: Boolean = true,
+    isAppNotificationPermissionGranted: Boolean = true,
     onRestoreIme: () -> Unit = {},
     onStartClick: () -> Unit,
     onStopClick: () -> Unit,
@@ -1278,6 +1317,8 @@ fun CastlaScreen(
     onEnableIme: () -> Unit,
     onSelectIme: () -> Unit,
     onOpenNotificationAccessSettings: () -> Unit = {},
+    onRequestLocalNetworkPermission: () -> Unit = {},
+    onRequestAppNotificationPermission: () -> Unit = {},
     isHotspotActive: Boolean = false,
     onToggleHotspot: () -> Unit = {},
     autoHotspot: Boolean = false,
@@ -1295,6 +1336,15 @@ fun CastlaScreen(
         availableIpCandidates.any { it.ip == preferred }
     }
     val serverReady = serverAvailability.isReady
+    val connectionReadiness = ConnectionReadinessPolicy.evaluate(
+        shizukuConnected = true,
+        batteryUnrestricted = isShizukuOnPowerAllowlist,
+        notificationAccess = isNotificationAccessEnabled,
+        localNetworkRequired = Build.VERSION.SDK_INT >= 37,
+        localNetworkGranted = isLocalNetworkPermissionGranted,
+        appNotificationsRequired = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
+        appNotificationsGranted = isAppNotificationPermissionGranted,
+    )
     val serverStatusColor = when {
         isPreparing || serverAvailability.state == MirrorServerAvailabilityState.STARTING -> Color(0xFFFFB300)
         serverReady -> Color(0xFF69F0AE)
@@ -1387,6 +1437,17 @@ fun CastlaScreen(
 
             Spacer(modifier = Modifier.height(20.dp))
 
+            if (!isStreaming) {
+                ReadinessChecklistCard(
+                    readiness = connectionReadiness,
+                    onBatteryClick = onOpenShizukuBatterySettings,
+                    onNotificationClick = onOpenNotificationAccessSettings,
+                    onLocalNetworkClick = onRequestLocalNetworkPermission,
+                    onAppNotificationsClick = onRequestAppNotificationPermission,
+                )
+                Spacer(modifier = Modifier.height(20.dp))
+            }
+
             androidx.compose.animation.AnimatedVisibility(visible = isCastlaImeActive) {
                 Column {
                     Box(
@@ -1465,6 +1526,7 @@ fun CastlaScreen(
                     text = when {
                         isPreparing -> stringResource(id = R.string.status_preparing)
                         isStreaming -> stringResource(id = serverAvailability.toStatusTextRes())
+                        !connectionReadiness.requiredReady -> stringResource(id = R.string.status_setup_required)
                         else -> stringResource(id = R.string.status_ready_to_stream)
                     },
                     style = MaterialTheme.typography.titleMedium,
@@ -1638,52 +1700,7 @@ fun CastlaScreen(
             if (isStreaming) {
                 Spacer(modifier = Modifier.height(24.dp))
             }
-            AnimatedVisibility(visible = !isNotificationAccessEnabled) {
-                Column {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(24.dp))
-                            .background(Color(0xFF0D2438).copy(alpha = 0.82f))
-                            .border(1.dp, Color(0xFF4FC3F7).copy(alpha = 0.3f), RoundedCornerShape(24.dp))
-                            .padding(20.dp)
-                    ) {
-                        Column(modifier = Modifier.fillMaxWidth()) {
-                            Text(
-                                text = stringResource(id = R.string.title_notification_overlay_setup),
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = Color(0xFF81D4FA)
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Text(
-                                text = stringResource(id = R.string.desc_notification_overlay_setup),
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = Color(0xFFB3E5FC),
-                                lineHeight = 20.sp
-                            )
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Button(
-                                onClick = onOpenNotificationAccessSettings,
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(12.dp),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFF0288D1)
-                                )
-                            ) {
-                                Text(
-                                    stringResource(id = R.string.btn_enable_notification_access),
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(24.dp))
-                }
-            }
-
-            AnimatedVisibility(visible = !isShizukuOnPowerAllowlist) {
+            AnimatedVisibility(visible = isStreaming && !isShizukuOnPowerAllowlist) {
                 Column {
                     Box(
                         modifier = Modifier
@@ -1752,6 +1769,7 @@ fun CastlaScreen(
             MirrorActionButton(
                 isStreaming = isStreaming,
                 isPreparing = isPreparing,
+                canStart = connectionReadiness.requiredReady,
                 onStartClick = onStartClick,
                 onStopClick = onStopClick,
                 modifier = Modifier
@@ -1823,6 +1841,131 @@ fun CastlaScreen(
 }
 
 @Composable
+private fun ReadinessChecklistCard(
+    readiness: com.castla.mirror.setup.ConnectionReadiness,
+    onBatteryClick: () -> Unit,
+    onNotificationClick: () -> Unit,
+    onLocalNetworkClick: () -> Unit,
+    onAppNotificationsClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .glassCard()
+            .padding(20.dp),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column {
+                    Text(
+                        text = stringResource(R.string.readiness_title),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color.White,
+                        fontWeight = FontWeight.ExtraBold,
+                    )
+                    Text(
+                        text = stringResource(
+                            R.string.readiness_summary,
+                            readiness.requiredComplete,
+                            readiness.requiredTotal,
+                            readiness.optionalComplete,
+                            readiness.optionalTotal,
+                        ),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White.copy(alpha = 0.58f),
+                    )
+                }
+                Text(
+                    text = if (readiness.requiredReady) "✓" else "!",
+                    color = if (readiness.requiredReady) Color(0xFF69F0AE) else Color(0xFFFFB300),
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            readiness.items.forEach { item ->
+                val label = when (item.kind) {
+                    ReadinessItemKind.SHIZUKU -> stringResource(R.string.readiness_shizuku)
+                    ReadinessItemKind.BATTERY -> stringResource(R.string.readiness_battery)
+                    ReadinessItemKind.LOCAL_NETWORK -> stringResource(R.string.readiness_local_network)
+                    ReadinessItemKind.APP_NOTIFICATIONS -> stringResource(R.string.readiness_app_notifications)
+                    ReadinessItemKind.NOTIFICATION_ACCESS -> stringResource(R.string.readiness_notifications)
+                }
+                val action = when (item.kind) {
+                    ReadinessItemKind.BATTERY -> onBatteryClick
+                    ReadinessItemKind.LOCAL_NETWORK -> onLocalNetworkClick
+                    ReadinessItemKind.APP_NOTIFICATIONS -> onAppNotificationsClick
+                    ReadinessItemKind.NOTIFICATION_ACCESS -> onNotificationClick
+                    ReadinessItemKind.SHIZUKU -> null
+                }
+                ReadinessChecklistRow(
+                    label = label,
+                    state = item.state,
+                    onClick = action?.takeIf { item.state != ReadinessState.COMPLETE },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReadinessChecklistRow(
+    label: String,
+    state: ReadinessState,
+    onClick: (() -> Unit)?,
+) {
+    val color = when (state) {
+        ReadinessState.COMPLETE -> Color(0xFF69F0AE)
+        ReadinessState.ACTION_REQUIRED -> Color(0xFFFFB300)
+        ReadinessState.OPTIONAL -> Color(0xFF81D4FA)
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .clip(CircleShape)
+                .background(color.copy(alpha = 0.14f))
+                .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = if (state == ReadinessState.COMPLETE) "✓" else "+",
+                color = color,
+                fontWeight = FontWeight.ExtraBold,
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Text(
+            text = label,
+            modifier = Modifier.weight(1f),
+            color = Color.White.copy(alpha = if (state == ReadinessState.COMPLETE) 0.72f else 0.94f),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = if (state == ReadinessState.ACTION_REQUIRED) FontWeight.Bold else FontWeight.Medium,
+        )
+        Text(
+            text = when (state) {
+                ReadinessState.COMPLETE -> stringResource(R.string.readiness_complete)
+                ReadinessState.ACTION_REQUIRED -> stringResource(R.string.readiness_action)
+                ReadinessState.OPTIONAL -> stringResource(R.string.readiness_optional)
+            },
+            color = color,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+        )
+    }
+}
+
+@Composable
 private fun StreamStatusChip(label: String, value: String) {
     Column(
         modifier = Modifier
@@ -1840,13 +1983,14 @@ private fun StreamStatusChip(label: String, value: String) {
 private fun MirrorActionButton(
     isStreaming: Boolean,
     isPreparing: Boolean,
+    canStart: Boolean,
     onStartClick: () -> Unit,
     onStopClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Button(
         onClick = if (isStreaming) onStopClick else onStartClick,
-        enabled = !isPreparing || isStreaming,
+        enabled = isStreaming || (!isPreparing && canStart),
         modifier = modifier
             .fillMaxWidth()
             .height(64.dp),

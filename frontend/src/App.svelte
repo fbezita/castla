@@ -39,6 +39,7 @@
     type OverlayNotification,
   } from "./lib/notificationOverlay";
   import { connectionOverlayDelayMs } from "./lib/connectionUi";
+  import { notificationCountsByPackage } from "./lib/quickLaunch";
 
   // References to tie components together for launch sequence state machine
   let viewportHostRef: any = undefined;
@@ -832,6 +833,7 @@
         notificationOverlayEnabled={notificationOverlayEnabled}
         notificationApps={notificationApps}
         notificationHistoryCount={notificationHistory.length}
+        notificationCounts={notificationCountsByPackage(notificationHistory)}
         serverConnected={controlConnected}
         serverWasConnected={controlWasConnected}
         serverConnectionPending={controlConnectionPending}

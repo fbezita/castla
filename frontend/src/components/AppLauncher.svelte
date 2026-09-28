@@ -53,6 +53,11 @@
     type AppPairPlacement,
   } from "../lib/appPair";
   import type { SplitTargets } from "../lib/splitTargets";
+  import {
+    buildQuickLaunchApps,
+    requiresParkedUseNotice,
+    resolveInitialLaunchHubTab,
+  } from "../lib/quickLaunch";
 
   // Modular components imported for robust Svelte 5 structure
   import LauncherTabs from "./LauncherTabs.svelte";
@@ -64,6 +69,7 @@
   import LauncherSettingsPanel from "./LauncherSettingsPanel.svelte";
   import ConnectionPanel from "./ConnectionPanel.svelte";
   import CurrentSessionPanel from "./CurrentSessionPanel.svelte";
+  import QuickLaunchPanel from "./QuickLaunchPanel.svelte";
 
   let {
     runtime,
@@ -73,6 +79,7 @@
     notificationOverlayEnabled,
     notificationApps = [],
     notificationHistoryCount = 0,
+    notificationCounts = {},
     serverConnected = false,
     serverWasConnected = false,
     serverConnectionPending = true,
@@ -89,6 +96,7 @@
     notificationOverlayEnabled: boolean;
     notificationApps: string[];
     notificationHistoryCount: number;
+    notificationCounts: Record<string, number>;
     serverConnected?: boolean;
     serverWasConnected?: boolean;
     serverConnectionPending?: boolean;
@@ -130,6 +138,7 @@
   const RECENT_APPS_KEY = "castla_recent_apps_v1";
   const ACTIVE_TAB_KEY = "castla_launch_hub_active_tab_v2";
   const MAX_RECENT_APPS = 8;
+  const PARKED_NOTICE_SESSION_KEY = "castla_parked_notice_ack_v1";
   const DRAWER_HANDLE_HOTZONE = 56;
 
   const groups = [
@@ -201,9 +210,11 @@
   let streamProfile = $state<StreamProfile>("balanced");
   let multiwindowOpen = $state(false);
   let placementPickerOpen = $state(false);
+  let pendingSafetyApp = $state<AppInfo | null>(null);
 
   // Lifecycle bindings
   onMount(() => {
+    activeTab = resolveInitialLaunchHubTab(hasVisibleStream, activeTab);
     appStreamStoppedCleanup = runtime.control.onMessage((message: ControlMessage) => {
       if (message.type === "serverInit") {
         const profile = (message as { streamProfile?: StreamProfile }).streamProfile;
@@ -281,6 +292,9 @@
     recentEntries
       .map((entry) => displayApps.find((app) => app.packageName === entry.packageName))
       .filter(Boolean) as AppInfo[]
+  );
+  let quickLaunchApps = $derived(
+    buildQuickLaunchApps(searchableApps, favorites, recentEntries, 6) as AppInfo[]
   );
 
   let autorunApps = $derived(getAutorunApps(displayApps, pairApps));
@@ -1619,11 +1633,40 @@
     }, 8000);
   }
 
+  function appNeedsParkedNotice(app: AppInfo): boolean {
+    if (app.isPair) {
+      return (app.apps ?? []).some((packageName) => {
+        const child = apps.find((candidate) => candidate.packageName === packageName);
+        return child ? requiresParkedUseNotice(child) : false;
+      });
+    }
+    return requiresParkedUseNotice(app);
+  }
+
   function activateApp(app: AppInfo) {
     if (!serverConnected) {
       toast(t($compositorStore.language, "serverUnavailable"));
       return;
     }
+    if (
+      sessionStorage.getItem(PARKED_NOTICE_SESSION_KEY) !== "1" &&
+      appNeedsParkedNotice(app)
+    ) {
+      pendingSafetyApp = app;
+      return;
+    }
+    activateAppNow(app);
+  }
+
+  function confirmParkedUseAndLaunch() {
+    const app = pendingSafetyApp;
+    pendingSafetyApp = null;
+    if (!app) return;
+    sessionStorage.setItem(PARKED_NOTICE_SESSION_KEY, "1");
+    activateAppNow(app);
+  }
+
+  function activateAppNow(app: AppInfo) {
     if (app.isPair) {
       appSelectionTarget = "primary";
       const appPair = appPairFromAppInfo(app);
@@ -1957,6 +2000,14 @@
   function getRecentMeta(packageName: string) {
     const entry = recentEntries.find((item) => item.packageName === packageName);
     return entry ? formatRelativeTime(entry.lastUsedAt) : "";
+  }
+
+  function getNotificationCount(app: AppInfo): number {
+    if (!app.isPair) return notificationCounts[app.packageName] ?? 0;
+    return (app.apps ?? []).reduce(
+      (sum, packageName) => sum + (notificationCounts[packageName] ?? 0),
+      0,
+    );
   }
 
   function getAppLabelByPackage(packageName: string) {
@@ -2836,16 +2887,27 @@
         onRetry={reconnectServer}
       />
     {:else if activeTab === "session"}
-      <CurrentSessionPanel
-        language={$compositorStore.language}
-        primaryLabel={$compositorStore.activePrimaryApp ? getAppLabelByPackage($compositorStore.activePrimaryApp) : ""}
-        secondaryLabel={$compositorStore.activeSecondaryApp ? getAppLabelByPackage($compositorStore.activeSecondaryApp) : ""}
-        {launchStage}
-        onChooseApp={() => selectTab("browse")}
-        onRecent={() => selectTab("recent")}
-        onAddSecondary={chooseSecondaryApp}
-        onRetry={retryCurrentSession}
-      />
+      {#if $compositorStore.activePrimaryApp}
+        <CurrentSessionPanel
+          language={$compositorStore.language}
+          primaryLabel={getAppLabelByPackage($compositorStore.activePrimaryApp)}
+          secondaryLabel={$compositorStore.activeSecondaryApp ? getAppLabelByPackage($compositorStore.activeSecondaryApp) : ""}
+          {launchStage}
+          onChooseApp={() => selectTab("browse")}
+          onRecent={() => selectTab("recent")}
+          onAddSecondary={chooseSecondaryApp}
+          onRetry={retryCurrentSession}
+        />
+      {:else}
+        <QuickLaunchPanel
+          language={$compositorStore.language}
+          apps={quickLaunchApps}
+          {notificationCounts}
+          onLaunch={activateApp}
+          onBrowse={() => selectTab("browse")}
+          onRecent={() => selectTab("recent")}
+        />
+      {/if}
     {:else if activeTab !== "browse"}
       <section class="launcher-hero single-panel">
         <div class="panel-shell rows-only" class:priority={activeTab === "autorun"}>
@@ -2862,16 +2924,11 @@
                 <AppRow
                   {app}
                   {activeTab}
-                  isStarred={favorites.includes(app.packageName)}
-                  isAutorun={isAppAutorun(app)}
-                  isNotification={notificationApps.includes(app.packageName)}
                   isActive={app.packageName === $compositorStore.activePrimaryApp || app.packageName === $compositorStore.activeSecondaryApp}
                   isDragActive={draggingApp !== null}
                   recentMeta={getRecentMeta(app.packageName)}
+                  notificationCount={getNotificationCount(app)}
                   onLaunch={activateApp}
-                  onToggleStar={toggleFavorite}
-                  onToggleAutorun={toggleAutorunForApp}
-                  onToggleNotification={toggleNotification}
                   onOpenEdit={openAppPairEditor}
                   onStartPress={startPress}
                   onPointerMove={movePress}
@@ -2900,6 +2957,12 @@
         </section>
       {/if}
 
+      <p class="app-gesture-hint">
+        {$compositorStore.language === "ko"
+          ? "탭하여 실행 · 길게 눌러 드래그하여 설정"
+          : "Tap to launch · Hold and drag to configure"}
+      </p>
+
       <div class="browse-accordion">
         {#each browseGroups as group (group.key)}
           <!-- Modularized Accordion for clean rendering -->
@@ -2908,15 +2971,9 @@
             isExpanded={expandedCategory === group.key}
             {draggingApp}
             {pairTarget}
-            {favorites}
-            {notificationApps}
             activePackages={[$compositorStore.activePrimaryApp, $compositorStore.activeSecondaryApp].filter(Boolean)}
-            isAutorun={isAppAutorun}
             onToggle={toggleCategory}
             onLaunch={activateApp}
-            onToggleStar={toggleFavorite}
-            onToggleAutorun={toggleAutorunForApp}
-            onToggleNotification={toggleNotification}
             onOpenEdit={openAppPairEditor}
             onStartPress={startPress}
             onPointerMove={movePress}
@@ -2963,6 +3020,24 @@
   />
 {/if}
 
+{#if pendingSafetyApp}
+  <div class="safety-dialog-backdrop" role="presentation">
+    <div class="safety-dialog" role="dialog" aria-modal="true" aria-labelledby="safety-dialog-title">
+      <span class="safety-icon">!</span>
+      <h2 id="safety-dialog-title">{$compositorStore.language === "ko" ? "정차 중에만 사용하세요" : "Use only while parked"}</h2>
+      <p>
+        {$compositorStore.language === "ko"
+          ? "주행 중 영상 시청이나 화면 조작은 위험합니다. 차량이 안전하게 정차된 상태인지 확인해 주세요."
+          : "Watching video or operating the screen while driving is dangerous. Confirm that the vehicle is safely parked."}
+      </p>
+      <div class="safety-dialog-actions">
+        <button onclick={() => (pendingSafetyApp = null)}>{$compositorStore.language === "ko" ? "취소" : "Cancel"}</button>
+        <button class="confirm" onclick={confirmParkedUseAndLaunch}>{$compositorStore.language === "ko" ? "정차했습니다" : "Vehicle is parked"}</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
   /* Base Glassmorphic Layouts & Aesthetics */
   .standby {
@@ -2978,6 +3053,38 @@
     pointer-events: none;
     transition: opacity 0.3s ease;
   }
+
+  .safety-dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 180;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background: rgba(0, 0, 0, 0.72);
+    backdrop-filter: blur(8px);
+  }
+
+  .safety-dialog {
+    width: min(420px, calc(100vw - 48px));
+    padding: 24px;
+    display: grid;
+    justify-items: center;
+    gap: 13px;
+    border: 1px solid rgba(255, 183, 77, 0.35);
+    border-radius: 22px;
+    background: #161923;
+    color: #f8fafc;
+    text-align: center;
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+  }
+
+  .safety-icon { width: 46px; height: 46px; display: grid; place-items: center; border-radius: 50%; background: rgba(255,183,77,.14); color: #ffbd66; font-size: 26px; font-weight: 950; }
+  .safety-dialog h2 { margin: 0; font-size: 20px; }
+  .safety-dialog p { margin: 0; color: #aeb7c5; font-size: 13px; line-height: 1.55; }
+  .safety-dialog-actions { width: 100%; display: grid; grid-template-columns: 1fr 1.35fr; gap: 9px; margin-top: 5px; }
+  .safety-dialog-actions button { min-height: 44px; border: 1px solid rgba(255,255,255,.1); border-radius: 12px; background: rgba(255,255,255,.05); color: #dbe3ef; font-weight: 850; cursor: pointer; }
+  .safety-dialog-actions button.confirm { border-color: rgba(255,183,77,.42); background: rgba(255,183,77,.16); color: #ffe0ac; }
 
   .standby.hidden {
     opacity: 0;
@@ -3386,8 +3493,8 @@
   }
 
   .launcher-row-list {
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 8px;
   }
 
@@ -3447,6 +3554,15 @@
   .browse-accordion {
     display: grid;
     gap: 8px;
+  }
+
+  .app-gesture-hint {
+    margin: 1px 2px 9px;
+    color: #758196;
+    font-size: 9px;
+    font-weight: 650;
+    line-height: 1.35;
+    text-align: center;
   }
 
 

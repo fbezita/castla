@@ -17,7 +17,7 @@ data class StreamSettings(
     val mirroringMode: MirroringMode = MirroringMode.FULL_SCREEN,
     val targetAppPackage: String = "",
     val targetAppLabel: String = "",
-    val autoHotspot: Boolean = true,
+    val autoHotspot: Boolean = DEFAULT_AUTO_HOTSPOT,
 
     // Option to enable or disable WebCodecs hardware accelerated decoding
     val webCodecsEnabled: Boolean = true,
@@ -61,6 +61,7 @@ data class StreamSettings(
 
         /** Sentinel value indicating auto FPS mode. Must not collide with real FPS values. */
         const val FPS_AUTO = 0
+        const val DEFAULT_AUTO_HOTSPOT = false
 
         val FPS_OPTIONS = listOf(FPS_AUTO, 30, 60)
 
@@ -88,7 +89,7 @@ data class StreamSettings(
                 } catch (_: Exception) { MirroringMode.FULL_SCREEN },
                 targetAppPackage = prefs.getString(KEY_TARGET_APP_PACKAGE, "") ?: "",
                 targetAppLabel = prefs.getString(KEY_TARGET_APP_LABEL, "") ?: "",
-                autoHotspot = prefs.getBoolean(KEY_AUTO_HOTSPOT, true),
+                autoHotspot = prefs.getBoolean(KEY_AUTO_HOTSPOT, DEFAULT_AUTO_HOTSPOT),
                 webCodecsEnabled = prefs.getBoolean(KEY_WEBCODECS, true),
                 useNativeVirtualDisplayIme = prefs.getBoolean(KEY_NATIVE_VD_IME, true),
                 verboseDiagnosticsEnabled = prefs.getBoolean(KEY_VERBOSE_DIAGNOSTICS, false),
