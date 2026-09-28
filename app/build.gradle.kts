@@ -79,18 +79,6 @@ fun gitCommitCount(): Int = try {
     }
 } catch (_: Throwable) { 0 }
 
-fun gitLatestFrontendCommit(): String = try {
-    val proc = ProcessBuilder("git", "log", "-1", "--format=%H", "--", "frontend")
-        .directory(rootProject.projectDir)
-        .redirectErrorStream(true)
-        .start()
-    if (proc.waitFor(2, TimeUnit.SECONDS)) {
-        proc.inputStream.bufferedReader().readText().trim().ifEmpty { "unknown" }
-    } else {
-        proc.destroyForcibly(); "unknown"
-    }
-} catch (_: Throwable) { "unknown" }
-
 val buildTimestamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ").format(Date())
 
 android {
@@ -263,11 +251,6 @@ val frontendSourceFiles = files(
     frontendDir.file("tsconfig.node.json"),
     frontendDir.file("vite.config.ts"),
 )
-val frontendBuildId = providers.environmentVariable("CASTLA_BUILD_TIMESTAMP")
-    .map { it.trim() }
-    .filter { it.isNotEmpty() }
-    .orElse(providers.provider { gitLatestFrontendCommit() })
-
 fun pnpmCommand(vararg args: String): List<String> {
     return if (org.gradle.internal.os.OperatingSystem.current().isWindows) {
         listOf("cmd", "/c", "pnpm") + args
@@ -293,7 +276,6 @@ tasks.register<Exec>("buildFrontend") {
     inputs.files(frontendSourceFiles)
         .withPropertyName("frontendSources")
         .withPathSensitivity(PathSensitivity.RELATIVE)
-    inputs.property("frontendBuildId", frontendBuildId)
     outputs.dir(frontendDistDir)
         .withPropertyName("frontendDist")
     workingDir = frontendDir.asFile
