@@ -158,6 +158,18 @@ class FileLoggerTest {
     }
 
     @Test
+    fun `raw blocks are sanitized without dropping later lines`() {
+        FileLogger.initForTest(tempFolder.root, maxFileBytes = 8192)
+        FileLogger.writeRaw(
+            "Frontend",
+            "Loaded https://example.com/private?token=secret\nlast diagnostic line",
+        )
+        val text = File(tempFolder.root, "logs/mirror.log").readText()
+        assertFalse("got: $text", text.contains("secret"))
+        assertTrue("got: $text", text.contains("last diagnostic line"))
+    }
+
+    @Test
     fun `clear removes log files`() {
         FileLogger.initForTest(tempFolder.root, maxFileBytes = 200)
         repeat(8) { FileLogger.i("Tag", "msg-$it ${"x".repeat(40)}") }

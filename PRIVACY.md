@@ -13,9 +13,9 @@ Castla processes the following data on the Android device and in the connected b
 - touch and text input sent by the browser;
 - installed application names and icons used by the launcher;
 - notification title, text, sender, app name, and timestamp when notification access is enabled;
-- local diagnostic logs.
+- local diagnostic logs, which the user can optionally upload for support.
 
-Video, audio, input, and notification payloads are sent directly between the phone and browser over the active network connection. Notification history is held in browser memory for the current session. Diagnostic logs leave the phone only when the user explicitly shares them.
+Video, audio, input, and notification payloads are sent directly between the phone and browser over the active network connection. Notification history is held in browser memory for the current session. Diagnostic logs leave the phone only when the user explicitly shares them or taps the send-logs button. Uploaded diagnostic logs are retained for up to 14 days and are identified by a random report ID.
 
 ### External connections
 
@@ -23,6 +23,7 @@ Castla can make these external network requests:
 
 - a release check to the GitHub API;
 - relay/DNS registration to `car.fbezita.com`, containing a shortened hash derived from `ANDROID_ID` and the selected local IP, a generated hostname, the local IP, and relay URL;
+- an optional user-initiated diagnostic log upload to `car.fbezita.com`, containing URL-redacted application logs, the shortened device identifier, and app version;
 - normal DNS and HTTPS requests needed to reach those services.
 
 The relay registration makes the browser address discoverable; it does not carry the video, audio, touch, or notification stream. As with any HTTPS request, service operators and network providers may observe standard connection metadata such as the source public IP and request time.
@@ -55,9 +56,9 @@ Castla는 기능 제공을 위해 Android 기기와 연결된 브라우저에서
 - 브라우저에서 전송한 터치 및 텍스트 입력
 - 런처에 표시할 설치 앱 이름과 아이콘
 - 알림 접근 권한을 켠 경우 알림 제목, 본문, 발신자, 앱 이름과 시각
-- 로컬 진단 로그
+- 로컬 진단 로그 및 사용자가 고객 지원을 위해 선택적으로 업로드한 로그
 
-영상, 오디오, 입력 및 알림 payload는 현재 네트워크를 통해 휴대폰과 브라우저 사이에 직접 전송됩니다. 알림 기록은 현재 브라우저 세션의 메모리에 보관됩니다. 진단 로그는 사용자가 직접 공유한 경우에만 휴대폰 밖으로 나갑니다.
+영상, 오디오, 입력 및 알림 payload는 현재 네트워크를 통해 휴대폰과 브라우저 사이에 직접 전송됩니다. 알림 기록은 현재 브라우저 세션의 메모리에 보관됩니다. 진단 로그는 사용자가 직접 공유하거나 로그 전송 버튼을 누른 경우에만 휴대폰 밖으로 나갑니다. 업로드한 진단 로그는 최대 14일간 보관되며 임의의 접수번호로 식별됩니다.
 
 ### 외부 연결
 
@@ -65,6 +66,7 @@ Castla는 다음 외부 네트워크 요청을 수행할 수 있습니다.
 
 - GitHub API를 통한 새 릴리스 확인
 - `car.fbezita.com`을 통한 relay/DNS 등록: `ANDROID_ID`와 선택된 로컬 IP에서 만든 짧은 해시, 생성된 hostname, 로컬 IP 및 relay URL 전송
+- 사용자가 직접 요청한 `car.fbezita.com` 진단 로그 업로드: URL이 마스킹된 앱 로그, 축약된 기기 식별자 및 앱 버전 전송
 - 위 서비스 접속에 필요한 일반 DNS 및 HTTPS 요청
 
 relay 등록은 브라우저 접속 주소를 찾을 수 있게 하는 용도이며 영상, 오디오, 터치 또는 알림 스트림을 전달하지 않습니다. 일반적인 HTTPS 요청과 마찬가지로 서비스 운영자와 네트워크 사업자는 접속 공인 IP와 요청 시각 같은 표준 연결 메타데이터를 확인할 수 있습니다.

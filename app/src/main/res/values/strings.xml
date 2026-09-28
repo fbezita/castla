@@ -155,13 +155,17 @@
 
     <!-- Diagnostic logs -->
     <string name="settings_logs_title">Diagnostic Logs</string>
-    <string name="settings_logs_description">If mirroring fails, share or copy these logs to help diagnose the issue. URLs are redacted.</string>
+    <string name="settings_logs_description">Send diagnostic logs directly to the Castla server, or share and copy them manually. URLs are redacted. Sent logs are retained for up to 14 days.</string>
+    <string name="settings_upload_logs">Send Logs</string>
     <string name="settings_share_logs">Share Logs</string>
     <string name="settings_copy_logs">Copy Recent</string>
     <string name="settings_logs_empty">No logs available yet.</string>
     <string name="settings_logs_copied">Recent logs copied to clipboard.</string>
     <string name="settings_logs_share_failed">Could not share logs.</string>
     <string name="settings_logs_chooser_title">Share diagnostic logs</string>
+    <string name="settings_logs_upload_success">Sent. Report ID %1$s was copied.</string>
+    <string name="settings_logs_upload_failed">Could not send logs.</string>
+    <string name="settings_logs_upload_unavailable">Direct log upload is not configured in this build.</string>
 
     <string name="settings_native_vd_ime">Android Keyboard in Virtual Display</string>
     <string name="settings_native_vd_ime_title">Use native Android keyboard</string>

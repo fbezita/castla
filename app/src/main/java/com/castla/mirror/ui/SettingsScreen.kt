@@ -33,10 +33,14 @@ import android.widget.Toast
 import androidx.core.content.FileProvider
 import com.castla.mirror.BuildConfig
 import com.castla.mirror.R
+import com.castla.mirror.diagnostics.DiagnosticLogArchive
+import com.castla.mirror.diagnostics.DiagnosticLogUploadApi
 import com.castla.mirror.diagnostics.FileLogger
+import com.castla.mirror.network.CastlaDeviceId
 import com.castla.mirror.policy.ThermalUiPolicy
 import com.castla.mirror.policy.ThermalUiSeverity
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.platform.LocalContext
@@ -657,6 +661,25 @@ fun SettingsScreen(
                             textAlign = TextAlign.Center
                         )
                         Spacer(modifier = Modifier.height(16.dp))
+                        Button(
+                            onClick = {
+                                if (working) return@Button
+                                working = true
+                                scope.launch {
+                                    try {
+                                        uploadLogs(context)
+                                    } finally {
+                                        working = false
+                                    }
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            enabled = !working
+                        ) {
+                            Text(stringResource(R.string.settings_upload_logs))
+                        }
+                        Spacer(modifier = Modifier.height(12.dp))
                         Row(modifier = Modifier.fillMaxWidth()) {
                             Button(
                                 onClick = {
@@ -767,6 +790,54 @@ fun SettingsScreen(
                     )
                 }
             }
+        }
+    }
+}
+
+private suspend fun uploadLogs(context: Context) {
+    try {
+        if (BuildConfig.CASTLA_RELAY_TOKEN.isBlank()) {
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, R.string.settings_logs_upload_unavailable, Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+
+        val files = withContext(Dispatchers.IO) {
+            com.castla.mirror.service.MirrorForegroundService.instance
+                ?.getMirrorServer()
+                ?.requestFrontendDebugDump("native_upload_logs")
+            kotlinx.coroutines.delay(350L)
+            FileLogger.getLogFiles()
+        }
+        if (files.isEmpty()) {
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, R.string.settings_logs_empty, Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+
+        val archive = withContext(Dispatchers.IO) { DiagnosticLogArchive.build(files) }
+        val reportId = DiagnosticLogUploadApi(token = BuildConfig.CASTLA_RELAY_TOKEN).upload(
+            deviceId = CastlaDeviceId.getDeviceId(context),
+            versionName = BuildConfig.VERSION_NAME,
+            archive = archive,
+        )
+        withContext(Dispatchers.Main) {
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("castla-report-id", reportId))
+            Toast.makeText(
+                context,
+                context.getString(R.string.settings_logs_upload_success, reportId),
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (failure: Throwable) {
+        FileLogger.e("LOG_UPLOAD", "upload_failed type=${failure::class.java.simpleName}")
+        withContext(Dispatchers.Main) {
+            Toast.makeText(context, R.string.settings_logs_upload_failed, Toast.LENGTH_SHORT).show()
         }
     }
 }

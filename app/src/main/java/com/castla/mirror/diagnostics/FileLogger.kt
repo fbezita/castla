@@ -92,6 +92,7 @@ object FileLogger {
 
     fun writeRaw(tag: String, msg: String) {
         if (!initialized || degraded) return
+        val safe = DiagnosticSanitizer.safeBlock(msg)
         val ts = timestampFmt.get()?.format(Date()) ?: ""
         val tname = Thread.currentThread().name
         val header = "$ts I $tag: (t=$tname)"
@@ -107,7 +108,7 @@ object FileLogger {
                 FileWriter(current, true).use { fw ->
                     PrintWriter(fw).use { pw ->
                         pw.println(header)
-                        pw.print(msg)
+                        pw.print(safe)
                     }
                 }
             } catch (failure: Throwable) {

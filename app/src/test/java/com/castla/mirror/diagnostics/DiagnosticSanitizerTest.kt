@@ -68,4 +68,18 @@ class DiagnosticSanitizerTest {
     fun `safeMessage handles empty string`() {
         assertEquals("", DiagnosticSanitizer.safeMessage(""))
     }
+
+    @Test
+    fun `safeBlock sanitizes every line without truncating the whole dump`() {
+        val block = "first https://example.com/private?a=secret\n" +
+            "second https://youtube.com/watch?v=hidden\n" +
+            "third"
+
+        val sanitized = DiagnosticSanitizer.safeBlock(block)
+
+        assertEquals(3, sanitized.lines().size)
+        assertTrue(!sanitized.contains("private"))
+        assertTrue(!sanitized.contains("hidden"))
+        assertTrue(sanitized.endsWith("third"))
+    }
 }

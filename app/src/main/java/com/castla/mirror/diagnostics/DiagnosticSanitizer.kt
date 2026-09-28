@@ -36,4 +36,8 @@ object DiagnosticSanitizer {
         if (s.length > MAX_LEN) s = s.substring(0, MAX_LEN) + "…"
         return s
     }
+
+    /** Sanitizes multi-line dumps line by line so one large block is not truncated to 500 chars. */
+    fun safeBlock(block: String): String =
+        block.split('\n').joinToString("\n") { line -> safeMessage(line) }
 }

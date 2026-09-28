@@ -150,13 +150,17 @@
     <!-- Support / Donate -->
     <!-- Diagnostic logs -->
     <string name="settings_logs_title">진단 로그</string>
-    <string name="settings_logs_description">미러링이 실패하면 로그를 공유하거나 복사해 원인 분석에 도움을 받을 수 있어요. URL은 자동 가려집니다.</string>
+    <string name="settings_logs_description">진단 로그를 Castla 서버로 바로 전송하거나 직접 공유·복사할 수 있어요. URL은 자동 가려지며 전송된 로그는 최대 14일간 보관됩니다.</string>
+    <string name="settings_upload_logs">로그 바로 전송</string>
     <string name="settings_share_logs">로그 공유</string>
     <string name="settings_copy_logs">최근 로그 복사</string>
     <string name="settings_logs_empty">아직 저장된 로그가 없습니다.</string>
     <string name="settings_logs_copied">최근 로그를 클립보드에 복사했어요.</string>
     <string name="settings_logs_share_failed">로그를 공유할 수 없습니다.</string>
     <string name="settings_logs_chooser_title">진단 로그 공유</string>
+    <string name="settings_logs_upload_success">전송 완료. 접수번호 %1$s를 복사했어요.</string>
+    <string name="settings_logs_upload_failed">로그를 전송할 수 없습니다.</string>
+    <string name="settings_logs_upload_unavailable">이 빌드에는 로그 전송 기능이 설정되지 않았습니다.</string>
 
     <!-- WebCodecs (Hardware Decoding) -->
     <string name="settings_webcodecs">WebCodecs 디코더</string>
